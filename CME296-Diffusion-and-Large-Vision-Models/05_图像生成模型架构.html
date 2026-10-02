@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第五讲：图像生成模型的架构 | 斯坦福 CME296 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="04_潜空间与引导生成.html">&larr; 上一讲</a>
+    <span>Stanford CME296: Lecture 05</span>
+    <a href="06_模型训练与蒸馏.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第五讲：图像生成模型的架构</h1>
+        <p class="subtitle">卷积与 U-Net，时间步和条件怎样注入，扩散 Transformer（DiT）与 adaLN-Zero，一次完整的生成过程，多模态 DiT 的联合注意力，以及位置编码从正弦到 2D RoPE</p>
+        <div class="author-meta">
+            主讲：Afshine Amidi（U-Net、DiT、MM-DiT）、Shervine Amidi（位置编码）· 2026 年 5 月 8 日<br>
+            资料来源：<a href="https://cme296.stanford.edu/slides/spring26-cme296-lecture5.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=HpFdSlMeXzQ" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述内容） · 主要论文：Ronneberger 等 2015（U-Net）、Peebles &amp; Xie 2022（DiT）、Esser 等 2024（SD3 / MM-DiT）、Su 等 2021（RoPE）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、要设计的是什么</h2>
+        <p>
+            期中考试之后，课程进入后半部分，内容更偏实践。前三讲推导了训练损失，第四讲解决了图像在什么空间里表示。这一讲打开一直被当作黑箱的生成模型本身。Afshine 先声明：架构有无数种，这一讲想讲清楚的是为什么某些组件总是被反复使用。
+        </p>
+        <p>
+            模型的输入有三样：加噪的潜表示 $x_t$，噪声水平（时间步 $t$），以及条件 $c$（比如提示词"一只正在读书的泰迪熊"）。输出是速度（也可以参数化成噪声或分数，现在大多数模型预测速度，所以本讲统一用速度）。输出必须和输入形状完全一样，因为更新公式是 $x_{t+\Delta t} = x_t + \Delta t \cdot u_\theta$，两者要逐元素相加。
+        </p>
+        <p>
+            条件只有文本时，模型叫文生图（text-to-image，T2I）模型。条件是一段文字加一张图，比如"让这只泰迪熊跳舞"加一张泰迪熊照片，就是图像编辑问题，模型叫 TI2I（text-image-to-image）模型。
+        </p>
+        <p>
+            对架构的要求有四条：
+        </p>
+        <ul>
+            <li>理解全局结构：知道整张图大致画的是什么、各部分怎么布局。</li>
+            <li>保留局部细节：生成清晰锐利的图。</li>
+            <li>能响应外部信号：时间步和条件都要能影响输出。</li>
+            <li>计算上可扩展：现在要生成很高分辨率的图，甚至视频。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>二、卷积：模仿人眼看图的方式</h2>
+        <h3>1. 归纳偏置</h3>
+        <p>
+            人看一张图时，眼睛会聚焦在某个局部，然后在图上扫来扫去。一个自然的思路是让模型也这样看图。在设计模型时，把"我们认为它应该怎样工作"的假设直接做进结构里，这叫归纳偏置（inductive bias）。卷积就是这种思路的产物。
+        </p>
+
+        <h3>2. 卷积、步幅与感受野</h3>
+        <p>
+            卷积用一个小的滤波器（filter）在输入上滑动，每个位置计算滤波器和对应区域的加权和，输出叫特征图（feature map）或激活图（activation map）。滤波器的作用是检测特征，比如边缘、角点、纹理、图案、形状。注意图像有深度（RGB 三个通道，或潜空间里的 $C$ 个通道），所以滤波器也是三维的，尺寸为 $F\times F\times C$，卷积在深度方向上也做了求和。一层通常有 $K$ 个滤波器，每个滤波器有 $F\cdot F\cdot C$ 个可学习参数（加上偏置）。滤波器每次移动的格数叫步幅（stride）。
+        </p>
+        <p>
+            对照四条要求：卷积计算可行，能保留局部细节。全局结构呢？这要看感受野（receptive field），也就是输出里的一个元素能"看到"输入的多大区域。一层卷积的感受野就是滤波器大小；多层叠加后，感受野随滤波器大小和步幅增长。如果每层都是 3×3、步幅为 1，那么每加一层，感受野只多 2 个像素。一张图常有 500×500 甚至 1000×1000 个像素，要让输出看到整张图，需要叠加非常多层，代价太大。
+        </p>
+
+        <h3>3. 降采样与上采样</h3>
+        <p>
+            解决办法是先降采样，让感受野很快变大；再上采样，把尺寸还原成和输入一样。降采样常用池化（pooling）：把一个小方块合并成一个值，取最大值（最大池化）或平均值（平均池化），按通道分别做，没有可学习参数，通常接在卷积之后。上采样用转置卷积（transpose convolution）：用滤波器把一个输入元素"广播"到输出的一片区域上。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、U-Net</h2>
+        <h3>1. 结构</h3>
+        <p>
+            把上面的想法组合起来，就是 Ronneberger 等人 2015 年提出的 U-Net。它最初用于生物医学图像分割，画出来是一个 U 形，因此得名。
+        </p>
+        <ul>
+            <li>降采样阶段（U 的左边）：卷积和最大池化交替进行，特征图尺寸逐步变小，每一层的元素能看到越来越大的输入区域，也就是逐步获得全局理解。作用类似编码器。U 的最底部叫瓶颈。</li>
+            <li>上采样阶段（U 的右边）：转置卷积（也叫上卷积）和卷积交替，把特征图尺寸逐步还原，最后用 1×1 卷积得到输出。作用类似解码器。</li>
+            <li>跳跃连接：降采样过程中细节会逐渐丢失。所以在每一层，把降采样阶段的特征图直接复制（必要时裁剪）过去，和上采样阶段同一层的特征图在通道维度上拼接。原论文图上标的是"copy and crop"。这条"信息高速公路"让局部细节可以直接流到输出端。</li>
+        </ul>
+        <p>
+            有学生问为什么不复制最底部的特征图。因为越往下细节丢得越多，所以连接是从同一层级横着连过去的，上层连上层，下层连下层。还有学生问模型会不会直接把输入原样复制到输出。这和自编码器不同：输入是加噪的潜表示，要输出的是去噪需要的速度（或噪声），不是重建输入。U-Net 是整体联合训练的。
+        </p>
+        <p>
+            U-Net 满足了前两条要求：降采样带来全局结构，跳跃连接保住局部细节。它的结构偏置和反向扩散过程也很契合，而且输入输出尺寸相同。
+        </p>
+
+        <h3>2. 怎样表示时间步</h3>
+        <p>
+            看一眼手表：人对时间的表示由小时、分钟、秒等多个分量组成，可以把它们看成一个向量的各个维度。这些分量变化的频率不同：小时走得慢，分钟快一些，秒最快。时间步的表示借用了同样的想法：用一个向量表示 $t$，向量的各个维度是不同频率的正弦和余弦函数。靠前的维度频率高，$t$ 稍有变化就在 −1 和 1 之间来回振荡；靠后的维度频率低，变化很慢。这和 Transformer 的正弦位置编码是同一个公式，第八节会详细讲。
+        </p>
+
+        <h3>3. 怎样表示条件</h3>
+        <p>
+            两类方法。一类是预先定义好的类别，比如"泰迪熊"，为每个类别学一个嵌入向量；也可以用一个 ViT 模型，取 [CLS] token 的表示。另一类是自由文本，切成 token，每个 token 有自己的表示。现在很常见的做法是直接拿一个预训练的大语言模型，取它的嵌入。
+        </p>
+
+        <h3>4. 怎样注入</h3>
+        <p>
+            有了时间步向量和条件向量，注入到 U-Net 里有三种方式，没有统一标准：
+        </p>
+        <ol>
+            <li>加到特征图上：把时间步向量和条件向量相加，调整到维度等于通道数 $C$，然后加到特征图的每个位置上。</li>
+            <li>调制（modulation）：用条件生成缩放和平移系数，去调整特征图。下面讲 DiT 时会细讲。</li>
+            <li>交叉注意力：让特征图去关注条件的表示。</li>
+        </ol>
+
+        <h3>5. 时间线</h3>
+        <p>
+            U-Net 2015 年就有了，但直到 2020 年代初才在图像生成里大量使用：2020 年 DDPM 在像素空间用 U-Net；2021 到 2022 年的 LDM 在潜空间用 U-Net；2023 年的 Stable Diffusion XL 把 U-Net 做得非常大。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、为什么还需要 Transformer</h2>
+        <p>
+            2017 年的 Transformer 在 NLP 里大获成功，2020 年 ViT 把它用到了图像理解上，效果很好。图像生成能不能也用它？Afshine 先给了一个 U-Net 处理不好的例子：一只泰迪熊站在镜子旁边。镜子里的影像和本体在图上相隔很远，但局部纹理必须几乎一样。卷积的计算局限在邻近像素之间；远处的信息虽然经过多层后也能被看到，但已经和很多别的信息混在一起了，没有"这一块和那一块"之间干净的直接联系。
+        </p>
+        <p>
+            注意力机制正好提供这种联系：任意两个 token 之间都有直接的连接，无论距离多远。它的思路是去掉归纳偏置，让模型自己学哪些部分彼此相关。公式是上一讲的 $\text{softmax}(QK^\top/\sqrt{d_k})V$，矩阵形式在现在的硬件上计算很高效。原始 Transformer 为翻译设计，有编码器和解码器；处理图像不需要逐个生成，所以只借用编码器部分，这就是 ViT 做的事：把图切成块，每块当作一个 token，让每块和所有其他块交互。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、扩散 Transformer（DiT）</h2>
+        <p>
+            Peebles 和 Xie 2022 年的论文《Scalable Diffusion Models with Transformers》提出了扩散 Transformer（Diffusion Transformer，DiT），是 ViT 在图像生成上的对应物。
+        </p>
+        <h3>1. 切块</h3>
+        <p>
+            输入是加噪的潜表示，尺寸 $I\times I\times C$。切成 $P\times P\times C$ 的小块（patchify），每块当作一个 token，序列长度是 $(I/P)^2$。块越小，序列越长、越精细，计算也越多，这是一个取舍。
+        </p>
+
+        <h3>2. 三种注入条件的方式</h3>
+        <p>
+            时间步嵌入用正弦函数，条件嵌入在 DiT 论文里是类别标签的嵌入（整段条件一个向量）。论文比较了三种注入方式：
+        </p>
+        <ul>
+            <li>自适应层归一化（adaptive layer norm，adaLN）：用条件去调制每个 token。</li>
+            <li>交叉注意力：在 Transformer 块里多加一步，图像 token 作为查询，条件作为键和值，让每个图像块去看哪些条件信息和自己相关。</li>
+            <li>上下文条件（in-context conditioning）：直接把条件向量拼接到输入序列里，当作额外的 token。</li>
+        </ul>
+        <p>
+            结果是自适应层归一化效果最好。用 FID 衡量（第 7 讲会讲，越低越好），它的零初始化版本 adaLN-Zero 那条曲线在训练过程中始终最低，同时计算量也最小。
+        </p>
+
+        <h3>3. adaLN 的直觉</h3>
+        <p>
+            Afshine 用一个假设的例子建立直觉。一个图像块的嵌入是一个向量，假设第 10 维表示棕色的强度，第 24 维表示形状有多圆，第 59 维表示局部绒毛细节，第 130 维表示白色的强度。现实中的维度不一定这么可解释，但潜空间确实带一些语义，所以这个假设不算离谱。
+        </p>
+        <p>
+            条件是"一只棕色毛绒泰迪熊"。在 $t = 0.1$（流匹配的记号，噪声很多）时，生成刚开始，主要任务是勾勒全局结构，所以希望棕色和圆形这两维变强；局部细节还不是时候，绒毛那一维应该弱；白色和条件无关，也应该弱。到 $t = 0.9$（几乎没有噪声）时，整体结构已经有了，现在要强化的是绒毛细节，棕色和圆形已经到位，不需要再推。
+        </p>
+        <p>
+            可见，我们希望根据条件和时间步，逐维地调高或调低 token 的各个分量。这就是调制。做法是：把时间步嵌入和条件嵌入相加，经过一个多层感知机（MLP，线性层加激活函数再加线性层），得到三个向量：门控 $\alpha$、缩放 $\gamma$、平移 $\beta$。然后对 token $x$ 这样处理（$\odot$ 是逐元素相乘）：
+        </p>
+        $$x \leftarrow x + \alpha \odot \text{Layer}\big((1+\gamma)\odot \text{LN}(x) + \beta\big)$$
+        <p>
+            先做层归一化（LN），这一步本身不是调制，只是为了训练稳定。乘以 $1+\gamma$：$\gamma$ 为零向量时什么都不变，某维为正就放大这一维，为负就缩小，所以 $\gamma$ 是缩放。加 $\beta$ 是平移。Layer 是注意力层或前馈网络。最后乘以 $\alpha$ 再加回原来的 $x$：$\alpha$ 控制这次变化有多少能流进去，是门控。
+        </p>
+        <p>
+            adaLN-Zero 就是在训练开始时把门控 $\alpha$ 初始化为 0（多数实现把 $\alpha$、$\gamma$、$\beta$ 都初始化为 0）。这样一开始每个块都相当于恒等映射，条件完全不起作用，模型从一个稳定的起点开始学。
+        </p>
+        <p>
+            有学生问 $t$ 是不是扩散的时间步。是的，就是当前的噪声水平，用正弦向量表示。训练时也一样，输入的 $t$ 就是那张训练图被加噪的程度。
+        </p>
+
+        <h3>4. 输出与规模</h3>
+        <p>
+            经过若干个 DiT 块后，得到彼此"知情"的 token，再经过层归一化、线性层和重排，还原成和输入一样的形状。DiT 原论文用在 DDPM 上，除了均值还预测了对角协方差，所以输出有两部分；现在不常这样做，预测速度时只有一个输出。
+        </p>
+        <p>
+            作者发现，DiT 越大效果越好。但只看参数量不够，因为同样的参数量，块大小 $P$ 不同，计算量差别很大。所以要用 FLOPs（浮点运算次数，一次前向的运算量）衡量模型复杂度，它把块大小考虑进去了：$P$ 越小，序列越长，FLOPs 越高。实验显示，只放大 Transformer 或只缩小块大小，效果都有提升但不算多；两者一起扩展，效果最好。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、一次完整的生成过程</h2>
+        <p>
+            DiT 很重要，课上用"一只正在读书的泰迪熊"完整走了一遍，用流匹配：
+        </p>
+        <ol>
+            <li>在 VAE 学到的潜空间里，从高斯分布采样 $z_0$，尺寸 $I\times I\times C$。</li>
+            <li>切成 $(I/P)^2$ 个块，每块 $P\times P\times C$，通过线性投影变成 $D$ 维的块嵌入。</li>
+            <li>条件：时间步嵌入和标签嵌入相加，得到条件嵌入。</li>
+            <li>位置：注意力里每个 token 都直接相连，会丢失"谁在哪里"的信息，所以要给每个块嵌入加上位置嵌入，得到带位置信息的块嵌入。（直接相加是最朴素的做法，已经不是主流，第八节讲。）所有块嵌入堆成一个矩阵，因为 GPU 擅长矩阵运算。</li>
+            <li>进入 DiT 块。条件嵌入经过 MLP，得到六个量：$\alpha_1, \gamma_1, \beta_1$ 给注意力层，$\alpha_2, \gamma_2, \beta_2$ 给前馈网络。块嵌入矩阵先做层归一化，用 $\gamma_1, \beta_1$ 缩放平移，送进自注意力，结果乘 $\alpha_1$ 后加回输入；前馈网络同样处理。得到"上下文化"的矩阵，每个块的表示都考虑了其他所有块。</li>
+            <li>经过若干个 DiT 块后，做归一化、线性层、重排，得到预测的速度 $u_\theta(z_0, t=0, c)$，形状和 $z_0$ 一样。</li>
+            <li>用 Euler 法走一步：$z_{\Delta t} = z_0 + \Delta t\cdot u_\theta(z_0, 0, c)$。</li>
+            <li>在 $z_{t_i}$ 处重复：输入 $z_{t_i}$、$t_i$ 和不变的条件 $c$，预测速度，走一步得到 $z_{t_{i+1}}$。一直到 $t = 1$。</li>
+            <li>$z_1$ 是最终的潜表示，人看不懂，送进 VAE 解码器，得到像素空间里那张读书的泰迪熊。</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>七、多模态扩散 Transformer（MM-DiT）</h2>
+        <h3>1. DiT 的局限</h3>
+        <p>
+            回到 adaLN 的例子，把提示词改成"一只棕色毛绒泰迪熊，周围是白墙"。现在白色那一维也应该被强化。问题是 adaLN 对所有 token 做同样的调制，不管它们在图上的哪个位置。我们希望泰迪熊所在的块加强棕色、不加强白色，墙所在的块加强白色、不加强棕色。DiT 做不到这种区分。
+        </p>
+        <p>
+            用时间步调制所有 token 是合理的，因为所有 token 都处在同一个噪声水平。所以策略是：保留用时间步嵌入做调制，但对文本条件换一种能精细交互的方式。主要有两类：交叉注意力和联合注意力。
+        </p>
+
+        <h3>2. 交叉注意力与联合注意力</h3>
+        <p>
+            交叉注意力：图像块嵌入当查询，文本当键和值。每个图像块问：哪段文字和我相关？然后据此调整自己。文本在这里是一个固定的输入，不会被改变。课上的比方是：画家照着诗人写好的说明作画，说明写完就不变了。
+        </p>
+        <p>
+            联合注意力（joint attention）：把图像块嵌入和文本嵌入拼在一起，送进同一个自注意力层。图像和文本彼此都能看到、都会被对方更新。继续上面的比方：画家和诗人在同一个房间里商量，比如画面右上角要写"Stanford"但空间不够，两人可以商量把字写小一点。现在大多数模型用的是联合注意力。
+        </p>
+
+        <h3>3. MM-DiT 与单流、双流</h3>
+        <p>
+            基于联合注意力的架构叫 MM-DiT（MultiModal Diffusion Transformer），这个名字来自 2024 年的 Stable Diffusion 3 论文（Esser 等，《Scaling Rectified Flow Transformers for High-Resolution Image Synthesis》）。
+        </p>
+        <p>
+            还有一个设计维度：不同模态是否使用各自的参数。比如 Transformer 块里的前馈网络和投影层，所有模态共享一套，还是图像一套、文本一套。共享时叫单流（single-stream），所有 token 一视同仁；各用一套时叫双流（double-stream），每个模态有自己的通道，只在注意力那一步汇合。也有混合（hybrid）的，一部分层是双流，一部分是单流。
+        </p>
+        <ul>
+            <li>双流：Stable Diffusion 3、Qwen-Image（通义千问团队，2025）。</li>
+            <li>单流：Z-Image（2025）。</li>
+            <li>混合：FLUX.1 Kontext（Black Forest Labs，2025）。</li>
+        </ul>
+        <p>
+            时间线：DiT 2022 年发表，SD3 2024 年提出 MM-DiT 这个名字，同年还有 FLUX.1，2025 年有 Qwen-Image、Z-Image，2026 年发布的模型看起来也沿用这个趋势。这些具体模型的论文链接在幻灯片里，不在期末考试范围内。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、位置编码</h2>
+        <p>
+            最后一部分由 Shervine 讲。所有这些模型都需要表示输入的位置，他从一维（文本）讲起，再推广到二维（图像）。
+        </p>
+        <h3>1. 为什么需要</h3>
+        <p>
+            注意力让每个 token 和所有 token 直接相连，这本身不包含距离信息。以 "a teddy bear is reading" 为例，我们希望 "teddy bear" 的表示和它附近的 token 更相似，和远处的不那么相似。写成数学形式，就是希望两个 token 表示的点积（严格说是一个的查询和另一个的键的点积）能反映它们的距离。
+        </p>
+
+        <h3>2. 绝对位置编码</h3>
+        <p>
+            原始 Transformer 的做法是：token 的表示 = 不含位置的输入嵌入 + 位置嵌入，逐元素相加。这样算点积时，会出现一项"位置嵌入与位置嵌入的点积"（还有一些交叉项，先忽略）。问题变成位置嵌入怎么选。原论文用固定公式：
+        </p>
+        $$PE_{(m,\,2i)} = \sin\!\left(\frac{m}{10000^{2i/d}}\right), \qquad PE_{(m,\,2i+1)} = \cos\!\left(\frac{m}{10000^{2i/d}}\right)$$
+        <p>
+            $m$ 是位置，$i$ 是维度编号，$d$ 是嵌入维度。$i$ 从 0 变到 $d/2$ 时，指数 $2i/d$ 从 0 变到 1。$i$ 小时分母小，正弦随位置变化很快，是高频；$i$ 大时分母接近 10000，变化很慢，是低频。10000 刻意取得比序列长度大很多：比如序列长 500 时，最后几维的正弦在整个序列上几乎不变化。
+        </p>
+        <p>
+            把第 $i$ 对维度的频率记作 $\omega_i$，比较位置 $m$ 和 $n$ 的编码。点积里是同频率的 $\sin\cdot\sin$ 加 $\cos\cdot\cos$，用三角恒等式 $\sin a\sin b + \cos a\cos b = \cos(a-b)$：
+        </p>
+        $$PE_m^\top PE_n = \sum_{i=0}^{d/2-1}\cos\big(\omega_i (m-n)\big)$$
+        <p>
+            点积只取决于两者的距离 $m-n$，可解释性很好。画出它随距离变化的曲线：整体趋势下降，但不是单调的。一开始急剧下降，因为所有余弦都从 $\cos 0 = 1$ 开始往下掉；距离再大一些，高频项在 −1 和 1 之间振荡，相互抵消，曲线有些小起伏；更远处低频项也开始振荡，起伏更明显。原作者还指出，位置偏移固定量 $k$ 后的编码可以由原编码经线性变换得到，网络里的矩阵乘法能吸收这种关系。
+        </p>
+        <p>
+            优点：实现简单，作为基线效果不错，每个位置都有自己明确的表示；公式固定，推理时遇到比训练更长的序列也能算出编码。缺点：位置信息是在输入处加进去的，而真正需要比较位置的地方在注意力层；相加后还多出位置与内容的交叉项，位置信息也混进了值向量里，这些都不是设计本意。
+        </p>
+        <p>
+            早期的 Transformer 都用绝对位置编码：原始 Transformer 用固定公式；原始 ViT 用可学习的位置嵌入；原始 DiT 用固定的二维正弦编码。
+        </p>
+
+        <h3>3. 旋转位置编码（RoPE）</h3>
+        <p>
+            既然位置信息在注意力层最需要，那就直接放到那里。Su 等人 2021 年的 RoPE（Rotary Position Embeddings）不再把位置加到输入上，而是在算点积之前，把查询和键按各自的位置旋转：位置 $m$ 的查询乘以旋转矩阵 $R_m$，位置 $n$ 的键乘以 $R_n$：
+        </p>
+        $$(R_m q)^\top (R_n k) = q^\top R_m^\top R_n\, k = q^\top R_{n-m}\, k$$
+        <p>
+            两个旋转合起来，等效于按位置差 $n - m$ 旋转。相对距离被自然地编码进了注意力分数里。这是现在的默认做法。
+        </p>
+
+        <h3>4. 推广到二维</h3>
+        <p>
+            文本是一维序列，直接用没问题。图像块有横纵两个坐标，如果按一维编号，比较两个编号是否有意义就不清楚了。
+        </p>
+        <ul>
+            <li>轴向 RoPE（Axial RoPE）：把向量的维度分成两组，一组按横坐标旋转，一组按纵坐标旋转（分组方式是任意的，比如按奇偶分）。问题是点积时只有横坐标和横坐标比、纵坐标和纵坐标比，两个轴之间没有交互，而且怎样分组是人为决定的。</li>
+            <li>混合 RoPE（Mixed RoPE）：在同一个旋转矩阵里同时混入两个轴的频率。Heo 等人 2024 年的论文做了一个实验：对一个位置的表示做傅里叶变换，在相同的频率预算下只保留部分频率再重建。轴向 RoPE 出现了沿坐标轴的伪影，混合 RoPE 更好地利用了同样的频率预算，避免了这种伪影。</li>
+        </ul>
+
+        <h3>5. 分辨率变化</h3>
+        <p>
+            同一只泰迪熊，低分辨率时切出的块少，高分辨率时切出的块多。如果坐标从左上角的 (0,0) 开始数，那么"中心"在低分辨率图里是 (2,2) 左右，在高分辨率图里是 (5,5) 左右，同一个坐标的空间含义变了。Seedream 2.0（字节跳动，2025）的做法是把坐标平移到以图像中心为原点，中心总是大约 (0,0)，两边对称，这样模型更容易知道哪里是中心、哪里是边缘。
+        </p>
+
+        <h3>6. 多模态 RoPE</h3>
+        <p>
+            MM-DiT 里文本 token 和图像 token 在同一个注意力层里交互，文本 token 的位置该怎么放？不能放在图像的横行或竖列的延长线上，否则模型会以为文字是图像的延续。Qwen-Image 技术报告提出的 MSRoPE（Multimodal Scalable RoPE）把文本 token 放在对角线方向上，明确地位于图像区域之外，图像和文本可以共存而互不干扰。而且对角线上横纵坐标同时加 1，用二维编码时，文本部分在功能上就等价于一维 RoPE。
+        </p>
+        <p>
+            Shervine 的结论是：位置编码仍是一个开放问题，变体很多，各有取舍，尚无定论。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、参考资料</h2>
+        <ul>
+            <li>U-Net: Convolutional Networks for Biomedical Image Segmentation（Ronneberger 等，2015）：U-Net 原论文。</li>
+            <li>Scalable Diffusion Models with Transformers（Peebles &amp; Xie，2022）：DiT。比较了多种条件注入方式，adaLN-Zero 最好；发现生成质量与模型的 Gflops 强相关，最大的 DiT-XL/2 在 ImageNet 256×256 类别条件生成上取得 FID 2.27，超过此前所有扩散模型。</li>
+            <li>Scaling Rectified Flow Transformers for High-Resolution Image Synthesis（Esser 等，2024）：Stable Diffusion 3，提出 MM-DiT，图像和文本各用一套权重、在注意力中联合交互，并用整流流训练。</li>
+            <li>Qwen-Image Technical Report（通义千问团队，2025）：双流 MM-DiT，提出 MSRoPE。</li>
+            <li>Z-Image: An Efficient Image Generation Foundation Model with Single-Stream Diffusion Transformer（Z-Image 团队，2025）：单流架构。</li>
+            <li>FLUX.1 Kontext: Flow Matching for In-Context Image Generation and Editing in Latent Space（Black Forest Labs，2025）：混合架构，用于图像生成与编辑。</li>
+            <li>RoFormer: Enhanced Transformer with Rotary Position Embedding（Su 等，2021）：RoPE。</li>
+            <li>Rotary Position Embedding for Vision Transformer（Heo 等，2024）：轴向 RoPE 与混合 RoPE 的比较。</li>
+            <li>Seedream 2.0: A Native Chinese-English Bilingual Image Generation Foundation Model（Gong 等，2025）：以图像中心为原点的坐标缩放。</li>
+            <li>Transformer Architecture: The Positional Encoding（Kazemnejad，2019）：正弦位置编码的图示来源。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>十、小结</h2>
+        <p>
+            架构要同时满足全局结构、局部细节、响应条件和可扩展四条要求。U-Net 用卷积的归纳偏置模仿人眼，降采样扩大感受野，跳跃连接保留细节，条件可以加、可以调制、可以交叉注意。Transformer 去掉了归纳偏置，任意两个图像块之间都能直接交互。DiT 把潜表示切块当 token，用 adaLN-Zero 根据时间步和条件逐维调制 token，并显示出随 FLOPs 扩展的规律。adaLN 对所有 token 一视同仁，无法按位置区分文本条件，于是 MM-DiT 保留时间步调制，把文本和图像放进同一个注意力层联合交互，又分出单流、双流和混合三种。位置编码从输入端的正弦编码发展到注意力内部的 RoPE，再推广到二维、多分辨率和多模态，仍在演进。
+        </p>
+        <p>
+            下一讲讲怎样训练这些模型：预训练、微调、偏好对齐，以及把模型变快的蒸馏。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CME296: Diffusion &amp; Large Vision Models · Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="04_潜空间与引导生成.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="06_模型训练与蒸馏.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第七讲：怎样评估生成的图像 | 斯坦福 CME296 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="06_模型训练与蒸馏.html">&larr; 上一讲</a>
+    <span>Stanford CME296: Lecture 07</span>
+    <a href="08_前沿趋势与视频生成.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第七讲：怎样评估生成的图像</h1>
+        <p class="subtitle">美观与遵循提示两个维度，人工评分与 Elo，FID、CLIPScore、PickScore，MSE、PSNR、SSIM、LPIPS，多模态大模型，TIFA、VQAScore 与 MLLM 评委，以及几个常用基准</p>
+        <div class="author-meta">
+            主讲：Afshine Amidi（人工评分与固定指标）、Shervine Amidi（多模态大模型与基准）· 2026 年 5 月 22 日<br>
+            资料来源：<a href="https://cme296.stanford.edu/slides/spring26-cme296-lecture7.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=iNaRBp4T57Q" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述和板书推导） · 主要论文：Heusel 等 2017（FID）、Wang 等 2004（SSIM）、Hu 等 2023（TIFA）、Lin 等 2024（VQAScore）、Ku 等 2023（VIEScore）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、评估什么</h2>
+        <p>
+            要知道该改进什么，得先知道输出有多好。Afshine 开场让全班看三张根据"一只读书的泰迪熊"生成的图。第一张很难看，大家都说不好，问题在美观。第二张很好看，但画的根本不是泰迪熊在读书，问题在没有遵循提示。第三张既是泰迪熊在读书，又比较好看，算是合格。（有学生连第三张也不满意，Afshine 说他品味很高。）
+        </p>
+        <p>
+            由此可以把评估大致分成两类：
+        </p>
+        <ul>
+            <li>美观（aesthetics），"这张图本身好不好"：物理上是否合理（书放在桌上而不是悬在空中），画面是否干净，感知质量，真实感。</li>
+            <li>遵循提示（prompt adherence），"有没有照指令做"：提到的物体、人物、地点是否都出现了，数量对不对，文字渲染是否正确（比如要求书上写 CME 296），风格是否符合。</li>
+        </ul>
+        <p>
+            这两类并不完整。还有安全（不生成不安全的内容）、多样性（同一提示不要每次都生成一样的图）、记忆（不要照搬训练数据，要有泛化能力）、偏见（不要总输出同一类形象）等维度。本讲集中讨论前两类。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、人工评分</h2>
+        <h3>1. 打分</h3>
+        <p>
+            最自然的办法是让人看图打分，比如 1 到 5 分，从"很差"到"很好"。模型在一个数据集上的分数就是平均分。好处是有细微区分；坏处是给了人太多自由度，有人觉得是 5 分，有人觉得是 4 分或 3 分，每个人对量表的理解不同，评分有噪声。而且在很多问题上，一张图到底该给 4 分还是 5 分，人本来就很难判断。
+        </p>
+
+        <h3>2. 二元判断</h3>
+        <p>
+            简化成好或不好，指标是通过率。任务对人更容易，噪声更小。但人在绝对尺度上判断仍然困难，"是否过线"需要一个参照。
+        </p>
+
+        <h3>3. 两两比较</h3>
+        <p>
+            给同一个提示词生成两张图，只问哪张更好（或一样好）。这比绝对尺度容易得多。课上那第三张图，单独看有人觉得不过线，但和第二张放在一起比，所有人都认为它更好。指标最直接的是胜率：赢的次数除以比较次数。
+        </p>
+        <p>
+            胜率的问题是它取决于和谁比。赢一个公认很差的模型说明不了什么，赢一个很强的模型才值得惊喜。排行榜上模型有进有出，如果用胜率，每次名单变化都要让所有模型两两重新比一遍，评估量太大。
+        </p>
+
+        <h3>4. Elo 评分</h3>
+        <p>
+            解决办法是在评分中考虑对手的强弱，也就是 Elo 评分。Elo 是发明者的名字（Arpad Elo），不是缩写。每个模型有一个分数 $R$。例子：新来的模型 A 起始分 1000，对手 B 是个弱模型，分数 600。
+        </p>
+        <ol>
+            <li>算期望得分，也就是按过去表现，A 预计能赢的概率：
+                $$E_A = \frac{1}{1 + 10^{(R_B - R_A)/400}} = \frac{1}{1 + 10^{-1}} \approx 0.9$$
+                400 是一个约定的常数。</li>
+            <li>实际比较，得到实际得分 $S_A$：赢为 1，平为 0.5，输为 0。</li>
+            <li>算"意外程度" $\Delta = S_A - E_A$：赢了是 +0.1，平了是 −0.4，输了是 −0.9。</li>
+            <li>更新：$R_A \leftarrow R_A + K\Delta$，$K$ 是步长。</li>
+        </ol>
+        <p>
+            这和直觉一致：赢了弱模型，分数几乎不涨；输给弱模型，扣得很多；连和弱模型打平也要扣分。文生图的公开排行榜（比如 Artificial Analysis 的 Image Arena）就是这样算分的，新模型加入时不需要和所有模型都比一遍。
+        </p>
+
+        <h3>5. 人工评分的局限</h3>
+        <p>
+            贵；慢，一天只有 24 小时；主观，比如"光线好不好"每个人理解不同；人也会出错，疲劳、一天中的不同时段、文化背景都会影响判断，所以人工评分也不一定是真值。这些都促使我们寻找自动化指标。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、无参考指标</h2>
+        <p>
+            文生图里，同一个提示词可以有很多张都合格的图。拿一张固定的"标准答案"去比较是不公平的。所以这一类指标叫无参考（reference-free）指标：不拿一张生成图和一张真实图逐一比较。
+        </p>
+
+        <h3>1. FID：比较两个分布</h3>
+        <p>
+            先看美观。既然不能和单张图比，就拿很多生成图和很多真实图，比较两个分布。具体做法：把真实图和生成图都送进同一个预训练编码器，得到它们在某个特征空间里的表示。每一组表示可以用均值 $\mu$ 和协方差矩阵 $\Sigma$ 来刻画：均值说明分布在哪里，协方差说明分布朝哪些方向散开、散得多开。然后比较两组：
+        </p>
+        $$\text{FID} = \underbrace{\|\mu_r - \mu_g\|^2}_{\text{位置差异}} + \underbrace{\text{Tr}\!\left(\Sigma_r + \Sigma_g - 2\left(\Sigma_r\Sigma_g\right)^{1/2}\right)}_{\text{形状差异}}$$
+        <p>
+            Tr 是矩阵的迹（对角线元素之和）。这个公式来自 Wasserstein 距离：它衡量把一个分布搬运成另一个分布需要花多少力气，一般没有闭式解，但如果假设两个分布都是高斯，就能写成上面这个闭式。这又是高斯分布简化问题的一个例子。FID 是距离，越低越好。它全称 Fréchet Inception Distance，因为那个预训练编码器是 Inception 网络，由 Heusel 等人 2017 年提出。第 5 讲 DiT 的图和第 6 讲 REPA 的图，纵轴都是 FID。
+        </p>
+        <p>
+            怎么解读：位置差异大，通常说明质量或风格不同；形状差异大，比如生成的图都挤在一个小区域里，说明多样性不够。
+        </p>
+        <p>
+            课上学生问了不少问题，答案整理如下。为什么一定要用 Inception 的特征？因为 FID 的用途是和别人的模型比较，必须在同一个表示空间里算。像素空间扩散模型能不能用？能，生成的图送进 Inception 即可。真实图集怎么选？选和你的任务相符的数据集，比如 ImageNet、MS COCO，生成时用对应的类别或描述做条件。要多少张图？常见的是 FID-50k，生成 5 万张、和 5 万张真实图比较，也见过 3 万张，一般是几万张的量级。均值和协方差足以刻画质量吗？不完全，真实图和生成图的特征分布通常都不是高斯，公式的前提并不严格成立。
+        </p>
+        <p>
+            Afshine 说，几乎每周都有新论文提出新指标，社区也公开承认 FID 不完美，但大家认为它是一个够用的代理。他个人认为 FID 难以被替换的一个原因是：写论文要和以前的方法比，以前的方法都报告 FID。也因此论文里还会附上不少（或许挑选过的）样例图。
+        </p>
+
+        <h3>2. CLIPScore：图文是否匹配</h3>
+        <p>
+            再看遵循提示。第 4 讲的 CLIP 把图和文分别编码到同一个空间，用对比损失训练，匹配的图文相似度高。直接用一个原始 CLIP 模型，输入提示词和生成的图，算两者的相似度，就是 CLIPScore（Hessel 等，2021）。
+        </p>
+
+        <h3>3. PickScore：人更喜欢哪张</h3>
+        <p>
+            同样的结构也可以用来预测人的偏好。Kirstain 等人 2023 年收集了 Pick-a-Pic 数据集（用户对文生图结果的偏好），在上面训练一个 CLIP 模型，得到 PickScore。它是一个综合分数，把美观、遵循提示等因素合在一起，反映人对生成结果的整体满意度。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、有参考指标</h2>
+        <p>
+            生成模型不是唯一要评估的模型。VAE 的任务是重建输入，这时有明确的参考答案：原图本身。图像编辑（要检查不该改的地方没被改）、蒸馏（学生和教师的输出比较）也有参考。这类指标叫有参考（reference-based）指标。记原图为 $x$，重建图为 $\hat x$。
+        </p>
+
+        <h3>1. MSE</h3>
+        <p>
+            逐像素差的平方再平均，即均方误差。两个问题：对位置极其敏感，重建得完美但整体向右偏了几个像素，MSE 就会很糟；数值本身难以解读，告诉你 MSE 是 10，你不知道这算好还是坏，因为像素有时取 0 到 1，有时取 0 到 255。
+        </p>
+
+        <h3>2. PSNR</h3>
+        <p>
+            峰值信噪比（Peak Signal-to-Noise Ratio）用像素可能的最大值 $\text{MAX}$ 对 MSE 做归一化，再取对数：
+        </p>
+        $$\text{PSNR} = 10\log_{10}\frac{\text{MAX}^2}{\text{MSE}}$$
+        <p>
+            归一化让数值有了参照。取对数的理由，Afshine 用开灯来说明：房间全黑时打开一盏灯，变化很大；房间里已经亮着很多灯时再开一盏，几乎感觉不到。误差也一样，几乎没有误差时多一点误差很明显，误差已经很大时再多同样一点就不那么明显，对数正好表达了这种相对变化。PSNR 越高越好，但它仍然是逐像素的，对位移敏感。
+        </p>
+
+        <h3>3. SSIM</h3>
+        <p>
+            结构相似性（Structural SIMilarity，Wang 等，2004）不比较单个像素，而是在两张图同一位置各取一个小块，比较三件事：亮度是否相同（用块内像素均值 $\mu$）、对比度是否相同（用标准差 $\sigma$）、结构是否相同（像素的变化方式是否一致，用协方差 $\sigma_{xy}$）。
+        </p>
+        <p>
+            亮度相似度是：
+        </p>
+        $$l(x, \hat x) = \frac{2\mu_x\mu_{\hat x} + C_1}{\mu_x^2 + \mu_{\hat x}^2 + C_1}$$
+        <p>
+            Afshine 先解释了 $\frac{2ab}{a^2+b^2}$ 这个形式（常数 $C_1$ 只是防止分母为零）。由 $(a-b)^2 \ge 0$ 得 $a^2 + b^2 \ge 2ab$，所以对正数 $a, b$，这个比值在 0 到 1 之间，$a = b$ 时等于 1。它比较的是相对差异：$a = 10, b = 20$ 时是 0.8；$a = 100, b = 110$ 时约 0.995。同样差 10，在高水平上差别显得小得多，和 PSNR 取对数的道理相同。这个形式在别的论文里叫 Dice 系数。
+        </p>
+        <p>
+            对比度相似度 $c$ 用同样的形式，把均值换成标准差。结构相似度 $s$ 用的是 Pearson 相关系数 $\frac{\sigma_{x\hat x} + C_3}{\sigma_x\sigma_{\hat x} + C_3}$，取值在 −1 到 1 之间。三者相乘：
+        </p>
+        $$\text{SSIM}(x, \hat x) = l(x,\hat x)\cdot c(x,\hat x)\cdot s(x,\hat x)$$
+        <p>
+            都相似时三项都接近 1；不相似时 $l$、$c$ 趋于 0，$s$ 趋于 0 或负。对所有小块算一遍再取平均，就是整张图的 SSIM，取值 −1 到 1，越接近 1 越相似。它比 MSE、PSNR 对位置不那么敏感，但如果位移超出了小块的范围，仍然会出问题。
+        </p>
+
+        <h3>4. LPIPS</h3>
+        <p>
+            第 4 讲已经见过。不在像素空间比较，把两张图都送进预训练网络，比较各层特征图的差异，按系数 $w_l$ 加权求和。$w_l$ 是在一个人类感知判断数据集上调出来的，使指标尽量符合人的判断。预训练网络通常是 VGG 或 AlexNet，因为 $w_l$ 和所用的网络绑定，所以只能从这几个预设里选。LPIPS 很常用，主要缺点是难以解读：分数不好时，不知道具体哪里出了问题。比较一批图时，对每对图算 LPIPS 再取平均即可。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、多模态大模型</h2>
+        <p>
+            后半部分由 Shervine 讲。上面这些指标数学性很强，种类很多，各自在不同层面上工作，含义分散，彼此之间难免不一致，而且都只给一个数字，不告诉你为什么。能不能让模型"说话"，用文字解释它的判断？大语言模型会说话，问题是怎样让它也能看图。
+        </p>
+        <p>
+            回顾课上见过的模型：Transformer 把文本变成文本；DiT 把加噪潜表示（加上类别）变成图像；MM-DiT 把加噪潜表示加上文本变成图像。现在要的是另一种组合：输入图像和文本，输出文本。比如给一张泰迪熊图，问"这只泰迪熊有多可爱"，回答"非常可爱"。图像和文本都可以变成 token，token 就是嵌入向量，问题变成：用什么架构接收这些嵌入并输出文字。
+        </p>
+        <h3>1. 方案一：交叉注意力</h3>
+        <p>
+            沿用原始 Transformer 的解码器，文本 token 作为输入，通过交叉注意力去看编码好的图像：图像提供键和值。Google DeepMind 2022 年的 Flamingo 就这样做，用一些占位 token 控制何时去看图像。好处是上下文长度固定、只有文本，计算高效。缺点是现在最好的大语言模型都是只有解码器的结构，已经去掉了交叉注意力，用这种方案就没法直接复用它们，得重新设计交叉注意力层。
+        </p>
+        <h3>2. 方案二：直接当作输入</h3>
+        <p>
+            把图像块经过一个编码器（比如 ViT）变成嵌入，和文本 token 一起直接送进一个只有解码器的大语言模型，当作普通输入处理。例子是 Liu 等人 2023 年的 LLaVA。因为能复用已经被证明有效的设计，质量也更好，现在的多模态大模型（MLLM）基本都用这一种，也就是解码器加联合注意力，比如 Qwen3-VL、GLM-4.5V。
+        </p>
+        <p>
+            有学生问"复用已有成果"具体指什么。Shervine 说主要是架构上的：一个被证明有效的设计，新模态只是同类输入，可以直接沿用；至于是否从已训练的权重初始化，是工程上的选择，完全可以这么做。
+        </p>
+        <p>
+            现代 MLLM 有几项能力在当评委时会用到：能处理各种分辨率的图；有空间感；能识别图中文字（OCR），用来检查生成图里的文字是否正确；能处理其他模态；能推理，给出评分的理由而不只是一个数字。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、用 MLLM 做评估</h2>
+        <h3>1. TIFA：把提示拆成问题</h3>
+        <p>
+            第一个不满：传统指标既笼统又不透明。一张图的 CLIPScore 是 0.922，然后呢？不知道该改什么。Hu 等人 2023 年的 TIFA（Text-to-Image Faithfulness evaluation with question Answering）把"是否忠于提示"拆成一组原子问题。先用少样本示例让语言模型从提示词生成问题，每个问题都是是非题或答案明确的题，再让 MLLM 逐个回答。以"一只可爱的泰迪熊在读书"为例：有泰迪熊吗？泰迪熊可爱吗？有书吗？泰迪熊在读这本书吗？全部答对，TIFA 得 100 分。
+        </p>
+        <p>
+            好处：简单易懂，分数好调试，能精确定位哪里出了问题。缺点：每个提示词都要生成一套专属问题，成本高，而且生成问题这一步本身就可能出错；各个问题权重相同，不一定反映真实的重要性。比如图里完全没有书，可能只丢掉一两个问题的分，总分还有一半左右，这未必是你想要的。
+        </p>
+
+        <h3>2. VQAScore：直接问"是不是"</h3>
+        <p>
+            第二个不满：传统指标对组合关系不敏感。把提示词改成"一本可爱的书在读一只泰迪熊"，人一看就知道意思完全变了，但 CLIPScore 几乎不变。原因有二：把整张图和整句话各压成一个向量再做点积，承载不了这么细的语义差别；CLIP 用批内负样本训练，负样本通常和图毫无关系，模型没有动力去学这种细微区别。
+        </p>
+        <p>
+            Lin 等人 2024 年的 VQAScore 让 MLLM 同时看图和句子。模板固定：
+        </p>
+        <p>
+            [图像] Does this figure show "[提示词]"? Please answer yes or no.
+        </p>
+        <p>
+            然后看模型下一个 token 的概率分布，取 "yes" 的概率作为分数。图文匹配时概率高，否则低。这样利用了大语言模型的理解能力，能分辨"熊读书"和"书读熊"。有学生问普通 MLLM 能直接这样用吗？能，这是零样本任务，不需要专门训练，拿一个现成的 MLLM 就行。
+        </p>
+        <p>
+            局限：需要拿到下一个 token 的概率，而最好的闭源模型通常不公开这个，因为从概率分布里能学到很多东西，在蒸馏领域是个敏感话题；TIFA 加 VQAScore 意味着每个问题都要单独调用一次 MLLM，开销随问题数量增长，虽然可以并行，但成本高。更根本的是，这些方法仍然以数据集里的提示词为中心，靠人工设计指标再事后解读。
+        </p>
+
+        <h3>3. VIEScore：MLLM 当评委</h3>
+        <p>
+            另一种思路：不再以提示词为中心，而是以"好"的概念为中心。先用通用的方式描述什么是好，再借助 MLLM 的推理能力替我们推理、给出分数。Ku 等人 2023 年的 VIEScore（Visual Instruction-guided Explainable Score）把这个思路形式化：输入提示词、生成的图和一份评分细则（rubric），MLLM 先写出证据和理由（比如"一只柔软蓬松的棕色泰迪熊坐在床上……"），再给出分数。这种用法叫 MLLM 当评委（MLLM-as-a-Judge）。
+        </p>
+        <p>
+            细则对应开头的两个维度：语义一致性（和条件有多吻合）和感知质量（看起来有多真实自然）。一张图可能两项都满足；另一张泰迪熊技术上也在读书，但看起来很假，语义一致性过关、感知质量不过关。
+        </p>
+        <p>
+            评委提示的典型结构：给出输入（提示词和图）；按维度列出评分准则；要求以 JSON 格式输出理由和分数，方便程序解析。
+        </p>
+
+        <h3>4. 怎样校准评委</h3>
+        <p>
+            Shervine 认为这是本讲最有意思的部分：怎样让评委的判断和人对齐。典型流程分三步：
+        </p>
+        <ol>
+            <li>播种：找人给一批生成图按细则打分，弄清楚人眼里什么是好、什么是差。这一步慢。</li>
+            <li>校准：调整给 MLLM 的细则，让它的打分和人的判断一致。现在通常不是手写，而是让模型帮忙改写细则，直到评分匹配人的直觉。</li>
+            <li>自动化：用校准好的评委去评大量其他图文对。这一步快。</li>
+        </ol>
+
+        <h3>5. 三种用法</h3>
+        <ul>
+            <li>逐点（pointwise）：评一张图的质量，比如给出"2/1/3"这样的各维度分数。适合诊断，评委给出的理由能帮你找到模型的失败模式，进而改进生成模型，或者发现评委本身没校准好。</li>
+            <li>成对（pairwise）：两张图哪张更好。适合比较模型，比如判断新版本能不能替换旧版本。</li>
+            <li>批量排序（batch ranking）：给一组图排序。论文里有研究，但实践中很少用，因为结果对顺序太敏感、方差大。</li>
+        </ul>
+
+        <h3>6. 最佳实践</h3>
+        <ul>
+            <li>把评分拆成原子化的准则。实际任务常有特定需求，把它单独拆成一项准则来评。</li>
+            <li>让 MLLM 先描述证据，再给分数。这和思维链的研究一致，人做判断前把事实说出来也会判断得更好。</li>
+            <li>用低温度和结构化输出。聊天应用通常不把温度设为 0，因为一定的随机性能提高多数任务的质量；但评分是严格依据输入和细则的任务，温度设为 0，保证多次运行结果一致。</li>
+            <li>成对比较时随机交换 A、B 的顺序，避免位置偏差。</li>
+            <li>在信任评委之前，先用人工评分验证它。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>七、常用基准</h2>
+        <h3>1. GenEval：物体与属性</h3>
+        <p>
+            Ghosh 等人 2023 年。测试能否正确画出指定的物体及其属性。约 600 个提示词，6 类任务：单个物体、两个物体、计数、颜色、相对位置、颜色归属。评判用目标检测模型、几何计算和颜色分类，每项给出是或否。例子："一张紫色背包和白色雨伞的照片"，两个物体和颜色都要对上。
+        </p>
+        <h3>2. DPG-Bench：长而密的提示</h3>
+        <p>
+            来自 Hu 等人 2024 年的 ELLA 论文。测试模型面对一大段详细描述时能否记住每个细节。用 DSG 流程把提示词拆成实体、属性、关系组成的问题图，约 1000 个提示词、约 14000 个问题，每个问题由 VQA 模型回答是或否。例子是一个隐形人：一副角质框眼镜悬在空中，下方挂着一串珍珠项链，手的位置拿着一部手机，房间里有沙发和茶几……问题包括：有空位吗？有隐形人吗？有眼镜吗？眼镜是角质框吗？眼镜悬在空中吗？有房间吗？有沙发吗？问题图有先后依赖：前提不存在（比如没有眼镜），就不再检查依赖它的问题（眼镜是不是角质框），由粗到细，比较高效。
+        </p>
+        <h3>3. LongText-Bench：文字渲染</h3>
+        <p>
+            来自 Geng 等人 2025 年的 X-Omni 论文。测试能否在图里渲染出可读的多行文字。160 个英文提示、160 个中文提示，覆盖 8 种场景：招牌、标签、印刷品、网页、幻灯片、海报、字幕、对话。用 OCR 提取图中文字，和提示里要求的文字比对。
+        </p>
+        <h3>4. GEdit-Bench：图像编辑</h3>
+        <p>
+            来自 Liu 等人 2025 年的 Step1X-Edit 论文。测试编辑一张图时能否不破坏原有内容。约 600 个编辑样例，11 类：改背景、改颜色、改材质、改动作、改风格、改文字、修图、增加主体、删除主体、替换主体、色调迁移。用 VIEScore 式的 MLLM 评委，从感知质量和语义一致性两方面打分。名字里的 G 论文没有明确展开，Shervine 理解为以输入图像为依据（grounded）。
+        </p>
+
+        <h3>5. 最后的提醒</h3>
+        <p>
+            指标这么多，又都不完美，人容易转而只看几张样例图来下判断。但样例图不能当作证据：同一个模型，展示"三张里最好的一张"和"三张里最差的一张"，得到的分布完全不同。只凭挑出来的图，说明不了模型的全貌。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、参考资料</h2>
+        <ul>
+            <li>GANs Trained by a Two Time-Scale Update Rule Converge to a Local Nash Equilibrium（Heusel 等，2017）：提出 FID。</li>
+            <li>CLIPScore: A Reference-free Evaluation Metric for Image Captioning（Hessel 等，2021）。</li>
+            <li>Pick-a-Pic: An Open Dataset of User Preferences for Text-to-Image Generation（Kirstain 等，2023）：PickScore。</li>
+            <li>Image Quality Assessment: From Error Visibility to Structural Similarity（Wang 等，2004）：SSIM。</li>
+            <li>The Unreasonable Effectiveness of Deep Features as a Perceptual Metric（Zhang 等，2018）：LPIPS。</li>
+            <li>Flamingo: a Visual Language Model for Few-Shot Learning（Alayrac 等，2022）。</li>
+            <li>Visual Instruction Tuning（Liu 等，2023）：LLaVA。</li>
+            <li>Qwen3-VL Technical Report（Bai 等，2025）；GLM-4.5V and GLM-4.1V-Thinking（GLM-V 团队，2025）。</li>
+            <li>TIFA: Accurate and Interpretable Text-to-Image Faithfulness Evaluation with Question Answering（Hu 等，2023）。</li>
+            <li>Evaluating Text-to-Visual Generation with Image-to-Text Generation（Lin 等，2024）：VQAScore。</li>
+            <li>VIEScore: Towards Explainable Metrics for Conditional Image Synthesis Evaluation（Ku 等，2023）。</li>
+            <li>MLLM-as-a-Judge: Assessing Multimodal LLM-as-a-Judge with Vision-Language Benchmark（Chen 等，2024）：逐点、成对、批量排序三种用法的比较。</li>
+            <li>GenEval: An Object-Focused Framework for Evaluating Text-to-Image Alignment（Ghosh 等，2023）。</li>
+            <li>ELLA: Equip Diffusion Models with LLM for Enhanced Semantic Alignment（Hu 等，2024）：DPG-Bench。</li>
+            <li>X-Omni: Reinforcement Learning Makes Discrete Autoregressive Image Generative Models Great Again（Geng 等，2025）：LongText-Bench。</li>
+            <li>Step1X-Edit: A Practical Framework for General Image Editing（Liu 等，2025）：GEdit-Bench。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>九、小结</h2>
+        <p>
+            评估主要看美观和遵循提示两方面。人工评分里，两两比较最可靠，Elo 用对手强弱修正胜率，是公开排行榜的做法，但人工又贵又慢又主观。无参考指标中，FID 在 Inception 特征空间比较生成图与真实图两个分布的位置和形状，CLIPScore 衡量图文匹配，PickScore 预测人的偏好。有参考指标用于重建、编辑和蒸馏：MSE 和 PSNR 逐像素，SSIM 比较小块的亮度、对比度和结构，LPIPS 比较深度特征。固定指标难以解读，于是引入多模态大模型：TIFA 把提示拆成问题，VQAScore 取 "yes" 的概率，VIEScore 让 MLLM 按细则先给证据再打分，评委需要先用人工评分校准。GenEval、DPG-Bench、LongText-Bench、GEdit-Bench 分别考察物体属性、长提示、文字渲染和编辑。样例图只能参考，不能当证据。
+        </p>
+        <p>
+            最后一讲回顾全课，介绍当前最先进的模型，从图像扩展到视频，以及生成之外的其他方法。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CME296: Diffusion &amp; Large Vision Models · Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="06_模型训练与蒸馏.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="08_前沿趋势与视频生成.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

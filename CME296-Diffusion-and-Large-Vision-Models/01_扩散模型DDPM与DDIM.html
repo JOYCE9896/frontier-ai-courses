@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第一讲：扩散模型，从 DDPM 到 DDIM | 斯坦福 CME296 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="08_前沿趋势与视频生成.html">&larr; 上一讲</a>
+    <span>Stanford CME296: Lecture 01</span>
+    <a href="02_分数匹配与随机微分方程.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第一讲：扩散模型，从 DDPM 到 DDIM</h1>
+        <p class="subtitle">为什么从噪声出发，前向加噪与反向去噪，ELBO 怎样化简成一个噪声回归损失，训练与采样流程，以及 DDIM 怎样把采样加速 10 到 100 倍</p>
+        <div class="author-meta">
+            主讲：Afshine Amidi（前半部分 DDPM）、Shervine Amidi（后半部分 DDIM）· 2026 年 4 月 3 日<br>
+            资料来源：<a href="https://cme296.stanford.edu/slides/spring26-cme296-lecture1.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=tr-CUpw--ck" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述和板书推导） · 必读论文：DDPM（Ho 等，2020）、DDIM（Song 等，2020）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、课程开场：这门课要回答什么问题</h2>
+        <p>
+            两位主讲人 Afshine 和 Shervine 是双胞胎兄弟，都毕业于法国中央理工（Centrale Paris），之后 Afshine 去了 MIT，Shervine 读了斯坦福的计算与数学工程研究所（ICME）。工作经历也几乎一样：先后在 Uber、Google，现在都在 Netflix。他们在斯坦福还开了一门姊妹课 CME 295（Transformers 与大语言模型）。Afshine 说，十年前两人入行时做的第一个项目就是计算机视觉，所以这十年图像生成的进步让他们格外有感触。
+        </p>
+        <p>
+            开场的两张图对比很直观。第一张来自 2014 年 Goodfellow 等人的 GAN 论文，生成的是低分辨率的黑白手写数字和人脸。第二张是 2026 年 3 月用 ChatGPT 生成的高分辨率彩色图片。这门课想讲清楚中间发生了什么：图像生成模型背后的生成范式是什么，模型怎样训练、怎样使用、怎样评估。
+        </p>
+        <p>
+            先修要求列得很直白，主讲人说"我不打算隐瞒"：线性代数（向量、矩阵、梯度、向量场的散度）、概率论（贝叶斯公式、条件概率与边缘概率、期望、协方差、高斯分布）、微分方程（常微分方程 ODE、随机微分方程 SDE、数值求解器），以及机器学习基础（损失函数、训练、推理、神经网络）。课上会用直观的方式复习这些概念，但不会从零讲起。课程没有作业，只有两次笔试：期中（5 月 1 日）和期末（6 月 8 日），各占 50%。考试考的是公式背后的直觉和主要公式，不考每一步推导。课上没有推导、只在幻灯片底部写了"推导思路"的内容，不会考。
+        </p>
+        <p>
+            还有一条提醒贯穿全课：这个领域的记号非常混乱。时间 $t$ 有时取 0 到 1，有时取 0 到 $T$，有时方向是反的；噪声有时记作 $\epsilon$，有时记作 $z$、$x_0$ 或 $x_1$。课程会尽量采用最常见的记号，尽量前后一致，记号改变时会明确指出。读论文时如果发现公式对不上，先检查记号。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、整门课的地图</h2>
+        <p>
+            一个典型的使用场景是：输入一句提示词，比如"一只正在读书的泰迪熊"，模型输出一张图。这个过程拆开有五个部分，对应八讲的安排：
+        </p>
+        <ul>
+            <li>生成范式（第 1 到 3 讲）：假设已经有一个模型，用什么流程把图"生成"出来。文本领域最常见的做法是一次生成一个 token，这和人说话写字的方式一致，很直观。图像没有这样天然的顺序，所以需要别的范式。前三讲分别讲扩散（diffusion）、分数匹配（score matching）和流匹配（flow matching）。</li>
+            <li>条件（第 4 讲）：怎样让模型按提示词生成，以及怎样表示图像和文本。</li>
+            <li>模型架构（第 5 讲）：早年常用 U-Net，现在逐渐收敛到基于 Transformer 的扩散 Transformer（DiT）及其多模态变体 MMDiT。</li>
+            <li>模型训练（第 6 讲）：预训练、后训练，以及在工业界很重要的蒸馏，也就是把模型变快。</li>
+            <li>评估（第 7 讲）：一张图"好不好"很难定义，所以有一大堆缩写指标，每个都有存在的理由；另外还有用多模态大模型当评委的新方法。</li>
+        </ul>
+        <p>
+            前三讲有一个简化：不给模型任何输入条件。手上有一批训练图像，它们来自某个未知的数据分布 $p_{\text{data}}$，目标是从这个分布里采样出一张新图。比如训练集是一堆泰迪熊照片，我们希望生成一张训练集里没有、但看起来同样像泰迪熊照片的新图。这叫无条件生成（unconditional generation）。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、为什么从噪声出发</h2>
+        <p>
+            几乎所有主流图像生成方法都有一个共同点：生成从一张纯噪声图开始，然后一步步把它修成一张干净的图。这里的"噪声"有确切定义，就是从高斯分布里随机抽出的数，画出来像一片灰色的雪花点。课上给了三个理由：
+        </p>
+        <p>
+            第一，噪声很容易采样，计算机生成一组标准正态随机数几乎不花成本。第二，噪声带来了随机性。起点不同，终点就不同，同一个提示词每次能生成不一样的图。第三，高斯分布的数学性质特别好，很多推导因此能写出闭式解，后面会反复看到这一点。
+        </p>
+        <p>
+            有学生问：为什么不从一张固定的白画布开始？回答是，有些生成流程中间每一步都不加随机性（本讲后半部分的 DDIM 就是这样）。如果起点也固定，那每次生成的结果完全一样，失去了多样性。随机性总得在某处引入，放在起点是最自然的选择。Afshine 还引用了米开朗基罗的一句话：雕像在大理石里本来就存在，雕刻家只是把多余的部分凿掉。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、准备工作：把图像看成向量，把噪声看成高斯分布</h2>
+        <h3>1. 图像是一个很长的向量</h3>
+        <p>
+            一张图由高乘宽个像素组成，每个像素有红、绿、蓝三个通道，每个通道是 0 到 255 之间的整数。把所有像素的所有通道按顺序排成一列，图像就变成了一个 $n$ 维向量，$n$ = 像素数 × 3。一张 256×256 的彩色图就是一个 196,608 维的向量。实际训练时这些整数会被缩放到 $[-1, 1]$ 这样的浮点区间，所以可以当作连续值处理。
+        </p>
+        <p>
+            课上特别说明，这不是最聪明的表示方式，第 4 讲会讲怎样把图像压缩到更小的"潜空间"里再生成。但在前三讲里，记号 $x_0$、$x_t$ 指的都是这种向量。
+        </p>
+
+        <h3>2. 高维高斯分布与各向同性</h3>
+        <p>
+            一维高斯分布 $\mathcal{N}(\mu, \sigma^2)$ 由均值 $\mu$（一个数）和方差 $\sigma^2$（一个数）决定。推广到 $n$ 维，均值变成一个 $n$ 维向量，方差变成一个 $n \times n$ 的协方差矩阵 $\Sigma$。协方差描述的是两个随机变量一起线性变化的程度：一个变大时另一个是否也倾向于变大。
+        </p>
+        <p>
+            好消息是，这门课几乎只用一种最简单的情况：协方差矩阵等于一个数乘单位矩阵，$\Sigma = \sigma^2 I$。这时每个维度的方差都相同，不同维度之间互不相关。这叫各向同性高斯（isotropic Gaussian），在二维平面上画出来，等密度线是一圈圈同心圆。它的概率密度有简单的解析式：
+        </p>
+        $$\mathcal{N}(x;\, \mu, \sigma^2 I) = \frac{1}{(2\pi\sigma^2)^{n/2}} \exp\!\left(-\frac{\|x - \mu\|^2}{2\sigma^2}\right)$$
+        <p>
+            所谓"采样噪声"，就是采样 $\epsilon \sim \mathcal{N}(0, I)$：均值是零向量，协方差是单位矩阵。换个说法，$\epsilon$ 的每个分量独立地服从标准正态分布（独立同分布，i.i.d.）。有学生指出，真实图像的相邻像素显然是相关的。没错，各向同性只是噪声的性质，真实图像的分布复杂得多，正因为复杂才需要学。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、扩散的两个过程</h2>
+        <p>
+            扩散的核心想法分两步：
+        </p>
+        <ul>
+            <li>前向过程（forward process）：拿一张训练集里的干净图 $x_0$，一点一点往上加噪声，得到 $x_1, x_2, \dots, x_T$，最后 $x_T$ 基本是纯噪声。这个过程记作 $q$，完全由我们自己设计，所以每一步的分布都是已知的。</li>
+            <li>反向过程（reverse process）：学一个带参数 $\theta$ 的模型 $p_\theta(x_{t-1} \mid x_t)$，学会把 $x_t$ 去掉一点噪声变回 $x_{t-1}$。生成时从纯噪声 $x_T$ 出发，反复用这个模型去噪，最后得到 $x_0$。</li>
+        </ul>
+        <p>
+            要学的只有反向过程。前向过程的作用是制造训练数据：它告诉模型"一张图被加噪之后长什么样"，模型从中学会怎样往回走。
+        </p>
+
+        <h3>1. 前向过程的具体形式</h3>
+        <p>
+            DDPM 定义的每一步加噪是：
+        </p>
+        $$q(x_t \mid x_{t-1}) = \mathcal{N}\!\left(x_t;\ \sqrt{1-\beta_t}\, x_{t-1},\ \beta_t I\right)$$
+        <p>
+            写成采样的形式就很直白了：
+        </p>
+        $$x_t = \sqrt{1-\beta_t}\, x_{t-1} + \sqrt{\beta_t}\, \epsilon, \qquad \epsilon \sim \mathcal{N}(0, I)$$
+        <p>
+            也就是把上一步的图乘一个略小于 1 的系数，再加上一点按 $\sqrt{\beta_t}$ 缩放的噪声。$\beta_t$ 在 0 和 1 之间。为什么系数是这两个平方根？算一下方差就明白：如果 $x_{t-1}$ 每个分量的方差是 1，那么 $x_t$ 的方差是 $(1-\beta_t) \cdot 1 + \beta_t \cdot 1 = 1$。每一步方差保持不变，所以这种加噪方式叫方差保持（variance preserving，VP）。如果不这样设计，数值会随着步数越变越大或越变越小。
+        </p>
+        <p>
+            所有 $\beta_t$ 合起来叫噪声调度（noise schedule），论文里这个词出现频率极高。DDPM 里的 $\beta_t$ 不是常数，而是从很小逐渐增大（原论文取 $T = 1000$，$\beta_t$ 从 $10^{-4}$ 线性增加到 $0.02$）。课上解释了原因：靠近干净图的那些步，模型要学的是细节，所以每步只加一点点噪声；靠近纯噪声的那些步，模型要学的是图的大致形状，可以加得多一些。噪声调度设计得好不好，直接影响模型能不能学好。
+        </p>
+
+        <h3>2. 一步跳到任意时刻</h3>
+        <p>
+            训练时如果每次都要从 $x_0$ 逐步加噪 $t$ 次才能拿到 $x_t$，太慢了。好在高斯分布有一个性质：两个独立高斯变量的和还是高斯变量，方差等于两者方差之和。Afshine 在黑板上推了一遍。先记 $\alpha_t = 1 - \beta_t$，于是
+        </p>
+        $$x_t = \sqrt{\alpha_t}\, x_{t-1} + \sqrt{1-\alpha_t}\, \epsilon_{t}, \qquad x_{t-1} = \sqrt{\alpha_{t-1}}\, x_{t-2} + \sqrt{1-\alpha_{t-1}}\, \epsilon_{t-1}$$
+        <p>
+            把第二式代入第一式：
+        </p>
+        $$x_t = \sqrt{\alpha_t \alpha_{t-1}}\, x_{t-2} + \underbrace{\sqrt{\alpha_t(1-\alpha_{t-1})}\, \epsilon_{t-1} + \sqrt{1-\alpha_t}\, \epsilon_t}_{\text{两个独立高斯之和}}$$
+        <p>
+            后两项的方差相加是 $\alpha_t(1-\alpha_{t-1}) + (1-\alpha_t) = 1 - \alpha_t\alpha_{t-1}$，所以它们可以合并成一个 $\sqrt{1-\alpha_t\alpha_{t-1}}\,\epsilon$。一直这样展开到 $x_0$，定义累积乘积 $\bar\alpha_t = \prod_{s=1}^{t} \alpha_s$，就得到：
+        </p>
+        $$q(x_t \mid x_0) = \mathcal{N}\!\left(x_t;\ \sqrt{\bar\alpha_t}\, x_0,\ (1-\bar\alpha_t) I\right), \qquad \text{即} \quad x_t = \sqrt{\bar\alpha_t}\, x_0 + \sqrt{1-\bar\alpha_t}\, \epsilon$$
+        <p>
+            这个公式在整门课里会反复用到。它说的是：任意时刻的加噪图，等于干净图乘一个系数，加上噪声乘另一个系数，两个系数的平方和为 1。$t$ 越大，$\bar\alpha_t$ 越接近 0，图里剩下的原图成分越少。这个公式也叫边缘分布（marginal），后面讲 DDIM 时它是关键。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、训练目标：从最大似然到一个能算的下界</h2>
+        <h3>1. 目标是什么</h3>
+        <p>
+            机器学习里最常见的做法是最大似然估计：找参数 $\theta$，让模型给训练数据分配的概率尽可能大。这里的训练数据是干净图 $x_0$，所以目标是最大化 $\log p_\theta(x_0)$。取对数有两个原因：对数把乘积变成求和，推导方便；概率都在 0 和 1 之间，很多个小概率连乘会下溢，取对数后数值更稳定。
+        </p>
+
+        <h3>2. 概率论复习：联合分布与边缘化</h3>
+        <p>
+            两个随机变量 $x_1, x_2$ 的联合分布可以写成 $p(x_1, x_2) = p(x_1)\, p(x_2 \mid x_1)$，这是概率的链式法则。把联合分布画成一张二维热力图，每个格子的颜色是密度。条件概率 $p(x_2 \mid x_1)$ 就是固定 $x_1$ 那一列，看各格子在这一列中占的比例。边缘化（marginalization）是把不关心的变量加总掉：$p(x_1) = \int p(x_1, x_2)\, dx_2$，相当于把一列格子全部加起来。
+        </p>
+        <p>
+            推广到 $T+1$ 个变量，论文里通常把 $x_0, x_1, \dots, x_T$ 简写为 $x_{0:T}$。在扩散模型里，生成一张 $x_0$ 要经过整条轨迹 $x_T \to x_{T-1} \to \dots \to x_0$，所以：
+        </p>
+        $$\log p_\theta(x_0) = \log \int p_\theta(x_{0:T})\, dx_{1:T}$$
+
+        <h3>3. 问题：这个积分算不了</h3>
+        <p>
+            这个积分要对所有可能的去噪轨迹求和，每个 $x_t$ 都是几十万维的向量，有 $T = 1000$ 步。轨迹的数量多到无法计算。这在数学上叫"不可解"（intractable）。
+        </p>
+        <p>
+            常用的办法是：既然目标本身算不了，那就找一个能算的、并且一定小于它的量，叫下界。只要把下界往上推，目标也会被往上推。这个下界叫 ELBO（Evidence Lower BOund，证据下界）。这里的"证据"指的就是 $p_\theta(x_0)$，数据本身的概率。
+        </p>
+
+        <h3>4. 第一步：用 Jensen 不等式得到 ELBO</h3>
+        <p>
+            技巧是让我们已知的前向过程 $q$ 出现在式子里。分子分母同时乘以 $q(x_{1:T} \mid x_0)$，也就是"给定干净图，前向加噪产生的那条轨迹的概率"：
+        </p>
+        $$\log p_\theta(x_0) = \log \int q(x_{1:T}\mid x_0)\, \frac{p_\theta(x_{0:T})}{q(x_{1:T}\mid x_0)}\, dx_{1:T} = \log \mathbb{E}_{q(x_{1:T}\mid x_0)}\!\left[\frac{p_\theta(x_{0:T})}{q(x_{1:T}\mid x_0)}\right]$$
+        <p>
+            第二个等号的意思是：对 $q$ 加权积分，就是在 $q$ 下求期望。然后用 Jensen 不等式：对数是凹函数，所以"期望的对数"大于等于"对数的期望"：
+        </p>
+        $$\log p_\theta(x_0) \ \ge\ \mathbb{E}_{q}\!\left[\log \frac{p_\theta(x_{0:T})}{q(x_{1:T}\mid x_0)}\right] = \text{ELBO}$$
+        <p>
+            这一步换来了什么？原来要对所有可能的轨迹求和，现在只需要对前向过程采样出来的轨迹求期望。前向过程是我们自己定义的，从它采样很容易。
+        </p>
+
+        <h3>5. 第二步：展开 ELBO，冒出 KL 散度</h3>
+        <p>
+            先复习 KL 散度。它衡量两个分布 $P$ 和 $Q$ 相差多远：
+        </p>
+        $$D_{KL}(P \,\|\, Q) = \int p(x) \log \frac{p(x)}{q(x)}\, dx = \mathbb{E}_{x\sim P}\!\left[\log \frac{p(x)}{q(x)}\right]$$
+        <p>
+            两个分布完全相同时 KL 散度为 0，越不同越大。利用对数的性质把 ELBO 里的比值拆开、重新组合（课上没有推，结果来自 DDPM 论文），最大化 ELBO 等价于最小化：
+        </p>
+        $$\underbrace{D_{KL}\big(q(x_T\mid x_0)\,\|\,p(x_T)\big)}_{\text{与 }\theta\text{ 无关}} + \sum_{t>1} \underbrace{D_{KL}\big(q(x_{t-1}\mid x_t, x_0)\ \|\ p_\theta(x_{t-1}\mid x_t)\big)}_{\text{核心项}} \ -\ \log p_\theta(x_0 \mid x_1)$$
+        <p>
+            课上把其他项统称为"一些我们不太关心的项"，重点是中间那一串 KL 散度。它比较的是两个分布：右边 $p_\theta(x_{t-1}\mid x_t)$ 正是我们想学的去噪模型；左边 $q(x_{t-1}\mid x_t, x_0)$ 的意思是"如果同时告诉你加噪图 $x_t$ 和原来的干净图 $x_0$，那稍微干净一点的 $x_{t-1}$ 应该是什么分布"。
+        </p>
+
+        <h3>6. 第三步：证明两边都能算</h3>
+        <p>
+            先看左边 $q(x_{t-1}\mid x_t, x_0)$。它多知道了 $x_0$，信息量很大，这有点"作弊"，但训练时 $x_0$ 本来就在手上，所以可以用。用贝叶斯公式（后验 = 似然 × 先验 / 证据）：
+        </p>
+        $$q(x_{t-1}\mid x_t, x_0) = \frac{q(x_t \mid x_{t-1}, x_0)\ q(x_{t-1}\mid x_0)}{q(x_t \mid x_0)}$$
+        <p>
+            前向过程有马尔可夫性：$x_t$ 只依赖于前一步 $x_{t-1}$，和更早的步无关。所以 $q(x_t \mid x_{t-1}, x_0) = q(x_t \mid x_{t-1})$，是已知的高斯。$q(x_{t-1}\mid x_0)$ 和 $q(x_t\mid x_0)$ 就是上一节一步跳到任意时刻的公式，也是已知的高斯。分母里没有 $x_{t-1}$，只是一个归一化常数。高斯相乘还是高斯，所以这个后验是一个精确已知的高斯分布：
+        </p>
+        $$q(x_{t-1}\mid x_t, x_0) = \mathcal{N}\!\left(x_{t-1};\ \tilde\mu_t,\ \tilde\beta_t I\right), \quad \tilde\mu_t = \frac{1}{\sqrt{\alpha_t}}\left(x_t - \frac{\beta_t}{\sqrt{1-\bar\alpha_t}}\,\epsilon\right), \quad \tilde\beta_t = \frac{1-\bar\alpha_{t-1}}{1-\bar\alpha_t}\,\beta_t$$
+        <p>
+            这里的 $\epsilon$ 是从 $x_0$ 加噪到 $x_t$ 时实际用的那个噪声。均值的含义很直接：从 $x_t$ 里减掉一部分已知的噪声，再整体放大一点。注意这一步没有任何近似。
+        </p>
+        <p>
+            再看右边 $p_\theta(x_{t-1}\mid x_t)$。它的形式由我们决定，所以可以直接假设它也是高斯。理由是：当每一步加的噪声 $\beta_t$ 很小时，前向一步的逆过程近似是高斯。既然真实后验的均值长成"$x_t$ 减去一部分噪声"的样子，那就让模型的均值长成同样的形式，只是把真实噪声 $\epsilon$ 换成模型预测的噪声 $\epsilon_\theta(x_t, t)$：
+        </p>
+        $$\mu_\theta(x_t, t) = \frac{1}{\sqrt{\alpha_t}}\left(x_t - \frac{\beta_t}{\sqrt{1-\bar\alpha_t}}\,\epsilon_\theta(x_t, t)\right)$$
+
+        <h3>7. 第四步：得到最终损失</h3>
+        <p>
+            两个高斯之间的 KL 散度有闭式解，代入后大量项相消，剩下的只与两个均值之差有关，而两个均值只差在 $\epsilon$ 和 $\epsilon_\theta$。最后得到的是：
+        </p>
+        $$\mathcal{L}_{\text{DDPM}} = \mathbb{E}_{t,\, x_0,\, \epsilon}\left[\big\|\, \epsilon - \epsilon_\theta\big(\sqrt{\bar\alpha_t}\, x_0 + \sqrt{1-\bar\alpha_t}\,\epsilon,\ t\big)\big\|^2\right]$$
+        <p>
+            逐项解释一下。期望是对三样东西取的：$t$ 是随机抽的时间步，代表加噪程度；$x_0$ 是训练集里的干净图；$\epsilon$ 是从标准正态分布抽的噪声。括号里第一个参数 $\sqrt{\bar\alpha_t}\, x_0 + \sqrt{1-\bar\alpha_t}\,\epsilon$ 正是加噪图 $x_t$。所以整个损失的意思是：给模型一张加了噪的图，让它猜加进去的噪声是什么，再和真实的噪声比，算平方误差。
+        </p>
+        <p>
+            模型的第二个输入 $t$ 很重要。它告诉模型这张图有多吵：$t$ 接近 0 说明只加了一点噪声，接近 $T$ 说明几乎全是噪声。模型据此判断该去掉多少噪声。
+        </p>
+        <p>
+            严格推导出来的损失，每个时间步前面还有一个权重系数。DDPM 的作者试了按理论系数加权，也试了直接把系数全设成 1，发现设成 1 效果不差，甚至更好。上面这个不带权重的版本通常叫 $L_{\text{simple}}$。课上提醒，这个权重是训练者可以选的超参数。
+        </p>
+        <p>
+            回头看四步的思路：最大似然算不了，于是用 Jensen 不等式得到 ELBO；展开 ELBO，冒出了 KL 散度；用贝叶斯公式和高斯性质证明 KL 两边都是已知形式的高斯；两个高斯的 KL 化简后，只剩一个预测噪声的回归问题。Afshine 的评价是，绕了这么一大圈，最后得到的损失简单得不可思议。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、训练和采样的具体流程</h2>
+        <h3>1. 训练</h3>
+        <ol>
+            <li>从训练集取一张干净图 $x_0$，抽一个噪声 $\epsilon \sim \mathcal{N}(0, I)$，抽一个时间步 $t$（在 1 到 $T$ 之间均匀抽）。</li>
+            <li>用公式 $x_t = \sqrt{\bar\alpha_t}\, x_0 + \sqrt{1-\bar\alpha_t}\,\epsilon$ 一步得到加噪图。</li>
+            <li>把 $x_t$ 和 $t$ 输入模型，得到预测噪声 $\epsilon_\theta(x_t, t)$，算 $\|\epsilon - \epsilon_\theta\|^2$，反向传播更新参数。</li>
+        </ol>
+        <p>
+            模型的具体结构在本讲被当作黑箱，第 5 讲再讲。训练时每次只随机抽一个时间步，完全不需要跑完整个 1000 步的链条，这是前面"一步跳到任意时刻"公式的直接用处。
+        </p>
+
+        <h3>2. 采样</h3>
+        <ol>
+            <li>抽一个纯噪声 $x_T \sim \mathcal{N}(0, I)$。</li>
+            <li>从 $t = T$ 到 $t = 1$ 反复执行：
+                $$x_{t-1} = \frac{1}{\sqrt{\alpha_t}}\left(x_t - \frac{1-\alpha_t}{\sqrt{1-\bar\alpha_t}}\,\epsilon_\theta(x_t, t)\right) + \sigma_t z, \qquad z \sim \mathcal{N}(0, I)$$
+            </li>
+            <li>最后得到的 $x_0$ 就是生成的图。</li>
+        </ol>
+        <p>
+            第一项是模型给出的均值：从当前图里减去预测出的噪声。第二项 $\sigma_t z$ 又加了一点新的随机噪声，因为 $p_\theta(x_{t-1}\mid x_t)$ 是一个高斯分布，采样时要按它的标准差 $\sigma_t$ 抽一个样本，而不是只取均值。这一点在后面讲 DDIM 时会变得重要。
+        </p>
+        <p>
+            这套方法来自 Ho、Jain 和 Abbeel 2020 年的论文《Denoising Diffusion Probabilistic Models》，简称 DDPM，是第一个把扩散范式成功用在图像生成上的工作。课程把它列为必读。Afshine 说，这一讲大概是前八讲里数学最难的一讲，觉得消化不了是正常的。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、DDPM 的问题：采样太慢</h2>
+        <p>
+            后半部分由 Shervine 讲。DDPM 生成一张图要把模型调用 $T$ 次，原论文里 $T = 1000$。作为对比，VAE 或 GAN 生成一张图只需要一次前向计算。如果一次前向要 100 毫秒，DDPM 生成一张图就要几分钟，比 VAE/GAN 慢好几个数量级。这在实际中用不了，所以目标是降低推理时的计算量。
+        </p>
+
+        <h3>1. 尝试一：用递推把多步合成一步</h3>
+        <p>
+            既然有 $x_t \to x_{t-1}$ 的公式，那就把 $t-1 \to t-2$ 等等也写出来，代入合并，看能不能直接从 $x_t$ 得到 $x_{t-k}$。可以合并，但合并出来的式子里仍然要对中间每一步算一次 $\epsilon_\theta$。模型调用次数一次也没少，这条路走不通。
+        </p>
+
+        <h3>2. 尝试二：直接跳步</h3>
+        <p>
+            取一个更稀疏的时间步序列 $\tau_1 < \tau_2 < \dots < \tau_S$，相邻两个之间可以隔很多步，然后猜一个从 $\tau_i$ 直接跳到 $\tau_{i-1}$ 的公式。可以验证，当 $\tau_i = t$、$\tau_{i-1} = t-1$ 时，这个公式退化成 DDPM 原来的一步公式，所以至少是自洽的。但实际跑下来，步子越大，每一步注入的随机噪声越多，生成质量明显变差。大步跳跃加上步间随机性，效果很糟。
+        </p>
+
+        <h3>3. 关键观察：损失只依赖边缘分布</h3>
+        <p>
+            回头看 DDPM 损失的推导，真正用到的是边缘分布 $q(x_t \mid x_0)$：训练时直接用它从 $x_0$ 一步得到 $x_t$，损失也只和它有关。前向过程一步一步怎么走，损失并不关心。
+        </p>
+        <p>
+            这意味着：只要换一个前向过程，让它的边缘分布 $q(x_t\mid x_0)$ 和 DDPM 一样，那么训练损失完全相同，已经训练好的 DDPM 模型可以直接拿来用，不需要重新训练。于是问题变成了：找一族前向过程 $q_\sigma$，满足两个条件：
+        </p>
+        <ul>
+            <li>边缘分布 $q_\sigma(x_t \mid x_0)$ 与 DDPM 相同；</li>
+            <li>对应的生成过程可以做成确定性的，也就是给定 $x_t$，$x_{t-1}$ 唯一确定，中间不再加随机噪声。</li>
+        </ul>
+
+        <h3>4. DDIM 的解</h3>
+        <p>
+            Song、Meng 和 Ermon 在 2020 年的论文《Denoising Diffusion Implicit Models》（DDIM）里给出了这样一族过程，用一个超参数 $\sigma_t$ 控制随机性。用归纳法可以验证它的边缘分布和 DDPM 一致。取 $\sigma_t = 0$ 时，$x_{t-1}$ 的分布方差为零，变成 $x_t$ 的确定性函数。
+        </p>
+        <p>
+            生成公式可以分两步理解。第一步，用当前的 $x_t$ 估计干净图。把 $x_t = \sqrt{\bar\alpha_t}\, x_0 + \sqrt{1-\bar\alpha_t}\,\epsilon$ 反解出 $x_0$，用预测的噪声代替真实噪声：
+        </p>
+        $$\hat x_0 = \frac{x_t - \sqrt{1-\bar\alpha_t}\ \epsilon_\theta(x_t, t)}{\sqrt{\bar\alpha_t}}$$
+        <p>
+            第二步，把这个估计的干净图按 $t-1$ 时刻的比例重新加噪：
+        </p>
+        $$x_{t-1} = \sqrt{\bar\alpha_{t-1}}\ \hat x_0 + \sqrt{1-\bar\alpha_{t-1}-\sigma_t^2}\ \epsilon_\theta(x_t, t) + \sigma_t z$$
+        <p>
+            当 $\sigma_t = 0$ 时最后一项消失。Shervine 把这个公式念成一句话：我们从 $t$ 时刻对干净图的预测，按 $t-1$ 时刻的程度重新加噪，而且没有随机性。注意这里"加噪"用的是模型预测出的噪声方向，不是新抽的随机数。
+        </p>
+        <p>
+            名字里的变化也说明了这一点。DDPM 的 P 是 Probabilistic（概率的），因为每一步之间都有随机性。DDIM 的 I 是 Implicit（隐式的），随机性只在开头抽 $x_T$ 时出现一次，之后整条路径都由起点决定。这也回应了开场那个问题：如果 DDIM 每次都从同一个噪声出发，就会生成完全相同的图。
+        </p>
+
+        <h3>5. 跳步加速</h3>
+        <p>
+            有了确定性的公式，就可以把上面公式里的 $t$ 和 $t-1$ 换成稀疏序列里的 $\tau_i$ 和 $\tau_{i-1}$：在 $\tau_i$ 处估计 $\hat x_0$，再按 $\tau_{i-1}$ 的比例重新加噪。序列长度为 $S$，加速比就是 $T/S$。论文常用 10 到 100 倍，实际中更多取 10 到 50 倍。
+        </p>
+        <p>
+            加速不是免费的。DDIM 论文在 CIFAR-10 上的实验（FID 是衡量生成图像质量的指标，越低越好，第 7 讲详细讲）：
+        </p>
+        <table>
+            <tr><th>加速倍数</th><th>1x</th><th>10x</th><th>20x</th><th>50x</th><th>100x</th></tr>
+            <tr><td>FID 相对基线的变化</td><td>基线</td><td>+3%</td><td>+16%</td><td>+70%</td><td>+330%</td></tr>
+        </table>
+        <p>
+            FID 的绝对值意义不大，相对变化才有参考价值。20 倍加速时质量损失还不算大，100 倍就差很多了。论文也比较了保留步间随机性的跳步方法，结果明显更差，所以跳步时最好去掉步间随机性。另外，跳哪些步（$\tau$ 序列怎么选）也是可以调的超参数。
+        </p>
+        <p>
+            Shervine 把 DDIM 的思路总结为三步：先选一个和 DDPM 优化目标兼容的建模假设（边缘分布相同）；再去掉步间随机性；最后跳步。最终把生成从 $T$ 步降到 $S$ 步，而且不用重新训练模型。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、参考资料</h2>
+        <ul>
+            <li>Denoising Diffusion Probabilistic Models（Ho、Jain、Abbeel，2020）：本讲前半部分的全部内容。论文完整推导了 ELBO 的展开、后验 $q(x_{t-1}\mid x_t, x_0)$ 的均值与方差，并发现用不加权的简化损失 $L_{\text{simple}}$ 训练效果更好。在 CIFAR-10 上取得了当时最好的 FID 3.17。官方代码在 GitHub 的 hojonathanho/diffusion。</li>
+            <li>Denoising Diffusion Implicit Models（Song、Meng、Ermon，2020）：本讲后半部分。提出一族非马尔可夫的前向过程，它们和 DDPM 有相同的训练目标，因此能直接复用 DDPM 训好的模型；取确定性采样时可以大步跳步，用 10 到 50 倍更少的步数生成质量相近的图。确定性还带来一个副产品：同一个起点噪声总是对应同一张图，因此可以在噪声空间里做插值。官方代码在 GitHub 的 ermongroup/ddim。</li>
+            <li>Generative Adversarial Networks（Goodfellow 等，2014）：开场对比图的出处。</li>
+            <li>课程速查表（VIP Cheatsheet）：GitHub 上的 afshinea/stanford-cme-296-diffusion-large-vision-models，四页纸汇总了整门课的主要公式与概念。</li>
+            <li>Super Study Guide: Transformers &amp; Large Language Models（Amidi 兄弟，2024）：KL 散度复习那两页幻灯片的出处。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>十、小结</h2>
+        <p>
+            扩散模型的设计可以浓缩成几句话。前向过程由我们定义：按噪声调度一步步往图上加高斯噪声，并且可以用 $x_t = \sqrt{\bar\alpha_t}\, x_0 + \sqrt{1-\bar\alpha_t}\,\epsilon$ 一步到位。反向过程要学：最大似然算不了，就最大化 ELBO；ELBO 展开后变成一串 KL 散度，两边都是高斯；化简后只剩"预测加进去的噪声"这一个回归任务。
+        </p>
+        <p>
+            DDPM 采样要走满 $T$ 步，太慢。DDIM 发现训练只依赖边缘分布，于是构造了一个边缘分布相同、但采样过程确定的版本，从而可以跳步，在不重新训练的前提下把采样加速一到两个数量级。
+        </p>
+        <p>
+            下一讲换一个角度看同一件事：不从"加噪去噪"出发，而是从"数据分布的梯度"出发，也就是分数匹配。到时会发现它和本讲的噪声预测其实是一回事。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CME296: Diffusion &amp; Large Vision Models · Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="08_前沿趋势与视频生成.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="02_分数匹配与随机微分方程.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

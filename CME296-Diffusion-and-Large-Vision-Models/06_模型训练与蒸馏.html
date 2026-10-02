@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第六讲：模型训练的全流程与蒸馏 | 斯坦福 CME296 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="05_图像生成模型架构.html">&larr; 上一讲</a>
+    <span>Stanford CME296: Lecture 06</span>
+    <a href="07_图像生成的评估.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第六讲：模型训练的全流程与蒸馏</h1>
+        <p class="subtitle">时间步怎么采样、按分辨率平移，REPA 表示对齐，预训练与课程学习，继续训练、SFT 与偏好对齐（ReFL、Flow-GRPO、Diffusion-DPO），DreamBooth 与 LoRA，以及从渐进蒸馏到 LADD 的少步生成</p>
+        <div class="author-meta">
+            主讲：Afshine Amidi（训练流程）、Shervine Amidi（蒸馏）· 2026 年 5 月 15 日<br>
+            资料来源：<a href="https://cme296.stanford.edu/slides/spring26-cme296-lecture6.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=IvXTl3yj-4Y" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述和板书推导） · 主要论文：Esser 等 2024（SD3）、Yu 等 2024（REPA）、Ruiz 等 2022（DreamBooth）、Salimans &amp; Ho 2022（渐进蒸馏）、Song 等 2023（一致性模型）、Yin 等 2023（DMD）、Sauer 等 2023/2024（ADD/LADD）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、范围与整体流程</h2>
+        <p>
+            一个文生图系统由好几个模型组成：VAE 负责潜空间，嵌入模型负责表示条件，生成模型（比如一个 DiT）负责去噪。本讲只讲生成模型本身怎样训练；嵌入模型和多模态大模型放到下一讲。
+        </p>
+        <p>
+            从一个随机初始化的模型到能上线的模型，大致经过四个阶段：
+        </p>
+        <ol>
+            <li>预训练（pre-training）：学会生成图像，任何图像都行。计算量最大，数据工作也最多。</li>
+            <li>后训练（post-training）：学会生成好的图像。</li>
+            <li>微调（tuning，可选）：针对某个特定用途做个性化，比如总是生成某一只特定的泰迪熊。</li>
+            <li>蒸馏（distillation）：学会快速生成。生成是迭代的，要把模型调用很多次；蒸馏的目的是减少步数，降低成本和延迟。</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>二、训练损失在实践中的调整</h2>
+        <p>
+            前三讲推出了三种损失：DDPM 回归噪声，分数匹配回归分数，流匹配回归速度。现在大多数人用流匹配，所以本讲默认用流匹配的损失：
+        </p>
+        $$\mathcal{L} = \mathbb{E}_{t\sim\mathcal{U}[0,1],\ x_1\sim p_{\text{data}},\ x_0\sim\mathcal{N}(0,I)}\left[\|u_\theta(x_t, t) - (x_1 - x_0)\|^2\right]$$
+        <p>
+            这里 $t=0$ 是纯噪声，$t=1$ 是干净图。$t$ 从均匀分布里抽。这一节要讨论的就是：均匀抽样合理吗？
+        </p>
+
+        <h3>1. 不同时间步的任务难度不同</h3>
+        <p>
+            Afshine 问了三个问题。$t$ 接近 0，输入几乎是纯噪声，预测往哪走难不难？简单。输入里没有任何信息，模型不管花多少时间学，最后都只会学到"往所有数据的平均方向走"。$t$ 接近 1，输入几乎已经干净，难不难？也简单，只需要微调一些细节。$t$ 在中间呢？难。以泰迪熊为例，到中间时大致知道身体和头在哪，但纹理怎么画、眼睛放哪、手臂摆成什么样，很多决定都要在这个阶段做出。
+        </p>
+        <p>
+            均匀抽样意味着模型在简单任务和困难任务上花一样多的训练量。所以实践中改用一个更偏重中间时间步的分布，最常用的是 logit-normal 分布。定义 $\text{logit}(t) = \log\frac{t}{1-t}$，它把 $(0,1)$ 映射到整个实数轴。先从正态分布 $\mathcal{N}(m, s^2)$ 抽一个数 $u$，再取 $t = \text{sigmoid}(u)$，得到的 $t$ 就服从 logit-normal 分布：
+        </p>
+        $$\pi(t;\, m, s) = \frac{1}{s\sqrt{2\pi}}\ \frac{1}{t(1-t)}\ \exp\!\left(-\frac{(\text{logit}(t) - m)^2}{2s^2}\right)$$
+        <p>
+            为什么不直接从正态分布抽 $t$？因为正态分布可以取任意实数，而 $t$ 必须在 0 和 1 之间。经过 sigmoid 就保证了这一点。调 $m$ 可以把分布的峰往某一侧移，调 $s$ 控制集中程度，可以按需要偏重某些时间步。这个做法来自 Stable Diffusion 3 的论文。
+        </p>
+
+        <h3>2. 按分辨率平移时间步</h3>
+        <p>
+            同一张图，低分辨率和高分辨率版本加同样多的噪声，低分辨率那张看起来更吵。原因是图像有很强的空间相关性，相邻像素的值通常很接近。高分辨率时，一个区域由很多像素组成，噪声均值为零，有的往上推、有的往下推，平均起来仍能反映底下的真实值；低分辨率时，一个区域只有一两个像素，被噪声盖住就看不出来了。所以我们真正关心的是人感知到的噪声，而不是名义上的噪声水平。
+        </p>
+        <p>
+            Afshine 在黑板上推了 SD3 论文里的平移公式。注意这篇论文的时间约定和流匹配相反：$t=0$ 是干净图，$t=1$ 是噪声。考虑一个玩具例子：一张只有一个通道、所有像素都等于同一个常数 $c$ 的图，有 $n$ 个像素。加噪后每个像素是
+        </p>
+        $$z_i = (1-t)\,c + t\,\epsilon_i, \qquad \epsilon_i \sim \mathcal{N}(0, 1)$$
+        <p>
+            我们知道 $c$ 是常数，但不知道它的值，想估计它。对所有像素取平均：
+        </p>
+        $$\bar z = (1-t)\,c + \frac{t}{n}\sum_{i=1}^n \epsilon_i, \qquad \mathbb{E}[\bar z] = (1-t)\,c, \qquad \text{Var}[\bar z] = \frac{t^2}{n}$$
+        <p>
+            于是 $\hat c = \bar z / (1-t)$ 是 $c$ 的一个估计，它的标准差是
+        </p>
+        $$\sigma(\hat c) = \frac{t}{1-t}\cdot\frac{1}{\sqrt{n}}$$
+        <p>
+            估计 $c$ 的不确定性随分辨率增大按 $1/\sqrt{n}$ 下降。要让分辨率 $m$ 下的不确定性和分辨率 $n$ 下相同，令两个标准差相等，解出：
+        </p>
+        $$t_m = \frac{\sqrt{m/n}\ t_n}{1 + \left(\sqrt{m/n} - 1\right) t_n}$$
+        <p>
+            分辨率更高（$m > n$）时，$t_m > t_n$，也就是要加更多的名义噪声，才能达到同样的感知噪声。推导细节不重要，要点是：高分辨率时把时间步往噪声更多的方向平移，让感知到的噪声水平一致。有学生问 $m$、$n$ 是像素空间还是潜空间的尺寸，答案是潜空间，因为扩散在潜空间里进行。
+        </p>
+
+        <h3>3. 表示对齐（REPA）</h3>
+        <p>
+            第三个训练技巧是借用已经训练好的大模型学到的表示，让生成模型学得更快。课上的说法是：好比学一门新课时有人递给你一本好教材。方法叫 REPA（REPresentation Alignment），来自 Yu 等人 2024 年的论文《Training Diffusion Transformers Is Easier Than You Think》。
+        </p>
+        <p>
+            做法：取 DiT 中某一层对加噪输入的输出 $h_t$，经过一个可训练的投影头 $h_\phi$，和一个预训练编码器（比如 DINOv2）对同一个图像块的干净版本给出的表示 $y^*$ 比较相似度：
+        </p>
+        $$\mathcal{L}_{\text{REPA}} = -\,\mathbb{E}\left[\frac{1}{N}\sum_{n=1}^{N}\text{sim}\big(y^*_n,\ h_\phi(h_t^{\,n})\big)\right]$$
+        <p>
+            $n$ 是图像块的编号，sim 是相似度（比如余弦相似度）。这一项加到原来的流匹配损失上。意思是：DiT 看着加噪的图像块，内部表示要和"一个好的编码器看干净图像块时的表示"相似，否则就受罚。
+        </p>
+        <p>
+            结果：训练明显加速，论文里大约快 18 倍。作者做了大量消融，发现只在较早的层上做对齐效果最好。Afshine 给了一种解释：DiT 的后几层负责预测往哪走，更多涉及局部细节；而预训练编码器擅长的是语义表示，所以让负责语义的早期层和它对齐更合适。另外，模型越大，从 REPA 获益越多。REPA 是 2024 年的工作，但在很多新论文里都能看到。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、预训练</h2>
+        <p>
+            目标是教模型生成图像。大量工作花在数据上：用什么图像训练、怎样过滤、怎样清洗、保留哪些分辨率。课上只放了一张 Qwen-Image 技术报告里的数据流程图，说明这一步非常耗时。
+        </p>
+        <h3>课程学习</h3>
+        <p>
+            课程学习（curriculum learning）是按难度循序渐进地教：先教简单的，再教难的，这样模型学得更好。简单指低分辨率、固定的正方形比例、短而简单的提示词，比如"a teddy bear"。难指高分辨率、各种长宽比、复杂精致的提示词，比如一大段描述"一只穿着米色风衣、围着格子围巾的毛绒泰迪熊，黄昏时走在雨后巴黎的林荫大道上"之类。
+        </p>
+        <p>
+            不同分辨率怎么处理？DiT 把输入切成块，每块一个 token。低分辨率切出的块少，高分辨率切出的块多，序列长度是 $(I/P)^2$。所以高分辨率就相当于更长的上下文，架构本身不需要改。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、后训练</h2>
+        <h3>1. 继续训练与监督微调</h3>
+        <p>
+            "好"有多种含义。两类常见方法（Seedream 2.0 的论文里两者都有）：
+        </p>
+        <ul>
+            <li>继续训练（Continued Training，CT）：侧重知识。比如预训练数据主要是自然风景和汽车，但你想生成泰迪熊，就准备一个泰迪熊数据集，在上面继续训练。</li>
+            <li>监督微调（Supervised FineTuning，SFT）：侧重行为。让生成的图更美观、光线更好、更遵循提示词。</li>
+        </ul>
+
+        <h3>2. 偏好对齐</h3>
+        <p>
+            上面的方法只教模型该做什么，没教不该做什么。偏好对齐（preference tuning）用的是对比：同一个提示词下有两张图，一张是高清、光线好、好看的读书泰迪熊，另一张没那么好看。我们希望模型更倾向于生成前一种。好坏判断可以来自人工评分，也可以来自某个模型（下一讲讲），形式是两两比较或排序。
+        </p>
+        <p>
+            这个领域还在发展中。Afshine 提到一个观察：大语言模型领域的对齐技术，经常会被改造后用到文生图上。下面三种方法都是这样。
+        </p>
+        <h3>3. 奖励反馈学习（ReFL）</h3>
+        <p>
+            来自 Xu 等人 2023 年的 ImageReward 论文。先对每个提示词收集多张图的两两比较或排序，用 Bradley-Terry 形式的成对损失训练一个奖励模型：输入提示词和图，输出一个分数。它代表人的偏好。然后调整生成模型，让它生成奖励更高的图：从加噪的潜表示出发生成一张图，送进奖励模型打分。奖励模型是我们自己的神经网络，可微，所以可以把"最大化奖励"的梯度直接反向传播回生成模型。
+        </p>
+
+        <h3>4. Flow-GRPO</h3>
+        <p>
+            做过大语言模型的人过去一年应该经常听到 GRPO。Liu 等人 2025 年的 Flow-GRPO 把它用到流匹配模型上。对一个提示词，生成一组彼此不同的图。流匹配的采样本来是确定性的 ODE，为了得到多样的图，作者把它改写成一个 SDE。每张图送进奖励模型（这里可以是黑箱），然后算相对奖励：一张图的奖励减去组内的平均水平，这叫优势（advantage）。再根据优势更新策略，也就是生成模型。名字里的"组"就是这个意思。
+        </p>
+        <p>
+            所有基于奖励的方法都有一个共同风险：奖励不一定完全等于我们真正想要的东西。模型可能被更新得太狠，去钻奖励的空子，这叫奖励投机（reward hacking）。所以通常在损失里加一项当前策略和旧策略之间的 KL 散度，防止每次更新离原来太远。
+        </p>
+
+        <h3>5. Diffusion-DPO</h3>
+        <p>
+            DPO 是大语言模型里一种根据人类偏好调整权重的监督式方法，不需要单独的奖励模型。Wallace 等人 2023 年把它改造成 Diffusion-DPO。幻灯片上是三行公式（取自 Qwen-Image 技术报告），课上只讲了要点：对于胜出的图，鼓励模型更准确地预测它的速度；对于落败的图，鼓励模型预测得差一些。这样胜出的图被生成的概率上升，落败的图下降。损失里比较的是当前模型和一个冻结的参考模型在两张图上的预测误差之差。
+        </p>
+
+        <h3>6. 提示词增强</h3>
+        <p>
+            经过对齐之后，模型擅长的是根据非常详细的提示词生成精美的图。课上展示了一张漂亮的读书泰迪熊，它的提示词长到幻灯片上只能放下截断的一部分：温暖私密的室内阅读场景，泰迪熊坐在扶手椅上，浅米色绒毛、棕色针织毛衣、小圆框眼镜，手里的书叫什么、封面是什么颜色，台灯在画面左侧、暖金色光、浅景深，前景木桌上有一个印着小熊的陶瓷杯冒着热气……实际长度大约是幻灯片上的四倍。
+        </p>
+        <p>
+            问题是普通用户只会写"一只读书的泰迪熊"，却想要那样的效果。于是在用户和模型之间加一步提示词增强（Prompt Enhancement，PE）：把用户简短的输入改写成详细、优雅的长提示词，接近模型训练时见过的那种分布。
+        </p>
+        <p>
+            Afshine 用学做菜把这一段串了一遍：预训练是认识各种食材；继续训练是读新菜谱，增加知识；SFT 是讲究摆盘和上菜；偏好对齐是请品鉴师把你做的几份同一道菜比较一番，告诉你哪份更好；提示词增强是服务员把顾客说的"我要肉"翻译成厨房能精确执行的"五分熟，加一撮盐"。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、微调：DreamBooth 与 LoRA</h2>
+        <h3>1. DreamBooth</h3>
+        <p>
+            Ruiz 等人 2022 年的 DreamBooth 很流行。场景是：你不要任意一只泰迪熊，而要你自己那只。准备几张它不同姿势的照片，用一个带罕见 token 的提示词训练模型，比如 "a photo of a [V] teddy bear"，让模型把 [V] 和这只具体的熊关联起来。推理时就可以写 "[V] teddy bear attending CME 296"，生成这只熊来上课的图。
+        </p>
+        <p>
+            只这样训练会出什么问题？有学生答：多样性不够。确实，模型会过度专门化，忘掉原来会生成的东西。比如以后写"a teddy bear"，生成的全是你这只。所以 DreamBooth 还加了一项先验保持损失（prior preservation loss）：用模型原来对 "a photo of a teddy bear" 生成的图一起训练，要求它继续能生成普通的泰迪熊。两项合在一起，既学会了新主体，又不丢失原有能力。
+        </p>
+
+        <h3>2. LoRA</h3>
+        <p>
+            DreamBooth 更新的是模型的全部权重。可模型很大，课上提到最大的开源文生图模型有几百亿参数，不是每个人都有大 GPU。Hu 等人 2021 年为大语言模型提出的 LoRA（Low-Rank Adaptation）在这里同样常用。它冻结原权重 $W_0$，只训练两个小矩阵 $A$、$B$：
+        </p>
+        $$W = W_0 + BA, \qquad B\in\mathbb{R}^{d\times r},\ A\in\mathbb{R}^{r\times k},\ r \ll \min(d, k)$$
+        <p>
+            $BA$ 的秩最多为 $r$，所以叫低秩适配。只需训练很小一部分参数，性能和全量微调相近。所以会看到 DreamBooth-LoRA 这样的组合。
+        </p>
+        <p>
+            优点：推理时几乎没有额外开销，生成结果和参考照片的细节吻合度高。缺点：每个新主体都要训练一次，费时费钱；训练出来的东西不能复用到别的主体上。适合的场景是需要为同一个主体（人、物）生成大量图片。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、蒸馏：让生成变快</h2>
+        <h3>1. 动机</h3>
+        <p>
+            Shervine 讲最后一部分。前面这些方法能生成顶尖质量的图，但实际场景有不同的需求：交互式应用、高并发服务、动画需要实时性；服务提供方也不愿意为每次请求花大价钱跑一千步。普通用户的算力、预算和时间都有限。很多时候目标是够好就行，于是要在质量和速度之间权衡。思路是利用更大、更慢的模型给出的丰富输出，训练一个更快的模型，也就是教师和学生。
+        </p>
+
+        <h3>2. 和传统蒸馏的区别</h3>
+        <p>
+            在大语言模型里，传统蒸馏是让一个小的学生模型去拟合大的教师模型输出的 token 分布，损失是两者的 KL 散度（假设教师分布是真实分布，衡量用学生去近似它有多差）。Shervine 举的数字是：学生大约只有教师 60% 的参数，能保留约 97% 的性能。
+        </p>
+        <p>
+            图像生成里，缩小学生模型往往会让质量差很多。更常调的是另一个旋钮：步数。学生和教师通常一样大，但教师要走很多步，学生希望只走几步，最好一步。损失通常是让学生的输出回归教师的输出，比如用均方误差。
+        </p>
+        <p>
+            最直接的尝试是让学生一步拟合教师多步的结果。这太难了。课上的说法是：让大师画一幅精美的画，再让学生一笔画出一模一样的。一次前向要装下的信息太多了。
+        </p>
+
+        <h3>3. 渐进蒸馏</h3>
+        <p>
+            Salimans 和 Ho 2022 年的渐进蒸馏（Progressive Distillation，PD）把这个难题拆成一系列难度差不多的小问题：让教师走两小步，学生一步拟合这两步的结果。学成之后，学生变成新的教师，再训练下一个学生把步数再减半。从 $T$ 步到 1 步，需要 $\log_2 T$ 轮。Shervine 假设他和 Afshine 不是双胞胎，而是 $\log_2 T$ 胞胎：第一轮 Afshine 是大师，他画两笔，Shervine 画一笔；下一轮 Shervine 当大师，下一个兄弟当学生。从几何上看，学生每一轮学的是曲线路径上两点之间的割线。
+        </p>
+        <p>
+            好处：可以选择愿意花的 NFE 数，步数和质量有明确的对应关系；在相同步数下，比 DDIM 质量更好。局限：路径本身是弯的，这是一个固定的约束，PD 只是绕着它走，并没有让问题变简单；推理时必须用训练时那种固定的离散步数；要做 $\log_2 T$ 轮蒸馏。
+        </p>
+
+        <h3>4. InstaFlow</h3>
+        <p>
+            如果能先让问题变简单呢？第三讲的 Reflow 正好能把路径拉直。Liu 等人 2023 年的 InstaFlow 就这样做：从一个预训练模型出发，先做 Reflow 把路径拉直，再把多步模型蒸馏成一步模型。
+        </p>
+        <p>
+            为什么不一直做 Reflow 直到完全直？因为每次 Reflow 生成配对数据时都会引入离散化误差。所以更好的做法是：让教师继续用多步解 ODE，学生直接拟合教师的终点。距离函数分两阶段：先用 MSE 热身，再用 LPIPS 打磨。MSE 只看每个像素的值，不能很好地反映图像质量；LPIPS 比较的是预训练网络里的特征图（第四讲讲过）。实验发现，大部分拉直效果来自第一次 Reflow；在直的路径上再加一步蒸馏，比只做 Reflow 然后一步采样的效果好得多。
+        </p>
+        <p>
+            局限是计算负担：每次 Reflow 都要先让教师把整条路走一遍，成本很高；而且教师走过的中间路径信息没有被利用。
+        </p>
+        <p>
+            有学生问：为什么不在预训练时就强制路径是直的？其实已经这样做了，每次随机配一对噪声和数据点，在两者之间连直线。但随机配对不是最优的，MSE 损失把交叉的路径平均之后就弯了，这是结果，不是设计。Reflow 就是用来补救这一点的。
+        </p>
+
+        <h3>5. 一致性模型</h3>
+        <p>
+            Song 等人 2023 年的一致性模型（Consistency Models，CM）利用的是局部信息。在一条确定性的 ODE 路径上，训练一个函数，把路径上的任意一点都映射到终点，也就是干净图。满足自一致性（self-consistency）：同一条路径上的任意两点映射到同一个结果，$f_\theta(x_t, t) = f_\theta(x_{t'}, t')$。这样无论从路径的哪一点出发，都能一步跳到终点，包括从纯噪声出发。
+        </p>
+        <p>
+            两种训练方式：
+        </p>
+        <ul>
+            <li>一致性训练（Consistency Training，CT）：不需要教师。取一张干净图，分别加噪到 $t$ 和 $t+\Delta t$，两个都送进模型，要求输出一致。</li>
+            <li>一致性蒸馏（Consistency Distillation，CD）：用教师模型从 $x_{t+\Delta t}$ 走一步 ODE 得到 $x_t$，这反映了教师学到的路径，再要求学生在这两点上的输出一致。效果上蒸馏胜出。</li>
+        </ul>
+        <p>
+            会不会坍塌？学生可以永远输出 0，这样也"一致"。有两个设计防止这一点：一是边界条件，模型的参数化保证在路径起点（几乎干净的地方）输出就等于输入；二是停止梯度，不对两个分支都反向传播，否则对称的更新可能不指向一个固定的目标。实际做法是其中一个分支用学生参数的滑动平均，不参与梯度。一致性模型在潜空间里的版本叫 LCM（Latent Consistency Model），文献里常见。
+        </p>
+        <p>
+            局限是质量：L2 式的回归损失会导致回归均值，图像模糊、过于平滑。目标图的确切像素没对上就会被罚，哪怕生成的图本身完全合理逼真。
+        </p>
+
+        <h3>6. 分布匹配蒸馏（DMD）</h3>
+        <p>
+            之前的方法都在"匹配一个样本"。换成匹配分布：不要求学生生成的图和某张目标图逐像素一样，只要求学生生成的图的分布和教师的分布一致。这是 Yin 等人 2023 年的 DMD（Distribution Matching Distillation）。
+        </p>
+        <p>
+            损失是学生输出分布（叫 fake，沿用 GAN 的叫法）和教师输出分布（叫 real）之间的 KL 散度。这个 KL 本身算不了，但它对学生参数的梯度有一个漂亮的形式：
+        </p>
+        $$\nabla_\theta D_{KL} = \mathbb{E}\left[\big(s_{\text{fake}}(x_t) - s_{\text{real}}(x_t)\big)\ \frac{\partial G_\theta}{\partial \theta}\right]$$
+        <p>
+            具体做法是：给学生一个噪声，学生一步生成一张图 $G_\theta(z)$，对它再加噪，然后让两个模型分别去噪：教师给出"真实分布的分数"$s_{\text{real}}$，另一个跟踪学生分布的扩散模型给出"学生分布的分数"$s_{\text{fake}}$。两者之差就是更新方向：多听教师的，少听学生自己的。在流匹配里可以理解为两个速度之差。再补一项回归损失，让学生输出大致和教师输出一致，实验发现这能稳定训练。
+        </p>
+        <p>
+            有学生问会不会坍塌。如果不比较教师与学生两者的分数，只沿教师分数走，会坍塌到教师分布的众数上；如果不加回归项，也到不了教师的分布。需要调两项损失的平衡。
+        </p>
+        <p>
+            结果有竞争力，但 Shervine 列了几条不满：比较对象是教师的输出，不是真实数据；那个跟踪学生分布的模型本身要在蒸馏循环里不断用扩散损失训练，相当于循环里套了一个小型扩散训练，很贵；两个模型算的东西差不多，概念上重复；"教师减学生"的信号比较软，不够直接。能不能给学生一个更硬的信号？
+        </p>
+
+        <h3>7. 对抗扩散蒸馏（ADD 与 LADD）</h3>
+        <p>
+            Sauer 等人 2023 年的 ADD（Adversarial Diffusion Distillation）引入 GAN 的判别器：把"软的分数之差"换成"硬的真假分类"。判别器努力区分真实图像和学生生成的图，学生努力骗过判别器；同时保留一项蒸馏损失，让学生输出接近教师。这个分类问题对学生要求更严，能让生成的图更锐利。
+        </p>
+        <p>
+            ADD 的问题是在像素空间和潜空间之间反复转换：学生在潜空间生成，要解码到像素空间给判别器看。Sauer 等人 2024 年的 LADD（Latent Adversarial Diffusion Distillation）把判别器挪到潜空间里，直接用教师模型的特征当判别器的特征提取器，不再需要转换，而且判别损失本身就隐含了蒸馏目标。这是现在用得很多的做法。
+        </p>
+
+        <h3>8. 小结</h3>
+        <p>
+            Shervine 的总结：教师加学生的组合很强大，各种方法在复杂度和质量之间各有取舍。比如一致性模型容易配合 LoRA 这类低秩权重使用；GAN 式方法的训练动态较难控制。反复出现的几个要素是：回归损失用 MSE 或 LPIPS；用分布层面或对抗的压力提升质量；以及在潜空间里训练，这是现在的趋势。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、参考资料</h2>
+        <ul>
+            <li>Scaling Rectified Flow Transformers for High-Resolution Image Synthesis（Esser 等，2024）：SD3，提出 logit-normal 时间步采样和按分辨率平移时间步。</li>
+            <li>Representation Alignment for Generation: Training Diffusion Transformers Is Easier Than You Think（Yu 等，2024）：REPA，把 DiT 中间层表示对齐到预训练视觉编码器的表示，训练加速约 17.5 倍。</li>
+            <li>Qwen-Image Technical Report（通义千问团队，2025）：数据流程与 Diffusion-DPO 公式出处。</li>
+            <li>Seedream 2.0（字节跳动 Seed 团队，2025）：继续训练与 SFT 的区分。</li>
+            <li>ImageReward: Learning and Evaluating Human Preferences for Text-to-Image Generation（Xu 等，2023）：奖励模型与 ReFL。</li>
+            <li>Flow-GRPO: Training Flow Matching Models via Online RL（Liu 等，2025）：把 ODE 采样改写成 SDE 以获得多样样本，用组内相对优势做在线强化学习。</li>
+            <li>Diffusion Model Alignment Using Direct Preference Optimization（Wallace 等，2023）：Diffusion-DPO。</li>
+            <li>DreamBooth: Fine Tuning Text-to-Image Diffusion Models for Subject-Driven Generation（Ruiz 等，2022）。</li>
+            <li>LoRA: Low-Rank Adaptation of Large Language Models（Hu 等，2021）。</li>
+            <li>Progressive Distillation for Fast Sampling of Diffusion Models（Salimans &amp; Ho，2022）。</li>
+            <li>InstaFlow: One Step is Enough for High-Quality Diffusion-Based Text-to-Image Generation（Liu 等，2023）。</li>
+            <li>Consistency Models（Song 等，2023）。</li>
+            <li>One-step Diffusion with Distribution Matching Distillation（Yin 等，2023）：DMD。</li>
+            <li>Adversarial Diffusion Distillation（Sauer 等，2023）：ADD，SDXL-Turbo 的方法。</li>
+            <li>Fast High-Resolution Image Synthesis with Latent Adversarial Diffusion Distillation（Sauer 等，2024）：LADD。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>八、小结</h2>
+        <p>
+            训练文生图生成模型分四步。损失默认用流匹配，但时间步不再均匀采样，而是用 logit-normal 偏重难度最大的中间段，并按分辨率平移，使感知噪声一致；REPA 把中间层表示对齐到预训练编码器，大幅加速训练。预训练的关键是数据和由易到难的课程学习，分辨率变化在 DiT 里只是序列长度变化。后训练里，继续训练加知识，SFT 改行为，ReFL、Flow-GRPO、Diffusion-DPO 把人类偏好引入模型，提示词增强弥补用户输入与训练分布之间的差距。DreamBooth 用罕见 token 加先验保持损失做个性化，LoRA 只训练低秩增量。蒸馏让学生用更少的步数做教师的事：渐进蒸馏逐轮减半；InstaFlow 先拉直路径再蒸馏；一致性模型把路径上任意点映射到终点；DMD 匹配分布而不是样本；ADD 和 LADD 用判别器提供更硬的信号，LADD 全程在潜空间里完成。
+        </p>
+        <p>
+            下一讲讲评估：一张图好不好，怎样衡量。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CME296: Diffusion &amp; Large Vision Models · Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="05_图像生成模型架构.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="07_图像生成的评估.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

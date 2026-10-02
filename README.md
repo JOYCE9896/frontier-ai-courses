@@ -1,6 +1,6 @@
 # Stanford AI 课程
 
-> 斯坦福大学 2025-2026 学年八门 AI 前沿课程的个人研读笔记，覆盖技术机制、系统工程、产业经济、公开研讨、法律治理、前沿系统栈与经典 NLP 七个维度。
+> 斯坦福大学 2025-2026 学年九门 AI 前沿课程的个人研读笔记，覆盖技术机制、系统工程、产业经济、公开研讨、法律治理、前沿系统栈、经典 NLP 与视觉生成八个维度。
 
 [![GitHub Pages](https://img.shields.io/badge/Reading-GitHub%20Pages-8b261e?style=flat-square&logo=github)](https://joyce9896.github.io/stanford-ai-monographs/)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-204e79?style=flat-square)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
@@ -30,6 +30,7 @@
 | [CS336: Language Modeling from Scratch](https://joyce9896.github.io/stanford-ai-monographs/CS336-Language-Modeling-from-Scratch/) | Percy Liang、Tatsunori Hashimoto | 从字节到对齐模型，亲手实现完整语言模型工程栈 |
 | [CS25: Transformers United V6](https://joyce9896.github.io/stanford-ai-monographs/CS25-Transformers-United/) | Steven Feng、Karan P. Singh、Christopher Manning | 斯坦福长年公开的 Transformers 前沿研讨课 |
 | [CS224N: NLP with Deep Learning](https://joyce9896.github.io/stanford-ai-monographs/CS224N-NLP-with-Deep-Learning/) | Christopher Manning | 从词向量、Transformer 到推理训练，斯坦福最长寿的 NLP 课 |
+| [CME296: Diffusion & Large Vision Models](https://joyce9896.github.io/stanford-ai-monographs/CME296-Diffusion-and-Large-Vision-Models/) | Afshine Amidi、Shervine Amidi | 扩散、分数匹配与流匹配的推导，潜空间、DiT 架构、训练蒸馏与评估 |
 
 ### Non-Technical
 

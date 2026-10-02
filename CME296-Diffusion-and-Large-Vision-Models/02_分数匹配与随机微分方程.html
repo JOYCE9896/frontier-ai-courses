@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第二讲：分数匹配与随机微分方程 | 斯坦福 CME296 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="01_扩散模型DDPM与DDIM.html">&larr; 上一讲</a>
+    <span>Stanford CME296: Lecture 02</span>
+    <a href="03_流匹配与整流流.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第二讲：分数匹配与随机微分方程</h1>
+        <p class="subtitle">分数函数是什么，去噪分数匹配，NCSN 与退火 Langevin 采样，分数和噪声的关系，用 SDE 统一扩散与分数匹配，概率流 ODE 与 DPM-Solver</p>
+        <div class="author-meta">
+            主讲：Afshine Amidi（分数匹配与 SDE）、Shervine Amidi（概率流 ODE 与 DPM-Solver）· 2026 年 4 月 10 日<br>
+            资料来源：<a href="https://cme296.stanford.edu/slides/spring26-cme296-lecture2.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=_WaR2fjZpEQ" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述和板书推导） · 主要论文：Vincent 2010（DSM）、Song &amp; Ermon 2019（NCSN）、Song 等 2020（Score SDE）、Lu 等 2022（DPM-Solver）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、上一讲回顾和本讲的出发点</h2>
+        <p>
+            上一讲的 DDPM 是这样做的：定义一个前向过程 $q$，把训练集里的干净图逐步加噪成纯噪声；再学一个反向过程，给定加噪图和噪声水平，预测加进去的噪声。训练目标本来是最大似然，算不了，于是推出 ELBO 下界，展开后得到 KL 散度，利用高斯分布的性质证明它可以计算，最后化简成一个对噪声的 L2 回归：
+        </p>
+        $$\mathcal{L}_{\text{DDPM}} = \mathbb{E}\left[\|\epsilon - \epsilon_\theta(x_t, t)\|^2\right]$$
+        <p>
+            本讲换一个角度讨论同一个问题。目标仍然是从未知的、复杂的数据分布 $p_{\text{data}}$ 中采样，仍然是无条件生成，策略也仍然是"先从一个容易采样的分布（比如高斯）取一个点，再把它挪到数据分布里去"。新的问题是：怎么挪？
+        </p>
+    </section>
+
+    <section>
+        <h2>二、分数函数：往概率高的地方走</h2>
+        <h3>1. 先想到梯度</h3>
+        <p>
+            设 $p(x)$ 是图像的概率密度函数：输入一张图 $x$（一个高维向量），输出这张图出现的概率密度。如果我们手上的点落在一个概率很低的地方，想往概率高的地方走，最自然的办法是沿着梯度走。
+        </p>
+        <p>
+            复习一下梯度：对一个输入是多维向量、输出是标量的函数，梯度是由它对每个维度的偏导数组成的向量，指向函数值增长最快的方向。所以如果知道 $\nabla_x p(x)$，就可以从起点出发，一步步往高密度区域移动。
+        </p>
+
+        <h3>2. 直接用 $\nabla p$ 的两个问题</h3>
+        <p>
+            第一个问题是归一化常数。概率密度在整个空间上的积分必须等于 1。一个模型通常只能给出一个"未归一化"的打分 $\tilde p(x)$，真正的密度是 $p(x) = \tilde p(x) / Z$，其中 $Z = \int \tilde p(x)\, dx$。要算 $Z$ 就得对整个几十万维的空间积分，根本做不到。$p$ 算不出来，$\nabla p$ 自然也算不出来。
+        </p>
+        <p>
+            第二个问题是数值稳定性。数据很少的区域里，$p(x)$ 极小，$\nabla p(x)$ 也极小，几乎全是零，计算时容易出数值问题。而我们从高斯分布采样的起点，恰恰大多落在这种低密度区域。
+        </p>
+
+        <h3>3. 改用 $\nabla \log p$</h3>
+        <p>
+            换成对数概率的梯度，三个好处都来了：
+        </p>
+        <ul>
+            <li>归一化常数消失。$\log p(x) = \log \tilde p(x) - \log Z$，而 $Z$ 是常数，和 $x$ 无关，所以 $\nabla_x \log Z = 0$，于是 $\nabla_x \log p(x) = \nabla_x \log \tilde p(x)$，完全不需要知道 $Z$。</li>
+            <li>方向不变。由链式法则 $\nabla \log p = \nabla p / p$，而 $p$ 是一个正的标量，除以它只改变向量的长度，不改变方向。所以 $\nabla \log p$ 和 $\nabla p$ 指向同一个方向。</li>
+            <li>数值更稳定。在低密度区域，$\nabla p$ 很小，但除以同样很小的 $p$ 之后，结果不再趋于零。</li>
+        </ul>
+        <p>
+            这个量有一个专门的名字，叫分数函数（score function），本讲的标题"分数匹配"就来自它：
+        </p>
+        $$s(x) = \nabla_x \log p(x)$$
+        <p>
+            下标 $x$ 是有意写上的。统计学里还有另一个"score"，是对模型参数 $\theta$ 求梯度。这里说的分数是对数据 $x$ 求梯度，两者不要混淆。画在平面上，分数是一个向量场：每个点上一个箭头，指向密度更高的方向。离数据越远，$p$ 越小，箭头通常越长；靠近数据时箭头变短。
+        </p>
+
+        <h3>4. 只沿分数走不够：Langevin 采样</h3>
+        <p>
+            Afshine 问学生：假设分数已知，从起点怎样走到数据分布？学生答：顺着分数走。这里有个陷阱：一直顺着分数走，最后会停在密度最高的那个点上，也就是所有样本都收敛到同一张"最典型"的图。但数据分布里还有很多密度没那么高、却完全合法的样本。我们既要往高密度走，又要保留多样性。
+        </p>
+        <p>
+            常用的办法是 Langevin 采样（Langevin dynamics），每一步沿分数走一小步，同时加一点随机噪声：
+        </p>
+        $$x_{k+1} = x_k + \alpha\, \nabla_x \log p(x_k) + \sqrt{2\alpha}\ z_k, \qquad z_k \sim \mathcal{N}(0, I)$$
+        <p>
+            第二项把点往高密度处拉，第三项让它在附近随机探索。步长足够小、步数足够多时，得到的点就服从分布 $p$。这属于马尔可夫链蒙特卡洛（MCMC）方法的一种。有学生问系数 $\sqrt{2\alpha}$ 是不是随便定的。不是，它可以从 Fokker-Planck 方程推出来，课上没有时间推导。至于步长 $\alpha$ 怎么选、会不会不收敛，后面讲 NCSN 时会回答。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、怎样估计分数</h2>
+        <h3>1. 分数匹配的目标和困难</h3>
+        <p>
+            上面假设分数已知，实际上并不知道。估计分数这件事本身就叫分数匹配（score matching，SM）：用一个神经网络 $s_\theta(x)$ 去拟合真实分数，最自然的损失是 L2 回归：
+        </p>
+        $$\mathcal{L}_{\text{SM}} = \mathbb{E}_{x\sim p_{\text{data}}}\left[\|s_\theta(x) - \nabla_x \log p_{\text{data}}(x)\|^2\right]$$
+        <p>
+            问题很明显：我们不知道 $p_{\text{data}}$，更不知道它的分数。这个损失写得出来，却算不出来。
+        </p>
+
+        <h3>2. 早期的两种绕法</h3>
+        <p>
+            课上简单提到两种历史方法，现在已经不常用：
+        </p>
+        <ul>
+            <li>隐式分数匹配（Implicit Score Matching，ISM）：Hyvärinen 2005 年提出，用分部积分把损失改写成只含 $s_\theta$ 及其雅可比矩阵迹的形式，不需要真实分数。缺点是要算雅可比矩阵的迹，维度高时代价很大。</li>
+            <li>切片分数匹配（Sliced Score Matching，SSM）：Song 等 2019 年提出，把分数投影到随机方向上，只需要算投影后的一维量，降低了计算量。</li>
+        </ul>
+
+        <h3>3. 高斯分布的分数很好算</h3>
+        <p>
+            现在常用的方法叫去噪分数匹配，它利用了高斯分布的性质。先看一维高斯 $x \sim \mathcal{N}(\mu, \sigma^2)$：
+        </p>
+        $$p(x) = \frac{1}{\sqrt{2\pi}\sigma}\exp\!\left(-\frac{(x-\mu)^2}{2\sigma^2}\right) \ \Longrightarrow\ \nabla_x \log p(x) = -\frac{x-\mu}{\sigma^2}$$
+        <p>
+            这个结果很好理解：$-(x-\mu) = \mu - x$，是从 $x$ 指向均值 $\mu$ 的方向，$\sigma^2 > 0$ 只调长度。所以高斯分布的分数永远指向均值，也就是密度最高的地方。
+        </p>
+
+        <h3>4. 给数据加噪，再估计加噪后分布的分数</h3>
+        <p>
+            真实数据分布的分数算不了，但高斯的分数好算。于是想法是：从训练集取一个点 $x$，加上高斯噪声：
+        </p>
+        $$\tilde x = x + \sigma \epsilon, \quad \epsilon\sim\mathcal{N}(0,I) \qquad\Longrightarrow\qquad q_\sigma(\tilde x \mid x) = \mathcal{N}(\tilde x;\, x,\, \sigma^2 I), \quad \nabla_{\tilde x}\log q_\sigma(\tilde x\mid x) = -\frac{\tilde x - x}{\sigma^2} = -\frac{\epsilon}{\sigma}$$
+        <p>
+            $q_\sigma(\tilde x\mid x)$ 叫扰动核（perturbation kernel）。对训练集里每个点都这样加噪，就得到一个加噪后的整体分布：
+        </p>
+        $$q_\sigma(\tilde x) = \int q_\sigma(\tilde x \mid x)\, p_{\text{data}}(x)\, dx$$
+        <p>
+            这个公式不用怕。实际中训练集是有限个点，它的意思就是在每个数据点周围放一个小高斯，所有小高斯叠在一起，形成一个高斯混合分布。$\sigma$ 小时，每个点只是稍微晕开一点；$\sigma$ 大时，整个分布被摊得很开。
+        </p>
+
+        <h3>5. 去噪分数匹配（DSM）</h3>
+        <p>
+            现在对加噪后的分布 $q_\sigma(\tilde x)$ 做分数匹配。它的分数仍然算不出来，但 Pascal Vincent 2010 年的论文证明了一个关键的等价关系：
+        </p>
+        $$\mathbb{E}_{q_\sigma(\tilde x)}\left[\|s_\theta(\tilde x) - \nabla_{\tilde x}\log q_\sigma(\tilde x)\|^2\right] = \mathbb{E}_{p_{\text{data}}(x)\, q_\sigma(\tilde x\mid x)}\left[\|s_\theta(\tilde x) - \nabla_{\tilde x}\log q_\sigma(\tilde x \mid x)\|^2\right] + C$$
+        <p>
+            右边用的是条件分数，也就是上面那个 $-\epsilon/\sigma$，完全可以算。$C$ 是与 $\theta$ 无关的常数。这就是去噪分数匹配（Denoising Score Matching，DSM）的损失。代入条件分数，它的意思很直接：给模型一个加了噪声的点，让它预测"往回指向原始数据点"的方向。
+        </p>
+        <p>
+            证明思路课上口述了一遍（原论文附录里大约五六行）。把两边的平方展开成 $\|a\|^2 - 2a^\top b + \|b\|^2$。$\|b\|^2$ 项不含 $\theta$，对优化没有影响；两边的 $\|s_\theta\|^2$ 项完全相同；剩下只需证明两边的交叉项 $\mathbb{E}[s_\theta^\top b]$ 相等，用 $q_\sigma(\tilde x)$ 的定义展开、交换积分顺序即可。
+        </p>
+        <p>
+            有学生问：加噪数据的分数等于条件分数吗？不相等。两个损失只差一个与 $\theta$ 无关的常数，所以对 $\theta$ 的梯度完全一样，梯度下降最终学到的模型也一样。直观上看，把以每个训练点为条件的分数在所有点上平均，结果就等于整个加噪分布的分数。
+        </p>
+
+        <h3>6. 噪声大小的两难</h3>
+        <p>
+            DSM 学到的是加噪分布 $q_\sigma$ 的分数，我们真正想要的是 $p_{\text{data}}$ 的分数。那就让 $\sigma$ 很小？这样 $q_\sigma$ 很接近 $p_{\text{data}}$，但会出新问题。
+        </p>
+        <p>
+            看损失里的期望：它是按 $q_\sigma(\tilde x)$ 加权的。某个区域如果在 $q_\sigma$ 下几乎不会出现，那里预测错了对损失几乎没有影响，模型也就没有动力在那里学准。$\sigma$ 很小时，$q_\sigma$ 只覆盖数据点附近一小圈，其他大片区域的分数估计都很差。而采样的起点来自高斯分布，大多就落在这些低密度区域。在估计很差的地方顺着估计的分数走，很可能走不到数据那里去。Afshine 把这总结为一个损失加权的问题。
+        </p>
+        <p>
+            反过来让 $\sigma$ 很大，$q_\sigma$ 覆盖了大片空间，到处都能学得准，但这时 $q_\sigma$ 和 $p_{\text{data}}$ 差得很远，学到的分数指向的是一个被摊平了的分布，不是真正要的东西。
+        </p>
+        <p>
+            噪声小，目标准但低密度区估计差；噪声大，估计稳但目标偏。课上说这有点像偏差与方差的权衡，两头不能兼得。也有学生注意到，$\sigma$ 很小时分布会变得很"尖"，在数据点周围剧烈起伏，这个直觉也是对的：小噪声带来尖锐，大噪声带来平滑。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、NCSN：同时学多个噪声水平</h2>
+        <h3>1. 思路</h3>
+        <p>
+            既然一个噪声水平解决不了，那就学一串：$\sigma_1 > \sigma_2 > \dots > \sigma_L$，从很大到很小。模型多一个输入，变成 $s_\theta(x, \sigma)$，同时估计每个噪声水平下加噪分布的分数。这个框架叫噪声条件分数网络（Noise Conditional Score Network，NCSN），来自 Yang Song 和 Stefano Ermon 2019 年的论文。损失是各噪声水平 DSM 损失的加权和：
+        </p>
+        $$\mathcal{L}_{\text{NCSN}} = \sum_{i=1}^{L} \lambda(\sigma_i)\ \mathbb{E}_{x,\tilde x}\left[\left\|s_\theta(\tilde x, \sigma_i) + \frac{\tilde x - x}{\sigma_i^2}\right\|^2\right]$$
+        <p>
+            论文里取 $\lambda(\sigma) = \sigma^2$，让各个噪声水平的损失量级大致相同。
+        </p>
+        <p>
+            采样时怎么用这一串分数？刚开始离数据很远，只需要知道大致方向，这时用噪声最大的那个分布的分数。它虽然和真实分布不完全一样，但覆盖了起点所在的区域，方向大体是对的。走近一些之后，换成噪声小一点的分布，它覆盖了当前区域，指得也更准。如此逐级换用更小的噪声，越到后面越关注细节，最后落在非常接近 $p_{\text{data}}$ 的地方。
+        </p>
+
+        <h3>2. 退火 Langevin 采样（ALD）</h3>
+        <p>
+            这种从大噪声逐级降到小噪声的 Langevin 采样叫退火 Langevin 动力学（Annealed Langevin Dynamics，ALD），正好回答了前面学生关于"能不能调整 Langevin 采样"的问题：
+        </p>
+        <ol>
+            <li>从一个方差很大的高斯分布采样起点 $x$。</li>
+            <li>对每个噪声水平 $\sigma_i$（$i = 1$ 到 $L$，从大到小），设步长 $\alpha_i \propto \sigma_i^2$，在这个水平上做 $K$ 步 Langevin 更新：
+                $$x \leftarrow x + \alpha_i\, s_\theta(x, \sigma_i) + \sqrt{2\alpha_i}\ z, \qquad z\sim\mathcal{N}(0, I)$$
+            </li>
+            <li>最后得到的 $x$ 就是生成的样本。</li>
+        </ol>
+        <p>
+            每一步里，$s_\theta$ 是预测的分数，告诉你往哪走；$z$ 是新抽的随机噪声，提供多样性。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、分数与噪声是一回事</h2>
+        <p>
+            DDPM 预测噪声，NCSN 预测分数，两者都涉及加噪，自然要问它们是什么关系。DDPM 的前向过程是：
+        </p>
+        $$q(x_t\mid x_0) = \mathcal{N}\!\left(\sqrt{\bar\alpha_t}\, x_0,\ (1-\bar\alpha_t) I\right), \qquad x_t = \sqrt{\bar\alpha_t}\, x_0 + \sqrt{1-\bar\alpha_t}\,\epsilon$$
+        <p>
+            用高斯分数公式"减均值、除方差、取负"：
+        </p>
+        $$\nabla_{x_t}\log q(x_t\mid x_0) = -\frac{x_t - \sqrt{\bar\alpha_t}\,x_0}{1-\bar\alpha_t} = -\frac{\sqrt{1-\bar\alpha_t}\,\epsilon}{1-\bar\alpha_t} = -\frac{\epsilon}{\sqrt{1-\bar\alpha_t}}$$
+        <p>
+            分数等于负的噪声再乘一个只和 $t$ 有关的系数。所以预测噪声的模型和预测分数的模型可以互相换算：$s_\theta(x_t, t) = -\epsilon_\theta(x_t, t)/\sqrt{1-\bar\alpha_t}$。这也说得通：噪声把图从干净的地方推开，分数指向回到高密度区域的方向，正好相反。
+        </p>
+        <p>
+            两种方法的真正区别在加噪的方式：
+        </p>
+        <ul>
+            <li>DDPM 是干净图和噪声的加权平均。如果数据已经标准化到均值 0、方差 1，那么 $x_t$ 的方差约为 $\bar\alpha_t + (1-\bar\alpha_t) = 1$，始终不变，所以叫方差保持（Variance Preserving，VP）。</li>
+            <li>NCSN 是直接往干净图上加 $\sigma$ 倍的噪声，$\tilde x = x + \sigma\epsilon$。噪声越加越多，方差越来越大，所以叫方差爆炸（Variance Exploding，VE）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>六、从离散到连续：随机微分方程</h2>
+        <h3>1. 为什么要连续化</h3>
+        <p>
+            到目前为止，加噪都是离散的：DDPM 有 $T$ 步，NCSN 有 $L$ 个噪声水平。步数要在训练前定好，这个离散化是人为的。如果改成连续时间的演化，一是不必预先决定离散步数，二是可以直接用微分方程这个数学领域里大量现成的工具，其中最重要的一个就是怎样把一个加噪过程反过来。
+        </p>
+
+        <h3>2. Wiener 过程</h3>
+        <p>
+            要连续化，先要有"连续地加高斯噪声"的数学对象。随机过程是一族按时间 $t$ 编号的随机变量。Wiener 过程（也就是布朗运动）$w_t$ 是满足以下性质的随机过程：
+        </p>
+        <ul>
+            <li>$w_0 = 0$；</li>
+            <li>增量服从高斯：$w_t - w_s \sim \mathcal{N}(0, (t-s) I)$；</li>
+            <li>不重叠时间段上的增量相互独立。</li>
+        </ul>
+        <p>
+            可以把它理解成连续时间版的随机游走。注意独立的是增量，$w_t$ 本身显然依赖于之前的值。一个直接推论是：极短时间 $dt$ 内的增量 $dw$ 方差为 $dt$，可以写成 $dw = \sqrt{dt}\,\epsilon$。
+        </p>
+
+        <h3>3. DDPM 的连续形式</h3>
+        <p>
+            Afshine 在黑板上推了 DDPM 的情形。从离散的加噪公式出发，两边减去 $x_{t-1}$：
+        </p>
+        $$x_t - x_{t-1} = \left(\sqrt{1-\beta_t} - 1\right) x_{t-1} + \sqrt{\beta_t}\,\epsilon$$
+        <p>
+            $\beta_t$ 是每个离散步加的噪声量。定义一个噪声速率函数 $\beta(t)$，让每步的噪声量等于速率乘时间增量：$\beta_t = \beta(t)\,dt$。当 $dt \to 0$ 时，$\beta_t$ 趋于零，但速率 $\beta(t)$ 保持非零，这就是连续版的噪声调度。用泰勒展开 $\sqrt{1-u} \approx 1 - u/2$，再把 $\sqrt{dt}\,\epsilon$ 认作 Wiener 增量 $dw$：
+        </p>
+        $$dx = -\frac{1}{2}\beta(t)\, x\, dt + \sqrt{\beta(t)}\, dw$$
+        <p>
+            NCSN 的连续形式类似，只是没有第一项：$dx = \sqrt{\frac{d[\sigma^2(t)]}{dt}}\ dw$。
+        </p>
+
+        <h3>4. 漂移项和扩散项</h3>
+        <p>
+            这两个式子都具有同一种形式，叫随机微分方程（Stochastic Differential Equation，SDE）：
+        </p>
+        $$dx = \underbrace{f(x, t)\, dt}_{\text{漂移（确定性）}} + \underbrace{g(t)\, dw}_{\text{扩散（随机）}}$$
+        <p>
+            $f$ 叫漂移（drift），决定点往哪个方向确定性地移动；$g$ 叫扩散（diffusion），决定每一步叠加多大的随机抖动。只有漂移时，点沿着一条光滑的确定轨迹移动；加上扩散，每一小步都被随机地推一下，轨迹变得锯齿状。
+        </p>
+        <p>
+            DDPM 的 SDE 每一项都有直观含义。在二维平面上，漂移项 $-\frac{1}{2}\beta x$ 指向原点，把点往零拉；扩散项再加一些噪声。两者合起来，任何起点最后都会变成均值为 0、方差为 1 的高斯分布，正好是 DDPM 前向过程做的事。Afshine 强调，这些公式的每一项都能这样读出具体含义。
+        </p>
+        <table>
+            <tr><th></th><th>漂移 $f(x,t)$</th><th>扩散 $g(t)$</th><th>类型</th></tr>
+            <tr><td>DDPM</td><td>$-\frac{1}{2}\beta(t)\,x$</td><td>$\sqrt{\beta(t)}$</td><td>方差保持（VP）</td></tr>
+            <tr><td>NCSN</td><td>$0$</td><td>$\sqrt{d[\sigma^2(t)]/dt}$</td><td>方差爆炸（VE）</td></tr>
+        </table>
+
+        <h3>5. 两条线的汇合</h3>
+        <p>
+            扩散和分数匹配原本是两条独立发展的研究线。扩散这边：2015 年 Sohl-Dickstein 等人提出用可计算的损失学习扩散过程的原理，2020 年 DDPM 首次在图像上做成功。分数匹配这边：Hyvärinen 2005 年提出用分数绕开归一化常数，Vincent 2010 年提出对加噪分布做分数匹配，2019 年 NCSN 用多噪声水平把它做成了生成模型。2020 年，斯坦福的 Yang Song 等人发表《Score-Based Generative Modeling through Stochastic Differential Equations》，用 SDE 把两条线统一起来。课程强烈推荐这篇论文。从那以后，社区一般把这两种范式看成一回事。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、在 SDE 框架下训练和采样</h2>
+        <h3>1. 训练</h3>
+        <p>
+            目标仍然是估计分数，方法是对条件分数做回归。写成一般形式：加噪图 $x_t = \alpha_t x_0 + \sigma_t\epsilon$，其中 $\alpha_t$、$\sigma_t$ 可以按 DDPM 的方式取（$\alpha_t = \sqrt{\bar\alpha_t}$，$\sigma_t = \sqrt{1-\bar\alpha_t}$），也可以按 NCSN 的方式取（$\alpha_t = 1$）。条件分数就是 $-\epsilon/\sigma_t$。
+        </p>
+        $$\mathcal{L} = \mathbb{E}_{t, x_0, \epsilon}\left[\lambda(t)\left\|s_\theta(x_t, t) + \frac{\epsilon}{\sigma_t}\right\|^2\right]$$
+        <p>
+            流程和 DDPM 完全一样：取干净图、抽噪声和时间步、合成加噪图、让模型预测分数、算损失、反向传播。各种参数化方式和权重 $\lambda(t)$ 怎么选，Karras 等人 2022 年的论文《Elucidating the Design Space of Diffusion-Based Generative Models》有很好的讨论。
+        </p>
+
+        <h3>2. 为什么要学分数：反向 SDE</h3>
+        <p>
+            NCSN 用分数采样，DDPM 用噪声采样，那为什么在 SDE 框架里要以分数为中心？因为有一个 1982 年 Anderson 证明的结论：任何形如上面的前向 SDE，都可以被一个反向时间的 SDE 精确逆转，而这个反向 SDE 里出现的正是分数：
+        </p>
+        $$dx = \left[f(x, t) - g(t)^2\, \nabla_x \log p_t(x)\right] dt + g(t)\, d\bar w$$
+        <p>
+            这里时间从 $T$ 往 0 走，$\bar w$ 是反向时间的 Wiener 过程，和前向那个不是同一个，所以加了一横。$p_t$ 是 $t$ 时刻加噪数据的分布。推导要用 Fokker-Planck 方程，超出课程范围。
+        </p>
+        <p>
+            直观理解一下这个式子。原来的漂移 $f$ 还在，扩散项 $g\,d\bar w$ 也还在。多出来的是漂移的修正项 $-g^2 \nabla \log p_t$。前向过程中扩散项不断把点推离高密度区域；反向时，除了原来的漂移，还必须额外朝高密度方向多走一些，来抵消扩散带来的偏离。负责指向高密度方向的，正是分数。$f$ 和 $g$ 在前向和反向里是同一组函数。
+        </p>
+
+        <h3>3. 采样</h3>
+        <p>
+            从纯噪声出发，用数值方法解这个反向 SDE。最常用的是 Euler-Maruyama 方法，它是常微分方程 Euler 法在 SDE 上的推广。用模型 $s_\theta$ 代替真实分数，每一步：
+        </p>
+        $$x_{t-\Delta t} = x_t - \left[f(x_t, t) - g(t)^2 s_\theta(x_t, t)\right]\Delta t + g(t)\sqrt{\Delta t}\ z, \qquad z\sim\mathcal{N}(0, I)$$
+        <p>
+            一直走到 $t = 0$，得到生成的图。有学生问 $f$ 和 $g$ 具体是什么，以 DDPM 为例，$f = -\frac{1}{2}\beta(t)x$，$g = \sqrt{\beta(t)}$。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、概率流 ODE</h2>
+        <h3>1. SDE 采样的毛病</h3>
+        <p>
+            下半节由 Shervine 讲，他说要唱一首和上周从 DDPM 到 DDIM 很像的歌。反向 SDE 里的随机项带来两个问题：
+        </p>
+        <ul>
+            <li>求解慢。随机项让轨迹在微观尺度上剧烈抖动，大步长无法准确近似这种运动，所以需要很多步，通常 1000 到 2000 步。而且事先不知道哪段好走、哪段难走，没法自适应地调整步长。</li>
+            <li>误差来源多。既有有限步长带来的离散化误差，又有注入的随机噪声带来的误差，两者叠加累积。</li>
+        </ul>
+        <p>
+            理想的情况是把 SDE 换成一个没有随机项的常微分方程（ODE）$dx = v(x, t)\, dt$。这样可以利用 ODE 的数学性质，在平缓处大步走、在陡峭处小步走，误差也只来自离散化。
+        </p>
+
+        <h3>2. 推导思路</h3>
+        <p>
+            Shervine 只讲了推导的主线，中间几个结论直接引用：
+        </p>
+        <ol>
+            <li>从前向 SDE $dx = f\,dt + g\,dw$ 出发。由一个定理（超出课程范围），$t$ 时刻的分布 $p_t$ 满足 Fokker-Planck 方程：
+                $$\frac{\partial p_t}{\partial t} = -\nabla\cdot\big(f\, p_t\big) + \frac{1}{2}g(t)^2\, \Delta p_t$$
+                右边第一项是输运项，描述概率质量被漂移带着走；第二项是扩散项，描述概率质量向四周摊开。
+            </li>
+            <li>利用恒等式 $\nabla p_t = p_t \nabla\log p_t$ 重新整理，把它写成连续性方程的形式（下一讲开头会细讲）：
+                $$\frac{\partial p_t}{\partial t} = -\nabla\cdot\big(v\, p_t\big), \qquad v(x,t) = f(x,t) - \frac{1}{2}g(t)^2\,\nabla_x\log p_t(x)$$
+            </li>
+            <li>连续性方程里的 $v$ 可以解释为速度，也就是 $dx/dt$。于是得到一个 ODE，叫概率流常微分方程（Probability Flow ODE，PF-ODE）：
+                $$\frac{dx}{dt} = f(x,t) - \frac{1}{2}g(t)^2\,\nabla_x\log p_t(x)$$
+            </li>
+        </ol>
+        <p>
+            右边每一项都是已知的：$f$ 和 $g$ 是我们自己选的建模假设，分数用训练好的模型 $s_\theta$ 代替。所以这个 ODE 可以直接解。名字的来历是：它没有随机项，所以是 ODE；它来自描述概率如何流动的连续性方程，所以叫概率流。
+        </p>
+        <p>
+            和反向 SDE 对比，漂移修正项的系数从 $g^2$ 变成了 $\frac{1}{2}g^2$，同时随机项消失了。少掉一半的修正正好补偿了被去掉的随机性。
+        </p>
+
+        <h3>3. 边缘分布相同，轨迹不同</h3>
+        <p>
+            幻灯片上用警告符号标出了一句话：边缘分布相同不等于轨迹相同。PF-ODE 保证每个时刻 $x$ 的分布 $p_t$ 和 SDE 一样，所以从噪声出发，最终得到的样本分布也一样。但单个点走的路径完全不同。原因是满足连续性方程的速度场不唯一：如果 $v$ 是一个解，任何满足 $\nabla\cdot(v_0\, p_t) = 0$ 的 $v_0$ 加上去，$v + v_0$ 也是解。有学生问 ODE 的轨迹是不是 SDE 轨迹的平均，Shervine 的回答是没有这么具体的解释，只是在整体上满足同样的概率流。
+        </p>
+
+        <h3>4. 反向 SDE 与 PF-ODE 对比</h3>
+        <table>
+            <tr><th></th><th>反向 SDE</th><th>PF-ODE</th></tr>
+            <tr><td>过程性质</td><td>随机</td><td>确定（起点定了，终点就定了）</td></tr>
+            <tr><td>样本多样性</td><td>更高</td><td>更低，唯一的随机性来自起点</td></tr>
+            <tr><td>样本质量</td><td>实验中通常更高</td><td>略低</td></tr>
+            <tr><td>采样速度</td><td>更慢</td><td>更快，可自适应步长</td></tr>
+        </table>
+        <p>
+            SDE 质量更高的一个直观解释是：每步注入的噪声让轨迹能探索确定性路径到不了的区域，有机会自我纠正。而 ODE 只由起点决定，数值求解时累积的误差没有机会被纠正。
+        </p>
+        <p>
+            这和上一讲的对应关系很明显：DDIM 是 DDPM 的确定性版本，PF-ODE 是反向 SDE 的确定性版本。两者都可以直接复用已经训练好的模型，不需要重新训练。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、怎样更快地解 PF-ODE</h2>
+        <h3>1. 衡量代价：NFE</h3>
+        <p>
+            这类论文普遍用 NFE（Number of Function Evaluations，函数求值次数）衡量采样代价，也就是模型前向计算的次数。目标是用尽量少的 NFE 得到好的结果。
+        </p>
+
+        <h3>2. 通用 ODE 解法</h3>
+        <p>
+            要解的问题是：已知 $dx/dt = v(x,t)$ 和起点，求终点。
+        </p>
+        <ul>
+            <li>Euler 法：在当前点算一次导数，沿切线走一步。每步 1 次 NFE，但误差大。</li>
+            <li>四阶 Runge-Kutta（RK4）：在起点、两个中点和终点各算一次导数，加权平均后再走一步。每步 4 次 NFE，单步误差是 $O(\Delta t^5)$ 量级，精确得多。实际中更常用。</li>
+        </ul>
+
+        <h3>3. 利用方程的结构：DPM-Solver</h3>
+        <p>
+            Shervine 问：有了 RK4，问题是不是就解决了？还能做得更好，因为 PF-ODE 有特殊结构。扩散模型里用到的漂移项都可以写成 $f(x,t) = f(t)\,x$，对 $x$ 是线性的。分数那一项由神经网络给出，神经网络第一层激活之后就不再是线性的了。所以 PF-ODE 是"一部分线性、一部分非线性"的半线性方程。
+        </p>
+        <p>
+            传统解法把整个式子一起离散化，没有利用这个结构。更聪明的做法是：线性部分用常数变易法精确求解，只对非线性部分做离散近似。这就是 Lu 等人 2022 年提出的 DPM-Solver。推导较长（常数变易法加变量替换），课上只给了结果。在 $s$ 到 $t$ 的一步里：
+        </p>
+        $$x_t = \frac{\alpha_t}{\alpha_s}\, x_s \;-\; \alpha_t \int_{\lambda_s}^{\lambda_t} e^{-\lambda}\ \hat\epsilon_\theta(x_\lambda, \lambda)\, d\lambda$$
+        <p>
+            第一项是线性部分的精确解，第二项的积分只涉及神经网络预测的噪声。注意积分变量换成了 $\lambda$ 而不是时间 $t$：$\lambda_t = \log(\alpha_t/\sigma_t)$，即对数信噪比的一半。$\lambda$ 随 $t$ 严格单调，所以和时间一一对应。
+        </p>
+        <p>
+            剩下的问题是那个积分。神经网络没法在连续区间上精确积分，只能离散近似。DPM-Solver 对 $\hat\epsilon_\theta$ 做泰勒展开，展开阶数不同就得到不同版本：
+        </p>
+        <ul>
+            <li>DPM-Solver-1：每步 1 次 NFE。论文证明它和 DDIM 等价。</li>
+            <li>DPM-Solver-2：每步 2 次 NFE。</li>
+            <li>DPM-Solver-$k$：做 $k-1$ 阶泰勒展开，每步 $k$ 次 NFE。</li>
+        </ul>
+        <p>
+            效果上，在相同 NFE 预算下它优于传统 ODE 解法，NFE 越少差距越明显。和 DDIM 一样，它不需要重新训练模型，因为训练目标没有变。实际中 10 到 20 次 NFE 就能得到不错的结果。
+        </p>
+        <p>
+            Shervine 把这一段的思路串起来：前向 SDE → Fokker-Planck 方程 → 连续性方程 → PF-ODE → 利用 PF-ODE 的半线性结构得到 DPM-Solver，把计算集中在真正需要离散化的那一部分。
+        </p>
+    </section>
+
+    <section>
+        <h2>十、参考资料</h2>
+        <ul>
+            <li>Estimation of Non-Normalized Statistical Models by Score Matching（Hyvärinen，2005）：提出分数匹配，用分部积分得到不依赖真实分数的损失，用来估计没有归一化常数的统计模型。</li>
+            <li>A Connection Between Score Matching and Denoising Autoencoders（Vincent，2010）：证明对加噪分布做分数匹配，等价于训练一个去噪自编码器，也就是本讲的 DSM 损失。</li>
+            <li>Sliced Score Matching（Song 等，2019）：把分数投影到随机方向上，降低高维分数匹配的计算代价。</li>
+            <li>Generative Modeling by Estimating Gradients of the Data Distribution（Song &amp; Ermon，2019）：NCSN 和退火 Langevin 采样。论文指出了单一噪声水平在低密度区域估计不准的问题，用多噪声水平解决，在 CIFAR-10 上取得了 8.87 的 Inception Score，是当时的最好成绩。</li>
+            <li>Score-Based Generative Modeling through Stochastic Differential Equations（Song 等，2020）：用 SDE 统一 DDPM 和 NCSN，给出 VP 与 VE 两类 SDE、反向 SDE 采样和概率流 ODE。课程强烈推荐。</li>
+            <li>Reverse-time Diffusion Equation Models（Anderson，1982）：反向时间 SDE 的数学结论出处。</li>
+            <li>Elucidating the Design Space of Diffusion-Based Generative Models（Karras 等，2022）：系统讨论扩散模型的参数化、损失加权、噪声调度和采样器设计。</li>
+            <li>DPM-Solver: A Fast ODE Solver for Diffusion Probabilistic Model Sampling in Around 10 Steps（Lu 等，2022）：利用 PF-ODE 的半线性结构设计专用解法器，大约 10 步就能得到高质量样本。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>十一、小结</h2>
+        <p>
+            分数 $\nabla_x\log p(x)$ 指向密度更高的方向，而且不需要知道归一化常数。真实数据的分数无法直接学，但给数据加高斯噪声后，用去噪分数匹配就能学到加噪分布的分数。单一噪声水平有两难，NCSN 同时学一串噪声水平，采样时从大噪声逐步退火到小噪声。分数和 DDPM 预测的噪声只差一个负号和一个系数，所以两者可以互相换算，区别在加噪方式（VP 还是 VE）。
+        </p>
+        <p>
+            把加噪写成连续时间的 SDE 之后，两种方法被统一起来，并且可以借用 Anderson 的反向 SDE 结论采样。去掉随机项得到 PF-ODE，它和反向 SDE 的边缘分布相同、轨迹不同，可以用更少的步数求解；再利用它的半线性结构，DPM-Solver 把采样压缩到 10 到 20 步。
+        </p>
+        <p>
+            下一讲从本讲末尾出现的连续性方程讲起，介绍第三种生成范式：流匹配。它直接学习速度场 $v$，不再绕道噪声或分数。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CME296: Diffusion &amp; Large Vision Models · Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="01_扩散模型DDPM与DDIM.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="03_流匹配与整流流.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
