@@ -39,7 +39,7 @@
 | Stanford | [CME296: Diffusion & Large Vision Models](https://joyce9896.github.io/frontier-ai-courses/CME296-Diffusion-and-Large-Vision-Models/) | Afshine Amidi、Shervine Amidi | 扩散、分数匹配与流匹配的推导，潜空间、DiT 架构、训练蒸馏与评估 |
 | CMU | [11-711: Advanced NLP](https://joyce9896.github.io/frontier-ai-courses/11-711-Advanced-NLP/) | Sean Welleck | 研究生 NLP 核心课（2026 春，23 讲）：语言模型、Transformer、预训练、微调与解码、检索、多模态、评估、强化学习、Agent、量化、并行、MoE、长序列与推理时扩展 |
 | CMU | [11-664/763: Inference Algorithms for LMs](https://joyce9896.github.io/frontier-ai-courses/11-664-LM-Inference/) | Graham Neubig、Amanda Bertsch | 语言模型推理算法（2025 秋，已整理 15 讲）：采样与搜索、受控生成、思维链与推理模型、工具与 Agent、奖励模型、MBR、推理时扩展与效率 |
-| CMU | [11-768: AI Agents](https://joyce9896.github.io/frontier-ai-courses/11-768-AI-Agents/) | Graham Neubig、Daniel Fried | 基于大语言模型的 Agent：工具、上下文、记忆、规划、SFT 与 RL 训练（课程进行中，已整理 11 讲） |
+| CMU | [11-768: AI Agents](https://joyce9896.github.io/frontier-ai-courses/11-768-AI-Agents/) | Graham Neubig、Daniel Fried | 基于大语言模型的 Agent：工具、上下文、记忆、规划、SFT 与 RL 训练、RL 系统与安全（课程进行中，已整理 13 讲） |
 
 ### Non-Technical
 
