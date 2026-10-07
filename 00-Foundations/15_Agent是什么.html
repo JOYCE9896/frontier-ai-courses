@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>15. Agent 是什么 | AI 基础</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="14_解码.html">&larr; 上一篇</a>
+    <span>AI 基础 15</span>
+    <a href="index.html">目录 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>15. Agent 是什么</h1>
+        <p class="subtitle">让语言模型调用工具、观察结果、再决定下一步：Agent 的基本循环，一次完整运行是什么样子，它由哪些部分组成，怎样变得更好，以及会带来哪些新风险</p>
+        <div class="author-meta">
+            需要的预备知识：<a href="11_语言模型.html">11</a>、<a href="13_预训练微调与对齐.html">13</a>、<a href="14_解码.html">14</a><br>
+            整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、只会说话的模型</h2>
+        <p>
+            前面讲的语言模型，输入文字、输出文字。它能回答问题、写文章、写代码，但做不了几件事：它不知道训练数据截止之后发生的事；它不能真的运行自己写的代码，看看对不对；它不能替你发邮件、订机票、修改文件。它只能"说"，不能"做"。
+        </p>
+        <p>
+            Agent 让模型能"做"。CMU 11-768 第一讲给出的定义很简洁：Agent 就是把模型放进一个循环里。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、基本循环</h2>
+        <p>
+            一个 Agent 由两部分组成：语言模型，以及包在它外面的一段普通程序，这段程序叫 Harness。循环是这样的：
+        </p>
+        <ol>
+            <li>Harness 把任务描述、可用工具的说明、到目前为止的全部历史交给模型。</li>
+            <li>模型输出一段文字。如果它想使用工具，这段文字会按约定的格式写明"调用哪个工具、传什么参数"。</li>
+            <li>Harness 解析这段文字，真正去执行工具：运行代码、搜索网页、读写文件。</li>
+            <li>Harness 把执行结果（叫观察）加进历史，回到第 1 步。</li>
+            <li>直到模型输出最终答案而不再调用工具，或者达到步数上限。</li>
+        </ol>
+        <p>
+            模型自己从来不直接执行任何东西，它只是生成文字。"执行"永远由 Harness 完成。这一点对理解 Agent 的能力和安全都很重要。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、一次完整的运行</h2>
+        <p>
+            任务："仓库里的测试有一个没通过，帮我修好。"Agent 有三个工具：运行 shell 命令、读文件、修改文件。
+        </p>
+        <p>
+            第 1 步，模型输出：
+        </p>
+<pre><code>{"tool": "run_shell", "arguments": {"command": "pytest"}}</code></pre>
+        <p>
+            Harness 运行 pytest，把结果交回：<code>test_config.py::test_zero_retries FAILED: expected 0, got 3</code>。
+        </p>
+        <p>
+            第 2 步，模型读这个结果，决定看看相关代码：
+        </p>
+<pre><code>{"tool": "read_file", "arguments": {"path": "config.py"}}</code></pre>
+        <p>
+            Harness 返回文件内容，其中有一行 <code>return config.get("retries") or 3</code>。
+        </p>
+        <p>
+            第 3 步，模型发现问题：当 retries 设为 0 时，<code>0 or 3</code> 在 Python 里得到 3。它修改这一行：
+        </p>
+<pre><code>{"tool": "edit_file", "arguments": {"path": "config.py",
+  "old": "return config.get(\"retries\") or 3",
+  "new": "retries = config.get(\"retries\")\n    return 3 if retries is None else retries"}}</code></pre>
+        <p>
+            第 4 步，再运行一次 pytest，全部通过。第 5 步，模型不再调用工具，输出总结："问题在于 0 被当成了假值，已改为只在未设置时使用默认值 3，测试全部通过。"
+        </p>
+        <p>
+            这个例子里，模型每一步都根据上一步的观察决定下一步做什么。它在开始时并不知道问题在哪，是在和环境的交互中找到的。这是它和一次性回答问题的区别。（这个 bug 也是 CMU 11-768 第六讲和第十一讲用的例子。）
+        </p>
+    </section>
+
+    <section>
+        <h2>四、模型怎样"调用"工具</h2>
+        <p>
+            模型调用工具的能力来自训练。工具的说明（名字、用途、参数及其类型）通常写成 JSON Schema 格式，放在提示词里。经过专门训练的模型会在需要时输出符合格式的工具调用，并用特殊的 token 标出"这是一次工具调用"。各家模型的具体格式不同，但思路一样（<a href="../11-768-AI-Agents/02_工具调用的机制与接口.html">CMU 11-768 第二讲</a>）。
+        </p>
+        <p>
+            为了让工具能在不同的 Agent 之间通用，Anthropic 在 2024 年提出了 MCP（Model Context Protocol），一种描述和提供工具的标准接口。另一种思路是不定义很多工具，而是让模型直接写代码，用代码去完成各种操作，这叫 CodeAct。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、Agent 需要的其他能力</h2>
+        <ul>
+            <li>上下文管理：每一步都把全部历史交给模型，几十步之后历史可能有几十万 token，超出上下文窗口，也越来越贵。常见做法是压缩：把早期的历史总结成一段摘要（<a href="../11-768-AI-Agents/03_长上下文与上下文管理.html">CMU 11-768 第三讲</a>）。</li>
+            <li>记忆：把有用的经验存到外部，以后的任务可以取用（第四讲）。</li>
+            <li>规划：复杂任务先分解成子任务，或者由多个 Agent 分工（第五讲）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>六、怎样让 Agent 更好</h2>
+        <p>
+            有两条路线。第一条不动模型，改 Harness：写更好的提示词，设计更好用的工具，改进上下文管理和流程控制。第二条训练模型：收集成功完成任务的轨迹（每一步的输入和模型输出）做监督微调；或者让模型在真实环境里反复尝试，以任务成功与否为奖励做强化学习（第 13 篇）。实际系统两条路线都用。
+        </p>
+        <p>
+            评价 Agent 用的是"在真实环境中能否完成任务"的基准。比如 SWE-bench 收集了真实 GitHub 项目里的 bug，Agent 要修改代码，用项目自己的测试判断是否修好；WebArena、OSWorld 让 Agent 在网页和桌面上完成任务。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、新的风险</h2>
+        <p>
+            Agent 能执行真实的操作，所以它的错误也有真实的后果：删掉文件、泄露数据、执行危险命令。还有一种针对 Agent 的攻击叫提示注入：攻击者把指令藏在 Agent 会读到的网页、邮件或文件里，Agent 可能把它当成任务去执行。对模型来说，用户的指令和它读到的内容都是同一个上下文里的 token，很难可靠地区分。
+        </p>
+        <p>
+            所以 Agent 的安全不能只靠模型自己判断，还要靠系统层面的限制：在隔离的沙盒里运行，只给完成任务所需的最小权限，危险操作执行前先经过检查或人工确认（<a href="../11-768-AI-Agents/13_Agent安全.html">CMU 11-768 第十三讲</a>）。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、小结</h2>
+        <p>
+            Agent 是把语言模型放进循环里：模型输出工具调用，Harness 执行工具并把结果交回，模型根据观察决定下一步，直到完成任务。模型只生成文字，真正的执行由 Harness 完成。工具调用的能力来自训练，工具用 JSON Schema 描述，MCP 是通用的工具接口标准。Agent 还需要上下文管理、记忆和规划。改进 Agent 可以改 Harness，也可以用监督微调和强化学习训练模型。Agent 能执行真实操作，带来了误操作和提示注入等新风险，需要沙盒、最小权限和检查机制来约束。
+        </p>
+        <p>
+            这是 AI 基础的最后一篇。读完这 15 篇，可以按<a href="index.html">目录页</a>的学习路线去读课程笔记了。
+        </p>
+    </section>
+
+    <section>
+        <h2>在课程笔记里继续读</h2>
+        <ul>
+            <li><a href="../11-768-AI-Agents/01_什么是Agent与模型加循环.html">CMU 11-768 第一讲</a>：什么是 Agent，它怎样工作。</li>
+            <li><a href="../11-664-LM-Inference/11_Agent与多Agent通信.html">CMU 11-664 第十一讲</a>：Agent 与多 Agent 通信。</li>
+            <li><a href="../CS329A-Self-Improving-AI-Agents/index.html">Stanford CS329A</a>：自我改进的 Agent。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>AI 基础 · Notes curated by Joyce</p>
+        <nav class="footer-nav">
+            <a href="14_解码.html">&larr; 上一篇</a>
+            <a href="index.html">目录</a>
+            <a href="../index.html">全部课程</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

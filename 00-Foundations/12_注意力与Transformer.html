@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>12. 注意力机制与 Transformer | AI 基础</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="11_语言模型.html">&larr; 上一篇</a>
+    <span>AI 基础 12</span>
+    <a href="13_预训练微调与对齐.html">下一篇 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>12. 注意力机制与 Transformer</h1>
+        <p class="subtitle">每个位置怎样从整段文字里取出需要的信息：查询、键、值，手算一次注意力，多头、因果掩码、位置编码，以及一层 Transformer 由哪些部件组成</p>
+        <div class="author-meta">
+            需要的预备知识：<a href="01_向量矩阵与求和符号.html">01</a>（点积、矩阵乘法）、<a href="05_神经网络.html">05</a>、<a href="06_softmax与交叉熵.html">06</a>、<a href="10_词向量与嵌入.html">10</a>、<a href="11_语言模型.html">11</a><br>
+            整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、要解决的问题</h2>
+        <p>
+            语言模型要根据前文预测下一个 token（第 11 篇）。每个 token 经过嵌入层得到一个向量（第 10 篇），但这个向量只代表这个 token 本身。要预测"小明把书还给了小红，因为她明天要用"中"她"后面的内容，模型需要知道"她"指的是谁，也就是要把"小红"的信息取过来。
+        </p>
+        <p>
+            Transformer 之前的主流做法是循环神经网络（RNN）：从左到右逐个读 token，把读过的内容压缩进一个固定大小的状态向量，一步步往后传。问题有两个：距离远的信息要经过很多步传递，容易丢失；必须一个一个顺序计算，训练时没法并行。
+        </p>
+        <p>
+            2017 年的论文 Attention Is All You Need 提出的 Transformer 用注意力机制解决这两个问题：每个位置直接查看前面所有位置，按相关程度取用它们的信息。任意两个位置之间只隔一步，而且所有位置可以同时计算。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、注意力：按相关程度加权平均</h2>
+
+        <h3>1. 查询、键、值</h3>
+        <p>
+            每个位置的向量 $\mathbf{x}_i$ 分别乘以三个可学习的矩阵，得到三个新向量：
+        </p>
+        <ul>
+            <li>查询（query）$\mathbf{q}_i = W_Q \mathbf{x}_i$：表示"我在找什么样的信息"。</li>
+            <li>键（key）$\mathbf{k}_i = W_K \mathbf{x}_i$：表示"我这里有什么样的信息"，用来和别人的查询匹配。</li>
+            <li>值（value）$\mathbf{v}_i = W_V \mathbf{x}_i$：表示"如果别人要取我的信息，取走的是什么"。</li>
+        </ul>
+        <p>
+            位置 $i$ 计算自己的输出时，用自己的查询和每个位置的键做点积，点积越大表示越相关；用 softmax 把这些分数变成加起来等于 1 的权重；再用权重对所有位置的值做加权平均。
+        </p>
+        $$\text{分数}_{ij} = \frac{\mathbf{q}_i \cdot \mathbf{k}_j}{\sqrt{d}}, \qquad \alpha_{ij} = \text{softmax}_j(\text{分数}_{ij}), \qquad \mathbf{o}_i = \sum_j \alpha_{ij} \mathbf{v}_j$$
+        <p>
+            除以 $\sqrt{d}$（$d$ 是向量维度）是为了防止维度高时点积太大，导致 softmax 的输出几乎全部集中在一个位置上，梯度变得很小。
+        </p>
+
+        <h3>2. 手算一次</h3>
+        <p>
+            三个位置，向量都是 2 维。假设已经算出：
+        </p>
+        <table>
+            <tr><th>位置</th><th>键 $\mathbf{k}$</th><th>值 $\mathbf{v}$</th></tr>
+            <tr><td>1</td><td>(1, 0)</td><td>(1, 0)</td></tr>
+            <tr><td>2</td><td>(0, 1)</td><td>(0, 2)</td></tr>
+            <tr><td>3</td><td>(1, 1)</td><td>(3, 1)</td></tr>
+        </table>
+        <p>
+            现在计算位置 3 的输出，它的查询是 $\mathbf{q}_3 = (2, 0)$。
+        </p>
+        <ol>
+            <li>点积：和三个键分别得到 2、0、2。</li>
+            <li>除以 $\sqrt{2} \approx 1.414$：1.414、0、1.414。</li>
+            <li>softmax：取指数得 4.113、1、4.113，总和 9.227，权重为 0.446、0.108、0.446。</li>
+            <li>加权平均值向量：$0.446 \times (1, 0) + 0.108 \times (0, 2) + 0.446 \times (3, 1) \approx (1.78, 0.66)$。</li>
+        </ol>
+        <p>
+            位置 3 的查询"在找第一维大的信息"，位置 1 和 3 的键在第一维上有值，所以它主要取用了这两个位置的信息，位置 2 只分到约 11%。这些矩阵 $W_Q, W_K, W_V$ 是训练出来的，模型会自己学会什么样的查询该匹配什么样的键，比如让代词的查询匹配名词的键。
+        </p>
+
+        <h3>3. 矩阵形式</h3>
+        <p>
+            所有位置的计算可以合成几次矩阵乘法。把所有查询排成矩阵 $Q$，键排成 $K$，值排成 $V$：
+        </p>
+        $$\text{Attention}(Q, K, V) = \text{softmax}\!\left(\frac{QK^\top}{\sqrt{d}}\right) V$$
+        <p>
+            $QK^\top$ 一次算出所有位置两两之间的分数，是一个 $N \times N$ 的矩阵（$N$ 是序列长度）。这就是为什么注意力的计算量随序列长度的平方增长：长度翻倍，这个矩阵变成四倍大。长上下文的各种优化（CMU 11-664 第 20、22 讲补充篇）都在处理这个问题。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、语言模型需要的几个补充</h2>
+
+        <h3>1. 因果掩码</h3>
+        <p>
+            训练语言模型时，所有位置同时计算（第 11 篇）。但位置 $i$ 预测的是第 $i+1$ 个 token，如果它能看到后面的位置，就等于偷看了答案。所以要把分数矩阵里"看向未来"的部分（$j > i$）设成负无穷，softmax 之后权重为 0。这叫因果掩码，有了它，每个位置只能看到自己和前面的内容。上面的手算例子算的是最后一个位置，本来就看不到更后面的位置。
+        </p>
+
+        <h3>2. 多头注意力</h3>
+        <p>
+            一个词可能同时需要好几种信息：它的主语是谁、它修饰哪个词、前面有没有否定词。一组 $W_Q, W_K, W_V$ 只能学一种"匹配方式"。多头注意力并行地使用好几组（比如 12 组），每组叫一个头，各自在较小的维度上做注意力，结果拼接起来再经过一个线性层。不同的头可以学会关注不同类型的关系。
+        </p>
+
+        <h3>3. 位置信息</h3>
+        <p>
+            注意力本身只看向量的内容，不知道顺序："狗咬人"和"人咬狗"如果不加位置信息，每个词得到的注意力结果是一样的。所以要把位置信息加进去。最早的 Transformer 给每个位置一个固定的位置向量，加到词向量上；现在的大模型多用旋转位置编码（RoPE），在计算查询和键时按位置旋转向量，让点积能反映两个位置的相对距离。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、一层 Transformer</h2>
+        <p>
+            一层 Transformer（也叫一个块）由两部分组成，每部分都带有残差连接和归一化（第 5 篇）：
+        </p>
+        <ol>
+            <li>注意力子层：$\mathbf{x} \leftarrow \mathbf{x} + \text{Attention}(\text{Norm}(\mathbf{x}))$。每个位置从其他位置取来信息，加到自己身上。</li>
+            <li>前馈子层：$\mathbf{x} \leftarrow \mathbf{x} + \text{FFN}(\text{Norm}(\mathbf{x}))$。FFN 是一个两层的神经网络（第 5 篇），对每个位置分别计算，中间层通常是向量维度的 4 倍左右。一般认为模型的大量知识存储在 FFN 的参数里。</li>
+        </ol>
+        <p>
+            分工可以这样概括：注意力负责在位置之间传递信息，前馈层负责在每个位置上加工信息。残差连接让每一层只需要在原来的向量上做"修改"，网络很深时也能稳定训练。
+        </p>
+        <p>
+            完整的语言模型是：嵌入层 → 很多层 Transformer 叠在一起 → 最后的归一化 → 输出层（把每个位置的向量变成词表上的分数）→ softmax。以 GPT-2 最小的版本为例：12 层，向量 768 维，每层 12 个注意力头，FFN 中间层 3072 维，总参数约 1.24 亿。其中 12 层 Transformer 约 8500 万个参数，嵌入矩阵约 3860 万个。今天的大模型结构基本相同，只是层数更多、向量更宽，有的把 FFN 换成混合专家（MoE），有的修改了注意力的细节。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、推理时的 KV 缓存</h2>
+        <p>
+            生成文字时是一个 token 一个 token 地生成（第 11 篇）。生成第 101 个 token 时，前 100 个位置的键和值和上一步算出的完全一样，不需要重算。所以把每层每个位置的键和值存下来，新 token 只计算自己的查询、键、值，和存下的键值做注意力。这份存储叫 KV 缓存，它让生成快了很多，但也占用大量显存，是大模型推理优化的重点（CMU 11-664 第 20 讲补充篇）。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、小结</h2>
+        <p>
+            注意力让每个位置用自己的查询和所有位置的键做点积，经 softmax 得到权重，再对值做加权平均，从而直接取用任意距离的信息，并且所有位置可以并行计算；分数矩阵是 $N \times N$ 的，计算量随长度平方增长。语言模型用因果掩码防止看到后面的内容，用多头注意力同时学习多种关系，用位置编码提供顺序信息。一层 Transformer 是注意力子层加前馈子层，各带残差连接和归一化；完整模型是嵌入层、多层 Transformer 和输出层。生成时用 KV 缓存避免重复计算。
+        </p>
+    </section>
+
+    <section>
+        <h2>在课程笔记里继续读</h2>
+        <ul>
+            <li><a href="../CS224N-NLP-with-Deep-Learning/04_Transformer架构详解.html">Stanford CS224N 第四讲</a>：Transformer 的完整推导。</li>
+            <li><a href="../11-711-Advanced-NLP/05_注意力与Transformer.html">CMU 11-711 第五讲</a>：注意力与 Transformer。</li>
+            <li><a href="../CS336-Language-Modeling-from-Scratch/03_模型架构与超参数选择的工程直觉.html">Stanford CS336 第三讲</a>：现代大模型在 Transformer 基础上做了哪些改动。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>AI 基础 · Notes curated by Joyce</p>
+        <nav class="footer-nav">
+            <a href="11_语言模型.html">&larr; 上一篇</a>
+            <a href="index.html">目录</a>
+            <a href="13_预训练微调与对齐.html">下一篇 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

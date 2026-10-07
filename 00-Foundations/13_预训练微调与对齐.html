@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>13. 预训练、微调与对齐 | AI 基础</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="12_注意力与Transformer.html">&larr; 上一篇</a>
+    <span>AI 基础 13</span>
+    <a href="14_解码.html">下一篇 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>13. 预训练、微调与对齐</h1>
+        <p class="subtitle">一个大模型从随机参数到能对话的助手，中间经过哪几个训练阶段：预训练、监督微调、基于人类偏好的训练、基于可验证奖励的强化学习，每个阶段用什么数据、解决什么问题</p>
+        <div class="author-meta">
+            需要的预备知识：<a href="07_梯度下降与反向传播.html">07</a>、<a href="11_语言模型.html">11. 语言模型</a><br>
+            整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、总览</h2>
+        <p>
+            今天的大模型助手一般经过以下几个阶段的训练，前一个阶段的结果是后一个阶段的起点：
+        </p>
+        <table>
+            <tr><th>阶段</th><th>数据</th><th>学到什么</th></tr>
+            <tr><td>预训练</td><td>几万亿 token 的网页、书籍、代码</td><td>语言、知识、一定的推理能力；会续写文本</td></tr>
+            <tr><td>中期训练（可选）</td><td>精选的高质量数据、长文档、数学和代码</td><td>加强特定能力，延长上下文</td></tr>
+            <tr><td>监督微调（SFT）</td><td>几万到几百万条"指令 + 理想回答"</td><td>按指令回答，遵循对话格式</td></tr>
+            <tr><td>偏好训练（RLHF、DPO）</td><td>人对多个回答的比较</td><td>回答更有用、更符合人的偏好、更安全</td></tr>
+            <tr><td>可验证奖励的强化学习</td><td>有标准答案或测试的题目</td><td>数学、编程等任务上的推理能力</td></tr>
+        </table>
+        <p>
+            预训练之后的所有阶段统称后训练。这些阶段都用梯度下降训练，区别在数据和损失函数。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、预训练</h2>
+        <p>
+            预训练就是第 11 篇讲的语言模型训练：在海量文本上预测下一个 token。规模很大：Meta 的 Llama 3 在超过 15 万亿个 token 上预训练，用了上万张 GPU，耗时数月。绝大部分计算花在这个阶段。
+        </p>
+        <p>
+            数据的质量和配比很重要。原始网页里有大量重复、垃圾、低质量内容，需要去重、过滤、按质量打分，再决定网页、书籍、代码、数学、多语言各占多少比例。<a href="../CS336-Language-Modeling-from-Scratch/09_预训练数据工程的全流程剖析.html">Stanford CS336 第九讲</a>专门讲这部分。
+        </p>
+        <p>
+            预训练出来的叫基座模型。它很有知识，但只会续写。给它"怎样煮米饭？"，它可能续写成一个问题列表，因为网上很多页面就是一连串问题。它也不知道什么时候该停下来。
+        </p>
+        <p>
+            模型应该多大、训练多少数据，有规律可循。缩放定律发现，在固定的计算预算下，模型参数量和训练 token 数之间有一个最佳的比例（<a href="../11-711-Advanced-NLP/07_缩放定律与上下文学习.html">CMU 11-711 第七讲</a>）。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、监督微调</h2>
+        <p>
+            监督微调（Supervised Fine-Tuning，SFT）用"指令和理想回答"配对的数据继续训练：
+        </p>
+        <ul>
+            <li>指令："用三句话解释光合作用。"</li>
+            <li>回答：一段写得好的三句话解释。</li>
+        </ul>
+        <p>
+            训练方法还是预测下一个 token，但只对回答部分计算损失，指令部分只作为上下文。数据按对话模板组织，用特殊的 token 标出哪里是用户说的话、哪里是助手说的话，模型由此学会对话的格式，以及在回答完之后输出结束标记。
+        </p>
+        <p>
+            SFT 需要的数据量比预训练小得多，几万条高质量数据就能明显改变模型的行为。一般认为，模型的知识和能力主要来自预训练，SFT 主要是教会它用什么方式把这些能力表现出来。
+        </p>
+        <p>
+            微调所有参数需要很多显存。LoRA 是一种常用的省资源方法：冻结原模型的参数，只在部分权重矩阵旁边加上两个小的低秩矩阵并只训练它们，需要训练的参数可以少到原来的千分之一以下（<a href="../CS224N-NLP-with-Deep-Learning/07_高效适配提示工程与PEFT.html">Stanford CS224N 第七讲</a>）。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、基于人类偏好的训练</h2>
+
+        <h3>1. 为什么 SFT 不够</h3>
+        <p>
+            很多任务没有唯一的理想回答，写出理想回答也很费力。但人比较两个回答哪个更好要容易得多。而且 SFT 只告诉模型"应该怎么说"，没有告诉它"哪些说法不好"。
+        </p>
+
+        <h3>2. RLHF</h3>
+        <p>
+            基于人类反馈的强化学习（RLHF）分三步：
+        </p>
+        <ol>
+            <li>让模型对同一个问题生成几个回答，请人标注哪个更好。</li>
+            <li>用这些比较数据训练一个奖励模型：输入一个问题和回答，输出一个分数，人更喜欢的回答分数应该更高。</li>
+            <li>用强化学习训练语言模型，让它生成的回答在奖励模型那里得高分。同时加一个约束，不让模型偏离 SFT 之后的版本太远，防止它找到奖励模型的漏洞，生成奇怪的高分回答。</li>
+        </ol>
+        <p>
+            OpenAI 2022 年的 InstructGPT 论文用了这个方法。人工评估中，经过 RLHF 的 13 亿参数模型的回答，比 1750 亿参数的原始 GPT-3 更受偏好。ChatGPT 也是用这种方法训练的。
+        </p>
+
+        <h3>3. DPO</h3>
+        <p>
+            RLHF 要训练单独的奖励模型，还要跑强化学习，流程复杂且不稳定。2023 年提出的 DPO（直接偏好优化）证明，可以跳过奖励模型和强化学习，直接用偏好数据训练语言模型：对每一对"更好的回答、更差的回答"，提高前者相对于后者的概率。它在形式上就是一个普通的监督学习损失，实现简单得多（<a href="../CS224N-NLP-with-Deep-Learning/06_后训练RLHF_SFT与DPO.html">Stanford CS224N 第六讲</a>）。
+        </p>
+
+        <h3>4. 对齐</h3>
+        <p>
+            让模型的行为符合人的意图和价值观，叫对齐。偏好训练是实现对齐的主要手段之一，包括让模型有帮助、诚实，并拒绝明显有害的请求。对齐也有自己的问题：模型可能学会讨好用户，或者在不该拒绝时过度拒绝。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、基于可验证奖励的强化学习</h2>
+        <p>
+            数学题有标准答案，编程题可以运行测试。对这类任务，不需要人来评判，程序就能自动判断回答对不对，这叫可验证奖励。用它做强化学习的过程是：
+        </p>
+        <ol>
+            <li>给模型一道题，让它生成多个完整的解答，每个解答都包含推理过程和最终答案。</li>
+            <li>检查最终答案是否正确，正确得 1 分，错误得 0 分。</li>
+            <li>提高得分高的解答的概率，降低得分低的解答的概率。</li>
+        </ol>
+        <p>
+            这种训练让模型学会了写很长的推理过程：分步思考、检查、发现错误后回头重来，答对的概率随之提高。OpenAI 的 o1 和 DeepSeek 在 2025 年发表的 R1 都是这样的"推理模型"。DeepSeek-R1 使用的算法是 GRPO：对同一道题的一组解答，以这组的平均分为基准，比平均好的解答被加强，比平均差的被削弱，不需要单独训练一个价值模型。
+        </p>
+        <p>
+            同样的方法也用来训练 Agent：让模型在真实环境中完成任务（修复代码中的 bug、操作网页），以任务是否成功作为奖励（<a href="../11-768-AI-Agents/09_强化学习基础.html">CMU 11-768 第九讲</a>）。这里常出现奖励作弊：模型可能找到评分规则的漏洞，比如修改测试让它通过，而不是真正修好代码。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、蒸馏</h2>
+        <p>
+            训练小模型的另一条常用途径是蒸馏：用一个大的强模型（教师）生成大量回答或推理过程，再用这些数据对小模型（学生）做监督微调。很多开源的小型推理模型就是用大型推理模型生成的推理过程蒸馏出来的。蒸馏比从头做强化学习便宜得多，但学生的能力通常不会超过教师（<a href="../11-711-Advanced-NLP/08_微调与蒸馏.html">CMU 11-711 第八讲</a>）。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、小结</h2>
+        <p>
+            大模型助手先在几万亿 token 上预训练，学到语言和知识，得到只会续写的基座模型；监督微调用指令和理想回答教会它按指令回答和对话格式；偏好训练（RLHF 用奖励模型加强化学习，DPO 直接在偏好对上训练）让回答更符合人的偏好；在有标准答案或测试的任务上做强化学习，让模型学会长推理，得到推理模型，也用来训练 Agent。各阶段都用梯度下降，区别在于数据和损失。蒸馏用强模型的输出训练小模型，是一条更便宜的路线。
+        </p>
+    </section>
+
+    <section>
+        <h2>在课程笔记里继续读</h2>
+        <ul>
+            <li><a href="../11-711-Advanced-NLP/06_预训练.html">CMU 11-711 第六讲</a>：预训练。</li>
+            <li><a href="../CS336-Language-Modeling-from-Scratch/10_对齐三部曲SFT_RLHF与强化学习.html">Stanford CS336 第十讲</a>：SFT、RLHF 与强化学习。</li>
+            <li><a href="../11-711-Advanced-NLP/17_大模型的强化学习.html">CMU 11-711 第十七讲</a>：大模型的强化学习。</li>
+            <li><a href="../11-664-LM-Inference/09_推理模型.html">CMU 11-664 第九讲</a>：推理模型、GRPO 与 DeepSeek-R1。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>AI 基础 · Notes curated by Joyce</p>
+        <nav class="footer-nav">
+            <a href="12_注意力与Transformer.html">&larr; 上一篇</a>
+            <a href="index.html">目录</a>
+            <a href="14_解码.html">下一篇 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

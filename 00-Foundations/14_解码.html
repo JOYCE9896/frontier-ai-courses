@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>14. 解码：模型怎样生成文字 | AI 基础</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="13_预训练微调与对齐.html">&larr; 上一篇</a>
+    <span>AI 基础 14</span>
+    <a href="15_Agent是什么.html">下一篇 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>14. 解码：模型怎样生成文字</h1>
+        <p class="subtitle">有了下一个 token 的概率分布，怎样选出实际输出的那个：贪心、束搜索、随机采样，温度、top-k、top-p 用具体数字算一遍，以及各自适合什么场景</p>
+        <div class="author-meta">
+            需要的预备知识：<a href="02_概率与对数.html">02</a>、<a href="06_softmax与交叉熵.html">06</a>、<a href="11_语言模型.html">11</a><br>
+            整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、问题</h2>
+        <p>
+            语言模型每一步给出下一个 token 的概率分布（第 11 篇）。比如读到"今天天气很"，模型给出：
+        </p>
+        <table>
+            <tr><th>token</th><th>好</th><th>热</th><th>冷</th><th>不错</th><th>晴朗</th><th>差</th><th>其他所有</th></tr>
+            <tr><td>概率</td><td>0.50</td><td>0.20</td><td>0.12</td><td>0.08</td><td>0.05</td><td>0.03</td><td>0.02</td></tr>
+        </table>
+        <p>
+            模型只给分布，不替我们做选择。从分布里选出 token 的规则叫解码算法，同一个模型用不同的解码算法，输出可能差别很大。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、选概率最高的</h2>
+
+        <h3>1. 贪心解码</h3>
+        <p>
+            最简单的做法：每一步都选概率最高的 token。上面的例子选"好"。结果是确定的，同样的输入总是得到同样的输出。
+        </p>
+        <p>
+            贪心解码有一个问题：每一步的最优，不一定组成整体最优。假设第一步"A"的概率 0.5，"B"0.4；选了 A 之后，下一步最好的 token 概率只有 0.4；选了 B 之后，下一步有一个 token 概率 0.9。贪心选 A 再选那个 0.4，整个序列的概率是 $0.5 \times 0.4 = 0.2$；先选 B 再选 0.9，是 $0.4 \times 0.9 = 0.36$，更高。贪心在第一步就错过了。
+        </p>
+        <p>
+            贪心解码还容易陷入重复，反复生成同一句话，因为一旦某句话出现过，模型往往认为它再次出现的概率更高。
+        </p>
+
+        <h3>2. 束搜索</h3>
+        <p>
+            束搜索（beam search）同时保留几个候选，比如 4 个（束宽为 4）。每一步把每个候选往后延伸所有可能的 token，按整个序列的概率（实际用对数概率之和）排序，只保留最好的 4 个。上面的例子里，束宽为 2 就能同时保留 A 和 B，最终找到 0.36 那条。
+        </p>
+        <p>
+            束搜索在机器翻译、语音识别这类"答案基本确定"的任务上很有效。但用于开放式写作和对话时，它找到的高概率文本往往平淡、重复。研究发现，人写的文字并不是概率最高的文字，所以一味追求高概率反而不像人话（<a href="../11-664-LM-Inference/04_束搜索及其变体.html">CMU 11-664 第四讲</a>）。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、随机采样</h2>
+        <p>
+            另一类方法是按概率随机抽取（第 2 篇）。上面的例子里，50% 的时候输出"好"，20% 的时候输出"热"，依此类推。每次运行结果不同，文字更多样、更自然。聊天模型默认使用采样，所以同一个问题问两次，回答会不一样。
+        </p>
+        <p>
+            直接采样的问题在长尾。"其他所有"虽然只有 2%，但它包括几万个 token，其中很多完全不通顺。生成一段几百个 token 的文字，每一步都有一点点概率抽到不合适的 token，累积起来几乎肯定会在某处出错，而一旦出错，后面的内容会跟着跑偏。下面三种方法都在调整分布，减少这种情况。
+        </p>
+
+        <h3>1. 温度</h3>
+        <p>
+            第 6 篇讲过，在 softmax 之前把分数除以温度 $T$。用上面的分布试一下：
+        </p>
+        <table>
+            <tr><th>温度</th><th>好</th><th>热</th><th>冷</th><th>不错</th><th>晴朗</th><th>差</th><th>其他</th></tr>
+            <tr><td>$T = 0.5$</td><td>0.795</td><td>0.127</td><td>0.046</td><td>0.020</td><td>0.008</td><td>0.003</td><td>0.001</td></tr>
+            <tr><td>$T = 1$</td><td>0.50</td><td>0.20</td><td>0.12</td><td>0.08</td><td>0.05</td><td>0.03</td><td>0.02</td></tr>
+            <tr><td>$T = 2$</td><td>0.305</td><td>0.193</td><td>0.149</td><td>0.122</td><td>0.096</td><td>0.075</td><td>0.061</td></tr>
+        </table>
+        <p>
+            温度低，概率集中到最可能的 token 上，长尾几乎消失，输出更稳定但更单调；温度趋于 0 时就是贪心解码。温度高，分布变平，长尾的概率变大，输出更多样也更容易出错。只有 $T = 1$ 时是从模型原本的分布中采样（CMU 11-664 第二讲讨论了这一点的意义）。
+        </p>
+
+        <h3>2. top-k</h3>
+        <p>
+            只保留概率最高的 $k$ 个 token，其余概率设为 0，再把保留的概率重新归一化（加起来等于 1）。$k = 3$ 时，保留"好、热、冷"，它们原本加起来是 0.82，归一化后变成 0.610、0.244、0.146。长尾被完全切掉。
+        </p>
+        <p>
+            top-k 的缺点是 $k$ 固定。有时模型很确定，前 1 个 token 就占了 99%，保留 3 个反而引入了不该有的选项；有时模型很不确定，几十个 token 都合理，只保留 3 个又太少。
+        </p>
+
+        <h3>3. top-p（核采样）</h3>
+        <p>
+            top-p 按累积概率截断：把 token 按概率从高到低排，依次累加，加到超过 $p$ 为止，保留这些 token。$p = 0.9$ 时：好 0.50，加热到 0.70，加冷到 0.82，加不错到 0.90，达到 0.9，保留这 4 个，归一化后是 0.556、0.222、0.133、0.089。
+        </p>
+        <p>
+            保留几个 token 随分布自动变化：模型确定时保留的少，不确定时保留的多。这是目前最常用的采样方法之一，常和温度一起使用，比如温度 0.7、top-p 0.9。
+        </p>
+        <p>
+            还有其他的截断方法，比如 min-p（只保留概率不低于最高概率某个比例的 token），思路相似。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、怎样选择</h2>
+        <ul>
+            <li>有唯一正确答案的任务（数学题的最终答案、提取信息、分类、翻译）：贪心或低温度，追求稳定。</li>
+            <li>开放式写作、头脑风暴、对话：温度 0.7 到 1 左右，配合 top-p，追求自然和多样。</li>
+            <li>需要多次尝试再挑选的方法（生成多个答案再投票、再用奖励模型挑最好的）：需要采样带来的多样性，否则多次生成都一样，挑选就没有意义。CMU 11-664 第七讲的自洽性、第十二讲的 Best-of-N 都依赖采样。</li>
+        </ul>
+        <p>
+            还有一些控制手段：重复惩罚（降低已经出现过的 token 的概率）、停止条件（遇到结束标记或某个字符串就停止）、最大长度限制。需要输出严格符合某种格式（比如合法的 JSON）时，可以在每一步把不合格式的 token 概率设为 0，这叫约束解码（<a href="../11-664-LM-Inference/06_其他受控生成方法.html">CMU 11-664 第六讲</a>）。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、解码的速度</h2>
+        <p>
+            无论用哪种规则，生成都是一个 token 接一个 token 地进行，每个 token 都要把整个模型算一遍。束搜索和多次采样还要成倍增加计算量。怎样在不改变结果的前提下加快这个过程，比如用小模型先猜几个 token 再让大模型一次检查（推测解码），是 CMU 11-664 第 21 讲补充篇等内容讨论的问题。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、小结</h2>
+        <p>
+            解码算法决定怎样从每一步的概率分布中选出 token。贪心每步选最高概率，确定但容易错过整体更好的序列、容易重复；束搜索保留多个候选，适合答案确定的任务，用于开放式生成时容易平淡。随机采样更自然多样，但长尾里的不合适 token 累积起来会出错。温度调节分布的集中程度，top-k 保留固定个数的最高概率 token，top-p 按累积概率动态决定保留多少个。确定性任务用贪心或低温度，开放式任务用适中的温度加 top-p，需要多次生成再挑选的方法依赖采样的多样性。
+        </p>
+    </section>
+
+    <section>
+        <h2>在课程笔记里继续读</h2>
+        <ul>
+            <li><a href="../11-711-Advanced-NLP/09_解码算法.html">CMU 11-711 第九讲</a>：解码算法总览。</li>
+            <li><a href="../11-664-LM-Inference/03_常用采样方法.html">CMU 11-664 第三讲</a>：温度、top-k、top-p、典型采样等。</li>
+            <li><a href="../11-664-LM-Inference/04_束搜索及其变体.html">CMU 11-664 第四讲</a>：束搜索及其问题。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>AI 基础 · Notes curated by Joyce</p>
+        <nav class="footer-nav">
+            <a href="13_预训练微调与对齐.html">&larr; 上一篇</a>
+            <a href="index.html">目录</a>
+            <a href="15_Agent是什么.html">下一篇 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>05. 神经网络：一层层叠起来的函数 | AI 基础</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="04_机器学习在做什么.html">&larr; 上一篇</a>
+    <span>AI 基础 05</span>
+    <a href="06_softmax与交叉熵.html">下一篇 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>05. 神经网络：一层层叠起来的函数</h1>
+        <p class="subtitle">线性层、激活函数，为什么必须有非线性，手算一个两层网络，用两个隐藏单元解决直线解决不了的 XOR 问题，以及参数量怎样数</p>
+        <div class="author-meta">
+            需要的预备知识：<a href="01_向量矩阵与求和符号.html">01. 向量、矩阵与求和符号</a>、<a href="04_机器学习在做什么.html">04. 机器学习在做什么</a><br>
+            整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、直线不够用</h2>
+        <p>
+            第 4 篇用一条直线 $\hat{y} = wx + b$ 预测分数。输入有多个特征时，可以推广为 $\hat{y} = \mathbf{w}^\top \mathbf{x} + b$，每个特征一个权重，这叫线性模型。线性模型能表示的规律有限：它只能表示"每个特征各自按固定比例影响结果"。现实中的规律往往复杂得多，比如一个词的情感取决于前面有没有"不"，两个特征要组合起来才有意义。神经网络就是一种能表示复杂规律的模型。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、组成部分</h2>
+
+        <h3>1. 线性层</h3>
+        <p>
+            第 1 篇讲过，神经网络最基本的一层是：
+        </p>
+        $$\mathbf{h} = W\mathbf{x} + \mathbf{b}$$
+        <p>
+            输入 $n$ 维向量 $\mathbf{x}$，输出 $m$ 维向量 $\mathbf{h}$，$W$ 是 $m \times n$ 的权重矩阵，$\mathbf{b}$ 是 $m$ 维偏置。输出的每一个分量，都是所有输入的加权和再加一个偏置，相当于同时运行了 $m$ 个线性模型。这一层也叫全连接层，因为每个输出都和每个输入相连。
+        </p>
+
+        <h3>2. 只叠线性层没有用</h3>
+        <p>
+            一个自然的想法是把线性层叠起来：先 $\mathbf{h} = W_1 \mathbf{x} + \mathbf{b}_1$，再 $\mathbf{y} = W_2 \mathbf{h} + \mathbf{b}_2$。但展开一下：
+        </p>
+        $$\mathbf{y} = W_2(W_1 \mathbf{x} + \mathbf{b}_1) + \mathbf{b}_2 = (W_2 W_1)\mathbf{x} + (W_2 \mathbf{b}_1 + \mathbf{b}_2)$$
+        <p>
+            $W_2 W_1$ 还是一个矩阵，$W_2 \mathbf{b}_1 + \mathbf{b}_2$ 还是一个向量。两层合起来等于一层，叠一百层也一样。线性函数套线性函数仍然是线性函数，表达能力没有增加。
+        </p>
+
+        <h3>3. 激活函数</h3>
+        <p>
+            解决办法是在两层之间加一个非线性函数，对每个分量分别作用，叫激活函数。最常用的是 ReLU：
+        </p>
+        $$\text{ReLU}(z) = \max(0, z)$$
+        <p>
+            负数变成 0，正数不变。它很简单，但已经足够打破线性。其他常见的激活函数有 sigmoid（把数压到 0 和 1 之间）、tanh（压到 −1 和 1 之间），以及大语言模型常用的 GELU 和 SwiGLU，它们可以看作 ReLU 的平滑版本。
+        </p>
+        <p>
+            一个两层的神经网络就是：
+        </p>
+        $$\mathbf{h} = \text{ReLU}(W_1 \mathbf{x} + \mathbf{b}_1), \qquad \mathbf{y} = W_2 \mathbf{h} + \mathbf{b}_2$$
+        <p>
+            中间的 $\mathbf{h}$ 叫隐藏层，它既不是输入也不是输出。隐藏层的每个分量常被称为一个神经元（这个名字来自早期对大脑神经元的粗略模仿，现代神经网络与生物神经元关系不大）。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、手算一个小网络</h2>
+        <p>
+            输入 2 维，隐藏层 3 维，输出 1 维。设参数为：
+        </p>
+        $$W_1 = \begin{pmatrix} 1 & -1 \\ 0.5 & 1 \\ -1 & 1 \end{pmatrix}, \quad \mathbf{b}_1 = \begin{pmatrix} 0 \\ -1 \\ 0.5 \end{pmatrix}, \quad W_2 = \begin{pmatrix} 1 & -2 & 0.5 \end{pmatrix}, \quad b_2 = 0.1$$
+        <p>
+            输入 $\mathbf{x} = (1, 2)$。
+        </p>
+        <ol>
+            <li>线性部分：$W_1 \mathbf{x} + \mathbf{b}_1 = (1 - 2 + 0,\ 0.5 + 2 - 1,\ -1 + 2 + 0.5) = (-1,\ 1.5,\ 1.5)$。</li>
+            <li>ReLU：$\mathbf{h} = (0,\ 1.5,\ 1.5)$。第一个分量是负数，被置为 0。</li>
+            <li>输出层：$y = 1 \times 0 + (-2) \times 1.5 + 0.5 \times 1.5 + 0.1 = -2.15$。</li>
+        </ol>
+        <p>
+            这就是一次前向计算。训练时会根据输出和正确答案之间的损失，用反向传播（第 7 篇）计算每个参数的梯度，再更新 $W_1, \mathbf{b}_1, W_2, b_2$。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、非线性带来了什么：XOR 问题</h2>
+        <p>
+            XOR（异或）是一个经典的例子。两个输入都是 0 或 1，规则是"两者不同时输出 1，相同时输出 0"：
+        </p>
+        <table>
+            <tr><th>$x_1$</th><th>$x_2$</th><th>正确输出</th></tr>
+            <tr><td>0</td><td>0</td><td>0</td></tr>
+            <tr><td>0</td><td>1</td><td>1</td></tr>
+            <tr><td>1</td><td>0</td><td>1</td></tr>
+            <tr><td>1</td><td>1</td><td>0</td></tr>
+        </table>
+        <p>
+            线性模型做不到这一点。把四个点画在平面上，输出为 1 的两个点在一条对角线上，输出为 0 的两个点在另一条对角线上，找不到一条直线把它们分开。
+        </p>
+        <p>
+            加一个只有两个神经元的隐藏层就可以：
+        </p>
+        $$h_1 = \text{ReLU}(x_1 + x_2), \qquad h_2 = \text{ReLU}(x_1 + x_2 - 1), \qquad y = h_1 - 2h_2$$
+        <table>
+            <tr><th>$(x_1, x_2)$</th><th>$h_1$</th><th>$h_2$</th><th>$y$</th></tr>
+            <tr><td>(0, 0)</td><td>0</td><td>0</td><td>0</td></tr>
+            <tr><td>(0, 1)</td><td>1</td><td>0</td><td>1</td></tr>
+            <tr><td>(1, 0)</td><td>1</td><td>0</td><td>1</td></tr>
+            <tr><td>(1, 1)</td><td>2</td><td>1</td><td>0</td></tr>
+        </table>
+        <p>
+            四个输出全对。$h_1$ 统计有几个输入是 1，$h_2$ 只在两个都是 1 时才激活。ReLU 把 $h_2$ 在前三种情况下都截成了 0，这个"截断"就是线性函数做不到的。隐藏层把输入变换成了一种新的表示，在新的表示上，问题变得线性可解。
+        </p>
+        <p>
+            这里的参数是手工设计的。实际中参数由训练自动找出来，隐藏层学到的表示也往往很难用人话解释。理论上已经证明，只要隐藏层足够宽，两层网络就能以任意精度逼近任何连续函数（万能逼近定理）。实践中更常用的是加深层数而不是一味加宽，深层网络能用少得多的参数表示复杂的规律。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、参数有多少</h2>
+        <p>
+            一个线性层有 $m \times n$ 个权重和 $m$ 个偏置。以识别手写数字的经典网络为例：输入是 28×28 = 784 个像素，隐藏层 128 个神经元，输出 10 个类别（数字 0 到 9）：
+        </p>
+        <ul>
+            <li>第一层：$784 \times 128 + 128 = 100{,}480$</li>
+            <li>第二层：$128 \times 10 + 10 = 1{,}290$</li>
+            <li>合计 101,770 个参数。</li>
+        </ul>
+        <p>
+            大语言模型的结构更复杂（第 12 篇讲 Transformer），但参数大部分也都在这样的矩阵里。GPT-2 最小的版本约有 1.24 亿个参数，GPT-3 有 1750 亿个。"一个 70 亿参数的模型"指的就是所有这些矩阵和向量里一共有 70 亿个数。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、深度学习里常见的其他部件</h2>
+        <p>
+            现代网络除了线性层和激活函数，还常用以下几种部件，课程笔记里会频繁出现：
+        </p>
+        <ul>
+            <li>残差连接：把一层的输入直接加到它的输出上，$\mathbf{y} = \mathbf{x} + f(\mathbf{x})$。网络很深时，这能让梯度顺利传回前面的层（第 7 篇的梯度消失问题）。</li>
+            <li>归一化层（LayerNorm、RMSNorm）：把每个向量的数值调整到稳定的范围，让训练更稳定。</li>
+            <li>嵌入层：把 token 编号变成向量（第 10 篇）。</li>
+            <li>注意力层：让序列中的每个位置读取其他位置的信息（第 12 篇）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>七、小结</h2>
+        <p>
+            线性层对输入做 $W\mathbf{x} + \mathbf{b}$，但只叠线性层等于一层，必须在层之间加入激活函数（如 ReLU）才能表示非线性的规律。隐藏层把输入变换成新的表示，XOR 这样线性模型无法解决的问题，在新表示上变得可解。参数量等于所有权重矩阵和偏置里数的总数，大语言模型的参数也主要在这些矩阵里。现代网络还会加上残差连接、归一化、嵌入和注意力等部件。
+        </p>
+    </section>
+
+    <section>
+        <h2>在课程笔记里继续读</h2>
+        <ul>
+            <li><a href="../CS224N-NLP-with-Deep-Learning/02_反向传播与神经网络基础.html">Stanford CS224N 第二讲</a>：神经元、非线性激活和多层网络。</li>
+            <li><a href="../11-711-Advanced-NLP/02_学到的表示与分词.html">CMU 11-711 第二讲</a>：深度连续词袋模型，用隐藏层组合特征。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>AI 基础 · Notes curated by Joyce</p>
+        <nav class="footer-nav">
+            <a href="04_机器学习在做什么.html">&larr; 上一篇</a>
+            <a href="index.html">目录</a>
+            <a href="06_softmax与交叉熵.html">下一篇 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

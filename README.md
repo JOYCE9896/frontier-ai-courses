@@ -26,7 +26,7 @@
 
 | 内容 | 说明 |
 | :--- | :--- |
-| [AI 基础：从零开始](https://joyce9896.github.io/frontier-ai-courses/00-Foundations/) | 给零基础读者的前置知识，每篇讲一个概念，用具体数字算一遍再给公式，附各门课的推荐阅读顺序（陆续更新） |
+| [AI 基础：从零开始](https://joyce9896.github.io/frontier-ai-courses/00-Foundations/) | 给零基础读者的前置知识，每篇讲一个概念，用具体数字算一遍再给公式，附各门课的推荐阅读顺序（共 15 篇） |
 
 ### Technical
 

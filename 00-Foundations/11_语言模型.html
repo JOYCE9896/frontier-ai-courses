@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>11. 语言模型：预测下一个 token | AI 基础</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="10_词向量与嵌入.html">&larr; 上一篇</a>
+    <span>AI 基础 11</span>
+    <a href="12_注意力与Transformer.html">下一篇 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>11. 语言模型：预测下一个 token</h1>
+        <p class="subtitle">语言模型是给文本分配概率的模型。从数次数的 n-gram 模型讲起，到神经网络语言模型，再到训练时怎样从一段文字里得到成千上万道题，以及模型怎样一个一个地生成文字</p>
+        <div class="author-meta">
+            需要的预备知识：<a href="02_概率与对数.html">02. 概率与对数</a>、<a href="06_softmax与交叉熵.html">06. Softmax 与交叉熵</a>、<a href="09_分词.html">09. 分词</a><br>
+            整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、什么是语言模型</h2>
+        <p>
+            语言模型是一个给文本分配概率的模型：给它任意一段文字，它告诉你这段文字出现的概率有多大。"今天天气很好"应该得到较高的概率，"好很天气今天"应该很低。
+        </p>
+        <p>
+            直接给整段文字打分很难，可能的文字组合无穷无尽。第 2 篇讲的链式法则把问题拆开了：
+        </p>
+        $$P(x_1, x_2, \ldots, x_T) = \prod_{t=1}^{T} P(x_t \mid x_1, \ldots, x_{t-1})$$
+        <p>
+            $x_t$ 是第 $t$ 个 token。一整段文字的概率，等于每个 token 在它前面所有内容的条件下的概率连乘。所以只要能回答"给定前文，下一个 token 是什么的概率"，就能给任何文字打分。这样从左到右逐个预测的模型叫自回归语言模型，GPT、Llama、Claude 等都是这一类。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、最早的做法：数次数</h2>
+
+        <h3>1. 二元模型</h3>
+        <p>
+            怎样估计 $P(x_t \mid \text{前文})$？最直接的办法是在大量文本里数次数。前文可能很长，为了简化，假设下一个词只和前一个词有关，这叫二元模型（bigram）：
+        </p>
+        $$P(x_t \mid x_{t-1}) = \frac{\text{"}x_{t-1}\ x_t\text{" 出现的次数}}{\text{"}x_{t-1}\text{" 出现的次数}}$$
+        <p>
+            假设语料只有三句话："我 喜欢 猫 。我 喜欢 狗 。我 讨厌 雨 。"。"我"出现 3 次，后面跟"喜欢"2 次、"讨厌"1 次；"喜欢"出现 2 次，后面跟"猫"和"狗"各 1 次。所以：
+        </p>
+        <ul>
+            <li>$P(\text{喜欢} \mid \text{我}) = 2/3$，$P(\text{讨厌} \mid \text{我}) = 1/3$</li>
+            <li>$P(\text{猫} \mid \text{喜欢}) = 1/2$，$P(\text{狗} \mid \text{喜欢}) = 1/2$</li>
+        </ul>
+        <p>
+            "我 喜欢 猫"在"我"开头的条件下的概率是 $2/3 \times 1/2 = 1/3$。只看前 $n-1$ 个词的模型统称 n-gram 模型，在神经网络之前，机器翻译和语音识别用的都是这类模型。
+        </p>
+
+        <h3>2. 两个根本问题</h3>
+        <ul>
+            <li>没见过的组合概率为 0。"我 讨厌 猫"在语料里没出现过，$P(\text{猫} \mid \text{讨厌}) = 0$，整句话的概率就是 0，尽管它完全通顺。需要各种平滑技巧给没见过的组合分一点概率。</li>
+            <li>上下文太短。"我在法国长大……所以我说一口流利的___"，要填"法语"需要回看很远的内容。把 $n$ 加大，可能的组合数量爆炸，绝大多数组合在语料里一次都没出现过，统计就失效了。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>三、神经网络语言模型</h2>
+        <p>
+            神经网络的做法是：用一个网络读入前文，输出下一个 token 的概率分布。
+        </p>
+        <ol>
+            <li>前文的每个 token 经过嵌入层变成向量（第 10 篇）。</li>
+            <li>网络（早期是循环神经网络 RNN，现在是 Transformer，第 12 篇）把这些向量综合成一个代表"当前上下文"的向量。</li>
+            <li>输出层把这个向量变成词表里每个 token 的分数，softmax 把分数变成概率（第 6 篇）。</li>
+        </ol>
+        <p>
+            这解决了 n-gram 的两个问题。相似的词有相似的向量，所以"我 讨厌 狗"学到的东西可以推广到"我 讨厌 猫"，没见过的组合也能得到合理的概率。网络可以读入很长的前文，今天的模型能处理几十万甚至上百万个 token 的上下文，能读多长叫上下文窗口。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、训练：一段文字就是很多道题</h2>
+        <p>
+            训练数据只需要普通的文本，不需要人工标注。一段文字"今天 天气 很 好"自动提供了好几道题：
+        </p>
+        <table>
+            <tr><th>输入（前文）</th><th>正确答案</th></tr>
+            <tr><td>今天</td><td>天气</td></tr>
+            <tr><td>今天 天气</td><td>很</td></tr>
+            <tr><td>今天 天气 很</td><td>好</td></tr>
+        </table>
+        <p>
+            每道题的损失是正确答案的负对数概率（交叉熵，第 6 篇），所有位置的损失取平均。一段长度为 $T$ 的文字就有大约 $T$ 道题，而且 Transformer 可以在一次计算里同时处理所有位置（第 12 篇讲的因果掩码保证每个位置只能看到它前面的内容，不会偷看答案）。这种从数据本身构造答案的方式叫自监督学习（第 4 篇）。
+        </p>
+        <p>
+            因为不需要标注，整个互联网的文本、书籍、代码都能用作训练数据。今天的大模型在几万亿个 token 上训练。为了把下一个词预测准，模型必须学会语法、常识、事实，甚至推理：要预测一道数学题解答的下一步，模型得理解这道题。这就是"只做预测下一个词"的模型能表现出广泛能力的原因。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、生成：一个一个地来</h2>
+        <p>
+            训练好的语言模型怎样写出一段话？反复执行下面的步骤：
+        </p>
+        <ol>
+            <li>把当前的文字（一开始是用户的提示词）输入模型，得到下一个 token 的概率分布。</li>
+            <li>按某种规则从分布里选一个 token，比如选概率最高的，或者按概率随机采样（第 14 篇详细讲）。</li>
+            <li>把选出的 token 接到文字末尾。</li>
+            <li>回到第 1 步，直到生成一个表示"结束"的特殊 token，或者达到长度上限。</li>
+        </ol>
+        <p>
+            所以模型生成每个 token 都要完整地计算一次，一段 500 个 token 的回答要算 500 次，后一个必须等前一个算完。这是大模型推理慢、贵的根本原因，也是 CMU 11-664 这门课后半部分讨论的核心问题。
+        </p>
+        <p>
+            只经过预训练的模型（基座模型）学会的是"续写"：给它"中国的首都是"，它会接着写"北京"；但给它一个问题，它可能接着写出更多类似的问题，而不是回答。要让它变成能对话、听指令的助手，还需要后续的训练（第 13 篇）。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、怎样评价一个语言模型</h2>
+        <p>
+            最基本的指标是困惑度（perplexity）：在一段没见过的测试文本上，算每个 token 的平均交叉熵损失，再取指数。第 6 篇讲过，困惑度可以理解为模型平均每一步在多少个选项之间犹豫，越低越好。
+        </p>
+        <p>
+            困惑度衡量的是"预测文本"的能力，和实际用途（回答问题、写代码）的表现不完全一致。所以今天评价大模型更多用各种任务上的基准测试，以及人类或模型评委的比较。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、小结</h2>
+        <p>
+            语言模型给文本分配概率，用链式法则拆成逐个 token 的条件概率连乘，所以核心任务是预测下一个 token。n-gram 模型靠数次数估计概率，但没见过的组合概率为 0，上下文也很短。神经网络语言模型用向量表示 token，能推广到没见过的组合，并读入很长的前文。训练时一段文字的每个位置都是一道题，答案就是原文的下一个 token，不需要标注，所以可以在海量文本上训练。生成时逐个 token 地预测、选择、接上，每个 token 都要完整计算一次。困惑度是衡量预测能力的基本指标。
+        </p>
+    </section>
+
+    <section>
+        <h2>在课程笔记里继续读</h2>
+        <ul>
+            <li><a href="../11-711-Advanced-NLP/03_自回归语言模型.html">CMU 11-711 第三讲</a>：自回归语言模型。</li>
+            <li><a href="../CS224N-NLP-with-Deep-Learning/03_语言模型与循环神经网络.html">Stanford CS224N 第三讲</a>：从 n-gram 到循环神经网络。</li>
+            <li><a href="../11-664-LM-Inference/01_语言模型与推理导论.html">CMU 11-664 第一讲</a>：从推理的角度看语言模型。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>AI 基础 · Notes curated by Joyce</p>
+        <nav class="footer-nav">
+            <a href="10_词向量与嵌入.html">&larr; 上一篇</a>
+            <a href="index.html">目录</a>
+            <a href="12_注意力与Transformer.html">下一篇 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>10. 词向量与嵌入 | AI 基础</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="09_分词.html">&larr; 上一篇</a>
+    <span>AI 基础 10</span>
+    <a href="11_语言模型.html">下一篇 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>10. 词向量与嵌入</h1>
+        <p class="subtitle">token 编号怎样变成向量，独热向量的问题，嵌入层就是查表，word2vec 怎样从上下文学出词义，以及语言模型里随上下文变化的表示</p>
+        <div class="author-meta">
+            需要的预备知识：<a href="01_向量矩阵与求和符号.html">01</a>（点积、余弦相似度、矩阵乘法）、<a href="09_分词.html">09. 分词</a><br>
+            整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、编号不能直接用</h2>
+        <p>
+            分词之后，每个 token 变成一个编号（第 9 篇）。但编号本身不能直接作为模型的输入：编号 1532 和 1533 只是碰巧相邻，意思可能毫无关系；编号的大小也没有意义，不能说 8810 号 token 是 1532 号的五倍多。模型需要一种能表达"意思"的数字形式，答案是向量。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、独热向量</h2>
+        <p>
+            最简单的做法是独热向量（one-hot）：词表有 $V$ 个 token，就用一个 $V$ 维向量表示每个 token，它的编号对应的那一位是 1，其余全是 0。词表大小为 5 时，2 号 token 是 $(0, 0, 1, 0, 0)$。
+        </p>
+        <p>
+            独热向量避免了编号大小的问题，但有两个缺点。一是维度太高：词表有 5 万个 token，每个向量就有 5 万维，几乎全是 0。二是所有词之间毫无关系：任意两个不同 token 的独热向量点积都是 0（第 1 篇），"猫"和"狗"的距离与"猫"和"民主"的距离完全一样。模型从"猫"学到的东西，一点也用不到"狗"上。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、稠密的词向量</h2>
+
+        <h3>1. 想法</h3>
+        <p>
+            换一种表示：给每个 token 一个较短的向量，比如 300 维或 768 维，每一维都是任意的实数，不再是 0 和 1。这叫稠密向量，也叫词向量或嵌入（embedding）。我们希望意思相近的词，向量也相近，余弦相似度高。比如"猫"和"狗"的向量应该比"猫"和"民主"更接近。
+        </p>
+        <p>
+            这些向量里的数是模型参数，由训练学出来，没有人去设定。每一维也通常没有可以直接解释的含义，意思体现在向量之间的相对位置上。
+        </p>
+
+        <h3>2. 嵌入层就是查表</h3>
+        <p>
+            把所有 token 的向量排成一个矩阵 $E$，形状是 $V \times d$，第 $i$ 行是 $i$ 号 token 的向量。模型的第一层（嵌入层）做的事情很简单：输入编号 $i$，取出第 $i$ 行。
+        </p>
+        <p>
+            这在数学上等价于用独热向量乘这个矩阵：独热向量只有第 $i$ 位是 1，乘上 $E$ 正好挑出第 $i$ 行。所以嵌入层可以看作一个以独热向量为输入的线性层，但实际实现时直接查表，不做那个几乎全是 0 的乘法。
+        </p>
+        <p>
+            嵌入矩阵的参数不少。GPT-2 最小版本的词表是 50,257，向量维度 768，嵌入矩阵有约 3860 万个参数，占整个模型 1.24 亿参数的近三分之一。很多模型的输出层（把最后的向量变回每个 token 的分数）和嵌入层共用这个矩阵。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、词向量从哪里学来：word2vec</h2>
+
+        <h3>1. 分布假说</h3>
+        <p>
+            语言学家 J. R. Firth 在 1957 年有一句常被引用的话："You shall know a word by the company it keeps"，意思是可以通过一个词经常和哪些词一起出现来了解它的含义。"猫"和"狗"都经常出现在"喂""宠物""毛"附近，所以它们的意思相近。这个想法叫分布假说，是从文本中自动学习词义的出发点。
+        </p>
+
+        <h3>2. word2vec</h3>
+        <p>
+            Mikolov 等人 2013 年提出的 word2vec 把分布假说变成了一个训练任务。以它的 skip-gram 版本为例：在大量文本上滑动一个窗口，用中间的词去预测窗口内的周围词。比如句子"我 家 的 猫 喜欢 晒 太阳"，用"猫"预测"的""喜欢"等。预测的方式是用两个词向量的点积，经过 softmax（第 6 篇）得到概率。
+        </p>
+        <p>
+            训练的目标是让真实出现在周围的词概率高。为了做到这一点，经常出现在相似上下文里的词，向量会被调整得相近。没有人告诉模型"猫和狗相似"，这个结果是从预测任务中自然产生的。这种"设计一个不需要人工标注的预测任务，让有用的表示自己学出来"的思路，后来成为语言模型预训练的核心思想（第 11 篇）。
+        </p>
+
+        <h3>3. 向量空间里的规律</h3>
+        <p>
+            word2vec 论文报告了一个著名的结果：词向量之间的差可以表示关系。"国王"的向量减去"男人"再加上"女人"，得到的向量最接近"王后"。类似地，"巴黎 − 法国 + 意大利"接近"罗马"。这说明向量空间的某些方向对应了性别、首都这样的关系。后来的研究也指出，这种规律并不总是成立，而且词向量会学到训练文本里的社会偏见，比如职业和性别之间的刻板关联。
+        </p>
+        <p>
+            同一时期还有斯坦福的 GloVe，用全局的词共现统计来学习词向量，结果类似。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、随上下文变化的表示</h2>
+        <p>
+            word2vec 给每个词一个固定的向量。但同一个词在不同句子里意思可能不同："苹果很甜"和"苹果发布了新手机"里的"苹果"，英文 "river bank" 和 "bank account" 里的 "bank"。固定向量只能把几种意思混在一起。
+        </p>
+        <p>
+            现代语言模型的做法是：嵌入层仍然给每个 token 一个固定的初始向量，然后经过很多层 Transformer（第 12 篇），每一层都让这个向量吸收周围 token 的信息。到了中间和后面的层，同一个"苹果"在两个句子里的向量已经很不一样了。这种表示叫上下文相关的表示（contextual representation），BERT 和 GPT 系列都是这样。在语言模型里，嵌入矩阵和模型的其他参数一起，在预测下一个 token 的任务中训练出来，不需要单独训练 word2vec。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、句子和文档的向量</h2>
+        <p>
+            同样的思路可以用到整段文字上：把一个句子或一段文档编码成一个向量，意思相近的文字向量相近。这类模型叫嵌入模型（embedding model）。它们是检索系统的基础：把所有文档都转成向量存起来，用户提问时把问题也转成向量，找余弦相似度最高的几篇文档。检索增强生成（RAG）就是先这样检索，再把找到的文档交给语言模型回答（<a href="../11-711-Advanced-NLP/10_检索增强生成与深度研究.html">CMU 11-711 第十讲</a>）。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、小结</h2>
+        <p>
+            token 编号本身没有意义，独热向量维度太高且让所有词互不相关。稠密的词向量用几百维的实数向量表示每个 token，意思相近的词向量相近；嵌入层就是按编号在 $V \times d$ 的矩阵里查出对应的行。word2vec 依据分布假说，用"由一个词预测周围的词"的任务学出词向量，向量之间的差能表示某些语义关系，但也会学到偏见。现代语言模型从固定的初始嵌入出发，经过多层 Transformer 得到随上下文变化的表示。整段文字也可以编码成向量，用于检索。
+        </p>
+    </section>
+
+    <section>
+        <h2>在课程笔记里继续读</h2>
+        <ul>
+            <li><a href="../CS224N-NLP-with-Deep-Learning/01_NLP发展简史与词向量表示.html">Stanford CS224N 第一讲</a>：word2vec 与 GloVe 的推导。</li>
+            <li><a href="../11-711-Advanced-NLP/02_学到的表示与分词.html">CMU 11-711 第二讲</a>：嵌入层与连续词袋模型。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>AI 基础 · Notes curated by Joyce</p>
+        <nav class="footer-nav">
+            <a href="09_分词.html">&larr; 上一篇</a>
+            <a href="index.html">目录</a>
+            <a href="11_语言模型.html">下一篇 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
