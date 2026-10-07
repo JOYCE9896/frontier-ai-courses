@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十七讲：大模型的强化学习 | CMU 11-711 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="16_强化学习基础.html">&larr; 上一讲</a>
+    <span>CMU 11-711: Lecture 17</span>
+    <a href="18_语言模型Agent.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十七讲：大模型的强化学习</h1>
+        <p class="subtitle">单步 MDP 与 token 级 MDP，RL 前要不要先做 SFT，可验证奖励（RLVR），组内相对优势与 GRPO，字符串反转示例，DeepSeek-R1，RLHF 三步走，Bradley-Terry 奖励模型，奖励投机与 KL 约束</p>
+        <div class="author-meta">
+            主讲：Sean Welleck · 2026 年 3 月 17 日<br>
+            资料来源：<a href="https://cmu-l3.github.io/anlp-spring2026/static_files/anlp-s2026-17-rl-llms.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=KtlCL-4PfCE" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述内容） · <a href="https://github.com/cmu-l3/anlp-spring2026-code/tree/main/17_rl_llm" target="_blank">课堂代码</a> · 主要阅读：InstructGPT（Ouyang 等，2022）；DeepSeek-R1（2025）；DPO（Rafailov 等，2023）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、把文本生成写成 MDP</h2>
+        <p>
+            上一讲在一般设定下讲了强化学习，例子是 CartPole：MDP、策略梯度（REINFORCE），以及用优势和 PPO 损失稳定训练。这一讲把它们用到大模型上，通过三个案例看强化学习在现代大模型里的两种主要用法，顺便引入新技术，并理清 RLVR、RLHF、GRPO 这些常见缩写。
+        </p>
+        <p>
+            核心是一个简单的循环：用语言模型生成输出，计算奖励，用策略梯度或 PPO 的某种变体更新参数。第零步是把问题写成 MDP。
+        </p>
+        <h3>1. 单步 MDP</h3>
+        <p>
+            最无聊的一种写法，但很有用，很多场景都能这样表示：状态是提示（以及提示加回答），动作是生成整个回答 $a: y$，不拆成单个 token；策略是语言模型 $p_\theta(y\mid x)$；环境转移是把回答接到提示后面；只有一次转移，所以只有一次拿奖励的机会，在完整序列上算奖励 $r(x, y)$。例子："2+3 等于几？""一步步想，2+3=23。"
+        </p>
+        <h3>2. token 级 MDP</h3>
+        <p>
+            状态 $s_t: (x, y_{&lt;t})$ 是提示加已生成的 token，动作 $a_t: y_t$ 是生成下一个 token，策略是 $p_\theta(y_t\mid y_{&lt;t}, x)$，环境转移是把 token 接上去，确定性地得到 $s_{t+1}: (x, y_{&lt;t}\circ y_t)$。奖励：$t &lt; T$ 时 $r_t = 0$，最后 $r_T = r(x, y)$。
+        </p>
+        <p>
+            关键差别：可以给不同 token 分配不同的奖励。只在最后有奖励时，可以用上一讲的折扣把奖励随时间衰减；如果真能知道哪个 token 导致了错误，就可以给中间步骤更细的优势。
+        </p>
+        <h3>3. 合起来</h3>
+        <p>
+            有了 MDP 就能用上一讲的算法。以策略梯度为例：给定预训练或微调过的模型 $p_\theta$、输入 $x$、奖励函数 $r$；循环：用 $p_\theta$ 生成输出 $\hat y$，计算奖励，计算损失 $L_{\text{PG}} = \sum_t r(s_t, a_t)\nabla_\theta\log p_\theta(a_t\mid s_t)$ 并更新。
+        </p>
+        <p>
+            讲到这里似乎可以下课了，但真要用在某个应用上，还要做几个关键决定：
+        </p>
+        <ol>
+            <li>先微调还是直接用预训练模型。</li>
+            <li>用哪些输入做强化学习，比如解数学题用哪一批题。</li>
+            <li>奖励函数是什么。</li>
+            <li>策略优化的设置：优势 $A_t$ 怎么算，用什么损失 $L$，以及各种超参数（比如跨多台机器的分布式训练，这门课不讲）。</li>
+        </ol>
+        <p>
+            下面三个案例各自体现了这些决定。有学生问是否假定每个输出都能算奖励：是的，MDP 本身就假定有奖励函数。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、案例一：反转字符串</h2>
+        <p>
+            任务：把输入字符串反转，比如 hello 变成 olleh。很容易检查对不对。当然用 Python 一行就能做，但这里用到的代码和思路可以用于很多任务，后面的数学题案例（一篇 Nature 论文）用的正是这些思路。课堂实现能在 Colab 上一小时内跑完，适合快速实验、尝试各种变体。
+        </p>
+        <h3>1. RL 之前先微调</h3>
+        <p>
+            微调那一讲里试过直接提示一个很小的模型反转字符串，结果是一堆乱码：它以为自己在某个论坛上，开始生成对话，格式完全不对。这正说明先微调有用：至少保证模型以正确格式输出，不至于花大量计算在强化学习上只为教它格式。流程是 $p_{\theta_0}\to p_{\theta_{\text{SFT}}}\to p_{\theta_{\text{RL}}}$。
+        </p>
+        <ul>
+            <li>好处：教会模型任务格式，避免因格式不对拿不到奖励、算不了奖励而白白浪费时间；利用数据集里的监督信号，大的微调集可能带来很大提升。用强化学习的话说，模型尤其在早期会遇到更多高奖励的例子，强化学习可以专注于更难的实例，或者打磨分布、避免特定错误，而不是从零学任务。</li>
+            <li>坏处：需要 $(x, y)$ 数据集，复杂任务的数据不好找，所以有时会跳过微调，或者只为教格式而微调，比如用更大的模型生成一百到一千条带思维链和输出的例子。即使有大量数据，微调过多也可能把模型的输出分布收得太窄、带偏，强化学习就像已经处在局部最优。比如在人写的数学解答上微调，而这些解答跳步多甚至有错，模型就很难学到解答里没有的新策略。提示那一讲有个实验：只给模型任务输入和格式说明，比连解答一起给效果更好，可能也是因为解答会把模型带偏。</li>
+        </ul>
+        <p>
+            课堂代码 sft.py 在（输入，反转结果）数据集上微调一个 epoch。用上学期的课程人员名字测试，模型能正确反转 Sean 的名字，但有些助教的名字反转不对；测试集上约 65%。
+        </p>
+        <h3>2. 规则奖励与"可验证"奖励</h3>
+        <p>
+            奖励：输出是输入的反转就给 1，否则 0。这个例子虽然简单，却代表了一类问题，称为可验证奖励（verifiable rewards），或者说基于规则的奖励：你在某种意义上可以信任这个奖励函数，任务有一个好的验证器。
+        </p>
+        <ul>
+            <li>反转字符串："反转 hello"，输出 ollh 得 0，olleh 得 1。</li>
+            <li>解数学题：假设题目以唯一的整数答案结尾，检查模型给出的答案是否等于标准答案。"2+3=23"得 0，"2+3=5"得 1。</li>
+            <li>写程序：奖励是通过测试的比例，比如有 bug 的程序 2/10，好程序 10/10，所以奖励不必是二元的。</li>
+        </ul>
+        <p>
+            局限：并非所有任务都有单一答案，比如生成证明，得看完整个证明才知道对不对；奖励不反映推理过程的质量，如果在乎中间步骤是否正确，就得另想办法，或者寄希望于它和答案正确性相关；仍然要知道答案，很难的数学题即使以答案结尾，也可能没人知道答案。程序的情况要更小心：通过有限的测试不等于程序完美，测试覆盖可能不全，这类奖励不完全是验证器，后面讲奖励投机时会再提。由此得到第一个缩写：RLVR（Reinforcement Learning with Verifiable Rewards）。
+        </p>
+        <h3>3. 组内相对优势</h3>
+        <p>
+            代码 reverse_ppo.py 用单步 MDP：状态是"reverse hello"，动作是整个输出字符串。算法用组内相对优势加 PPO 损失。做法：对每个输入 $x^{(i)}$ 生成 $K$ 个输出，称为一组：
+        </p>
+        $$\{y^{(i,1)}, y^{(i,2)}, \dots, y^{(i,K)}\}\sim p_\theta(\cdot\mid x^{(i)})$$
+        <p>
+            减去组内平均奖励，可选地再除以组内奖励的标准差 $Z$：
+        </p>
+        $$A^{(i,k)} = \frac{r^{(i,k)} - \text{mean}\big(r^{(i,1)}, r^{(i,2)}, \dots, r^{(i,K)}\big)}{Z}$$
+        <p>
+            例子：组大小 4，三个输出丢了字母 e、错了，一个正确，奖励是 0、0、0、1。均值 0.25，不归一化的优势是 −0.25、−0.25、−0.25、0.75；除以组内标准差后是 −0.5、−0.5、−0.5、1.5。正确的输出得到高优势，错误的得到低优势。这个优势是对整个序列的，因为用的是单步 MDP。
+        </p>
+        <p>
+            如果有两个正确，均值变成 0.5，正确输出的优势就小一些。可以这样理解：只有一个正确时，题目更难、正奖励更稀有，模型得到更大的更新；题目简单时，均值把更新幅度压下来，有一种"感知难度"的效果。要注意边界情况：全部为 1 或全部为 0 时，归一化会除以零，可以加一个小的 epsilon，常见做法是直接丢掉这些样本。最近的论文会在归一化上做各种调整：有人去掉 $Z$，有人用整个批次的标准差，理由是批次很大时这接近总体标准差。Sean 说有时改一处就有人起个新缩写说是新算法，希望大家关注算法里变的是什么，而不是缩写。
+        </p>
+        <ul>
+            <li>优点：不需要学价值函数。上一讲的价值函数从状态预测最终回报，对很大的语言模型和复杂任务，学价值函数可能需要很多参数，也很难。组内优势只靠生成多个输出、互相比较。</li>
+            <li>缺点：不清楚怎样给非终止状态分配优势，在 token 级 MDP 里要给每个 token 一个组内优势，就得从每个状态多次展开，代价很高，这正是价值函数的好处；生成多个输出本身也耗计算。很多问题上不学价值函数、只用组内优势就够了。</li>
+        </ul>
+        <h3>4. PPO 损失</h3>
+        <p>
+            回顾上一讲。策略梯度（REINFORCE）的损失是 $L_{\text{PG}} = A_t\log p_\theta(y_t\mid y_{&lt;t}, x)$，梯度为 $A_t\nabla_\theta\log p_\theta(y_t\mid y_{&lt;t}, x)$。PPO：
+        </p>
+        $$L_{\text{PPO}} = \min\left(\frac{p_\theta(y_t\mid y_{&lt;t}, x)}{p_{\theta_{\text{old}}}(y_t\mid y_{&lt;t}, x)}A_t,\ \text{clip}\left(\frac{p_\theta(y_t\mid y_{&lt;t}, x)}{p_{\theta_{\text{old}}}(y_t\mid y_{&lt;t}, x)}, 1-\epsilon, 1+\epsilon\right)A_t\right)$$
+        <p>
+            要保留一份旧模型 $p_{\theta_{\text{old}}}$。模型有几十亿参数时，得考虑把这份副本放在哪些 GPU 上。代码里用对数概率，取指数算比率。裁剪用了两个不同的阈值，这是有意为之：人们发现可以给正方向的更新设更高的裁剪阈值，直觉上正向更新时也许确实想让它更新得大一些，某些问题上这已成为常用设置。代码里每复制一次旧模型做几次（比如三次）更新，再换下一批数据、重新复制；复制的时机是设计选择，大规模时这份额外副本更要小心处理。
+        </p>
+        <p>
+            完整流程：对批次里每个输入生成 $K$ 个输出，评估奖励、计算优势，计算 PPO 损失，反向传播更新参数。代码不复杂，规模化的实现看起来复杂得多，但核心都是这些步骤，值得通读一遍。
+        </p>
+        <p>
+            课上回答了 Slido 上的问题。怎样判断 SFT 够了、该转向 RL？要看具体情况，有时数据量直接替你做了决定；否则可以在 SFT 的不同检查点上各跑一个小的 RL，看有没有差别。一般来说先 SFT 是好主意，但 SFT 过多会带偏 RL。怎样抽取答案？听起来无聊但必须考虑：强制特定输出格式会让模型只会那种格式；更一般的办法是用语言模型来抽取答案，模型够好的话可以依赖它，但要做测试确认。
+        </p>
+        <p>
+            跑起来后要做好监控，代码用 Weights &amp; Biases（wandb）记录各种指标，最主要盯着平均奖励，它掉了你会紧张。这里奖励稳步上升，强化学习在起作用。还要在留出数据上评估，因为那是训练集上的奖励：上学期课程人员的名字现在反转得好多了，测试集准确率从 64.8% 升到 92.6%。
+        </p>
+        <h3>5. 术语</h3>
+        <ul>
+            <li>用监督微调初始化，最近常叫"冷启动"（cold start）。</li>
+            <li>可验证奖励：RLVR。</li>
+            <li>组内相对优势加 PPO 风格的损失：GRPO。原始 GRPO 还用组内标准差归一化，并在损失里加一项 KL 散度，后面讲。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>三、案例二：解数学题与 DeepSeek-R1</h2>
+        <p>
+            和反转字符串相比变化不大。DeepSeek-R1 发表在 Nature（2025），几个月内就有上千次引用，Sean 估计一年左右可能上万，是领域的一次突破。它主要因数学解题而出名，区别在于让模型先输出思维链，再给出解答。真正有意思的是，强化学习让模型学会了以有趣的方式使用思维链，性能随之提升。
+        </p>
+        <ul>
+            <li>输入：题目。提示非常简短，说明这是一段对话，要求模型把推理放在 &lt;think&gt; 标签里，把答案放在 &lt;answer&gt; 标签里，答案部分被解析并计算奖励。可以在这里加入灵活性：答案标签内格式严格，之前的部分自由。</li>
+            <li>输出：思维链加答案。</li>
+            <li>模型：一种设定直接从预训练模型出发，不做初始微调，模型也能学会使用思维链并取得好的解题表现；另一种设定先做初始微调，得到另一个模型。</li>
+            <li>MDP：单步 MDP。奖励：0/1 的答案检查，加上格式奖励（检查格式是否正确，他们发现有用）。</li>
+            <li>算法：GRPO，即 PPO 加组内相对优势，再加 KL 惩罚。</li>
+            <li>数据：补充材料很长，可以看到细节，比如数学用了约 2.6 万个提示；后面还扩展到代码、STEM 和通用任务。</li>
+        </ul>
+        <p>
+            关键结果图：横轴是强化学习步数，纵轴是 AIME（美国数学邀请赛）题目上的准确率，那时还是很难的基准，现在已经饱和。随着训练，模型越来越好。两条线是不同的推理策略，红线是生成 16 个输出取出现最多的答案，最后一讲细讲。
+        </p>
+        <p>
+            更有意思的现象在思维链上：训练过程中思维链长度不断增长；看内容会发现一些模式，模型学会了各种策略，比如在生成过程中说"等等，我目前做的可能不对，重新评估一下，换个思路"，或者试了很多方法后说"等等，我有了关键想法，知道怎么做完了"。这些当然只是语言模型产生的 token，但可以看出，靠强化学习信号，模型在学着有效地使用思维链来最大化奖励。由此产生了所谓推理模型：在输出之前产生思维链，思维链里除了一步步的解答，还有尝试其他方案、回溯等行为。
+        </p>
+        <p>
+            有学生问：GRPO 采样很差、方差很低时怎么办？全 1 或全 0 的极端情况通常直接丢弃；PPO 的裁剪能防止很大的更新，有时把正方向的裁剪阈值设高一些更好；更一般地，看看用来做 RL 的提示的统计：如果对模型来说几乎全对或几乎全错，就换策略，比如优先选中等难度的题，或者用课程学习逐步引入更难的题。
+        </p>
+        <p>
+            另一个问题：思维链没有监督，模型是不是只是坍缩到网上那些带回溯的数学解答？可以在 RL 之前做 SFT，SFT 数据甚至可以显式演示回溯、考虑不同方案。如果相信 RL 起了作用，那它学到的是在合适的时候选用模型已知的这些模式来最大化奖励；模型可能在网上见过回溯，但它学会了选择那些最终导向高奖励的策略。而且模型不一定只用这些策略，它可以随意使用 token。一个证据是 DeepSeek 论文观察到模型会切换语言：它在中英文数据上都训练过，思维链有时在两种语言之间来回切换，如果只看奖励，这说不定就是最优策略。他们为此另加了一个奖励，保证模型只用一种语言输出。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、案例三：对齐人类偏好（RLHF）</h2>
+        <p>
+            现在不是解题，而是让聊天模型生成人类用户觉得好的回复。核心难点是怎样评估奖励，怎样判断一个输出在人看来是好是坏。办法是学一个奖励函数。
+        </p>
+        <h3>1. 两类奖励模型</h3>
+        <ul>
+            <li>直接评估模型：一个给（部分）序列打分的模型 $r(x, y)\to\mathbb{R}$，比如判断输出是否"有用"或是否"安全"，输出 $r(x, y)\to[0,1]$ 是"安全"的概率。Hugging Face 上有相应的数据集，比如 NVIDIA 的 Aegis 内容安全数据集，收集了大量回答是否安全的标签（安全怎么定义又是很微妙的话题），还有 RoBERTa 毒性分类器。</li>
+            <li>偏好模型：对很开放的任务，很难确定具体标准或给出具体分数。给一个回答打 4 分还是 2 分很难，但给两个回答，说哪个更好往往容易些，不用说清为什么。目标是训练奖励模型给更常被偏好的回答打更高分。</li>
+        </ul>
+        <h3>2. RLHF 流程</h3>
+        <p>
+            基于人类反馈的强化学习（RL from Human Feedback）成了标准流程，让它成为大研究方向的是 OpenAI 的 InstructGPT（Ouyang 等 2022）：
+        </p>
+        <ol>
+            <li>监督微调：用数据集 $D_{\text{SFT}} = \{(x^{(n)}, y^{(n)})\}_{n=1}^N$ 微调，$x$ 是提示，$y$ 是人写的回答。</li>
+            <li>奖励建模：用偏好数据 $D_{\text{Pref}} = \{(x, y^{(n)}_+, y^{(n)}_-)\}_{n=1}^{N'}$ 训练奖励模型 $r_\phi(x, y)$，$y$ 是模型生成的回答。</li>
+            <li>强化学习：把第一步的模型记为 $p_0$，用强化学习算法（比如 PPO）在提示上继续微调：$p_\theta = \text{RL}(p_0, r_\phi, \{x^{(n)}\}_{n=1}^{N''})$。</li>
+        </ol>
+        <h3>3. 第一步：SFT</h3>
+        <p>
+            指令微调那一讲的所有技术都能用。例子：Alpaca（Taori 等 2023），5.2 万条模型生成的（提示，回答）。更大规模的开放例子是 AI2 的 Tulu 3，前沿实验室的规模和细节会更甚：90 万个提示，57% 来自开源数据，43% 是额外生成的指令遵循、数学和代码提示，回答用闭源模型生成；按技能做数据混合，保留在各项技能上效果最好的混合。覆盖范围包括数学，也包括他们设想的语言模型的所有用途。
+        </p>
+        <h3>4. 第二步：奖励建模</h3>
+        <p>
+            提示可以复用 SFT 数据集里的，也可以引入新的，比如 AlpacaFarm（Dubois 等 2024）从 5.2 万条 Alpaca 数据里留出 1 万条用来生成偏好数据。回答通常用 SFT 模型生成，也可以用别的模型。需要两样东西：偏好标注，以及训练奖励模型的方法。
+        </p>
+        <p>
+            给定 $x, y_1, y_2$，判断哪个回答更好（或者给两个以上的回答排序）。有钱就雇人标注，OpenAI、Meta 都这么做；也可以自动收集，比如 ChatGPT 界面有时问你更喜欢回答 A 还是 B，不清楚 OpenAI 是否这样用，但可以作为偏好数据。开源社区常用很强的模型来标注偏好，比如 AlpacaFarm 用 GPT 模型给 LLaMA 生成的回答打分；Tulu 3 也用当时最好的 GPT 来标。想训练最好的模型时这样做会有困难，但通常可以通过 API 用非常强的模型给要改进的小模型的回答打分。
+        </p>
+        <h3>5. 奖励模型的损失与 Bradley-Terry</h3>
+        <p>
+            给定 $D = \{(y^{(n)}_+, y^{(n)}_-)\}_{n=1}^N$，训练模型给 $y_+$ 打更高分（省略了输入 $x$）：
+        </p>
+        $$\mathcal{L} = -\sum_{y_+, y_-\in D}\log\sigma\big(r_\theta(y_+) - r_\theta(y_-)\big)$$
+        <p>
+            看一下符号就知道，它抬高偏好回答的分数、压低另一个。依据来自 Bradley-Terry 模型（1952），一个描述成对比较结果的经典概率模型：对物品 $i, j$，比较结果"$i &gt; j$"成立的概率为
+        </p>
+        $$\Pr(i &gt; j) = \frac{p_i}{p_i + p_j}$$
+        <p>
+            用神经网络参数化：令 $p_i = \exp(r_\theta(y_i))$。分子分母同除以 $\exp(r_\theta(y_i))$：
+        </p>
+        $$p(y_i\succ y_j) = \frac{\exp(r_\theta(y_i))}{\exp(r_\theta(y_i)) + \exp(r_\theta(y_j))} = \frac{1}{1 + \exp(r_\theta(y_j))/\exp(r_\theta(y_i))} = \frac{1}{1 + \exp\big(-[r_\theta(y_i) - r_\theta(y_j)]\big)} = \sigma\big(r_\theta(y_i) - r_\theta(y_j)\big)$$
+        <p>
+            其中 $\sigma(z) = 1/(1+\exp(-z))$ 是 sigmoid 函数。有了概率模型，就用课上的老工具最大似然：数据集中所有偏好的似然是
+        </p>
+        $$\mathcal{L}(\theta) = \prod_{(y_i, y_j)\in\mathcal{D}}\sigma\big(r_\theta(y_i) - r_\theta(y_j)\big)$$
+        <p>
+            最小化负对数似然 $\mathcal{L}_{\text{NLL}}(\theta) = -\log\mathcal{L}(\theta) = -\sum\log\sigma(r_\theta(y_i) - r_\theta(y_j))$，正是上面的损失。训练奖励模型的论文里常见这个损失，但除了早期论文，很少写出它的来历。
+        </p>
+        <h3>6. 第三步：强化学习与奖励投机</h3>
+        <p>
+            选好提示，用奖励函数做强化学习，就完了吗？问题是奖励投机（reward hacking）：奖励模型不完美，而强化学习算法很聪明，模型会学会钻奖励函数的空子，奖励模型给高分，人看了却不是想要的。课上的小测：$r$ 衡量输出有多冒犯（希望越低越好），什么策略能最大化这个奖励？一个永远输出空回答的模型。奖励模型可能认为空序列肯定安全，强化学习一旦发现这一点，就会让模型坍缩到只输出空字符串。有时投机更隐蔽。DeepSeek-R1 论文发现，用测试用例做代码 RL 时也会出现：模型找到办法通过训练样本里的测试，但在留出的程序集上评估，性能在下降，到某一点直接跳水。优化的奖励与留出的性能指标之间出现背离，是奖励投机的典型症状。
+        </p>
+        <h3>7. KL 散度约束</h3>
+        <p>
+            缓解办法是加一个正则，让模型不要离强化学习开始时的模型太远。如果初始模型还算合理，不会输出空序列或怪异的程序，这个约束能限制强化学习走多远：
+        </p>
+        $$\arg\max_\theta\ \mathbb{E}_{x, y}[r(x, y)] - \beta D_{KL}(p_\theta\,\|\,p_0)$$
+        <p>
+            $\beta$ 越大，越要贴近原模型；越小，越自由地最大化奖励。需要保留一份原模型（参考策略）。常见做法是通过修改奖励引入：
+        </p>
+        $$r_{\text{KL}} = -\beta\log\frac{p_\theta(y\mid x)}{p_0(y\mid x)}$$
+        <p>
+            它近似 KL 散度，是单样本的蒙特卡洛近似：
+        </p>
+        $$D_{KL}\big(p_\theta(y\mid x)\,\|\,p_0(y\mid x)\big) = \sum_y p_\theta(y\mid x)\log\frac{p_\theta(y\mid x)}{p_0(y\mid x)} = \mathbb{E}_{y\sim p_\theta}\log\frac{p_\theta(y\mid x)}{p_0(y\mid x)}\approx\log\frac{p_\theta(\hat y\mid x)}{p_0(\hat y\mid x)}, \qquad \hat y\sim p_\theta(\cdot\mid x)$$
+        <p>
+            加上惩罚后，最大化这个目标的策略是（推导见 Korbak 等 2022 或 Rafailov 等 2023 的 DPO 论文）：
+        </p>
+        $$p_\theta(y\mid x) = \frac{1}{Z(x)}p_0(y\mid x)\exp\Big(\frac{1}{\beta}r(x, y)\Big)$$
+        <p>
+            原始算法是 PPO 加广义优势估计（GAE），优化的奖励是偏好奖励加 KL 惩罚。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、方法的分类</h2>
+        <p>
+            各种方法可以按奖励、损失和优势的选择来区分：
+        </p>
+        <table>
+            <thead>
+                <tr><th></th><th>损失</th><th>奖励</th><th>优势</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>GRPO（原始版本）</td><td>PPO 损失 + KL 惩罚损失</td><td>任意</td><td>组内相对，用组内标准差归一化</td></tr>
+                <tr><td>PPO（最一般的意思）</td><td>PPO 损失</td><td>任意</td><td>任意</td></tr>
+                <tr><td>RLHF 中通常所说的 PPO</td><td>PPO 损失</td><td>基于模型的偏好奖励 + KL 惩罚</td><td>通常用 GAE</td></tr>
+            </tbody>
+        </table>
+        <p>
+            GRPO、PPO 的许多变体就是在调整这几项。实用工具有 Hugging Face 的 trl 和字节跳动火山引擎的 verl。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、参考资料</h2>
+        <ul>
+            <li>Training Language Models to Follow Instructions with Human Feedback（Ouyang 等，2022）：InstructGPT，主要阅读。</li>
+            <li>DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning（DeepSeek-AI，Nature 2025）：主要阅读。</li>
+            <li>Direct Preference Optimization: Your Language Model is Secretly a Reward Model（Rafailov 等，2023）：主要阅读，其中有 KL 约束下最优策略的推导。</li>
+            <li>Fine-Tuning Language Models from Human Preferences（Ziegler 等，2019）；Learning to Summarize from Human Feedback（Stiennon 等，2020）。</li>
+            <li>Alpaca（Taori 等，2023）；AlpacaFarm（Dubois 等，2024）；Tulu 3（AI2）。</li>
+            <li>Bradley &amp; Terry, Rank Analysis of Incomplete Block Designs（1952）；Korbak 等（2022）。</li>
+            <li>工具：<a href="https://github.com/huggingface/trl" target="_blank">trl</a>；<a href="https://github.com/volcengine/verl" target="_blank">verl</a>。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>七、小结</h2>
+        <p>
+            把文本生成写成 MDP，可以是整段回答作为一个动作的单步 MDP，也可以是逐 token 的 MDP，后者能给不同 token 不同奖励。实际应用要决定是否先做 SFT（教格式、利用监督，但可能把分布带偏）、用哪些提示、奖励是什么，以及优势和损失怎么选。字符串反转演示了 RLVR 的完整流程：规则奖励，每个输入生成一组输出、减去组内均值（可除以标准差）得到优势，不用价值函数，再配 PPO 的裁剪损失，即 GRPO，测试准确率从 64.8% 升到 92.6%。DeepSeek-R1 用同样的方法训练数学推理，思维链越来越长并出现反思、回溯，催生了推理模型。对开放式聊天，RLHF 先 SFT，再用 Bradley-Terry 损失在偏好数据上训练奖励模型，最后用 PPO 优化；学出来的奖励容易被投机，于是加 KL 惩罚让模型不离初始模型太远。
+        </p>
+        <p>
+            下一讲由 Zora Wang 讲语言模型 Agent。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-711: Advanced NLP · Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="16_强化学习基础.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="18_语言模型Agent.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

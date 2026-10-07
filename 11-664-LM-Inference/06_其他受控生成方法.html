@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第六讲：受控生成 | CMU 11-664/763 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="05_A星与最佳优先搜索.html">&larr; 上一讲</a>
+    <span>CMU 11-664/763: Lecture 06</span>
+    <a href="07_思维链与中间步骤.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第六讲：受控生成</h1>
+        <p class="subtitle">可验证与逐 token 可验证的约束，用状态机强制输出合法 JSON，不自然的 token 边界与 token 修复，正则语言、上下文无关语言与下推自动机，语义约束：logit 屏蔽、先生成再过滤、FUDGE 未来判别器，RLHF 的贝叶斯视角与奖励增强解码，对比解码及其在安全上的应用</p>
+        <div class="author-meta">
+            主讲：Amanda Bertsch · 2025 年 9 月 11 日<br>
+            资料来源：<a href="https://docs.google.com/presentation/d/1GG-sHP5KOClE3FnM7k7cwF4yjecTL4veMBgouWfyuxI/edit" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=i4COjX4z1zY" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述内容） · 主要阅读：llama.cpp 关于形式语法约束的 README；FUDGE（Yang &amp; Klein，2021）；Controlled Decoding from Language Models
+        </div>
+    </header>
+
+    <section>
+        <h2>一、约束的分类</h2>
+        <p>
+            接着上一讲结尾，这一讲讲怎样控制或约束生成，两个词混用。前两讲其实已经在约束输出：用不完全是模型对数概率的搜索分数，比如长度惩罚、多样化束搜索里惩罚与其他部分输出的相似、NeuroLogic A*esque 里加入对预期奖励的启发式。今天的约束是要得到"高概率且满足某个额外条件 X"的输出，X 会随讲随变；也不再默认用搜索来做，还会考虑修改概率分布再重新采样。第一次作业里束搜索那道谜题，今天会有一点提示。
+        </p>
+        <ul>
+            <li>可验证（这里是宽泛的说法）：能写一个确定性函数，在生成结束时检查约束是否满足，能列出所有允许的东西。</li>
+            <li>逐 token 可验证：能写一个确定性函数，在每个解码步检查到结束时约束是否会被满足。"输出恰好 10 个 token"在结束时很容易检查，但生成过程中每一步并不能确定当前选择会通向满足约束的结果，所以不是逐 token 可验证的；"每个 token 以空格开头"、"全部用中文"、"输出合法 JSON"则在任何一步都能判断是否偏离。</li>
+        </ul>
+        <p>
+            NeuroLogic A*esque 论文的约束是"写一句包含 car、drive、snow 的句子"：可验证，最终输出含这些词就成功；但不是逐 token 可验证，从"the"开始，不保证最后会出现这些词。前缀"I drive my car during the"已经满足了两个；下一个 token 若是 summer，概率还挺高、句子也通，但更难在最后出现 snow；winter 概率略低，但更可能导向 snow。用 A* 式的前瞻能看出哪条路更可能满足约束，于是重塑分布或选那条路。这是很多方法背后的思路。先放下它，从更容易的逐 token 可验证情形讲起。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、可验证约束：模板式约束</h2>
+        <p>
+            比如要求每次给用户的消息以"Hello!"开头，以"Thanks for chatting with me."结尾，总是输出合法的 JSON。能训练模型做到吗？可以喂大量这样的训练数据，但不能保证，尤其采样时总有可能走到分布的奇怪角落，结尾不对，或者太长被截断；合法 JSON 的空间很大，它可能写出很奇怪的东西。而且约束可能会变：想把 Hello 换成 Bonjour 一周（也许巴黎在办奥运会），要重新训练模型吗？大概不会。约束简单到推理时就能强制，或者可能变化（比如模式更新），推理时强制更灵活。
+        </p>
+        <p>
+            前两个怎么做？学生答：直接在开头拼上 Hello，在结尾拼上那句话，在模型采样之外处理，只要你控制着系统（比如在 API 后面）就很容易。合法 JSON 呢？2025 年合理的第一反应是：直接让模型做。Amanda 早上让 GPT-5 把信息转成 JSON，它当然知道格式，但默认会在两边加很多话，"你好，我帮你做好了，改了这个地方，要保留这个格式吗"，作为 API 调用期望拿到合法 JSON，这不是想要的。明确要求只输出对象、不加任何说明，前沿模型完全做得到。那为什么还要花这么多时间讲 JSON？一是 GPT-5 自己选的键名（id、name、birthday）也许合理，但生产环境里数据有固定格式，不会因为 GPT-5 觉得 birthday 好听就去数据库里改键名，需要保证能和其他格式严丝合缝；二是做一百万次生成，可能出现奇怪的输出，或者"抱歉，超出速率限制"，大规模使用时希望每次都保证合法，否则还得把输出再过一遍 JSON 检查器。
+        </p>
+        <h3>1. 用状态机表示模式</h3>
+        <p>
+            关键在于每个解码步上这个约束非常窄：十万多个选择里，只有大概十个能导向合法 JSON。能把规则都写下来吗？例子来自 Matt Finlayson（USC）：把"Taylor Swift was born December 13, 1989"按模式格式化，键是 name（字符串）和 birth year（整数）。把模式表示成状态机，跟踪生成进度：
+        </p>
+        <ul>
+            <li>状态 0：只有一个合法 token，左花括号，模型认为别的 token 有多可能都无所谓，全部划掉。</li>
+            <li>状态 1：可以输出 <code>"name": "</code> 或 <code>"birth year": </code>。</li>
+            <li>输出 name 后进入只能输出字母的状态；输出 birth year 后进入只能输出数字的状态，这里用了正则式的写法。</li>
+            <li>名字结束要闭合引号，年份结束可以接逗号，然后可选地输出另一个键。</li>
+            <li>最后输出右花括号，结束。自动机里习惯用双圈表示结束（接受）状态。</li>
+        </ul>
+        <p>
+            这个自动机至少有两个问题，看得出吗？学生先说没有长度限制，名字可以无限长，Amanda 问 JSON 里通常限制名字长度吗，大概不会；学生又说键可以重复：在状态 1 和 4 之间来回，输出一千个 birth year，技术上合法，但一个人不会有一千个出生年；还有学生说可能根本不输出 birth year，输出 name 后直接结束，要求两个都必须出现就得改结构。另外也没限制取值，出生年可以是一位数或一千位，名字不能有空格。这些自己写并不简单，但如果喜欢这类谜题会觉得很好玩。好消息是几乎所有模板约束都不用自己写，提供规则（对 JSON 就是键和类型），各种库会替你强制。
+        </p>
+        <p>
+            学生问怎样强制模式：可以重画状态机，比如区分"输出了名字但没输出生日"和"输出了生日但没输出名字"两个状态，前者只能再输出生日再结束。学生说大的模式手画不可能，确实，但可以程序化地表示状态集合，每个状态的合法下一个 token 是什么，编译成很高效的"查表并屏蔽 logit"。学生问 LLaMA 或 GPT-4 这些生产系统是否还用状态机：他们不说，但这是这个问题的精确解，换别的会让她意外；Graham 补充，OpenAI 不清楚，但 vLLM、SGLang 都支持。学生问给一个 500 个键的 JSON 时图怎么来：最好的参考是 llama.cpp 的说明，用一种形式语法（GBNF）描述语言，从根规则出发，定义终结符（实际输出的字符串或字符范围）；几乎所有库都有 JSON 的辅助工具，把你传的 JSON 模式或 Python 类型字典转换成这样的语法，再编译成解析器去强制约束，这和解析的原理相通。
+        </p>
+        <h3>2. 不自然的 token 边界与 token 修复</h3>
+        <p>
+            还有一个在图上看不出来的问题：模板生成会把标点之类的小 token 单独放在边上，造成不自然的 token 边界。不受约束时模型可能生成"The URL is http:" 然后接 "//"，但沿着自动机，可能得到"The URL is http"，边上给出冒号，然后必须在前面不带空格地生成两个斜杠。词表里很可能有这样的 token，但如果预训练分词时 URL 里总把 "://" 切成一个 token，这就是很难预测的 token，概率质量很少。
+        </p>
+        <p>
+            解决办法叫 token 修复（token healing）：已经生成了冒号，我们知道冒号必须是下一个 token 的开头，但不必是整个 token。于是回退一个 token（极少数情况两个），要求下一个 token 以刚才那个 token 的字符串开头：在候选里去掉所有不以冒号开头的，冒号仍然合法，冒号加斜杠也合法，而后者概率高得多。
+        </p>
+        <p>
+            什么时候触发？没有公认的唯一触发条件，开销大，不会每步都做，一般在做模板生成或强制模式时允许修复，按启发式触发。学生说维护一个"惯犯"列表，比如单独的冒号；常见的启发式还有：
+        </p>
+        <ul>
+            <li>上一个 token 很短，比如词表里大多数 token 都多于一个字符，生成了单字符 token 时。</li>
+            <li>上一个 token 既不以空白开头也不以空白或标点结尾。很多 token 以空白开头，表示一个词的开始；很多以标点或空白结尾。词尾后接以空白开头的新 token 当然可能，所以不完美，但对代码这类内容是合理的选择。</li>
+            <li>上一个预测的 token 恰好是另一个高概率 token 的前缀，比如生成冒号那一步，冒号和冒号加斜杠两个 token 概率都高、前缀相同，可能需要回去修复，或者重写自动机避免做这个选择。</li>
+            <li>从给定文本继续生成时。</li>
+        </ul>
+        <p>
+            学生问：能否在一般推理里用，发现走进死胡同就回退？对更长的路径不行，"the cat went south"不太可能是词表里任何 token 的前缀；可以判定之前的补全是错的、从更早的地方重新采样，有推理算法这样做，一两周后讲的思维树（Tree of Thoughts）可以看作在句子而不是 token 上分支。token 修复假设已生成的东西没错，只是在分词器里不是最高效的表示，修复不改变输出字符串，只改变 token 切分。另一个学生问对不以空白分词的语言有没有用：以空白开头结尾的启发式不适用，但保持表面形式不变、换一种切分的思路适用，尤其是分词器对 Unicode 处理不够聪明、带变音符号的字符被拆成多个字节 token 时。没有其他约束时，修复后的 token 本来就更可能被生成，所以随时开着也行，若要修复的前缀本身就是最可能的下一个 token，就什么都不变；不每步都做只是因为贵。
+        </p>
+        <h3>3. 现有工具</h3>
+        <p>
+            Hugging Face 没有原生的模板约束，但有 token 修复：<code>model.generate(token_healing=True)</code>；做更复杂的约束要自己写 LogitsProcessor。其他：llama.cpp 可以限制为 JSON，也可以强制特定模式，比如恰好一个名字和一个生日；LangChain 的 with_structured_output；OpenAI API 的结构化输出（以前叫 JSON mode，最近改名，更通用）；Gemini 可以指定响应模式，用 Python 类型描述，比如菜名和配料表；Outlines 库（Willard 和 Louf 2023）大概是最早这样做的，用 Python 类型语法指定输出，他们还为此创办了公司；vLLM 也可以传 JSON 模式。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、计算理论的一瞥</h2>
+        <p>
+            能对编程语言也这样做吗？比如强制生成合法的 C？简短回答：不能，这时要换推理时的技术，或者训练模型生成合法代码。课上一部分人上过计算理论、自动机、编程语言或编译原理课，没上过也没关系，这只是额外背景。
+        </p>
+        <ul>
+            <li>强制一个具体的模式，一般只需要一个（很长的）有限状态自动机，它表达的是正则语言。只要模式不允许任意嵌套，就能知道嵌套最深几层，为每一层定义不同的状态，画一个很长的自动机。</li>
+            <li>一般的 JSON 是上下文无关的，但不是正则的，因为括号可以任意深地嵌套，要求开括号和闭括号数量一致，而有限状态自动机不记得自己来过某个状态几次。用下推自动机（有限状态自动机加一个栈）可以描述所有合法 JSON。支持 JSON 模式的工具实际写的都是下推自动机。</li>
+            <li>要强制"同一个键不能出现两次"这类要求，需要比上下文无关语法更强的东西。C 要求变量先定义后使用，用 numpy 前要先 import，也不是上下文无关的，所以无法用这种逐 token 检查的方式高效强制。</li>
+        </ul>
+        <p>
+            学生请她各用一句话定义。正则语言：不需要当前位置之外任何额外记录的东西，比如任意长的数字，可以写成 <code>[0-9]*</code> 这样的正则式，这也是"正则表达式"一词的本义（很多编程语言里的正则语法其实比这更强）；上下文无关语言：需要记录输入两部分之间某种对称或联系，比如 $a^nb^n$ 这个经典例子，括号数量匹配，JSON 的花括号匹配，对应下推自动机；再往外是广阔的世界，编译器通常在更上一层。需要写入多个栈、或者有一条可读写的长"纸带"，就是图灵机了。
+        </p>
+        <p>
+            Graham 补充两种理解方式：典型的语言模型给任何东西都分配非零概率；自动机给它接受的东西分配均匀概率，给其他一切零概率，它不判断字符串好不好、可能不可能，只判断行不行。可以把两个"语言模型"相乘：自动机的均匀概率乘到语言模型上，不接受的变成 0，接受的之间相对概率不变。上一讲画的加权有限状态自动机，表达能力相同，只是给转移加上了概率。
+        </p>
+        <p>
+            学生问怎样把它映射到整个词表上的 softmax：把所有不合法转移的概率设得任意低，在 softmax 之前加一个很大的负数。Graham 补充：在对数空间里相乘就是相加，允许的 token 加 0（均匀分布可以设为 1，取对数为 0），不允许的加负无穷（0 的对数），再 softmax 重新归一化。学生问过滤之后还能否再修改分布：可以，但那样也模拟不出 C 这样的任意语言；可以放下自动机，对分布施加约束，让生成合法 C 的可能性更大，这就是接下来的内容。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、语义约束</h2>
+        <p>
+            约束不能方便地形式化时，只能估计会不会满足约束，这类约束宽泛得多，也可能很模糊。例子：提示"介绍几种能保持身材的爱好"，但我不想去攀岩（Amanda 盯着在场的 Clara 说：请别带我去攀岩）。这没法用正则式强制。一年前她问 Gemini 1.5，它说了几个好主意，然后又绕回攀岩。最近十个月情况变了，GPT-5 在你说不想攀岩后不再建议，正式宣告语言模型在"Amanda 爱好基准"上打败了她的朋友们。但假设模型没那么强，把指令写在输入里并不总是够的。
+        </p>
+        <h3>1. logit 屏蔽</h3>
+        <p>
+            照搬模板的做法，把 climbing 的概率设为 0，即在 logit 上加一个大负数。容易实现，但：同义词很多时不行，不想攀岩大概也不想抱石；被限制的 token 可能有允许的用法，比如徒步时"爬上山去看风景"；如果在被限制的词之前先生成了相关的词就糟了，模型说"和朋友一起做的好活动是 rock"然后不许说 climbing，会得到很不自然的句子。拿 softmax 这把大锤砸不出路来。
+        </p>
+        <h3>2. 先生成再过滤</h3>
+        <p>
+            生成一组序列，过滤掉违反约束的（拒绝采样）。好处是检查完整序列比检查子序列容易，因为没有逐 token 可验证性；坏处是贵（慢），被限制的东西若很常见还可能要重新生成。
+        </p>
+        <h3>3. 前瞻：FUDGE</h3>
+        <p>
+            NeuroLogic A*esque 能前瞻，但这个约束不好验证，写不出一个列表；想写规则判断输出是不是关于攀岩，也许能写一长串启发式，但不是正则式能表达的。所以要换一种方式计算启发式。FUDGE（Future Discriminators for Generation，Yang 和 Klein 2021）：原分布是 $P(x_i\mid x_{&lt;i})$，想额外以属性 $a$ 为条件，比如话题不是攀岩，或者文本要正式、非正式，甚至是合法 JSON。直接训练一个以 $a$ 为条件的模型可以（类条件语言模型，输入风格和文本），但对已有模型很难。用贝叶斯公式改写，差一个常数：
+        </p>
+        $$P(x_i\mid x_{&lt;i}, a)\ \propto\ P(a\mid x_{\le i})\,P(x_i\mid x_{&lt;i})$$
+        <p>
+            第一项是给定直到当前要生成的 token 为止的子串，约束最终被满足的概率。反正要 softmax，所以只要成比例就行。怎么算它？这比预测整个字符串容易得多，而且能用已有的标注数据造训练数据：有正式和非正式的语料，把每句分词，取所有从开头开始的子串作为输入、整句的标签作为标签："I" 标为正式，"I would" 标为正式，"I would appreciate" 标为正式……在大语料上做下来，会学到以"I"开头正式和非正式差不多，以"I would appreciate"开头几乎只出现在正式数据里。训练一个分类器，从子串预测整个输出是否正式。
+        </p>
+        <p>
+            使用时，把输入照常过一遍语言模型，得到候选下一个 token 的分布；再把输入加上每个候选 token 送进这个判别器，问"给定 do you want / do you prefer / do you thus，最终输出正式的概率是多少"。thus 整体概率很低，但很正式，所以正式分很高、总分很低。两者相乘（对数空间相加），want 和 prefer 原本概率差不多，prefer 更正式，于是被提上去，输出"do you prefer"。只往前看一个 token 做二元判断，这就是"未来判别器"这个名字的由来。
+        </p>
+        <p>
+            局限：每一步都要用判别器过一遍所有候选 token，他们的办法是只在一小部分上运行（比如前 200 个最可能的 token，而不是全部十几万个，第十万名的 token 再正式也不会被选），并用很小的模型，这种 0/1 判断比较好学；不保证满足约束，任何预测未来的方法都如此，对正式度这种，偶尔不太正式也许可以接受，约束很重要时可以配合拒绝采样，看到完整输出后重新打分、拒绝不合格的；需要能拿到 logit，这是这类方法的根本要求。
+        </p>
+        <p>
+            课后有学生问能否用 word2vec 之类的相似度，比如句子平均词向量与"正式"聚类的距离：可以，那就是 FUDGE 里的一种判别器。
+        </p>
+        <h3>4. 用 RLHF 做约束解码？</h3>
+        <p>
+            Controlled Decoding 和 RL with KL penalties is better viewed as Bayesian inference（Korbak 等 2022）详细讨论了一个联系：可以把 RLHF 表述为贝叶斯推断，先验是对齐之前的原语言模型，用来更新先验的证据是奖励模型给每个输出的分数，做 KL 约束下的优化，得到的对齐模型就是在从这个后验采样。这和 FUDGE 的贝叶斯解读很契合。于是可以像 FUDGE 那样，不预测正式度这种有点玩具的东西，而是预测"解码结束时奖励模型会不会给高分"，不做 RLHF，而是逐 token 地预测。这就是奖励增强解码（Reward-Augmented Decoding，Deng 和 Raffel 2023）的思路：按每个序列估计的最终奖励修改概率，课后由学生报告。Hugging Face 大多没有原生实现这些方法，要自己写 LogitsProcessor，或者用 model.forward() 写自己的解码循环，作业里会接触到 logit 处理器。
+        </p>
+        <h3>5. 对比解码</h3>
+        <p>
+            先补一个之前漏掉的采样方法。对比解码本身不是为了约束生成，而是基于这样的想法：更小或更弱的模型会犯和大系统不同的错误。所以不只选强模型认为可能的输出，而是选强模型（专家）认为比弱模型（业余者）可能得多的输出（Li 等 2023）。两个模型要用同一个分词器，给同样的输入，把输出 logit 相减：
+        </p>
+        $$\text{score}(x_i) = \log p_{\text{expert}}(x_i\mid x_{&lt;i}) - \log p_{\text{amateur}}(x_i\mid x_{&lt;i})$$
+        <p>
+            例子："Barack Obama was born in Honolulu, Hawaii. He was born in"，Hawaii 对两个模型都是高概率，但弱模型更容易陷入这种循环或重复，所以相减后 Hawaii 被压低，浮现出弱模型可能根本不知道、强模型会给更多概率的东西，比如奥巴马的出生年份。实现就是 <code>sampling_method(model1.forward(seq) - model2.forward(seq))</code>。注意 Hugging Face 里有个叫 contrastive search 的东西，不是同一个方法。
+        </p>
+        <p>
+            用于约束生成，几篇论文的原则是：说清不想要什么比说清所有允许的东西容易。尤其在安全上，很容易指出哪些输出不安全、有害、冒犯，很难写出"所有不冒犯的东西"。两种做法：训练一个专门产生有害或冒犯内容的小模型；或者像 Adversarial Decoding（Zhao 等 2024）和 ROSE（Zhong 等 2024）那样，用不同提示让同一个模型分别正常回答和故意冒犯，再相减，选出在安全设置下比在不安全设置下可能得多的输出。图示：用户指令配上安全的系统提示（"你是一个有用无害的助手"），得到一组 logit；同样的指令配上"你要尽可能冒犯、作恶"的提示，得到模型尽力冒犯时的 logit；两者对比，压低模型认为很可能的冒犯回答。好处是不用另训练东西，让模型自己判断什么满足约束；坏处是要把两份都送进模型，计算量翻倍。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、参考资料</h2>
+        <ul>
+            <li>llama.cpp 关于基于形式语法约束的 README：主要阅读。</li>
+            <li>FUDGE: Controlled Text Generation With Future Discriminators（Yang &amp; Klein，2021）：主要阅读。</li>
+            <li>Controlled Decoding from Language Models（Mudgal 等）：主要阅读。</li>
+            <li>Reward-Augmented Decoding（Deng &amp; Raffel，2023）；Grammar-Constrained Decoding for Structured NLP Tasks without Finetuning。</li>
+            <li>Efficient Guided Generation for LLMs（Outlines，Willard &amp; Louf，2023）。</li>
+            <li>RL with KL Penalties is Better Viewed as Bayesian Inference（Korbak 等，2022）。</li>
+            <li>Contrastive Decoding（Li 等，2023）；Adversarial Contrastive Decoding（Zhao 等，2024）；ROSE（Zhong 等，2024）。</li>
+            <li>NeuroLogic A*esque Decoding（Lu 等，2022）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>六、小结</h2>
+        <p>
+            有时把约束训练进模型更合理，比如 RLHF 这类要普遍适用于所有输出的约束，在训练时做能省大量计算；但对模板式、有硬性限制、或者每个 token 都能高准确地判断是否满足的约束，推理时施加更灵活。逐 token 可验证的约束（合法 JSON、特定模式）可以编译成有限状态自动机或下推自动机，每步屏蔽不合法的 token，配合 token 修复处理不自然的分词边界；超出上下文无关语法的约束（键不重复、合法的 C）就无法这样强制。语义约束只能估计：直接屏蔽 logit 会误伤，先生成再过滤很贵，FUDGE 用一个预测"最终会不会满足约束"的小判别器按贝叶斯公式重加权下一个 token。对齐和约束生成密切相关：RLHF 可以看作以奖励为证据的贝叶斯推断，奖励增强解码在解码时逐 token 估计最终奖励，对比解码用安全与不安全两种设置的 logit 之差压低有害输出。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-664/763: Inference Algorithms for Language Modeling · Fall 2025</p>
+        <nav class="footer-nav">
+            <a href="05_A星与最佳优先搜索.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="07_思维链与中间步骤.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十讲：深度研究 Agent | CMU 11-768 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="09_强化学习基础.html">&larr; 上一讲</a>
+    <span>CMU 11-768: Lecture 10</span>
+    <a href="11_进阶强化学习算法.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十讲：深度研究 Agent</h1>
+        <p class="subtitle">需要多次搜索、综合多份证据的研究型问题：怎样评估、怎样训练、怎样检索</p>
+        <div class="author-meta">
+            主讲：Akari Asai · 2026 年 9 月 24 日<br>
+            资料来源：<a href="https://www.cmu-agents.com/slides/lecture-10-deep-research-agents.pdf" target="_blank">课程幻灯片</a>（课程网站尚未发布这一讲的录像，本文依据幻灯片和课程列出的阅读材料整理）· 指定阅读：OpenScholar、BrowseComp、DeepResearch Bench、Tongyi DeepResearch、DR Tulu、AgentIR
+        </div>
+    </header>
+
+    <section>
+        <h2>一、什么是深度研究 Agent</h2>
+        <p>
+            有些问题搜一次就够了。比如"Akari Asai 在 CMU 的办公室号码是多少"，搜一下，在 CMU 语言技术研究所的教师主页上找到 GHC 5507，答案就有了。
+        </p>
+        <p>
+            另一些问题没有任何单一结果能回答。比如"AI Agent 能像人类专家一样综合科学文献吗？"主讲人用她自己参与的两篇论文演示了一个深度研究 Agent 的工作过程：
+        </p>
+        <ol>
+            <li>规划：我需要把"基准上的好成绩"和"与人类专家的直接比较"分开。先找文献综合方面的研究，再看专家和 Agent 是怎样比较的，最后比较任务范围和局限，再下结论。</li>
+            <li>搜索"AI agent literature synthesis human expert evaluation"。结果 A 是一个研究基准，报告的是和其他 AI 系统比较的分数；结果 B 是一个专家评估，把 Agent 的回答和人写的回答做比较。</li>
+            <li>反思：这两项研究的比较对象不同。基准分数更高，不能回答"是否达到人类专家水平"。测试了哪些任务和领域？</li>
+            <li>再次搜索，关注比较协议、任务和领域。</li>
+            <li>给出最终答案：在测试过的任务上表现不错，但能否普遍达到专家水平尚未得到证明。在被评估的文献综合问题上，专家更偏好 OpenScholar 的回答，引用准确度与人类专家相当 [1]；DR Tulu 在四个长篇研究基准上表现很好，但和其他 AI 的比较并不能直接说明达到了人类专家水平 [2]。</li>
+        </ol>
+        <p>
+            这里引用的两篇论文：OpenScholar（Asai 等，Nature 2026）从 4500 万篇开放获取论文中检索段落，生成带引用的回答；它的 8B 版本在 ScholarQABench 上正确率比 GPT-4o 高 5%，而 GPT-4o 在引用最新文献时有 78% 到 90% 的引用是编造的；人工评估中，专家有 51% 的时间更偏好 OpenScholar-8B 的回答而不是专家自己写的回答。DR Tulu（Shao、Asai 等，ICML 2026）是一个 8B 的开源深度研究模型，后面会详细讲。
+        </p>
+        <p>
+            这一讲分三部分：评估（基准、评分细则、引用支撑）；建模（怎样学会搜索、推理和综合）；检索（为 Agent 的下一步找到证据）。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、基准与评估</h2>
+
+        <h3>1. 传统问答基准的局限</h3>
+        <p>
+            以 Natural Questions 的一个例子说明："谁为《原力觉醒》写了配乐？"答案是 John Williams。这类题有四个问题：搜索简单，一个熟悉的事实可能凭记忆就能答，或者搜一次就找到；领域通用，宽泛的网页问题测不到专业知识；答案短，只比对答案无法评估多文档综合能力；证据使用不清楚，答对了不代表用了证据，也不代表可靠。后面的新基准分别针对这四点做了改进。
+        </p>
+
+        <h3>2. 搜索难度：BrowseComp</h3>
+        <p>
+            BrowseComp（OpenAI，2025）有 1,266 道人写的题。出题方法是反过来：先选定一个答案（某个人、事件或作品），把它的名字藏起来，把多条事实线索组合成一道复杂的题。然后验证难度：模型加搜索应该答不出来，用 5 次 Google 搜索也不够；人在 10 分钟后仍然觉得难（在一部分题上检查）。
+        </p>
+        <p>
+            例题：请找出一个虚构角色，他偶尔打破第四面墙和观众说话；背景故事里有无私的苦行僧帮助过他；以幽默著称；有一部在 1960 到 1980 年代播出、不到 50 集的电视剧。答案是 Plastic Man。
+        </p>
+        <table>
+            <tr><th>系统</th><th>准确率</th></tr>
+            <tr><td>GPT-4o</td><td>0.6%</td></tr>
+            <tr><td>GPT-4o + 浏览</td><td>1.9%</td></tr>
+            <tr><td>GPT-4.5</td><td>0.9%</td></tr>
+            <tr><td>OpenAI o1（medium）</td><td>9.9%</td></tr>
+            <tr><td>Deep Research（针对此类任务训练过）</td><td>51.5%</td></tr>
+            <tr><td>人类（与参考答案一致）</td><td>25.3%</td></tr>
+        </table>
+        <p>
+            人类尝试了 1,266 题中的 1,255 题。Tongyi DeepResearch 的技术报告显示，给 Agent 更多搜索空间，准确率就更高：上下文从 8K 增加到 128K，BrowseComp 准确率持续上升。它的 SFT 数据里超过 20% 的样本有 10 次以上工具调用，评估时每个任务最多允许 128 次工具调用。
+        </p>
+        <p>
+            真实网页会变化，结果难以复现。BrowseComp-Plus（ACL 2026）把语料固定下来：拿 BrowseComp 的题和答案，先让 o3 找证据网页，再由人工标注支持每条线索的文字片段和包含答案的文档，并加入"难负例"（相关但缺少某条线索的网页），最终得到 830 道题和 100,195 篇文档的固定集合，方便做受控比较。
+        </p>
+
+        <h3>3. 专业领域：FinSearchComp 等</h3>
+        <p>
+            FinSearchComp（ICLR 2026）由金融专家出题：从真实工作场景或经过核实的财务表格出发；检索可靠数据，计算并交叉核对，确定答案；再由其他专家独立做一遍，解决分歧。例题（意译）：2022 到 2024 年，强生公司国际收入占比每年怎样变化？类似的还有医学领域的 MedBrowseComp（关联临床试验、药物和监管信息），以及学术检索的 ScholarSearch 和 AutoResearchBench。
+        </p>
+
+        <h3>4. 答案质量：需要多维度评估</h3>
+        <p>
+            研究型回答需要从准确性、覆盖面、限定条件和证据支撑几个维度评估。同一个问题可以有多个正确答案："专家在一项研究中更偏好 OpenScholar，跨领域是否相当尚未证明"和"一项研究支持 OpenScholar，但不能说明在各领域都相当"意思相同，措辞不同。而"专家在一项研究中更偏好 OpenScholar，跨领域相当已经得到证明"和参考答案文字很像，意思却错了。所以和标准答案的文字相似度不够用。
+        </p>
+        <p>
+            一项 ACL 2023 的研究在 109 组专家比较上测试了相似度指标能否选出专家更偏好的回答：ROUGE 58%，BERTScore 57%，BLEURT 62%，都只比随机猜（50%）好一点。
+        </p>
+        <p>
+            ScholarQABench 用专家写的评分细则（rubric）。对每一条细则检查回答，再加权合并：
+        </p>
+        $$S_c = \frac{\sum_i w_i b_i}{\sum_i w_i}$$
+        <p>
+            例子：细则一"报告了与人类专家的直接比较"，权重 2；细则二"按任务和领域限定结论"，权重 1。候选回答是"OpenScholar 在 70% 的专家比较中胜出 [1]，这在所有领域都成立"。第一条满足，第二条不满足，得分 (2×1 + 1×0)/3 = 0.67。在 12 道题、2 个系统、每个回答 2 位专家的检验中，专家与 LM 裁判的一致率是 79%，专家之间是 80%。
+        </p>
+        <p>
+            专家写细则很贵。ResearchQA（TACL 2026）用 LM 从综述论文中生成问题和细则，覆盖 75 个领域，2.1 万个问题，16 万条细则。但生成的细则也可能出错：专家审核发现，仅凭模型自身知识生成的细则中有 15% 是空洞的、错误的或含糊的，比如引用不存在的论文、只是重复问题、太含糊以至于似是而非的错误也能通过。所以要先评估细则本身：让细则以来源为依据，再审核它们的相关性和可验证性。DeepResearch Bench II 用专家报告生成细则，再经人工修订和专家审核。
+        </p>
+
+        <h3>5. 证据支撑：检查引用</h3>
+        <p>
+            DeepResearchBench（ICLR 2026）的 FACT 方法检查被引用的网页是否真的支持每一条陈述：先抽取"陈述加 URL"，再读被引用的页面，最后判断是否支持。例子：陈述一"OpenScholar 与人类回答做过比较 [1]"，论文里确实在一批研究问题上做了专家比较，支持；陈述二"OpenScholar 在每个领域都达到专家水平 [1]"，论文并没有测试每个领域，不支持。引用准确率 1/2 = 50%，有效引用 1 对。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、Agent 建模与训练</h2>
+
+        <h3>1. 推理过程</h3>
+        <p>
+            深度研究 Agent 的一次运行：模型生成推理 <code>&lt;think&gt;找专家比较&lt;/think&gt;</code>；生成工具调用 <code>&lt;tool&gt;search("expert comparisons")&lt;/tool&gt;</code>；搜索工具执行查询；检索到的文字追加进上下文；模型结合检索内容继续推理 <code>&lt;think&gt;检查测试过的任务&lt;/think&gt;</code>；最后生成带引用的答案 <code>&lt;answer&gt;在测试过的任务上表现不错 [1,2]……&lt;/answer&gt;</code>。
+        </p>
+
+        <h3>2. 训练流程</h3>
+        <p>
+            Tongyi DeepResearch 的配方分三段：中期训练，大规模学习 Agent 行为；SFT，模仿教师模型的成功示范；RL，从自己的尝试所得到的反馈中学习。数据分别是输入加答案，再加教师轨迹或策略自己的 rollout。问题是：任务和轨迹从哪里来？
+        </p>
+
+        <h3>3. 用知识图谱造题</h3>
+        <p>
+            知识图谱中，节点是实体，带标签的箭头是关系。比如"Allen Newell"通过"是……的教员"指向"Carnegie Mellon"。WebSailor-V2（ICLR 2026）的方法是：从有来源的事实出发，采样一个连通子图，把选中的事实变成题目的线索，把目标实体的名字藏起来。
+        </p>
+        <p>
+            课上的例子用了四条事实：Newell 是 CMU 教员；Newell 和 Simon 合著了《Human Problem Solving》（1972）；两人共同获得 1975 年图灵奖；Simon 获得 1978 年诺贝尔经济学奖。生成的题目是："哪位 CMU 研究者与一位未来的诺贝尔经济学奖得主合著了一本关于人类问题求解的书，并在诺奖之前三年与这位同事分享了图灵奖？"答案是 Allen Newell。
+        </p>
+
+        <h3>4. SFT：收集、过滤、模仿</h3>
+        <p>
+            用题目和已知答案让教师模型生成轨迹，只保留答案正确、格式有效、过程连贯的轨迹，丢掉答案错误或格式无效的，然后用 SFT 训练（WebDancer，NeurIPS 2025；Tongyi DeepResearch）。
+        </p>
+
+        <h3>5. Agent 中期训练</h3>
+        <p>
+            Tongyi 用继续预训练为基础模型做准备：把 Agent 轨迹和通用预训练数据混在一起，做下一个 token 预测，得到一个"为 Agent 准备好的"基础模型（Scaling Agents via Continual Pre-training，ICLR 2026）。在同样的下游 SFT 数据下，只换初始模型：
+        </p>
+        <table>
+            <tr><th>基准（Pass@1）</th><th>Qwen3 基础模型 + SFT</th><th>AgentFounder 基础模型 + SFT</th></tr>
+            <tr><td>BrowseComp-en</td><td>28.6</td><td>39.9</td></tr>
+            <tr><td>BrowseComp-zh</td><td>35.6</td><td>43.3</td></tr>
+            <tr><td>GAIA</td><td>71.8</td><td>72.8</td></tr>
+        </table>
+
+        <h3>6. RLVR：按答案是否正确学习</h3>
+        <p>
+            RLVR（可验证奖励的强化学习）以 Search-R1（COLM 2025）为例：对一道题，策略搜索并推理，采样多条轨迹，比如最终答案分别是 Herbert Simon、Allen Newell、Allen Newell；用精确匹配 $r_i = \mathrm{EM}(a_i, a_{gold})$ 验证，奖励是 0、1、1；然后更新策略。
+        </p>
+        <p>
+            用 GRPO 的话，同组内低于平均的尝试（Herbert Simon）概率被降低，高于平均的被提高。完整的 GRPO 目标里还有两项上一讲没讲的内容：
+        </p>
+        $$J(\theta) = \mathbb{E}\Big[\min\big(\rho \hat A,\ \mathrm{clip}(\rho, 1-\epsilon, 1+\epsilon)\hat A\big) - \beta D_{KL}\Big]$$
+        <p>
+            $\hat A$ 是组内相对奖励；裁剪项限制每次更新的幅度；KL 惩罚让模型不要离参考模型太远。这些在下一讲详细展开。
+        </p>
+        <p>
+            训练效率上，Agent 的 rollout 长短不一，要调用工具。异步 rollout 的做法是：各条 rollout 独立进行，完成后打分，凑满一批再更新策略。另外还有缓存工具结果、稳健地处理 API 错误、在后台整理任务等技巧，更多内容在 RL 系统那一讲。Tongyi 的训练曲线显示，奖励持续上升，策略熵保持相对稳定。
+        </p>
+
+        <h3>7. 开放式报告需要更丰富的奖励</h3>
+        <p>
+            短答案只需检查对错。开放式的综合报告要衡量覆盖面、相关性、事实准确性，以及陈述是否有引用支撑。DR Tulu 提出 RLER（Reinforcement Learning with Evolving Rubrics，演化细则强化学习）：对一个文献综合问题，策略搜索并推理，生成报告 A、B、C；按细则打分：
+        </p>
+        $$r_i = \frac{\sum_k w_k\, \mathrm{Judge}(c_k, y_i)}{\sum_k w_k}$$
+        <p>
+            关键在于细则 $c_k$ 不是固定的：训练过程中，根据模型的回答和检索到的证据不断修订。静态的、事先定好的标准很难完整描述一个好回答应该是什么样，而且准确判断往往需要模型参数之外的最新信息。演化细则能吸收搜索中新发现的信息，以及不同回答之间的对比，使反馈更有区分度。
+        </p>
+        <p>
+            DR Tulu-8B 在科学、医疗和通用领域的四个长篇研究基准上，平均比 Tongyi DR 高 15.6%，比 OpenAI Deep Research 高 0.7%，每次查询的成本约为后者的千分之一。几项消融实验：
+        </p>
+        <ul>
+            <li>SFT 作为 RL 的热启动：哪怕只用 5% 的 SFT 数据做冷启动，也比不做 SFT 好；用完整的 SFT 数据混合，RL 效果最好。延长 RL 训练很关键，有些一开始看起来持平的评估，训练久了会上升。训练奖励更高不一定意味着下游表现更好。</li>
+            <li>演化细则比只用初始细则好，去掉演化部分平均最多下降 2 分，而且差距随训练扩大。两者都比随机奖励好，说明提升不是 Qwen 模型的某种偶然行为。</li>
+            <li>不依赖强大的闭源裁判：把 GPT-4.1 换成 Qwen3-8B 同时做细则生成器和裁判，1000 步 RL 后仍比 SFT 检查点平均提高 4.4 分，只比用 GPT 裁判（+5.7）低 1.3 分。</li>
+            <li>基于搜索的细则比仅凭模型知识生成的细则效果好。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>四、深度研究中的检索</h2>
+
+        <h3>1. 搜索工具</h3>
+        <p>
+            分两类。本地搜索：词汇检索器（如 BM25，按关键词匹配）和向量模型（学出来的相似度）。黑盒 API：网页搜索和网页浏览。其他工具还有 Python 执行（Tongyi）和学术搜索（Tongyi、DR Tulu）。
+        </p>
+
+        <h3>2. 向量检索的原理</h3>
+        <p>
+            先用文档编码器 $E_d$ 把所有文档编码成向量，建立索引。查询时用查询编码器 $E_q$ 编码问题，给每篇文档打分 $s(q, d) = E_q(q)^\top E_d(d)$，取分数最高的 k 篇。例子：问"谁和 Simon 分享了图灵奖"，文档 [1]"Newell 和 Simon：1975 年图灵奖"得分最高，[2]"Simon：1978 年诺贝尔经济学奖"次之，[3]"CMU 校园建筑与路线"最低。这种双编码器检索来自 DPR（EMNLP 2020）。
+        </p>
+        <p>
+            训练编码器用对比学习：让查询和相关段落 $d^+$ 更相似，和负例段落 $d^-$ 更不相似：
+        </p>
+        $$\mathcal{L} = -\log \frac{\exp s(q, d^+)}{\exp s(q, d^+) + \sum_{d^-} \exp s(q, d^-)}$$
+
+        <h3>3. 检索器通常只看到查询</h3>
+        <p>
+            Agent 的上下文里有原始任务、之前的推理、之前的查询和证据，以及当前这一步的推理 $\tau_t$ 和最新查询 $q_t$。但传给检索器的只有 $q_t$，推理内容没有传过去。而推理里恰恰写着"我现在为什么要搜这个、想找什么"。
+        </p>
+        <p>
+            AgentIR（Chen 等，COLM 2026）做了两处改动。一是输入：检索器同时接收当前推理 $\tau_t$ 和查询 $q_t$。二是训练：学习哪些文档对这一步推理有帮助。
+        </p>
+        <p>
+            第二点有一个困难：标准的检索器训练数据有"查询、正例、负例"的标签，而深度研究的轨迹里只有全局问题的标签，中间每一次搜索哪些文档有用，并不知道。DR-Synth 为 Agent 生成的中间信息需求构造标签，用来训练检索器。
+        </p>
+        <p>
+            消融实验（准确率 %）：
+        </p>
+        <table>
+            <tr><th>Agent</th><th>只用查询</th><th>+ 推理</th><th>+ DR-Synth</th><th>两者都用（AgentIR）</th></tr>
+            <tr><td>Tongyi-DR</td><td>48.7</td><td>55.5</td><td>59.4</td><td>66.3</td></tr>
+            <tr><td>gpt-oss-120B</td><td>47.6</td><td>51.3</td><td>59.2</td><td>67.0</td></tr>
+            <tr><td>GLM-4.7</td><td>50.5</td><td>50.9</td><td>57.5</td><td>64.7</td></tr>
+            <tr><td>Tongyi-DR（visit）</td><td>50.2</td><td>54.0</td><td>59.5</td><td>68.1</td></tr>
+        </table>
+        <p>
+            两个组件都有帮助，合起来最好。AgentIR 能用更少的搜索找到更多证据。
+        </p>
+        <p>
+            给检索器什么历史最有用？在都用 DR-Synth 训练的前提下，只改变输入：只用查询、加上之前的查询、再加推理、再加文档、只用当前推理（AgentIR）。以 Tongyi-DR 为例，准确率依次是 59.4、63.1、63.1、60.0、66.3。把检索到的文档也塞进去反而下降，只用当前这一步的推理效果最好，在四种 Agent 设置下都是如此。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、指定阅读与参考资料</h2>
+        <p>
+            第九讲结尾 Daniel Fried 介绍过，这一讲的主讲人 Akari Asai 是 CMU 的教师，专门研究深度研究 Agent。本讲的录像还没有公开，下面根据课程列出的材料整理。
+        </p>
+        <h3>指定阅读（六篇）</h3>
+        <ul>
+            <li>OpenScholar（Asai 等，Nature 2025）：科学进展依赖研究者综合越来越多的文献，这篇论文问 LLM 能否帮上忙。OpenScholar 是一个专门的检索增强语言模型，从 4500 万篇开放获取论文中找出相关段落，写出带引用的回答。作者同时构建了 ScholarQABench，这是第一个大规模、跨领域的文献检索基准，包含计算机科学、物理、神经科学和生物医学领域专家编写的 2,967 个问题和 208 个长回答。在多篇论文综合的任务上，较小的开放模型 OpenScholar-8B 的正确率比 GPT-4o 高 6.1%，比 PaperQA2 高 5.5%。论文还报告：GPT-4o 在 78% 到 90% 的情况下会编造引用，而 OpenScholar 的引用准确率和人类专家相当。人工评估时，专家在 51% 和 70% 的情况下更喜欢 OpenScholar-8B 和 OpenScholar-GPT-4o 的回答，而不是专家自己写的回答；GPT-4o 只有 32%。</li>
+            <li>BrowseComp（OpenAI，2025）：1,266 个问题，需要在互联网上坚持不懈地寻找难找、相互缠绕的信息。题目虽难，答案却很短，容易和标准答案比对，所以用起来很简单。作者把它比作编程竞赛之于编程 Agent：不完整，但有用。它回避了真实用户问题里写长回答、处理歧义这些难点，测的是找信息时的坚持和创造性这一核心能力。</li>
+            <li>DeepResearch Bench（2025）：100 个博士水平的研究任务，由 22 个领域的专家精心编写。因为评估深度研究 Agent 既复杂又费人力，论文提出两套和人类判断高度一致的方法：一套基于参考答案、按任务自适应设定标准来评估报告质量；另一套评估信息检索和收集能力，看有效引用的数量和整体引用准确率。</li>
+            <li>Tongyi DeepResearch（阿里通义，2025）：专为长程、深度信息检索的研究任务设计的 Agent 模型，训练框架把 Agent 中期训练和 Agent 后训练结合起来。数据合成流程完全自动，不依赖昂贵的人工标注，贯穿所有训练阶段；并为每个阶段构建专门的环境，保证交互稳定。模型总参数 305 亿，每个 token 只激活 33 亿，在 Humanity's Last Exam、BrowseComp、BrowseComp-ZH、WebWalkerQA、xbench-DeepSearch、FRAMES 等基准上达到当时最好的水平，模型、框架和完整方案都已开源。</li>
+            <li>DR Tulu（2025）：多数开放的深度研究 Agent 是在容易验证的短答案问答上用可验证奖励训练的，这推广不到真实的长篇任务。论文提出"随训练演化的评分细则"强化学习（RLER）：评分细则在训练过程中和策略模型一起不断更新，能纳入搜索中新发现的信息和不同回答之间的对比，从而更好地核查事实、给出更有区分度的在线策略反馈。由此训练出的 DR Tulu-8B 是第一个直接为开放式长篇深度研究训练的完全开放模型，在科学、医疗和通用领域的四个长篇基准上，平均比 Tongyi DeepResearch 高 15.6%，比 OpenAI 的深度研究产品平均高 0.7%，而每次查询的成本约为后者的千分之一。</li>
+            <li>AgentIR（2026）：深度研究 Agent 正在成为检索系统的主要用户。和人类不同，Agent 每次搜索前都会写出一段自然语言推理，透露了丰富的意图和上下文，而现有检索器完全忽略了这一点。论文提出"感知推理的检索"，把 Agent 的推理过程和查询一起编码；并提出 DR-Synth，从普通问答数据集合成深度研究检索器的训练数据。训练出的 AgentIR-4B 配合 Tongyi DeepResearch，在 BrowseComp-Plus 上准确率达到 68%，而用两倍大小的普通向量模型只有 50%，用 BM25 只有 37%。本讲第四节"检索器通常只看到查询"讲的就是这个问题。</li>
+        </ul>
+        <h3>参考资料</h3>
+        <ul>
+            <li>Natural Questions 数据浏览器和一个维基百科旧版本页面（2018 年 2 月的《星球大战：原力觉醒》原声带条目）：本讲说明传统问答基准的例子。传统基准的答案通常能在单个维基百科页面里找到。</li>
+            <li>BrowseComp-Plus（2025）：BrowseComp 依赖实时的网页搜索 API，不透明且不断变化，难以公平比较和复现；也无法控制文档语料，分不清效果来自检索器还是来自 Agent。BrowseComp-Plus 固定了一个人工核实过的文档库，让评估公平透明，也能单独比较不同检索器的作用。</li>
+            <li>FinSearchComp（2025）：第一个完全开源的金融搜索与推理 Agent 基准。金融分析师经常要在时效性强、专业性强的数据上做复杂的多步搜索，很适合考察搜索能力和基于知识的推理。</li>
+            <li>MedBrowseComp（2025）：第一个系统考察 Agent 能否从实时的医学专业知识库（临床试验、原始研究、监管文件、成本数据）中可靠地检索并综合多跳医学事实的基准。</li>
+            <li>ScholarSearch（2025）：第一个专门评估学术检索能力的数据集，关注文献溯源和整理、学术数据库的使用、长尾学术知识和学术严谨性，这些是 BrowseComp 这类通用搜索基准覆盖不到的。</li>
+            <li>AutoResearchBench（2026）：评估自主科学文献发现的基准，分两类任务：深度研究，通过逐步探查找到一篇特定的目标论文；广度研究，全面收集符合条件的一批论文。</li>
+            <li>A Critical Evaluation of Evaluations for Long-form Question Answering（Xu 等，ACL 2023）：请专家评估长篇回答，并考察各种自动指标和人类判断是否一致，发现现有自动指标都不能很好地反映人对长篇回答的偏好。本讲"答案质量需要多维度评估"引用了它。</li>
+            <li>ResearchQA（2025）：把 75 个研究领域的综述文章提炼成 2.1 万个问题和 16 万条评分细则，细则写明对某个问题的回答应该引用哪些论文、做出哪些解释、说明哪些局限。作者还请 8 个领域的 31 位博士标注者检验了问题和细则的质量。</li>
+            <li>DeepResearch Bench II（2026）：132 个有依据的研究任务，覆盖 22 个领域，Agent 写出的研究报告用总共 9,430 条细粒度的二元评分细则来评估，覆盖信息召回、分析等几个维度，细则从专家写的报告中提取。</li>
+            <li>CMU 档案馆的 Herbert Simon 资料、1978 年诺贝尔经济学奖页面：Herbert Simon 是 CMU 的教授，1978 年因"对经济组织内部决策过程的开创性研究"获得诺贝尔经济学奖。他也是人工智能的奠基人之一。这两份资料出现在本讲的幻灯片里。</li>
+            <li>WebSailor-V2（2025）：认为闭源的深度研究系统之所以能在 BrowseComp 上表现超群，靠的是开源模型缺少的一种推理模式：在庞大的信息空间里系统地降低极高的不确定性。方法包括通过结构化采样生成高不确定性的新任务，以及可扩展的强化学习。</li>
+            <li>WebDancer（2025）：从数据和训练阶段的角度，给出构建端到端信息检索 Agent 的完整流程：构造浏览数据、采样轨迹、用 SFT 做冷启动、用 RL 提升泛化。</li>
+            <li>Scaling Agents via Continual Pre-training（2025）：指出在通用基础模型上做后训练，开源模型在 Agent 任务上一直表现不佳，根源在于缺少强的 Agent 基础模型，后训练时模型既要学习多种 Agent 行为，又要对齐专家示范，两者存在优化上的冲突。于是首次在深度研究 Agent 的训练中加入"Agent 持续预训练"（Agentic CPT），即本讲说的 Agent 中期训练。</li>
+            <li>Search-R1（2025）：用强化学习训练 LLM 在逐步推理的过程中自主生成（多个）搜索查询并利用实时检索结果，只用最终结果作为奖励；训练时对检索回来的内容做掩码，不计入损失，保证训练稳定。</li>
+            <li>DeepSeekMath（2024）：GRPO 的出处，见第九讲。</li>
+            <li>Dense Passage Retrieval（Karpukhin 等，EMNLP 2020）：用双编码器分别把问题和段落编码成向量，用向量相似度检索，在开放域问答上大幅超过 BM25 这类基于词项匹配的方法。本讲"向量检索的原理"讲的就是这种方法。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>六、小结</h2>
+        <p>
+            任务：深度研究要把多次搜索和证据综合结合起来。评估：既要评估回答质量，也要检查引用是否真的支持陈述，评分细则本身也需要审核。训练：先从示范中学习，再通过任务反馈改进；开放式报告可以用随训练演化的细则作为奖励。检索：把 Agent 当前的信息需求（推理）交给检索器，并针对这种需求训练检索器。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-768: AI Agents · Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="09_强化学习基础.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="11_进阶强化学习算法.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

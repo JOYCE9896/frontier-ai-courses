@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第二讲：工具调用的机制与接口 | CMU 11-768 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="01_什么是Agent与模型加循环.html">&larr; 上一讲</a>
+    <span>CMU 11-768: Lecture 02</span>
+    <a href="03_长上下文与上下文管理.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第二讲：工具调用的机制与接口</h1>
+        <p class="subtitle">模型怎样把"预测 token"变成"执行动作"，以及围绕它的格式约束、API 接口、MCP 与评估</p>
+        <div class="author-meta">
+            主讲：Graham Neubig · 2026 年 8 月 27 日<br>
+            资料来源：<a href="https://www.cmu-agents.com/slides/lecture-02-tool-use.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=jXChFB4JSyw" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述内容）· 指定阅读：What Are Tools Anyway?、CodeAct、Toolformer、XGrammar
+        </div>
+    </header>
+
+    <section>
+        <h2>一、什么是工具，为什么需要它</h2>
+        <p>
+            课程采用 Wang 等人在论文 What Are Tools Anyway?（COLM 2024）里的定义：工具是语言模型用来调用外部计算机程序的接口。搜索引擎、计算器、浏览器、Python 解释器、各种 API 都算工具。Graham 提到，这篇综述是他、Daniel Fried 和学生 Zhiruo Wang 一起写的。这里有一个贯穿全讲的原则：模型只负责提出调用请求，要不要执行、怎么执行，由外部软件决定。
+        </p>
+        <p>
+            工具带来的好处分两类。一类是扩展：让模型获得它参数里没有的信息或能力，比如今天的新闻、你账户里的数据。另一类是代劳：把外部程序做得更可靠、更高效的事交给它们，比如精确计算。
+        </p>
+        <p>
+            Graham 给了两个例子来区分。模型的参数在训练结束时就固定了，比如训练数据截止到四个月前，那么"现在几点"它无论如何都不可能知道，必须调用外部函数，这属于扩展。反过来，现在的模型数学已经很好，让它算两个七位数相乘，它能算对，但要写很长一段推理，计算器一瞬间就给出结果，这属于代劳。
+        </p>
+        <table>
+            <tr><th>需求</th><th>工具示例</th><th>好处</th></tr>
+            <tr><td>最新信息</td><td>搜索</td><td>拿到新鲜的证据</td></tr>
+            <tr><td>精确计算</td><td>计算器或 Python</td><td>执行结果可靠</td></tr>
+            <tr><td>私有状态</td><td>账户 API</td><td>经过授权的应用数据</td></tr>
+            <tr><td>对外动作</td><td>浏览器或 API</td><td>真正改变环境</td></tr>
+        </table>
+        <p>
+            但调用工具有代价：会增加延迟、花钱、可能失败，也可能带来风险。所以只有当好处大于这些代价时才值得调用。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、从需求倒推工具：以 ChatGPT 为例</h2>
+        <p>
+            Graham 先问学生平时用 ChatGPT 做什么。回答有写代码、在 Blender 里渲染东西、生成图片、推荐商品（这需要网页搜索或直接连 Google、亚马逊的 API）、渲染 LaTeX 并生成 PDF、操作 Slack。ChatGPT 刚推出时只能收文字、回文字，现在几乎什么都能做。Graham 特别强调：ChatGPT 已经是一个 Agent 了，因为它会为了回答你的问题反复调用工具，而这就是 Agent 的定义。
+        </p>
+        <p>
+            设计工具的思路是先想清楚要什么能力，再为每一类交互定义一个范围窄、类型明确的接口。课堂以"如何搭一个 ChatGPT"为例，列出了几种基本调用：
+        </p>
+        <ul>
+            <li><code>finish(text)</code>：返回最终文字并结束 Agent 循环。它不调用任何外部程序，是 Harness 自己的控制动作。比如问"加纳的首都是哪里"，模型直接调用 <code>finish("Accra is the capital of Ghana.")</code>。Graham 说在 Agent 循环里实现文字回复有两种方式：一种是专门设一个 finish 工具；另一种是只要模型这一轮没有调用任何工具，就当作它要结束，直接退出循环。</li>
+            <li><code>search_web(query)</code>：从网上检索信息，比如回答"CMU 今天发布了什么消息"。Graham 在这里谈到了"RAG 已死"的说法。RAG 即检索增强生成（Retrieval-Augmented Generation），先检索相关资料，再根据资料生成回答。有人说这是两年前的东西，已经没人关心了。Graham 的看法相反：先检索再生成现在已经普遍到大家用着都意识不到，所有聊天产品都在做，它成了默认配置，所以才有人以为它死了。</li>
+            <li><code>execute_code(code)</code>：在隔离环境里运行代码并返回输出。问 18、23、41、54 的平均数，模型写 <code>sum([18,23,41,54])/4</code>，得到 34.0。</li>
+            <li><code>generate_image(query)</code>：根据文字描述生成图片。这个工具和其他几个不同，它的输出是图像。Graham 指出，调用时的关键其实是写查询词：模型会把用户的一句简短要求大幅扩写之后再交给图像生成 API。以前下载 ChatGPT 生成的图片时，还能在图片说明里看到这段扩写后的文字，它和用户原话差别很大。</li>
+            <li>自定义函数，比如 <code>create_grocery_cart(items)</code>：用一个有类型的调用暴露某个应用特有的功能。传入香蕉、牛奶、咖啡，返回"购物车 C17，3 件商品，31.42 美元"。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>三、用代码当工具</h2>
+        <p>
+            上面的工具每次只做一件事。如果给模型五六十个 API，它每一步调用一个（或者并行调用几个）。如果任务需要循环、中间变量、调用多个库，一次次单独调用工具会很慢。另一个做法是让模型直接写一段代码，用代码把多个操作组合在一次动作里。What Are Tools Anyway? 把代码称为一种"元工具"：它本身能组合控制流、库函数和多个操作。Graham 的解释是，一段代码本身就是一棵函数调用树：赋值是一次调用，减法是一次调用，这棵树里还能有循环和条件分支。再导入一个库，比如 pandas，库里的所有功能就都成了可用的工具；你还可以自己写辅助函数。
+        </p>
+        <p>
+            他举了 CodeAct 论文里的例子：找出在美国、日本、德国、印度四国中，买某款手机哪里最划算。用普通工具调用，模型要先查德国汇率，再查德国售价，再换算加税，然后对日本重复一遍，对每个国家都重复一遍，一步一步来回很多轮。写代码的话，一段程序里用循环把四个国家都算完、比较大小，一次动作就结束了。Graham 说，今天大家把"用代码调工具"当成理所当然，但三四年前刚开始用 LLM 做 Agent 时，并不是这样做的。
+        </p>
+        <p>
+            CodeAct（Wang 等，ICML 2024）系统比较了这种做法。它让模型用可执行的 Python 代码作为动作，和用 JSON 或纯文本描述动作做对比。幻灯片给出的结果是：在展示的 8 个模型里，用代码当动作的成功率 8 个都最高；需要的交互轮数有 7 个最少。放到全部 17 个模型上，两项都是 12 个模型最好。
+        </p>
+        <p>
+            CodeAct 的结果里还有一点：这些任务原本被看作普通的工具调用任务，并不需要写代码，但换成代码之后成功率依然更高。
+        </p>
+        <p>
+            既然代码更好，为什么不是所有工具都用代码调用？Graham 问学生，循环和变量会带来什么坏处。学生回答：会卡住。模型可能写出死循环，系统里就得有处理死循环的机制。库呢？学生回答：安全问题。Graham 补充说，这是目前 Agent 在网络安全方面的一个主要问题：Agent 会引入一个已经被人植入恶意代码的库，于是 Agent 被攻破，整个系统也跟着被攻破。所以代码是一种威力很大的工具，也因此需要小心：
+        </p>
+        <ul>
+            <li>表达力强：有循环、变量和库，适合多步骤的数据处理和组合。</li>
+            <li>难以约束：可能的动作范围很大，校验起来不如一个窄接口的函数精确。</li>
+            <li>影响面大：可以动文件、网络和进程。所以必须配合沙盒、资源限制、权限控制和审计日志。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>四、工具调用在底层是怎么实现的</h2>
+        <p>
+            Graham 先在黑板上画了一次模型输出的结构。一次输出里常常同时包含几部分：用了推理模型的话，最前面是思考 token，内容很长，不给用户看；然后是给用户看的简短文字；最后是工具调用块。所以 ReAct 循环在今天已经不再需要单独的代码来拼接"推理"和"行动"，一次生成就把两者都写出来了。
+        </p>
+        <p>
+            有学生问：工具调用用到的这些特殊 token，是不是在预训练时就必须在词表里？Graham 先说是，又改口说不一定。在整个互联网文本上预训练时，通常还没有这些 token；更常见的做法是在中期训练（mid-training）时引入，也就是在预训练之后，用中等规模、符合目标格式的数据继续训练，之后可能再做强化学习。
+        </p>
+
+        <h3>1. 消息先被模板拼成一串文字</h3>
+        <p>
+            我们平时调 API 发送的是一组带角色的消息：system（系统指令）、user（用户）、assistant（模型）。但模型本身只接受一整串 token。聊天模板负责把这些消息拼接起来。以 Qwen 模型为例，每条消息会被包在 <code>&lt;|im_start|&gt;角色</code> 和 <code>&lt;|im_end|&gt;</code> 之间：
+        </p>
+<pre><code>&lt;|im_start|&gt;system
+Be concise.&lt;|im_end|&gt;
+&lt;|im_start|&gt;user
+Weather in Pittsburgh?&lt;|im_end|&gt;
+&lt;|im_start|&gt;assistant
+I need current data.&lt;|im_end|&gt;</code></pre>
+        <p>
+            角色是 API 层面的结构，模板把它们序列化成一条模型输入。
+        </p>
+
+        <h3>2. 工具定义进入提示，调用从输出出来</h3>
+        <p>
+            发送请求时，Harness 在 <code>messages</code> 之外再传一个 <code>tools</code> 参数，里面是每个工具的 JSON Schema。模板把这些定义也放进提示，比如放在 <code>&lt;tools&gt;…&lt;/tools&gt;</code> 里。模型如果决定查天气，就输出：
+        </p>
+<pre><code>&lt;tool_call&gt;
+{"name":"get_weather", "arguments":{"city":"Pittsburgh"}}
+&lt;/tool_call&gt;</code></pre>
+        <p>
+            模型只生成调用的内容，API 返回响应时会给这次调用附上一个唯一的编号。
+        </p>
+
+        <h3>3. 同一个调用，不同模型写法不同</h3>
+        <p>
+            工具的 Schema 是统一的，但每个模型家族在训练时学的输出格式不一样，Harness 必须用对应的方式解析。幻灯片对比了三种：
+        </p>
+        <ul>
+            <li>Qwen 3.8：用函数标签和参数标签，写成 <code>&lt;function=get_weather&gt;&lt;parameter=city&gt;Pittsburgh&lt;/parameter&gt;&lt;/function&gt;</code>。</li>
+            <li>Mistral Small 4：用一个控制 token <code>[TOOL_CALLS]</code>，后面跟 JSON 数组，并且模型自己输出调用编号。</li>
+            <li>DeepSeek V3.2：用一种叫 DSML 的标记块，<code>&lt;｜DSML｜function_calls&gt;</code> 里再套 <code>invoke</code> 和 <code>parameter</code>。DeepSeek 不叫它 tool call，而叫 function call。</li>
+        </ul>
+        <p>
+            Graham 说，同样的模型、同样的数据，用哪种格式训练，效果也许有细微差别，但任何一种都能用。关键是你要知道它们不一样：能解析 DeepSeek 输出的代码，拿去解析 Qwen 的输出就会出错。有学生问微调时要注意什么，他的回答很明确：如果在一个已经训练过的模型上继续微调，一定要沿用它原来的工具调用格式，不要让它去学一个它没见过的格式。好在 Hugging Face 的 <code>apply_chat_template</code> 已经为各个模型实现好了对应的模板，如果实现有误，可以去提问题，也可以自己改。他之所以讲底层细节，是因为不了解这些就容易犯错。
+        </p>
+        <p>
+            课程引用的几份参考资料可以看到这些格式的原貌。Qwen2.5 的聊天模板在系统提示里写着："你可以调用一个或多个函数来协助回答用户问题。函数签名放在 &lt;tools&gt;&lt;/tools&gt; XML 标签里"，并要求模型把每次调用写成 <code>&lt;tool_call&gt;{"name": ..., "arguments": ...}&lt;/tool_call&gt;</code>。Mistral 的官方分词指南说明，它的工具调用用专门的控制 token 来标记，理由是效率、安全和边界清楚：控制 token 是单个特殊 token，用户输入的普通文字无法伪造出它，模型也就不会把用户写的一段文字误当成一次工具调用。
+        </p>
+
+        <h3>4. Harness 如何分发调用：以 OpenHands 为例</h3>
+        <p>
+            OpenHands 是 Graham Neubig 参与开发的开源编程 Agent。它的处理分两步。初始化时，把每个工具规格（比如 BashTool）解析并配置好，建立一张"工具名到定义"的表 <code>tools_map</code>，每个定义包含 Schema、动作类型和执行器。每次模型发出调用时，按顺序做五件事：解析出名称和参数；在表里查到工具；用 <code>action_from_arguments</code> 校验参数并构造动作；交给执行器运行；返回一个带调用编号的 ObservationEvent。
+        </p>
+
+        <h3>5. 结果按编号对回去</h3>
+        <p>
+            工具执行完，结果以一条 role 为 tool 的消息送回，里面的 <code>tool_call_id</code> 和原调用的 <code>id</code> 一致。模型一次发出多个调用时，就靠这个编号知道哪个结果属于哪个调用。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、约束解码：保证输出格式合法</h2>
+        <p>
+            讲约束解码之前，Graham 补充了分发环节里两个会出错的地方。一是校验时失败：模型给的调用本身就不合规定，比如参数类型不对。二是执行时失败：调用在形式上合法，但实际跑不通。比如一个执行 Python 的工具接受任何字符串，校验一定通过，真正运行时代码却报错了。无论成功还是失败，都要产生一条观测结果返回给模型。
+        </p>
+        <p>
+            还有一个实际开发中很烦人的细节：调用编号必须配对。Anthropic 的 API 如果发现历史记录里有一个工具调用没有对应的结果，会直接判定历史无效，拒绝继续生成。Graham 遇到过这种情况：模型发出了工具调用，程序在写入结果之前崩溃了，重启恢复后，历史里缺了这条结果，API 就再也不肯工作。
+        </p>
+
+        <h3>1. 问题：模型会写出坏掉的调用</h3>
+        <p>
+            模型是逐个 token 生成的，完全可能漏掉一个右花括号，写出 <code>{"name":"get_weather", "arguments":{"city":"Pittsburgh"}</code>。这样的 JSON 解析不了，Harness 就无法执行。Graham 说他见过无数人事后去检查缺没缺括号、手动补上，这种做法不值得提倡。
+        </p>
+        <p>
+            对工具调用的约束可以分四层：语法（是合法的 JSON）、结构（字段齐全）、类型（city 是字符串）、取值（units 只能是 C 或 F）。课程特别提醒：这些约束只能保证"形式正确"，保证不了内容是真的、有没有权限、选的工具对不对、任务能不能完成。
+        </p>
+
+        <h3>2. JSON Schema 描述"合法"是什么</h3>
+<pre><code>{
+  "type": "object",
+  "properties": {
+    "city": {"type": "string"},
+    "units": {"enum": ["C", "F"]}
+  },
+  "required": ["city"],
+  "additionalProperties": false
+}</code></pre>
+        <p>
+            按这个 Schema，<code>{"city":"Pgh","units":"F"}</code> 合法，<code>{"city":"Pgh","units":"K"}</code> 不合法。两者都是正确的 JSON，但只有 F 能从规则"unit 是 C 或 F"推导出来。可以把 Schema 看成一套语法规则，合法的输出就是能按规则一步步推出来的字符串。
+        </p>
+
+        <h3>3. 下推自动机：检查嵌套结构的工具</h3>
+        <p>
+            Graham 在课上从正则表达式讲起。正则表达式属于正则语法，可以用有限状态自动机来识别：自动机有若干状态，每读入一个符号就按规则跳到另一个状态，读完时停在"接受"状态就说明匹配成功。但 JSON Schema 描述的结构不是正则语法能表达的，它需要上下文无关语法（context-free grammar）。上下文无关语法能为合法的 JSON 画出一棵语法树：最外层是一对花括号，里面是用逗号隔开的成员，某个成员的值是字符串，另一个成员的值是温度单位。如果输出的单位是 K，前面大半棵树都能画出来，画到单位这里就失败了，因为我们规定只接受摄氏和华氏。有限状态自动机识别不了上下文无关语法，需要下推自动机。
+        </p>
+        <p>
+            怎样在生成过程中实时检查"到目前为止是否仍然可能合法"？JSON 可以无限嵌套（对象里套数组，数组里再套对象），普通的有限状态机记不住嵌套了几层。所以要用下推自动机（Pushdown Automaton，PDA）：它在有限状态之外加了一个栈。状态记录当前处在语法规则的哪个位置（比如"正在等一个值"、"正在等逗号"）；栈记录嵌套层次，遇到 <code>{</code> 就压入"对象"，遇到 <code>[</code> 压入"数组"，遇到对应的右括号就弹出。栈为空时说明结构完整。
+        </p>
+
+        <h3>4. 检查发生在 token 以下的字节层面</h3>
+        <p>
+            这里有一个技术难点：模型的 token 和语法的单位对不上。一个 token 可能跨越好几个语法单元（比如 <code>"F"}</code> 这个 token 同时包含引号、字母、引号和右花括号），也可能只包含某个单元的一半。所以不能在 token 边界上做语法判断。
+        </p>
+        <p>
+            XGrammar（Dong 等，MLSys 2025）的做法是：先把语法一次性编译成按字节工作的 PDA；生成每一步时，对每个候选 token，把它解码成字节，逐字节喂给 PDA，看能否继续推进。能推进就允许，不能就把这个 token 的概率屏蔽掉（mask），使模型不可能选它。具体做法是把所有不合法 token 的 logit（模型输出的原始分数）设为负无穷，再重新归一化，这样概率只分布在合法 token 上。Graham 提到，XGrammar 是 CMU 机器学习系的人开发的，现在各主流推理框架里都在用。
+        </p>
+
+        <h3>5. 如何做得快</h3>
+        <p>
+            词表里有十几万个 token，每步都逐个检查太慢。XGrammar 的加速分四步：
+        </p>
+        <ol>
+            <li>解析前缀：用持久化的 PDA 栈跟进已经生成的字节。</li>
+            <li>读取缓存：大多数 token 是否合法只取决于栈顶的语法节点，和更深的上下文无关，这些结果可以预先算好，按栈顶节点查表即可。</li>
+            <li>只检查少数：剩下那些合法性依赖完整上下文的 token，才拿完整的栈去跑。</li>
+            <li>屏蔽并继续：合并结果、屏蔽 logits、采样一个 token、更新栈。</li>
+        </ol>
+        <p>
+            幻灯片总结了加速来源：缓存处理掉大部分 token；持久化栈支持分支；CPU 上的检查工作和 GPU 上的模型推理同时进行，互不等待。
+        </p>
+    <h3>6. 约束解码也有管不到的时候</h3>
+        <p>
+            Graham 在课上出了一道题：开了约束解码、设好 JSON Schema 之后，还有什么情况会生成不合法的调用？答案是 token 用完了。模型每次生成都有长度上限，如果到上限时自动机仍在一条合法路径上，但还没走到结束状态，输出就是半截 JSON。他自己就遇到过。理论上的解决办法是随时计算还剩多少 token，在快用完时强制把结构收尾。他开玩笑说，谁要是在 XGrammar 里把这个实现了，可以算作业加分。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、通过 REST API 调用外部服务</h2>
+
+        <h3>1. 库函数和网络服务的区别</h3>
+        <p>
+            Graham 先提了另一种调用 API 的方式，叫编程式工具调用（programmatic tool calling）：直接给模型一个 Python 文件，比如 weather_lib.py，里面有 get_weather 函数，告诉模型需要时调用它，再给它执行 Python 的能力。这样可以用，但这个函数只能在本地调用，远程调不了，也没法走标准的工具调用接口。
+        </p>
+        <p>
+            写一个 Python 函数 <code>get_weather(city, units)</code>，用 Pydantic 标注好参数和返回值类型，这是一个进程内的 API：调用者和函数在同一个程序里。它还不能被远程调用，因为网络上的客户端还需要地址、通信协议、数据序列化方式和身份认证。
+        </p>
+
+        <h3>2. REST API 把函数暴露到 HTTP 上</h3>
+        <p>
+            用 FastAPI 可以把这个函数绑定到一个 HTTP 地址 <code>GET /weather</code>，参数从查询字符串读，并要求请求头里带 <code>X-API-Key</code> 作为密钥。FastAPI 还会自动生成一份 OpenAPI 描述文档，写明有哪些操作、每个参数在哪里（query 还是 header）、类型和取值范围（里面嵌的仍然是 JSON Schema）、需要哪种认证。OpenAPI 描述的是 HTTP 操作，JSON Schema 描述的是其中的值。Graham 说这份自动生成的描述可以原样交给语言模型，模型据此知道哪些调用是允许的；Agent 发出调用后，Harness 再把它转发给 API 服务器。加 API 密钥有两个作用：不想让别人查天气时可以拦住；更重要的是，如果接口背后是个人数据，没有正确密钥的人都会被挡在外面。
+        </p>
+
+        <h3>3. 编程 Agent 常用 curl 直接调</h3>
+        <p>
+            有 shell 权限的编程 Agent 往往直接读 API 文档，然后拼一条 curl 命令：
+        </p>
+<pre><code>curl -sS -G https://weather.example/weather \
+  --data-urlencode "city=Pittsburgh" \
+  --data-urlencode "units=F" \
+  -H "X-API-Key: $WEATHER_API_KEY"</code></pre>
+        <p>
+            这很简单，但有一个安全问题：密钥放在环境变量里，Agent 的 shell 能读到它，也就可能泄露或滥用它。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、MCP：另一种给 Agent 提供能力的方式</h2>
+        <p>
+            MCP（Model Context Protocol，模型上下文协议）规定了 AI 应用如何发现和调用外部能力。结构上，一个 MCP Host（比如某个 AI 应用）里有多个 Client，每个 Client 连一个 MCP Server。Server 可以在本地通过标准输入输出（stdio）连接，比如文件系统服务；也可以在远程通过 HTTP 连接，比如 Sentry 错误监控服务。课程强调：MCP 是给 Agent 用的另一种接口，调用 REST API 并不一定要经过 MCP。
+        </p>
+        <p>
+            Graham 坦白说，他第一次看到 Anthropic 大约一年半到两年前推出 MCP 时，觉得没必要：已经有很好的方式调用 API 了，直接发请求给 REST 服务器就行，为什么还要为每个 API 跑一个程序？后来他认识到 MCP 至少有一两点和普通 API 调用真正不同，最主要的就是下面讲的安全层。
+        </p>
+        <p>
+            FastMCP 这个库可以读取一份 OpenAPI 描述，把每个 HTTP 操作自动变成一个可被发现的 MCP 工具，比如 <code>GET /weather</code> 变成 <code>get_weather(city, units)</code>。
+        </p>
+        <p>
+            MCP 在凭证管理上的价值在于"凭证中转"（credential brokering）。部署时用两把不同的密钥：<code>UPSTREAM_API_KEY</code> 由 MCP Server 保管，用来调用真正的天气 API；<code>MCP_API_KEY</code> 用来保护 MCP 这个入口。Agent 的 Harness 只拿着 MCP 密钥，Server 验证通过后，再用上游密钥去调 API。这样模型两把密钥都看不到，Server 能在中间控制谁可以访问什么。Graham 用 GitHub 举例：上游密钥是你的 GitHub 令牌，只交给 MCP Server；Agent 手里只有 MCP 密钥。如果把 GitHub 令牌直接给 Agent，而它某一天觉得把令牌推到你的公开仓库里是个好主意，你的账号就被盗了，所有仓库都可能被装上恶意软件。给 Agent 的应该是一个即使泄露也危害不大的东西，真正的凭证留在 Agent 碰不到的地方。幻灯片也注明，示例里的静态令牌只适合教学和开发，生产环境应该验证 JWT 或使用 OAuth。
+        </p>
+        <table>
+            <tr><th></th><th>OpenAPI / HTTP API</th><th>MCP</th></tr>
+            <tr><td>共同点</td><td colspan="2">名称、描述，以及描述输入结构的 JSON Schema</td></tr>
+            <tr><td>发现</td><td>获取一份 OpenAPI 文档</td><td>运行时调用 <code>tools/list</code></td></tr>
+            <tr><td>调用</td><td>HTTP 方法 + 路径 + 参数</td><td>通过 MCP 传输层发 <code>tools/call</code></td></tr>
+            <tr><td>认证</td><td>客户端直接向 API 认证</td><td>客户端向 MCP 认证，上游认证另行处理</td></tr>
+            <tr><td>范围</td><td>只描述 HTTP 操作</td><td>还支持资源、提示模板和扩展</td></tr>
+        </table>
+    <p>
+            Graham 在幻灯片之外还补充了两点。一是 MCP 有官方的服务器注册表（MCP Registry），想找能做某件事的 MCP 可以去那里查，此外还有大量按受欢迎程度排名的第三方目录网站。二是一个巧合：他整讲都在用匹兹堡天气举例，上课当天匹兹堡恰好一边下暴雨一边出太阳，而他设计的 API 一次只能返回一种天气状态，被现实天气弄坏了。
+        </p>
+        <p>
+            课程引用的 MCP 官方资料里还有几处细节。MCP 的消息用 JSON-RPC 编码；标准传输方式有两种：stdio（客户端启动一个子进程，通过标准输入输出逐行收发消息）和 Streamable HTTP（每条消息是发到同一个 MCP 地址的一次 HTTP POST）。工具规范里写明，出于安全考虑，应该始终有人在环中，能够拒绝某次工具调用；应用应当在界面上清楚显示哪些工具暴露给了模型。2026 年 7 月 28 日发布的新版规范把 MCP 从有状态的双向协议改成了无状态的请求/响应协议，取消了握手和会话，每个请求都自带描述信息，工具列表结果可以缓存，这主要是为了让 MCP 服务器更可靠、更容易扩展。按官方博客的数字，MCP 的一级 SDK 每月下载量接近 5 亿次。FastMCP 的文档也提醒：从 OpenAPI 自动转换出来的 MCP 服务器适合快速起步和做原型，但在正式使用时，专门设计、精心挑选过工具的 MCP 服务器效果明显更好，接口多、参数复杂的 API 尤其如此。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、同时调用多个工具</h2>
+        <p>
+            假设一个请求要查天气、看日历、查航班。如果一个接一个调用，每次都要"模型生成一轮、等工具返回"。按幻灯片的数字，每轮生成 0.8 秒，三个工具分别 1.2、0.9、1.1 秒，串行总共约 6.4 秒。
+        </p>
+        <p>
+            如果模型在一轮里同时发出三个调用，Harness 并发执行，只需要两次生成加上最慢那个工具的时间：2 × 0.8 + max(1.2, 0.9, 1.1) ≈ 2.8 秒。
+        </p>
+        <p>
+            前提是这些调用彼此独立。"查天气、读日历、查航班"可以并行；"先查客户编号，再用编号查订单，再退款某个订单"就必须按顺序，因为后一步要用前一步的结果。实现并发时，结果返回的顺序可能和发出的顺序不同，必须保留调用编号来对应。课上的 Python 写法是用 <code>asyncio.gather</code> 并发执行，每个任务返回 <code>(call_id, value)</code>，并设置 <code>return_exceptions=True</code>，让一个工具出错不影响拿到其他结果。
+        </p>
+        <p>
+            Graham 接着讲了一个现象：在 Agent 场景里，单价更贵的模型按每个任务算，反而可能更便宜。原因有两个。一是贵的模型更聪明，能更快找到合适的解法。二是新模型的并行工具调用做得好得多，用编程 Agent 时你会看到它一次同时查看好几张图、同时写好几个文件。他问学生：并行调用的机制早就有了，为什么大约半年前才真正普及？一位学生答对了：强化学习逼出来的。训练时对完成任务的耗时施加很重的惩罚，模型为了尽快做完，就学会了尽量一次发出多个调用。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、怎样评估工具调用</h2>
+        <p>
+            伯克利函数调用排行榜（Berkeley Function Calling Leaderboard，BFCL）第 4 版是常用的基准，测试分四类：单轮调用（简单、多个候选函数、并行、多个并行）；多轮调用（基础、缺少函数、缺少参数、长上下文）；Agent 场景（网页搜索、记忆）；稳健性（是否编造不存在的调用、对格式变化是否敏感）。
+        </p>
+        <p>
+            课程建议从四个层次评估整个系统：
+        </p>
+        <table>
+            <tr><th>层次</th><th>问题</th><th>指标示例</th><th>是否要真实执行</th><th>常见失败</th></tr>
+            <tr><td>选择</td><td>选对工具了吗</td><td>精确率 / 召回率</td><td>否</td><td>漏调或多调</td></tr>
+            <tr><td>参数</td><td>参数值对吗</td><td>语法树或 Schema 匹配</td><td>否</td><td>字段或值错误</td></tr>
+            <tr><td>轨迹</td><td>顺序对吗</td><td>序列成功率</td><td>通常要</td><td>依赖关系搞错</td></tr>
+            <tr><td>任务</td><td>目标达成了吗</td><td>端到端成功率</td><td>要</td><td>看似合理的错误答案</td></tr>
+        </table>
+        <p>
+            除了准确率，还要看运营层面的质量：效率（延迟、调用次数、token 数、成本），一个正确但太慢太贵的 Agent 也没法用；可靠性（超时、重试、部分失败），要在真实的服务商表现下报告成功率；安全（策略、权限、副作用），要测试恶意输出和有后果的操作。
+        </p>
+        <p>
+            失败来源分三处：模型（选错工具、参数写错、忽略返回结果）；Harness（解析失败、认证失败、校验失败、编号对不上）；服务商或工具本身（超时、限流、执行报错）。幻灯片还引用了 OpenRouter 在 2026 年 8 月 27 日的服务商统计，显示不同服务商的工具调用错误率各不相同。所以生产环境的评估既要看基准准确率，也要看这些运营故障率。
+        </p>
+        <p>
+            课堂上 Graham 对这张图讲得更具体：图里是同一个模型（他说大概是 GLM 5.3），唯一变化的是由哪家服务商提供，工具调用错误率却从万分之一到万分之五一直到 15% 不等。他请学生猜原因，结合学生的回答总结了几条：
+        </p>
+        <ul>
+            <li>量化精度不同。量化是用更少的位数存储模型权重来省钱。他的经验是，FP8（常见的默认精度）的模型出错的工具调用比 FP4 少得多，FP4 压缩得太狠，服务商省了钱，模型却变差了，能在 FP4 下保持原有表现的量化方案很少。</li>
+            <li>解码算法不同。推测解码（speculative decoding）用一个便宜的小模型先猜大模型会输出什么，以此加速。无损的推测解码理论上不改变结果；如果用了有损的版本，结果就会变，这时还叫"同一个模型"本身就不太合适。</li>
+            <li>约束解码没开或实现不同。很多服务商从头自己写推理引擎，有的用 vLLM 或 SGLang，而它们支持的语法约束解码实现不一样。有的服务商根本没实现，完全靠模型自己写对格式。</li>
+            <li>服务商本身不稳定，时不时宕机，调用自然失败。</li>
+        </ul>
+        <p>
+            BFCL 本身也在逐版扩展。第 1 版引入了用抽象语法树（AST）来比对调用是否正确，覆盖单轮的简单、多函数和并行调用；第 2 版加入企业和开源社区贡献的函数；第 3 版加入多轮交互；第 4 版转向整体的 Agent 评估，包括网页搜索、记忆和格式敏感性三部分。网页搜索部分用的是需要多跳推理的问题，模型要通过 DuckDuckGo 搜索 API 一步步查找才能答出来。排行榜同时区分两种模式：模型原生支持的函数调用（FC），以及不支持时用普通文本生成来模拟的提示方式（Prompt）；格式敏感性测试只针对后者。
+        </p>
+    </section>
+
+    <section>
+        <h2>十、指定阅读</h2>
+        <h3>What Are Tools Anyway?（Wang、Neubig、Fried，COLM 2024）</h3>
+        <p>
+            很多论文都说自己在研究"工具"，但用法各不相同。这篇综述先给出统一定义：工具是语言模型使用的外部程序。然后系统梳理了工具在哪些场景、以什么方式帮助语言模型，本讲开头"扩展"和"代劳"的分类就来自这里。论文还做了实证比较：测量不同工具方法所需的计算量和在各基准上带来的提升，也就是算一笔"花多少、换来多少"的账，最后列出了这个方向尚未解决的挑战。
+        </p>
+        <h3>CodeAct（Wang 等，ICML 2024）</h3>
+        <p>
+            当时的 Agent 一般用 JSON 或规定格式的文字来输出动作，这有两个限制：动作只能在预先定义的工具范围内选，而且不方便把多个工具组合起来。CodeAct 让所有动作都写成可执行的 Python 代码，配一个 Python 解释器执行；在多轮交互里，模型看到执行结果后，可以修改之前的代码或写新的代码。论文在 API-Bank 和作者新建的基准上测了 17 个模型，CodeAct 的成功率比常用做法最多高出 20%。作者还收集了 7000 条多轮交互数据（CodeActInstruct）用来微调，结果显示它能提升模型在 Agent 任务上的表现，同时不损害通用能力。
+        </p>
+        <h3>Toolformer（Schick 等，2023）</h3>
+        <p>
+            第一讲的指定阅读，这里再次列出，因为它是"工具调用也是 token"这个思路的起点。简单回顾：模型先在文本中尝试插入 API 调用并执行，只保留那些让后文更容易预测的调用，再用这些数据微调，从而自己学会何时、如何调用工具。详见第一讲笔记。
+        </p>
+        <h3>XGrammar（Dong 等，MLSys 2025）</h3>
+        <p>
+            论文的出发点是：Agent 越来越需要结构化输出，比如能解析的代码、函数调用、机器人指令。上下文无关语法足够灵活，能描述这些结构，但运行时要对词表里每一个 token 在多个栈状态上做检查，开销不小。XGrammar 的核心做法是把词表分成两类：与上下文无关的 token，合法与否可以预先算好；与上下文相关的 token，才在运行时检查。它还对语法做变换，扩展语法的上下文，尽量减少需要运行时检查的 token；用持久化的栈加速运行时检查；并且把语法计算和 GPU 上的模型推理重叠进行。结果是比已有方案最多快 100 倍，和推理引擎结合后，结构化生成几乎不增加额外延迟。
+        </p>
+    </section>
+
+    <section>
+        <h2>十一、小结</h2>
+        <p>
+            课程把工具调用总结为一个分层的系统：能力层，工具带来检索、执行、生成和应用操作；机制层，Schema 进入提示，模型按各自协议输出调用，Harness 校验、分发并按编号对回结果；约束层，JSON Schema 和语法屏蔽只保证形式，不保证语义正确；接口层，直接调用 REST 和使用 MCP 是两种暴露能力、管理凭证的方式；系统层，要处理依赖和并发，并从选择、参数、结果、成本和运营故障几方面评估。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-768: AI Agents · Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="01_什么是Agent与模型加循环.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="03_长上下文与上下文管理.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

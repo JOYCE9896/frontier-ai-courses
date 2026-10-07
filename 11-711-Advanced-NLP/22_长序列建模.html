@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第二十二讲：扩展序列长度 | CMU 11-711 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="21_混合专家模型.html">&larr; 上一讲</a>
+    <span>CMU 11-711: Lecture 22</span>
+    <a href="23_测试时扩展.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第二十二讲：扩展序列长度</h1>
+        <p class="subtitle">序列能有多长，长上下文的评测（迷失在中间、大海捞针、RULER、Oolong），注意力的平方复杂度与 GPU 存储层级，在线 softmax、FlashAttention 与环形注意力，位置编码的外推失败、长文档继续训练与 RoPE 缩放，Transformer 的改造与状态空间模型（Mamba）</p>
+        <div class="author-meta">
+            主讲：Sean Welleck · 2026 年 4 月 7 日<br>
+            资料来源：<a href="https://cmu-l3.github.io/anlp-spring2026/static_files/anlp-s2026-22-longcontext.pdf" target="_blank">课程幻灯片</a>（部分来自 Graham Neubig 2024 年秋的讲稿） · <a href="https://www.youtube.com/watch?v=pSWrrq0D6M4" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述内容；Transformer 改造一节课上跳过，依据幻灯片简述） · 主要阅读：Self-attention Does Not Need O(n²) Memory（Rabe &amp; Staats，2021）；Mamba（Gu &amp; Dao，2023）；FlashAttention（Dao 等，2022）；Ring Attention（Liu 等，2023）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、序列有多长，难在哪</h2>
+        <p>
+            继续规模化的主题，这次扩展的是序列长度：序列长到几百万 token 时怎么办？
+        </p>
+        <ul>
+            <li>一个句子：约 20 个 token，传统 NLP 任务比如翻译单句。</li>
+            <li>一篇文档：100 到 1 万个 token。</li>
+            <li>一本书：5 万到 30 万个 token。</li>
+            <li>一段视频：1500 到 100 万个 token（约每秒 300 个）。</li>
+            <li>一个代码库：2 万到 10 亿个 token。</li>
+            <li>一个基因组：30 亿个核苷酸。</li>
+        </ul>
+        <p>
+            在 Agent 场景里，每一步都可能处理信息，还要再乘以步数。深度研究 Agent 会从大量文档甚至书里收集信息，要么丢掉一部分，要么让上下文越来越长；编程 Agent 也要决定一次读一个文件，还是把整个代码库给它、让它自己找要用的部分，后者某种意义上更通用。处理超长序列的能力是一大限制。
+        </p>
+        <p>
+            难在哪：内存复杂度，Transformer 的内存随序列长度平方增长（因为注意力），出人意料的是内存往往才是大瓶颈；计算复杂度，也是平方增长；训练，真正需要长距离依赖的数据很少。网上一个页面的内容和随机另一个页面基本无关，拼在一起并不是一个真正的长序列，只是两个独立的短序列；要组装出真正要求模型学习长距离依赖的训练集，得花心思。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、长上下文的用途与评测</h2>
+        <ul>
+            <li>早期基准：Long Range Arena（Tay 等 2020），综合基准，多数是非 NLP 任务，有些是合成的，专门探测长序列中利用数据的能力；SCROLLS（Shaham 等 2022），长文档摘要、问答等更现实的任务，其中的问答数据集比当时流行的其他数据集长得多。</li>
+            <li>迷失在中间（Lost in the Middle，Liu 等 2023，斯坦福的一个组）：给 GPT-3.5 Turbo 一份长文档，控制答案所在的位置。答案在开头时表现很好，在中间时明显下降，在结尾又回升。一种可能的解释是训练数据很少有长距离相关，模型倾向于看最近的信息；另一端则是很少有需要利用开头信息的例子。这种现象一旦被发现，前沿实验室就会修好。</li>
+            <li>大海捞针（Needle in a Haystack，Kamradt 2023）：最简单的测试，曾非常流行。横轴是上下文长度，纵轴是插入位置（文档顶部到底部），人为往文档里插一句"魔法词是 12784"，再问模型"魔法词是什么"。早期各家模型会在奇怪的地方失败；后来的 Gemini 论文（那时 Gemini 还写论文）里这张图几乎全绿，这个简单测试上的问题被解决了。RULER（Hsieh 等 2024）汇集了多种变体，比如多根针。</li>
+            <li>Oolong（Bertsch 等 2025，CMU）：大海捞针测的是定位信息，不测聚合多条信息。他们用一档《龙与地下城》节目长达数小时的字幕，问"某个角色施放某个法术多少次"，有可靠的标准答案，模型必须看完整份字幕去计数，考的是聚合，单靠检索做不到。另一个更合成的任务：拼接一百篇文档，问情感标签（正面、负面、中性）的分布，模型要在内部给每篇分类，再汇总成"60% 正面、40% 负面"。几个月前的最先进模型（Claude、GPT-5 或 5.1）随上下文变长表现下滑，即使每个子任务都很简单。</li>
+            <li>长上下文的上下文学习（Bertsch 等 2024，同一位第一作者 Amanda，CMU 博士生）：提示里的示例越来越多，表现持续提升，可能会饱和，但至少说明模型确实在利用额外的上下文；示例非常多时，甚至可能比微调还好。</li>
+        </ul>
+        <p>
+            学生问：像 GPT 这样的大模型有很多护栏约束，提示一长，会不会丢掉这些约束？比如系统提示里有"不要说冒犯的话"。如今长上下文微调是后训练的一部分，训练样本里大概会有系统提示，并要求模型在长序列中遵循系统提示的指令。一切都是学出来的，只能希望它不忘，但有训练样本就有不忽略它的学习信号。
+        </p>
+        <p>
+            在 Agent 时代这仍然是问题：用 Claude Code 或深度研究 Agent 时，它会搜大量信息或与你长时间协作，然后突然用完上下文，你得决定是重置上下文，还是用一个摘要器压缩上下文。
+        </p>
+        <p>
+            两大策略：留在 Transformer 上改进它；或者换一个更擅长扩展序列长度的替代架构。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、注意力的复杂度与内存瓶颈</h2>
+        <p>
+            注意力 $\text{softmax}(QK^\top)V$ 中，$QK^\top$ 是序列长度乘序列长度的分数矩阵，加上批维度是 $b\times s\times s$。记 $b$ 为批大小，$s$ 为序列长度，$d$ 为维度：
+        </p>
+        <ul>
+            <li>$QK^\top$：计算 $O(bs^2d)$，每加一个位置都要和所有其他位置算分数；内存 $O(bs^2)$，算完要把这个矩阵存着，再和 $V$ 相乘。</li>
+            <li>再乘 $V$：计算 $O(bs^2d)$，内存 $O(bsd)$，从内存角度不那么令人担心。</li>
+            <li>多头注意力：$h$ 个头各有一个分数矩阵，计算复杂度不变，内存是 $O(bs^2h)$。</li>
+        </ul>
+        <p>
+            下面的方法会仔细审视 softmax 这一步，想办法不"物化"（materialize）这个矩阵，压低内存。
+        </p>
+        <p>
+            为什么一直说内存是问题？加速器（比如 CUDA GPU）的内存容量和带宽都有限，问题出在数据在不同层级的存储之间搬运。FlashAttention 论文（很有名，推荐阅读）里的 GPU 存储层级：顶端是 SRAM，只有约 20 MB，但带宽约 19 TB/s；下一层是 HBM，40 GB，慢约一个数量级；再往下是 CPU 内存，比如 1 TB，带宽只有约 12 GB/s，要尽量避免在这两者之间搬数据。$O(bs^2h)$ 的内存需求一大，张量放不下快速存储，就要频繁在 SRAM 和 HBM 之间传输。
+        </p>
+        <p>
+            学生问 Mac 的统一内存架构能否解决这个问题。Sean 不熟悉 Mac 的架构，如果它仍然有存储层级、仍然值得用少量更快的存储，就会遇到同样的问题。另一位学生补充：统一架构会失去一部分速度优势，SRAM 之所以快正是因为它的结构，扩大到 40 GB 很难保持那个速度，这是权衡。
+        </p>
+        <p>
+            影响：长上下文的（预）训练很贵，预训练要尽量多处理 token、高效用算力，资源随上下文长度平方增长就不划算，或者直接内存不足；生成（推理）也很贵。"贵"可能意味着慢（带宽导致传输），也可能意味着根本不可行（内存不够）。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、内存高效的计算</h2>
+        <h3>1. 在线 softmax</h3>
+        <p>
+            标准 Transformer 也有救。Sean 第一次在语言模型语境里见到这个技巧，是 Google 两位作者 Rabe 和 Staats 2021 年只发在 arXiv 上、从未正式发表的论文；流式 softmax 的想法在更早的其他场景（Jang 2019 等）里也出现过。洞见是：softmax 可以"在线"计算，不必物化 $s^2$ 的矩阵。把注意力输出拆成 softmax 分子乘 $V$ 和 softmax 分母两部分，分别计算再相除，只需线性于序列长度的内存。
+        </p>
+        <p>
+            对一个查询 $q$，逐个位置遍历键值，累加两个缓冲：
+        </p>
+        $$s_i = q\cdot k_i, \qquad v^* \leftarrow v^* + v_i\,e^{s_i}, \qquad s^* \leftarrow s^* + e^{s_i}$$
+        <p>
+            遍历完后输出 $v^*/s^*$。（实际实现还会维护一个当前最大值来保证数值稳定。）整个过程中没有任何 $s^2$ 大小的东西要存，内存降到 $O(bsh)$。代价是要按位置顺序进行，会慢一些。一般也不必一次一个查询或一个键，可以按块处理，不同论文把这些块叫 chunk、block 或 tile。
+        </p>
+        <p>
+            Rabe 和 Staats 的结果放在今天是"上古历史"，但在当时很惊人：标准注意力在长序列上内存不足，内存高效版本能处理 100 万个 token，内存开销只有 256 MB；推理有基准测试，训练也有类似的图。课上有人查到速度只比基线慢约 5%（这是在 TPU 上，说明 TPU 也有类似问题）。学生问这个时间指的是什么单位，Sean 说要回去看论文，可能是固定序列长度下整条序列的推理，也可能是平均到每个 token。
+        </p>
+        <h3>2. FlashAttention</h3>
+        <p>
+            FlashAttention（Dao 等 2022）把在线 softmax 和分块（tiling）写进一个新的 CUDA 内核，更好地管理存储，确保大部分操作在最快的存储里完成。这在内核层面的实现对扩大训练和推理时的序列长度非常重要，作者一路做到了 FlashAttention-3，已被大量训练和推理库采用。
+        </p>
+        <h3>3. 环形注意力与上下文并行</h3>
+        <p>
+            既然注意力能拆成块顺序处理，就可以考虑分布到多台设备上。环形注意力（Ring Attention，Liu 等 2023，一位博士生和他的导师两个人完成，训练了百万 token 级别的序列）提出了一种新的并行策略，即并行那一讲里的序列并行或上下文并行（context parallelism）：把序列切成块分到各设备，每台设备持有一个查询块，键值块沿着一个环在设备间传递，每台设备最终和所有键值做完自己查询块的计算，再汇总结果。切分方式可以是连续的块，也可以是巧妙的交错。Ultra-Scale Playbook 里的图：不并行、张量并行之后，激活仍然很大；加上上下文并行，可以训练 1.6 万的序列长度，继续加大并行度，甚至能放下 13.1 万。权衡和以往一样：压低内存，付出通信代价，环上要不断传递和等待，最后还要聚合。
+        </p>
+        <p>
+            学生问为什么在设备间传递的是键和值，而不是传递累加的中间结果。Sean 说要再想想有没有等价的做法；按照这个算法，每台设备有自己的查询，中间结果始终留在本地，所以需要传递的是键和值。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、外推</h2>
+        <p>
+            Transformer 那一讲提过：模型在最长 4000 的序列上训练，现在来了一份 4001 甚至 5000 token 的文档，会怎样？大多数 Transformer 在较短的序列上训练（比如 4k），文档超长就截断或分块。位置信息通过位置编码进入模型，问题就出在这里：
+        </p>
+        <ul>
+            <li>学习的绝对位置编码：为 1 到 4000 每个位置学一个向量，第 4001 个位置没有嵌入，给个随机的话，模型行为是未定义的，不可能外推。</li>
+            <li>固定的绝对位置编码：原始 Transformer 论文的正弦编码，作者推测正弦函数的周期结构也许有利于外推，但实际不行。虽然有周期结构，模型拿到的仍是高维空间里一个独特的点，新的组合对模型来说是分布外的，表现很差。</li>
+            <li>相对位置编码（如 RoPE）：理论上应该更好，实际也不太行。</li>
+        </ul>
+        <p>
+            例子（Fu 等 2024）：用 RoPE、在 32k 上下文上训练的 LLaMA-2，在文档问答上能外推到约 40k，再往后就掉下去，128k 的文档完全失败。
+        </p>
+        <h3>1. 在更长的文档上继续训练</h3>
+        <p>
+            常见做法是不管外推问题，直接在更长的文档上训练，比如要处理 128k，就用 128k 的序列训练。语言模型的训练流程里，后训练通常有一个长上下文适配阶段，用长序列数据微调；预训练阶段这样做太贵。数据从哪来仍是问题：简单拼接文档，模型会学会忽略彼此独立的其他文档。Fu 等的做法是对长文档上采样，并保持领域配比，在每个领域内部上采样长文档；也可以生成合成数据，微调用不着上万亿 token。这样做并没有完全解决问题，但好了很多；不过这还是在回避问题，给它 256k 的文档，可能又会出同样的问题。
+        </p>
+        <h3>2. RoPE 缩放</h3>
+        <p>
+            互补的做法是在微调时调整 RoPE 的参数。RoPE 基于旋转矩阵，由正弦和余弦构成，可以想象成绕着一个圆柱旋转，有周期结构；参数 $\theta$ 决定转得多快，即周期：
+        </p>
+        $$\theta_j = b^{-2j/d_k}, \qquad b = 10000$$
+        <p>
+            人们发现，原始 RoPE 的注意力分数会随查询与键之间的距离增大而自然衰减，序列越长越趋近于零，这是 RoPE 形式本身的后果。多个团队发现在长上下文微调时调整这个基数就能缓解：RoPE ABF 提高基频，Position Interpolation（位置插值）把周期乘以一个常数。调整后注意力分数在长距离上保持得更高。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、Transformer 的改造</h2>
+        <p>
+            这一节往年也跳过，幻灯片由 Graham 制作，不要求掌握，留作有兴趣时参考。有些发布的模型会用到其中的技术。
+        </p>
+        <ul>
+            <li>稀疏注意力：Sparse Transformer（Child 等 2019）加入"步长"，只关注每隔 $n$ 个的先前状态。</li>
+            <li>滑动窗口与截断：Transformer-XL（Dai 等 2019）关注上一句的固定向量，类似 RNN 的截断反向传播，可以用之前的状态，但不反向传播进去；另见 Mistral（Jiang 等 2023）的滑动窗口注意力。</li>
+            <li>压缩先前状态：对之前的状态做带步长的压缩（Rae 等 2019）。</li>
+            <li>低秩近似：注意力矩阵很贵，能否用低秩矩阵预测？Linformer（Wang 等 2020）在模型中加入低秩线性投影；Nyströmformer（Xiong 等 2021）用 Nyström 方法近似，采样"地标"点。</li>
+        </ul>
+        <p>
+            Sean 提醒一点：上面的在线 softmax 和原始注意力是等价的，而这些稀疏或近似的变体不再是精确的注意力，可能损失原始 Transformer 的表达能力，有时一开始看着很酷，长期看会因为性能更差而落败。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、替代架构：状态空间模型</h2>
+        <p>
+            这一节不会考，但 Sean 觉得是有意思的研究方向，所以快速讲一下。目标是找到 Transformer 的替代，避免内存平方增长。RNN 那一讲说过，到课程末尾会看到类似的想法在今天被重新探索，现在就是时候。
+        </p>
+        <p>
+            回顾 RNN 的优点：理论上上下文无限长，只要模型能把信息存进隐藏状态，就能一直运行下去；推理内存高效，无论多长只需保留一个隐藏状态，内存不随序列长度增长。缺点：训练难以并行，这可能是它输给 Transformer、难以高效扩展的原因之一；实际上很难把一切压进一个隐藏状态，为此人们发明了注意力，回头去看之前的位置。卷积则基于局部上下文计算，$h_t = f(W[x_{t-1}; x_t; x_{t+1}])$，用于自回归模型时只看之前的上下文，功能上完全一样；把卷积算子沿时间滑动。
+        </p>
+        <h3>1. 结构化状态空间模型</h3>
+        <p>
+            状态空间模型（Gu 等 2021）想兼得两者：像 RNN 一样省内存，同时可以看作卷积模型，便于训练时并行。形式如下：
+        </p>
+        $$h'(t) = Ah(t) + Bx(t), \qquad y(t) = Ch(t) + Dx(t)$$
+        <p>
+            和 RNN 很像：隐藏状态被 $A$ 变换，输入被 $B$ 变换，还有一个跳跃连接 $D$（可以忽略）。一个区别是这里没有非线性，只有对隐藏状态的线性变换，并行正是靠这一点。关键想法：$h(t)$ 既可以并行地算（训练快），也可以像 RNN 一样逐步算（推理快）。
+        </p>
+        <p>
+            经典的状态空间模型是连续时间的，要离散化。论文里用一个离散步长 $\Delta$ 参数化出 $\bar A$ 和 $\bar B$（细节不展开）。离散后有两种等价的视角：
+        </p>
+        <ul>
+            <li>循环视角：$h_t = \bar A h_{t-1} + \bar B x_t$，$y_t = Ch_t$，推理高效。</li>
+            <li>卷积视角：因为全是线性的，可以展开成一个卷积，卷积核 $\bar K = (C\bar B, C\bar A\bar B, \dots, C\bar A^k\bar B, \dots)$，即 $y = x * \bar K$，可以并行训练，上下文可以无限长。核可以通过对矩阵求幂来计算。</li>
+        </ul>
+        <h3>2. S4 与 Mamba</h3>
+        <ul>
+            <li>S4：离散状态空间模型，对循环更新矩阵 $A$ 采用一种结构化形式（HiPPO），更好地保留记忆。</li>
+            <li>S6（Mamba 的选择性状态空间模型）：在 S4 基础上让参数 $B$、$C$、$\Delta$ 随时间变化，由当前输入或时刻计算出来，从而选择性地保留信息。参数随时间变化后就不再是时不变的，更难并行，所以 Mamba 论文设计了并行扫描（parallel scan）算法来加速。</li>
+            <li>Mamba：一个包含 S6 的块（层）设计。</li>
+        </ul>
+        <p>
+            Mamba 是很大的创新，主导者 Albert Gu 现在是 CMU 的教授，有兴趣可以去找他聊。Transformer 那一讲展示过这张图，现在应该能完全看懂了：按 FLOPs 画的缩放曲线，最好的 Transformer 和 Mamba 扩展得差不多；在音频、人类基因组这类极长序列的数据上，大概根本用不了 Transformer，Mamba 表现很好。
+        </p>
+        <p>
+            小结：状态空间模型结合了循环模型和卷积模型的长处，训练和推理都高效，复杂度随序列长度线性增长。学生问有没有大实验室在生产中用状态空间模型：人们在研究混合模型，一些层用状态空间的思想，另一些层用更贵的注意力，一些流行的开源模型就是这样。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、参考资料</h2>
+        <ul>
+            <li>Self-attention Does Not Need O(n²) Memory（Rabe &amp; Staats，2021）：主要阅读。</li>
+            <li>FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness（Dao 等，2022）。</li>
+            <li>Ring Attention with Blockwise Transformers for Near-Infinite Context（Liu 等，2023）。</li>
+            <li>Mamba: Linear-Time Sequence Modeling with Selective State Spaces（Gu &amp; Dao，2023）；Efficiently Modeling Long Sequences with Structured State Spaces（S4，Gu 等，2021）。</li>
+            <li>Lost in the Middle（Liu 等，2023）；Needle in a Haystack（Kamradt，2023）；RULER（Hsieh 等，2024）；Oolong（Bertsch 等，2025）；In-Context Learning with Long-Context Models（Bertsch 等，2024）。</li>
+            <li>Long Range Arena（Tay 等，2020）；SCROLLS（Shaham 等，2022）。</li>
+            <li>Data Engineering for Scaling Language Models to 128K Context（Fu 等，2024）。</li>
+            <li>The Ultra-Scale Playbook（Tazi 等，2025）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>九、小结</h2>
+        <p>
+            书、视频、代码库和 Agent 的多步交互都需要很长的上下文，难点在于注意力的计算和内存都随序列长度平方增长，以及真正需要长距离依赖的训练数据稀缺。评测从大海捞针这类检索测试发展到需要聚合信息的 Oolong，模型随长度增加仍会退化。内存往往是瓶颈，因为 GPU 的快速 SRAM 很小，大矩阵会导致与 HBM 之间频繁搬运；在线 softmax 分别累加分子和分母，不物化 $s^2$ 矩阵，把内存降到线性，FlashAttention 把它做成 CUDA 内核，环形注意力把它分布到多台设备上成为上下文并行。位置编码无法很好地外推，常用做法是在长文档上继续训练，并调整 RoPE 的基频或做位置插值。另一条路是换架构：状态空间模型去掉非线性，既能像 RNN 一样逐步推理，又能像卷积一样并行训练，Mamba 让参数随输入变化以选择性保留信息，线性复杂度使它适合音频、基因组等极长序列，混合架构已进入一些开源模型。
+        </p>
+        <p>
+            最后一讲讲测试时扩展。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-711: Advanced NLP · Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="21_混合专家模型.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="23_测试时扩展.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

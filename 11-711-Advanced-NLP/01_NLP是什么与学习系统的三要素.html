@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第一讲：NLP 是什么，学习系统的三个要素 | CMU 11-711 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="index.html">&larr; 课程目录</a>
+    <span>CMU 11-711: Lecture 01</span>
+    <a href="02_学到的表示与分词.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第一讲：NLP 是什么，学习系统的三个要素</h1>
+        <p class="subtitle">规则、监督学习与强化学习，手写一个情感分类器，打分函数，参数化、学习与推理，词袋模型与感知机，从分数到概率再到生成与行动</p>
+        <div class="author-meta">
+            主讲：Sean Welleck · 2026 年 1 月 13 日<br>
+            资料来源：<a href="https://cmu-l3.github.io/anlp-spring2026/static_files/anlp-s2026-01-intro.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=dnnBCi-qd0Q" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述内容） · <a href="https://github.com/cmu-l3/anlp-spring2026-code/tree/main/01_intro" target="_blank">课堂代码</a> · 主要阅读：Cho, Natural Language Understanding with Distributed Representation 第 1 章
+        </div>
+    </header>
+
+    <section>
+        <h2>一、自然语言处理指的是什么</h2>
+        <p>
+            Sean Welleck 说 NLP 没有公认的定义，他给了一个自己的说法：让计算机能处理、生成语言并借助语言与外界交互的技术。这里的语言包括自然语言，也包括编程语言。它有三个侧面：
+        </p>
+        <ul>
+            <li>学习有用的表示：把一段文本的含义编码成某种结构，比如一个向量（嵌入），再拿它去做别的事，例如给文档分类，或者根据查询检索文档。</li>
+            <li>生成语言：生成对话的回复、翻译、问题的答案、代码。本课的大部分技术都围绕生成。</li>
+            <li>把语言和行动连起来：语言只是更大环境的一部分，系统最终要做的是一个动作。比如在代码编辑器里调用某个工具，或者 Agent 在环境里一步步操作，过程中仍然需要理解语言。</li>
+        </ul>
+        <p>
+            所以今天的 NLP 已经远远超出了人们对"处理自然语言"的传统印象。
+        </p>
+        <p>
+            他展示了三个一年前（2025 年 1 月）截的例子，故意没换成新的，因为对比一下能看出一年里变了多少。第一个是在 Together.ai 上调用刚发布的 DeepSeek-V3，请它写一段同时包含英文、日文和 Python 代码的展示文字，它写了一个叫 bridge_cultures 的函数。第二个是 OpenScholar，一个基于检索增强生成的系统，会去检索论文再用语言模型写总结；他用自己参与的论文测试，总结得相当合理，这类系统后来发展成了"深度研究" Agent。第三个是 OpenHands（由曾教这门课的 Graham Neubig 开发），一个编程 Agent，可以上网查 PyTorch 的矩阵乘法用法，再按要求写出示例文件。这两个系统都完全开源，课程结束时它们背后的关键思想都会讲到。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、任务就是从输入到输出的映射</h2>
+        <p>
+            把问题稍微形式化：很多 NLP 任务都是把一个输入 $x \in \mathcal{X}$ 映射成一个输出 $y \in \mathcal{Y}$，两者至少有一个涉及语言。
+        </p>
+        <table>
+            <tr><th>输入 $x$</th><th>输出 $y$</th><th>任务</th></tr>
+            <tr><td>文本</td><td>另一种语言的文本</td><td>翻译</td></tr>
+            <tr><td>文本</td><td>标签</td><td>文本分类</td></tr>
+            <tr><td>图像</td><td>文本</td><td>图像描述</td></tr>
+            <tr><td>搜索查询</td><td>文档列表</td><td>检索</td></tr>
+            <tr><td>环境的状态</td><td>动作</td><td>决策（Agent 任务）</td></tr>
+        </table>
+
+        <h3>构建 NLP 系统的三种方式</h3>
+        <ul>
+            <li>规则：人凭直觉和知识把功能直接写出来。比如判断一篇新闻是不是体育新闻，列出 baseball、soccer、football、tennis 几个关键词，出现任何一个就判为体育。规则可以写得任意复杂。</li>
+            <li>监督学习：给系统一批输入和正确输出的配对数据，让学习算法自己找出这个函数。</li>
+            <li>强化学习：没有配对数据，只有一个环境。Agent 在环境里采取动作、看到新的状态，并得到一个信号告诉它做得好不好，要从这种反馈里学出模型。在最先进的 NLP 系统里越来越常见，本课有两到三讲专门讲它。</li>
+        </ul>
+        <p>
+            不同方式需要的数据不同。完全凭直觉写规则或写提示词，不需要数据，但也没有效果保证；拿几个输入抽查、改进规则或提示词，需要少量只有输入的数据；监督学习需要训练集，通常越多越好；强化学习需要一个环境，包括输入、状态、动作、状态转移和奖励。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、手写一个情感分类器</h2>
+        <p>
+            为了说明为什么要用机器学习，课上先动手写了一个基于规则的系统。任务是判断一条影评是正面（1）、负面（−1）还是中性（0）。"I hate this movie" 是负面，"I love this movie" 是正面，"I saw this movie" 是中性。记分类器为 $g: \mathcal{X} \to \mathcal{Y}$，$\mathcal{Y} = \{-1, 0, 1\}$，数据集为 $D = \{(x_i, y_i)\}_{i=1}^N$。
+        </p>
+        <h3>1. 特征与打分</h3>
+        <p>
+            一个通用的模式是：先从输入里提取一个特征向量 $f(x) \in \mathbb{R}^h$，再和权重 $w \in \mathbb{R}^h$ 做点积，得到一个分数：
+        </p>
+        $$s_\theta(x) = w^\top f(x)$$
+        <p>
+            $\theta$ 表示参数，这里就是权重 $w$。然后根据分数做决定：
+        </p>
+        $$g(x) = \begin{cases} 1 & s(x) > 0 \\ 0 & s(x) = 0 \\ -1 & s(x) < 0 \end{cases}$$
+        <p>
+            课堂代码里的特征提取很简单：数一数文本里有几个"好词"（love、good、nice、great 等），几个"坏词"（hate、bad、terrible 等），再加一个恒为 1 的偏置特征。权重也是手动设的：好词 1，坏词 −1，偏置 0.5，看上去挺合理。
+        </p>
+        <p>
+            在训练集上跑一遍，准确率只有 43%。看错误样例能发现问题：很多句子既没有好词也没有坏词，这时只剩偏置 0.5，于是一律被判为正面。设计任何系统时，看具体的错误往往最能启发改进。
+        </p>
+
+        <h3>2. 难处理的情况</h3>
+        <p>
+            假设花大力气把这个程序写得很完善，仍然会碰到一连串问题：
+        </p>
+        <ul>
+            <li>低频词：总有词典里没有的褒贬词，比如 tenuous（站不住脚的）、mucking up（搞砸）。可以不断补充，或者引入外部情感词典，但工作量越来越大。</li>
+            <li>词形变化：entertainingly、magnificently 和 entertaining、magnificent 是同一个意思。可以还原成词根并加上词性，又是更多规则。</li>
+            <li>否定："This one is not nearly as dreadful as expected"，"Serving Sara doesn't serve up a whole lot of laughs"。可以规定被否定的词不算，但真实句子里的逻辑可以复杂得多。</li>
+            <li>比喻和类比："Has all the depth of a wading pool"（深度和儿童戏水池差不多）。从字面上很难判断褒贬，不清楚该怎么写规则。</li>
+            <li>其他语言：来了一条日文影评，所有工作都得为新语言重做一遍。</li>
+        </ul>
+        <p>
+            回头看开头那个让模型同时写英文、日文和 Python 的例子，就能体会到这件事有多不平凡。要我们手工把这些能力编进程序，几乎肯定会失败。本课讲的就是现在已经比较成熟的、基于学习的方法。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、学习系统的一般框架</h2>
+        <h3>1. 打分函数</h3>
+        <p>
+            从数据里学出特征提取器和权重，再用推理算法做决定。核心对象是一个打分函数 $s_\theta(x, y) \in \mathbb{R}$，它衡量输出 $y$ 和输入 $x$ 有多"匹配"：分数高表示更匹配，低表示不匹配。比如这条影评和"正面"这个标签有多匹配。这个说法有点怪，但它是理解各种学习系统的一个很通用的视角。Yann LeCun 2006 年有一篇基于能量的模型（energy-based model）的教程，用的是"能量"这个词，能量就是负的分数 $E(x,y) = -s(x,y)$，越匹配能量越低。
+        </p>
+        <p>
+            二分类时 $y\in\{-1,1\}$，特征提取器 $f_\phi$ 也是学出来的：
+        </p>
+        $$s_\theta(x) = w^\top f_\phi(x), \qquad s_\theta(x, y) = y\cdot s_\theta(x), \qquad \theta = (w, \phi)$$
+        <p>
+            乘以 $y$ 的作用是：标签为 1 时分数越正越好，标签为 −1 时翻转符号。多分类时 $y \in \{0, 1, \dots, K\}$，把权重换成矩阵 $W \in \mathbb{R}^{h\times K}$：
+        </p>
+        $$s_\theta(x) = W^\top f_\phi(x), \qquad s_\theta(x, y) = s_\theta(x)[y]$$
+        <p>
+            $W^\top f_\phi(x)$ 是一个 $K$ 维向量，每个位置对应一个类别的分数，取第 $y$ 个位置就是这个类别和输入的匹配程度。
+        </p>
+
+        <h3>2. 三个要素</h3>
+        <p>
+            各种系统的区别，主要落在三个维度上，这也是整门课的主线：
+        </p>
+        <ol>
+            <li>建模或参数化（modeling / parameterization）：打分函数长什么样、有哪些参数。比如用什么神经网络架构，它有哪些权重。前面那个分类器选择了"特征和权重做点积"，这个形式就是我们定的。</li>
+            <li>学习（learning）：怎样根据监督信号调整参数。监督信号可能是输入输出配对，也可能只是一个奖励函数（这时用强化学习）。前面那个分类器的"学习"就是手动填了几个数。</li>
+            <li>推理（inference）：学完之后怎样做决定，也就是用什么算法从打分函数得到输出。</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>五、词袋模型与感知机</h2>
+        <h3>1. 词袋模型</h3>
+        <p>
+            一个最简单的参数化方式叫词袋（Bag of Words，BoW）。把每个词看作一个 token（下一讲会细讲分词），每个 token 用一个独热向量（one-hot vector）表示：$x_t \in \{0,1\}^V$，$V$ 是词表大小，向量只在这个词对应的位置为 1，其余为 0。把一句话所有词的独热向量加起来，就得到特征向量 $f(x) \in \mathbb{R}^V$，其实就是每个词出现的次数。再和权重 $w \in \mathbb{R}^V$ 做点积得到分数。和前面不同，这次的权重要从数据里学。
+        </p>
+        <p>
+            参数的含义很直观。二分类时，每个词有一个数，正数表示这个词倾向于正面，负数表示倾向于负面，比如 love 2.4、nice 1.2、no −0.2。多分类时（比如非常正面、正面、中性、负面、非常负面五类），每个词有一个 5 维向量，整体是一个 $V\times K$ 的矩阵。
+        </p>
+        <p>
+            Sean 问这能解决前面哪些问题。有学生说取决于词表。另一个学生说出了关键：词序丢了。这正是"词袋"名字的由来，把词扔进袋子里，顺序就没了。所以它是一个很朴素的模型，后面会讲循环神经网络和 Transformer。
+        </p>
+
+        <h3>2. 推理</h3>
+        <p>
+            遍历所有可能的 $y$，选分数最高的：
+        </p>
+        $$\hat y = \arg\max_y s_\theta(x, y) = \arg\max_{y\in\{-1,1\}} y\cdot s_\theta(x) = \text{sign}(s_\theta(x))$$
+        <p>
+            二分类时这就等于看分数的符号。讲语言模型时还会看到这种 argmax 过程。
+        </p>
+
+        <h3>3. 学习</h3>
+        <p>
+            把数据分成训练集、开发集和测试集（$D_{\text{train}}$、$D_{\text{dev}}$、$D_{\text{test}}$，为什么这样分后面会讲），定义一个由每个样本的损失相加而成的损失函数，然后用某个算法找到让训练损失最小的参数：
+        </p>
+        $$\mathcal{L}(\theta, D) = \sum_{(x,y)\in D} L(x, y, \theta), \qquad \min_\theta \mathcal{L}(\theta, D_{\text{train}})$$
+        <p>
+            课上举了一个之后不会再用、但很直观的算法：结构化感知机（structured perceptron）。对每个样本先用当前权重做预测；如果预测错了，就把每个特征的权重加上 $y$ 乘以该特征的值。真实标签是 1 而预测成了 −1，就把这些特征的权重往正方向推；反之往负方向推。也就是按模型错的方向去修正。
+        </p>
+        <p>
+            结果：训练集准确率约 75%，开发集和测试集约 58%（手写规则时约 45%）。有学生解释了训练集和测试集之间的差距：权重是在训练数据上更新的，学到的东西不足以覆盖测试数据。这就是过拟合，模型找到了一些只适用于训练集的权重，到了没见过的数据上就不能泛化。
+        </p>
+        <p>
+            看学到的权重很有意思。正面权重最大的词有 remarkable、terrific、refreshing、rare、heart，负面最大的有 worst、stupid、depressing、failure。这么简单的算法确实学到了符合直觉的东西。但也学到了不符合直觉的，比如 TV 得到了很负的权重，这就是过拟合的表现。
+        </p>
+        <p>
+            词袋模型解决不了的问题：词形变化（love 和 loved），词义相近（提高了 love 的权重，并不会提高同义词 adore 的权重），句子结构（"It has an interesting story, but is boring overall"，以及否定）。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、更好的参数化：神经网络</h2>
+        <p>
+            把"独热向量相加"换成一个从数据中学到的、任意复杂的函数，也就是神经网络。输入可以是连续向量（独热向量只是一种特殊的连续向量），经过这个函数得到特征 $f(x) \in \mathbb{R}^d$，再和权重 $w \in \mathbb{R}^d$ 得到分数。
+        </p>
+        <p>
+            大语言模型做的其实就是这件事：每一步，模型生成一个表示向量，最后把它和一组权重相乘，得到词表里每一个可能的下一个 token 的分数。这张简单的图包含了很多东西，要定下来的细节是：用什么架构、用什么学习算法、多个类别或结构化输出怎么办。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、从分类推广到一般任务</h2>
+        <p>
+            基于打分函数的这个视角很通用：
+        </p>
+        <ul>
+            <li>分类：给正确的类别高分，给错误的类别低分。</li>
+            <li>排序：给定一个查询（比如 OpenScholar 里的问题），给相关文档高分、不相关文档低分，让文档按正确的顺序排列。</li>
+            <li>概率建模：把分数归一化成分布 $p(y\mid x)$。例如 $x$ 是一个英文句子、$y$ 是日文句子；或者 $x$ 是对话历史、$y$ 是回复。早期的 ChatGPT（不调用搜索的那种）大致就是这样。</li>
+        </ul>
+
+        <h3>1. 从分数到概率</h3>
+        <p>
+            有了打分函数，就可以构造一个概率模型：
+        </p>
+        $$p_\theta(y\mid x) = \frac{\exp\big(s_\theta(x, y)\big)}{\sum_{y'} \exp\big(s_\theta(x, y')\big)}$$
+        <p>
+            分母把所有可能输出的指数分数加起来，保证结果在 0 到 1 之间、加起来为 1。例如 "I hate this movie" → [负面 0.98，中性 0.01，正面 0.01]。有了概率模型，推理就可以通过采样完成：$\hat y \sim p_\theta(y\mid x)$。好比抛一枚硬币，抛一次就得到一个结果。
+        </p>
+
+        <h3>2. 从分类到生成</h3>
+        <p>
+            如果输出空间是任意序列呢？可以是文本序列、表示成序列的图像，甚至 DNA 序列。比如 "I hate this movie" → "because it isn't creative."。通过从这样的模型里采样，就能生成文本、图像，或者做决定。大语言模型就是这样。
+        </p>
+
+        <h3>3. 从生成到行动</h3>
+        <p>
+            同一个概率模型也可以用来决定在状态 $s$ 下采取哪个动作 $a$，这叫策略（policy）：
+        </p>
+        $$\pi(a\mid s) \iff p_\theta(y = a\mid x = s)$$
+        <p>
+            比如状态是一个视频网站，用户说了 "I hate this movie"，动作是点击暂停按钮。很多 AI Agent 都是这样构造的：能生成文本的模型，可以被拿来在各种环境里采取行动。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、课程路线图</h2>
+        <p>
+            目标是为任何 NLP 任务构建好的、基于学习的系统。三个要素各自展开：
+        </p>
+        <ul>
+            <li>建模：神经网络架构；自回归模型（目前文本语言模型的主流范式），以及扩散和流（生成图像时很重要）；如何让模型支持图像、检索和工具调用。</li>
+            <li>学习：从无结构数据（比如互联网文本）学习，从配对数据学习，从带奖励函数的环境学习。</li>
+            <li>推理：优化与采样，多样本策略，高效的推理方法，以及训练完成后在推理阶段提升性能的方法。</li>
+        </ul>
+        <p>
+            课程按七个主题组织，课表上每一讲旁边都标了主题：基础，架构，学习与推理，生成模型，评估与研究能力，强化学习与 Agent，扩展与效率。课程名义上没有先修要求，实际上最好有深度学习和 PyTorch 编程经验，以及相应的数学基础。基础部分会讲得很快，很快就会进入最新的架构和算法。有些主题会先讲最基础的部分，后面再回来讲更进阶的内容，比如混合专家模型是一种架构，但放在了课程末尾。
+        </p>
+        <p>
+            这学期的一个新变化是：本课更偏基础，另有一门大语言模型应用课（11-766），默认学过本课内容。现在做 NLP 研究需要从很多领域汲取知识，本课模拟的就是这种广度；想深入某个方向，可以去上专门的课，比如多模态、强化学习，CMU 现在甚至有一整门课讲推理算法。Sean 说他们考虑过以后把课名改成"LLM 与 NLP 基础"之类，但也想强调大语言模型之外还有很多重要的东西。
+        </p>
+        <p>
+            有学生问 Transformer 和自回归模型有什么区别。Transformer 是一种神经网络架构，可以用来做很多事，其中之一是构建自回归语言模型。一个是架构，一个是建模方式。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、课程安排</h2>
+        <ul>
+            <li>每讲有主要阅读材料（前几讲来自纽约大学 Kyunghyun Cho 的讲义，之后基本没有单一教材，内容在幻灯片里，并链接相关论文）。课上有讲授、讨论（这学期试用 Slido 投票和提问），以及几乎每讲都有的代码演示。</li>
+            <li>四次作业：第一次是构建自己的语言模型；第二次是解决一个任务，比如构建问答系统；第三、四次服务于期末项目。项目是一个小型研究：先就感兴趣的主题做文献综述，再复现一个基线结果（确认评估设置可靠），最后提出新的东西，改进模型或把模型用到新任务上。项目 2 到 4 人一组，期中和期末各有一次汇报。上学期他们花了很多工夫写项目指导，鼓励去答疑时间讨论想法。</li>
+            <li>五次课堂小测，在课前 20 分钟进行，去掉最低分；一次课内闭卷考试，时长 1 小时 20 分钟。课堂参与占 5%。</li>
+            <li>课程会录像，但要求到场。小测、考试、项目时间和海报展示必须到场。</li>
+            <li>课程可以不做项目拿 6 学分，做项目拿 12 学分。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>十、参考资料</h2>
+        <ul>
+            <li>Natural Language Understanding with Distributed Representation（Cho，2015）第 1 章：本讲主要阅读。</li>
+            <li>Machine Learning: a Lecture Note（Cho，2025）第 1 章：从打分函数（能量函数）的角度讲机器学习，本讲的框架与此一致。</li>
+            <li>A Tutorial on Energy-Based Learning（LeCun 等，2006）：基于能量的模型。</li>
+            <li>OpenScholar（Asai 等，2024）与 OpenHands：课上的两个开源系统示例。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>十一、小结</h2>
+        <p>
+            NLP 涵盖表示、生成和行动三个侧面，很多任务都能写成从输入到输出的映射。手写规则会被低频词、词形、否定、比喻和多语言一一难倒，所以要靠学习。学习系统都可以用一个打分函数来理解，并且由三个要素决定：参数化（打分函数的形式和参数）、学习（怎样根据监督调参数）、推理（怎样做决定）。词袋模型加感知机把开发集准确率从约 45% 提到 58%，但丢失了词序，也有过拟合。神经网络把特征提取换成可学习的复杂函数。把分数用 softmax 归一化就得到概率模型，输出空间换成序列就是生成，把输入当状态、输出当动作就是 Agent 的策略。
+        </p>
+        <p>
+            下一讲讲学到的表示：深度学习的基础，以及文本怎样切分成 token。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-711: Advanced NLP · Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="index.html">&larr; 课程目录</a>
+            <a href="index.html">返回主目录</a>
+            <a href="02_学到的表示与分词.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

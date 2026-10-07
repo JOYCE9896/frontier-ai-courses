@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十一讲：多模态大模型（一）：让语言模型看懂图像 | CMU 11-711 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="10_检索增强生成与深度研究.html">&larr; 上一讲</a>
+    <span>CMU 11-711: Lecture 11</span>
+    <a href="12_多模态大模型II离散化与自回归生成.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十一讲：多模态大模型（一）：让语言模型看懂图像</h1>
+        <p class="subtitle">多模态的几种设定，把图像变成向量序列，Vision Transformer 的切块与嵌入，表示学习与 CLIP 的对比损失，零样本分类，LLaVA 式视觉语言模型，以及 Molmo 和 PaliGemma 两个案例</p>
+        <div class="author-meta">
+            主讲：Sean Welleck · 2026 年 2 月 17 日<br>
+            资料来源：<a href="https://cmu-l3.github.io/anlp-spring2026/static_files/anlp-s2026-11-multimodal.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=1fClfAI6hmA" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述内容） · <a href="https://github.com/cmu-l3/anlp-spring2026-code/tree/main/11_multimodal_i" target="_blank">课堂代码</a> · 主要阅读：ViT（Dosovitskiy 等，2020）；CLIP（Radford 等，2021）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、多模态的几种设定</h2>
+        <p>
+            这是本学期三讲多模态建模中的第一讲。这里的多模态只指图像和文本，当然还有音频等其他模态。CMU 有一整门多模态课，本课只讲和 NLP 主线相关的部分：已经有一个语言模型，怎样扩展它，让它能接受图像输入。
+        </p>
+        <p>
+            到目前为止讲的都是文本到文本的模型。可以有几种扩展：输入能有图像、输出仍是文本（multi-to-text，本讲）；输出图像（multi-to-image）；最一般的是输入输出都可以是交错的文本和图像（multi-to-multi）。后两种是接下来两讲的内容。至少到今天，这几种情况各有不同的建模方法，还没有统一的方案。
+        </p>
+        <p>
+            应用例子：ChatGPT 那样可以发图片对话的界面，完全开源的例子是 AI2 的 Molmo（Sean 用 ChatGPT 生成了一幅"印象派风格的匹兹堡"，让 Molmo 描述，回答很合理）；网页 Agent，网页可以表示成截图，加上任务说明，比如"帮我发帖卖这件东西，价格比网站上最相似的商品便宜 10 美元"，还附了一张 iPhone 的图，Agent 要在网页上点击操作；电脑操作 Agent，看屏幕截图甚至视频流，点击、打字，原则上能做人在电脑上能做的任何事（后面讲 Agent 时会讲）；视觉推理，比如 MathVista 里需要看懂图表才能回答的数学题。
+        </p>
+        <p>
+            本讲分三步：视觉架构的基础（ViT），学习图像表示（CLIP），与语言模型结合（LLaVA）。计算机视觉的很多历史都略过，直接讲基于 Transformer 的方法，因为它和前面讲的一致，而且确实是现在实际在用的。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、核心问题：把图像变成向量序列</h2>
+        <p>
+            文本归根到底是一串向量（token 嵌入）。目标是也把图像表示成一串向量，$f_{\text{enc}}(x_{\text{image}}) \to z_1, \dots, z_L$。这样它就和 token 嵌入差不多，只是向量不同，可以沿用处理文本的架构。需要两样东西：一个神经网络架构，一个学出好向量的算法。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、Vision Transformer</h2>
+        <h3>1. 切块与嵌入</h3>
+        <p>
+            影响很大的论文 Vision Transformer（ViT，Dosovitskiy 等 2020）的想法正如其名：把图像切成小块（patch），每块展平成一个向量，再用标准的 Transformer。
+        </p>
+        <p>
+            图像用三维数组表示 $x_{\text{image}}\in\mathbb{R}^{H\times W\times C}$：高、宽、通道。通道就是 RGB 三原色，相当于有三份 $H\times W$ 的矩阵；也可以加更多通道存别的信息。具体例子：
+        </p>
+        <ul>
+            <li>图像 120×120×3，块大小 40×40，每个通道切成 $N = \frac{120\times 120}{40\times 40} = 9$ 块。</li>
+            <li>每块展平成一个向量，长度 $P^2\cdot C = 40\times 40\times 3 = 4800$，得到 $x_p\in\mathbb{R}^{9\times 4800}$。块大小和通道数决定了这个向量有多长。</li>
+            <li>用一个线性变换映射到模型的维度 $D$：$x = W x_p$，比如 $W\in\mathbb{R}^{1024\times 4800}$，得到 $x\in\mathbb{R}^{9\times 1024}$。这个矩阵相当大，块大小这样的选择会影响参数量。这些向量叫块嵌入（patch embeddings）。</li>
+            <li>和文本一样加上位置嵌入。原始 ViT 及之后一段时间都用最简单的绝对位置嵌入，把块当作一个序列，第 0、1、2……个各有一个嵌入；也可以用 RoPE、相对位置嵌入，甚至考虑二维结构的 2D RoPE。</li>
+        </ul>
+        <p>
+            然后交给 Transformer，得到输出向量 $z_1, \dots, z_N$。像 BERT 一样加一个 [CLS] 之类的额外 token，接一个输出头，就可以训练分类（苹果、鸟、汽车……）。当时的重点是 ImageNet 分类。有学生问把块当成一维序列会不会丢失"4 号块在 7 号块上方"这种二维位置信息：下面的可视化显示，模型能学到这种结构。
+        </p>
+
+        <h3>2. ViT 的结果与可视化</h3>
+        <p>
+            当时主流是卷积网络和 ResNet，用 Transformer 处理图像还很新。论文按预训练计算量比较：在各个计算预算上，ViT 通常都高于 ResNet；他们还试了混合模型（把 ResNet 的特征交给 ViT），在小规模时更好，但规模变大后差别消失，所以不如直接用更简单的纯 Transformer。有学生问卷积网络有内置的平移不变性，Transformer 怎么办？Transformer 得自己学，或者把它做进嵌入里；论点是规模足够大、数据足够多时，它能学会，数据很少时这种归纳偏置才更有用。
+        </p>
+        <ul>
+            <li>块嵌入的权重：对生成块嵌入的初始权重 $W_e$ 做主成分分析，把行重排成 $P\times P$ 来看，和卷积网络学到的滤波器类似，像是边缘这类低层特征的检测器。之后的层在此基础上构建更高层的特征。</li>
+            <li>位置嵌入：计算每个块的位置嵌入与其他所有块的位置嵌入的余弦相似度，按二维排列显示，能看出模型学到了行列结构。</li>
+            <li>注意力：把各层注意力汇总起来可视化，分类模型学会了关注与任务相关的区域，比如狗、飞机所在的地方。分别看各层：早期层有的看很窄的区域，有的看很大的区域；后面的层大多看大范围。有学生说这合理：早期层只能直接看输入，后面的层拿到的信息已经被汇总过了。</li>
+        </ul>
+        <p>
+            课堂代码加载了一个 Google 训练的预训练 ViT，展示一张真实图像的切块、各个维度，并做分类，不需要训练。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、学习图像表示：CLIP</h2>
+        <h3>1. 表示学习</h3>
+        <p>
+            Torralba 等人的《计算机视觉基础》里有一张有用的图，对文本同样适用：左边是数据空间（比如图像），学一个编码器把数据映射到表示空间（比如向量，常叫隐表示或隐向量），这叫表示学习；反过来，从表示空间（比如随机噪声向量，或者自回归模型从空开始）生成数据空间里的东西，叫生成建模。后两讲会讲生成建模，这一讲讲表示学习中一个很有影响的方法。
+        </p>
+        <h3>2. 动机</h3>
+        <p>
+            CLIP（Contrastive Language-Image Pre-training，OpenAI 2021）的目标是为图像表示学习设计一个预训练目标。两个出发点：
+        </p>
+        <ul>
+            <li>从文本中学习：当时的图像预训练任务是分类，唯一的文本监督就是类别标签。而一句话、一段描述（比如网上的图片说明）包含的信息比一个类别标签多得多。</li>
+            <li>可扩展：当时图像预训练大多依赖人工标注数据，要高质量的类别标签就得雇人标注。希望方法具备"加计算就变好"的性质。</li>
+        </ul>
+        <h3>3. 方法</h3>
+        <p>
+            同时学两个编码器：图像编码器 $f_I(x)\to z_I$（比如 ViT），文本编码器 $f_T(y)\to z_T$（比如 Transformer）。配对的图像和文本（一张图和它的说明），表示要彼此接近；不配对的要远离。在尽可能大的（图像，文本）数据集上训练，数据仍受限于必须有图文配对，不能拿网上的任何数据都用。他们收集了 4 亿张网页图片及其文字描述，在当时是非常大的数据集。
+        </p>
+        <p>
+            给定一个批次的 $N$ 对（图像，文本），各自过编码器得到向量，两两做点积得到 $N\times N$ 矩阵。对角线是配对的（比如小狗的照片和 "Pepper the aussie pup"），非对角线是不配对的（假设一张图和批里别的文字无关）。要把对角线的相似度推高，其余推低：
+        </p>
+        $$L = -\frac{1}{2}\sum_{n=1}^N\left[\log\frac{\exp\big(f_I(x_n)^\top f_T(y_n)\big)}{\sum_j\exp\big(f_I(x_j)^\top f_T(y_n)\big)} + \log\frac{\exp\big(f_I(x_n)^\top f_T(y_n)\big)}{\sum_j\exp\big(f_I(x_n)^\top f_T(y_j)\big)}\right]$$
+        <p>
+            第一项是对图像做 softmax（给定文本，挑出配对的图像，按列），第二项是对文本做 softmax（给定图像，挑出配对的文本，按行）。分子是正确配对的得分；推高它，softmax 的归一化就会把其他的压下去。这叫对比损失，早期推广它的一篇论文叫 InfoNCE（info noise contrastive estimation）。它和上一讲稠密检索里训练查询-文档相似度的方法非常相似。
+        </p>
+        <p>
+            每一项其实都是一个交叉熵损失：模型的概率正比于点积，$p_\theta\propto f_I(x)^\top f_T(y)$，目标分布 $p^*$ 把全部质量放在正确的那一对上。所以 CLIP 论文里的实现代码就是：编码、归一化、算点积，再分别按行、按列算两个交叉熵，取平均。
+        </p>
+        <h3>4. 零样本分类</h3>
+        <p>
+            怎么用？当时令人意外的一个用法是零样本分类，不需要额外微调：为每个类别（飞机、汽车、狗、鸟……）写一段文字，比如 "a photo of a dog"，全部编码；对一张图，看哪段文字的向量和它最相似。这巧妙地利用了预训练。结果是，在不少数据集上，这比在当时最好的基于 ResNet 的特征上微调分类器还要好；并非全胜（在 Stanford Cars、Country211、Food101 上好，在另一些上不行），但当时能在任何数据集上赢都很令人意外。和前面讲的一样，范式转向了大规模预训练加零样本或少样本使用。论文也展示了零样本错误率随预训练计算量下降。
+        </p>
+        <p>
+            那时 OpenAI 还公开模型，CLIP 的权重可以下载。课堂代码用它做了一个分类器，文字可以随便写，不必是一个个类别标签："cats on a couch"、"two cats sitting together"、"animals indoors"、"a living room scene"。对一张两只猫在沙发上的图，概率集中在前两条上，很合理。
+        </p>
+        <p>
+            有学生问这是在生成文本吗？不是。这些文字是事先写好的，只是编码成向量，用点积打分做分类。为什么能泛化？它被训练成让训练数据里配对的东西更相似；在几亿个样本上训练，见过大量猫配猫的说明、粉色的东西、沙发，所以面对一张把这些组合在一起的新图也能处理。
+        </p>
+        <h3>5. 之后的发展</h3>
+        <p>
+            CLIP 之后有一整片研究：用巧妙的方式自动或半自动获取海量数据；不一定要用对比损失，比如 Google 的 SigLIP 改成二分类损失，在他们的设定下扩展性更好；还有基于自蒸馏或自监督的方法，比如让教师模型看低分辨率版本等。CLIP 至今仍被大量使用，比如 2024 年底的 Molmo 用的还是原始的 CLIP 编码器。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、与语言模型结合：LLaVA</h2>
+        <p>
+            作业一做过 LLaMA，这个叫 LLaVA，V 是 vision。这类模型叫视觉语言模型（vision language model，VLM）。思路很简单：
+        </p>
+        <ul>
+            <li>图像"token"：用 CLIP 预训练好的 ViT（丢掉文本编码器），输入图像，取最后一层的全部输出向量，当作一串类似文本嵌入的向量。它们不是真正的 token，但可以这么叫。</li>
+            <li>用一个线性层 $W$ 把它们投影到与文本嵌入相同的维度。</li>
+            <li>文本 token 照常处理。</li>
+            <li>在（图像，指令，回复）形式的数据上微调。比如一张图，指令"这张图有什么不寻常的地方？"，回复由人或模型写出。</li>
+        </ul>
+        <p>
+            这就是把图像表示和语言模型结合的核心。一般流程：
+        </p>
+        <ol>
+            <li>图像预处理：比如切块、向量化。</li>
+            <li>图像编码：用现成的编码模型（比如 CLIP，取 ViT 最后一层的向量）。有团队发现从 ViT 多个层取向量再平均或池化效果更好，各家会做实验再决定。</li>
+            <li>把编码交给大语言模型：比如线性变换到模型的嵌入维度，通常做得很简单。</li>
+            <li>在包含文本和图像的数据上训练或微调，图像位置不计损失。怎样获得图文配对的数据，很大程度上决定了最终模型的质量。</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>六、两个案例</h2>
+        <h3>1. Molmo（AI2）</h3>
+        <p>
+            结构正是上面讲的：图像经过视觉编码器得到 token 序列，连接器（比如线性变换）映射到文本 token 的维度，交给语言模型。它能完成各种任务，比如输出"指向这些坐标"这样的文本：指令"指向雷尼尔山"，模型就在图上标出一个点，坐标仍然用文本表示。细节：
+        </p>
+        <ul>
+            <li>多个裁剪：为了看清高分辨率的细节，除了整张图（矩形图像加黑边补成统一尺寸），还生成多个裁剪，比如左上角那部分放大成完整尺寸。每个都切块、展平，拼成一个很长的序列。模型既看到全局，也看到放大的局部。</li>
+            <li>编码器：CLIP ViT-L/14 336px，即 ViT-Large，块大小 14，支持 336×336 分辨率，得到 24×24 的网格；把每 2×2 的块池化成一个，省下一些 token，得到 12×12 个向量，再变换到语言模型的嵌入维度。对 1 张完整图像和 12 个裁剪都这样做。</li>
+            <li>数据：让人看图口述描述，再用语言模型改写成说明文字，这是一种节省成本的收集方式；专门构造了"指向"数据，Google 的论文里也有类似的；还有计数数据、合成的钟表表盘、读图表等非常实用的数据。很多能力不是凭空出现的，要认真设计数据。所有细节都公开。</li>
+        </ul>
+        <h3>2. PaliGemma（Google）</h3>
+        <p>
+            2024 年底的模型，之后有 PaliGemma 2，主要是升级了语言模型，并加入了社区发现的一些额外损失。视觉编码器用 Google 自家的 SigLIP（用 sigmoid 把问题当作二分类：这张图和这段文字是否配对），语言模型用 Gemma，结构仍是视觉 token 加文本 token。
+        </p>
+        <p>
+            训练分阶段：先分别预训练图像编码器（SigLIP 或 CLIP）和语言模型（预测下一个 token），再在多模态数据上训练。他们做了消融：多模态训练时只更新语言模型、冻结图像编码器？还是重置某一边的权重？结论是两边都更新最好。
+        </p>
+        <p>
+            还有一个有意思的问题：能不能干脆不要图像编码器，直接把原始的块喂给网络？实验显示，去掉编码器的版本也在学习、在变好；作者推测，计算量足够大时也许能不要编码器。但就目前而言，预训练图像编码器节省了大量计算：有它的话，用很少的样本就能达到没有它时用十亿样本才能达到的水平。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、参考资料</h2>
+        <ul>
+            <li>An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale（Dosovitskiy 等，2020）：ViT，主要阅读。把图像切成 16×16 的块，当作 token 序列交给标准 Transformer；在大规模数据上预训练后，图像分类效果超过最好的卷积网络，训练所需计算更少。</li>
+            <li>Learning Transferable Visual Models From Natural Language Supervision（Radford 等，2021）：CLIP，主要阅读。</li>
+            <li>Visual Instruction Tuning（Liu 等，2023）：LLaVA。</li>
+            <li>Molmo and PixMo: Open Weights and Open Data for State-of-the-Art Vision-Language Models（Deitke 等，2024）。</li>
+            <li>PaliGemma: A versatile 3B VLM for transfer（Beyer 等，2024）。</li>
+            <li>MathVista（Lu 等，2024）：视觉数学推理基准。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>八、小结</h2>
+        <p>
+            让语言模型处理图像，关键是把图像变成一串向量。ViT 把图像切成小块、展平、线性投影成块嵌入，加位置嵌入后交给标准 Transformer；规模足够大时它胜过卷积网络，并能学到二维结构和与任务相关的注意力。CLIP 同时训练图像编码器和文本编码器，用对比损失让配对的图文接近、不配对的远离，本质是按行和按列的两个交叉熵；它能做零样本分类，至今仍被广泛使用。LLaVA 式的视觉语言模型把 CLIP ViT 的输出向量线性投影成"图像 token"，与文本 token 一起交给语言模型，在图文指令数据上微调。Molmo 用多裁剪和池化处理高分辨率，靠精心设计的数据获得指向、计数等能力；PaliGemma 用 SigLIP，发现同时更新编码器和语言模型最好，预训练的图像编码器能省下大量计算。
+        </p>
+        <p>
+            下一讲讲多模态生成：怎样把图像离散化成 token，用自回归模型生成图像。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-711: Advanced NLP · Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="10_检索增强生成与深度研究.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="12_多模态大模型II离散化与自回归生成.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

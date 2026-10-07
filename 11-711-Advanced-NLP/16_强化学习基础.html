@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十六讲：强化学习基础 | CMU 11-711 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="15_扩散与流.html">&larr; 上一讲</a>
+    <span>CMU 11-711: Lecture 16</span>
+    <a href="17_大模型的强化学习.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十六讲：强化学习基础</h1>
+        <p class="subtitle">最大似然的三个局限，智能体与环境，马尔可夫决策过程与策略，策略、价值、模型三类算法，得分函数估计与 REINFORCE，CartPole 示例，折扣、基线、优势与 GAE，PPO 的裁剪</p>
+        <div class="author-meta">
+            主讲：Sean Welleck · 2026 年 3 月 12 日<br>
+            资料来源：<a href="https://cmu-l3.github.io/anlp-spring2026/static_files/anlp-s2026-16-rl.pdf" target="_blank">课程幻灯片</a>（参考 John Schulman 2016 年的教程和 David Silver 2015 年的强化学习课程） · <a href="https://www.youtube.com/watch?v=_6lgEwYkqSg" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述内容） · <a href="https://github.com/cmu-l3/anlp-spring2026-code/tree/main/16_rl" target="_blank">课堂代码</a> · 主要阅读：Karpathy, Deep Reinforcement Learning: Pong from Pixels；OpenAI Spinning Up；PPO（Schulman 等，2017）；GAE（Schulman 等，2015）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、为什么需要强化学习</h2>
+        <p>
+            这是两讲强化学习的第一讲。在大模型和 Agent 的时代，强化学习和 NLP 的交集越来越大，最近几年这门课也不断加入相关内容。这一讲用语言模型做动机，但讲的很多技术和语言模型、甚至和 NLP 都无关，Sean 认为先在这种一般形式下看清楚很重要，之后可以用到别的地方。下一讲讲在语言模型上的具体应用；再下一讲讲 Agent，到时这一讲的策略、序贯决策等概念能帮你从特定角度理解今天用语言模型搭的 Agent。
+        </p>
+        <p>
+            回顾：预训练之后，课上讲的主要学习算法是监督微调。收集带输入输出的任务数据，得到一个专精某领域（数学、代码）的模型，或者通过指令微调得到通用模型。损失一直是最大似然：
+        </p>
+        $$\mathcal{L}(y_{1:T}\mid x) = -\sum_t\log p_\theta(y_t\mid y_{&lt;t}, x)$$
+        <p>
+            训练模型给数据集里的序列分配高概率。从今天的强化学习视角看，最大似然是一种模仿学习：数据集展示了一些行为（比如怎样写数学解答），训练模型把概率质量放到这些行为上，并希望泛化到新输入。它有三个局限：
+        </p>
+        <ul>
+            <li>任务不匹配。我们希望模型在任务上表现好，比如聊天机器人的回答有用、不冒犯，客服机器人最终解决用户的问题；解题要正确，代码要通过测试。最大似然隐含地假设训练里被抬高概率的回答就是满足任务标准的回答，这不一定成立。用 Reddit 数据训练再部署成助手，Reddit 上有冒犯性内容，和"永不冒犯"的目标不一致。网上的数学解答也没有理由正好是模型最该生成的解法，事实上带思维链的推理过程对模型解题更有帮助，而这和网上找到的数据不太一样。</li>
+            <li>数据不匹配。数据里有我们不想要的输出（Reddit 上的冒犯评论、有 bug 的代码）；任务相关的数据又不多（解题时的思维链、对所有提示都有用的回答）。人们想让模型做越来越难的事，就越来越不清楚怎样收集数据。极端例子：用语言模型证明一个未解决的猜想，哪里去找"已解决的未解决猜想"的数据集？</li>
+            <li>暴露偏差（exposure bias）。模型在固定数据集上训练，测试时自己生成的东西可能和数据集略有不同。比如解题时犯了个错，而数据集里只有正确解答，模型就处于分布外，它从没学过怎样纠正错误；网购的 Agent 点错了页面，这种情况也不在训练数据里。可以说那就收集纠错的例子，但同样的理由，收集这些数据又贵又难。</li>
+        </ul>
+        <p>
+            可以继续推最大似然、收集越来越大的数据集，但换个视角，很多问题就不那么严重了（当然会有别的问题）。强化学习用于语言模型的一个简单例子：模型拿到数学题"2+3 等于几"，自己生成输出（不是来自数据集），比如"一步步想，2+3=23"和"一步步想，2+3=5"；奖励函数判断最终答案对不对，再用这个信号更新模型。聊天也一样，奖励说"你是 %*@*$" 这个回答差，"我很好，你呢"更好。三个关键差别：
+        </p>
+        <ul>
+            <li>任务标准通过奖励被直接优化，"这个回答差"直接影响参数更新，以前不是这样。</li>
+            <li>数据（至少输出）由模型生成，奖励告诉我们怎样用这些数据训练；奖励函数够好，就不必费力构造好的和坏的解答。</li>
+            <li>只要能评估奖励，模型可以从任何轨迹学习，成功和失败的都行。最大似然只会抬高概率，从不显式压低某个东西的概率；强化学习能很自然地从次优或负面的例子里得到学习信号。</li>
+        </ul>
+        <p>
+            本讲讲什么是强化学习，以及策略梯度方法，因为它们正是目前语言模型和 Agent 里大量使用的方法。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、什么是强化学习</h2>
+        <p>
+            教科书定义：机器学习的一个分支，研究从交互中学习。智能体（agent）与环境交互，学会怎样行动以最大化奖励信号。"强化学习"可以指这个问题，指一类解法，也可以指研究它们的领域。
+        </p>
+        <p>
+            每一步，智能体收到观察 $o_t$、收到一个标量奖励 $r_t$、执行动作 $a_t$；环境收到动作，转移后发出新的观察和奖励。智能体的目标是最大化奖励。这个框架很一般：
+        </p>
+        <ul>
+            <li>玩 Atari 游戏（DeepMind 2016、2017 年前后很有影响的工作）：智能体是玩家，观察是屏幕截图，动作是按手柄上的方向键和按钮，奖励是游戏得分，可能在结束时给，也可能在中途得分时给。</li>
+            <li>运动控制与机器人：智能体是机器人，观察是相机图像、关节角度，动作是关节力矩，奖励是保持平衡（比如多久不摔倒）或把方块移到目标位置。CMU 有一整个机器人研究所，这里不展开。</li>
+            <li>文本生成：智能体是语言模型，观察是到目前为止生成的序列，动作是生成下一个 token，奖励是最终答案是否正确，中间步骤奖励为 0。如果有好的办法检查中间推理，也可以加进来。下一讲细讲。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>三、形式化：MDP 与策略</h2>
+        <p>
+            通常把强化学习形式化为马尔可夫决策过程（Markov Decision Process，MDP）$(S, A, E, R)$：
+        </p>
+        <ul>
+            <li>$S$：状态空间，比如屏幕图像。</li>
+            <li>$A$：动作空间，比如 Atari 手柄的按钮。</li>
+            <li>$E(s_{t+1}\mid s_t, a_t)$：环境转移。按下按钮后，Atari 上运行的程序要转移并产生新的屏幕。一般来说，给定状态和动作，可能转移到多个不同的状态，所以是一个分布。</li>
+            <li>$R(s_t, a_t)\to\mathbb{R}$：奖励函数。也可以把它看成环境的一部分、是一个分布，这里简化为函数，比如每一步返回游戏得分。</li>
+        </ul>
+        <p>
+            智能体用策略 $\pi(a_t\mid s_t)$ 选动作，惯用希腊字母 $\pi$：输入状态，给出动作上的分布。智能体与环境交互，直到终止状态（游戏结束、角色死亡等）：
+        </p>
+        $$s_0\sim E,\quad a_0\sim\pi(a_0\mid s_0),\quad s_1\sim E(s_1\mid s_0, a_0),\quad r_1 = R(s_0, a_0),\quad a_1\sim\pi(a_1\mid s_1),\quad \dots,\quad s_T, r_T$$
+        <p>
+            序列 $\tau_{0:T} = (s_0, a_0, r_1, s_1, \dots, r_T, s_T)$ 叫一个回合（episode）或轨迹（trajectory）。这里讨论的是有限长度的回合，智能体不会一直跑下去。用策略 $\pi$ 与环境交互，在所有初始状态和所有运行上得到一个轨迹分布 $d^\pi_\tau$。目标是找一个策略最大化期望回报，回报（return）是一个回合里未来奖励的总和：
+        </p>
+        $$\max\ \mathbb{E}_{d^\pi_\tau}\Big[\sum_{t=1}^T r_t\Big]$$
+        <p>
+            例子 Pong：中间各步奖励为 0，最后赢了得 +1，输了得 −1。给定状态，策略选一个动作（比如"下"），环境转移到新状态，再交给策略，如此进行下去。
+        </p>
+        <h3>状态与观察</h3>
+        <p>
+            细分一下，有几样东西：环境状态 $s^E_t$ 是环境私有的表示，比如 Atari 是一个运行中的程序，智能体看不到程序的执行轨迹；观察 $o_t$ 是智能体能看到的信息；智能体状态 $s_t$ 是智能体用来选下一个动作的任何信息，可以只用当前观察（此时两者相同），也可以把迄今为止的观察和动作都记下来：
+        </p>
+        $$s_t = f(o_0, a_0, r_1, \dots, a_t, o_t)$$
+        <p>
+            所以智能体虽然只收到一个"状态"，里面可以有很多信息。有些论文会说部分可观察 MDP（POMDP），就是区分了状态和观察的 MDP。
+        </p>
+        <h3>例子：解数学题</h3>
+        <ul>
+            <li>状态：提示加到目前为止生成的 token，$s_t: (x, y_{&lt;t})$。</li>
+            <li>动作：生成一个 token，$a_t: y_t$。</li>
+            <li>策略：语言模型 $p_\theta(y_t\mid y_{&lt;t}, x)$。</li>
+            <li>环境：把 token 接上去，$s_{t+1}: (x, y_{&lt;t}\circ y_t)$。</li>
+            <li>奖励：$r(x, y_{1:t}) = 1$，当 $t = T$ 且 $y_{1:T}$ 里的答案正确；否则为 0。</li>
+        </ul>
+        <p>
+            这里的环境转移有点无聊，只是把生成的 token 接到前面；Atari 有真实的系统在转移，后面讲 Agent 时环境会更有意思，可能涉及执行代码、点击网页及其后果。
+        </p>
+        <h3>三类算法</h3>
+        <p>
+            智能体一般至少包含以下之一：
+        </p>
+        <ul>
+            <li>策略 $\pi_\theta$：智能体的行为函数。直接学策略的叫基于策略的方法，用神经网络参数化策略，学参数以最大化期望回报。本讲重点。</li>
+            <li>价值函数 $v_\phi$：每个状态（和/或动作）有多好，$v^\pi(s_t) = \mathbb{E}\big[\sum_{t'=t+1}r_{t'}\big]$，即从这个状态出发最终的回报。如果完美学会了状态-动作价值，就能构造很好的策略：看哪个动作导向最高回报就选哪个。学价值函数的叫基于价值的方法。</li>
+            <li>模型 $e_\psi(r_{t+1}, s_{t+1}\mid s_t, a_t)$：智能体对环境的表示（小写 $e$ 表示不是真实环境）。学得完美的话，可以在某个状态模拟各种未来轨迹，挑出奖励最高的。比如一家交易公司若有完美的市场模型，就能模拟所有未来、选利润最大的那个。可见学一个好的环境模型可能非常难。这类叫基于模型的方法。</li>
+        </ul>
+        <p>
+            本讲专注策略梯度方法，其中一些会顺带学一个价值函数来稳定训练。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、策略梯度</h2>
+        <p>
+            直接把目标写成 $J(\theta) = \mathbb{E}_{\tau\sim\pi_\theta}[R(\tau)]$，求 $\arg\max_\theta$。能不能像课上一直做的那样，算 $\nabla_\theta J(\theta)$，然后用 SGD、Adam？比预想的棘手。一是要对奖励函数反向传播，Atari 游戏的奖励 $\nabla_\theta R(\tau)$ 是什么？奖励一般不可微。二是回报定义在整条轨迹上，轨迹里有环境转移，最后得到奖励、想调整第一步的动作，就得穿过环境转移反向传播，没法对 Atari 系统求导。机器学习里常用的办法是估计：用与环境交互采样的轨迹来估计梯度，再交给优化器。
+        </p>
+        <h3>1. 得分函数梯度估计（REINFORCE）</h3>
+        <p>
+            这个技巧可能更早就出现在统计学里，在强化学习和机器学习里的早期论文是 Williams 1992，称为 REINFORCE。它本身和强化学习无关。设有分布 $p_\theta(x)$（之后是轨迹分布）和函数 $f(x)$（之后是奖励）：
+        </p>
+        $$\nabla_\theta\mathbb{E}_{x\sim p_\theta(x)}[f(x)] = \nabla_\theta\sum_x p_\theta(x)f(x) = \sum_x p_\theta(x)\frac{\nabla_\theta p_\theta(x)}{p_\theta(x)}f(x) = \sum_x p_\theta(x)\nabla_\theta\log p_\theta(x)f(x) = \mathbb{E}_{x\sim p_\theta(x)}\big[\nabla_\theta\log p_\theta(x)f(x)\big]$$
+        <p>
+            在合理假设下把梯度移进求和，乘一个 $p_\theta(x)/p_\theta(x)$，再用微积分里的 $\nabla_\theta\log p_\theta(x) = \nabla_\theta p_\theta(x)/p_\theta(x)$。妙处在于：现在梯度在一个对 $p_\theta$ 采样的期望里，可以用有限个样本近似。极端情况下只用一个样本 $\hat x\sim p_\theta$：
+        </p>
+        $$g_{\text{REINFORCE}} = f(\hat x)\,\nabla_\theta\log p_\theta(\hat x)$$
+        <p>
+            多个样本就取平均。单样本的近似可能噪声很大，但它是真实梯度的无偏估计。
+        </p>
+        <h3>2. 用到强化学习上</h3>
+        <p>
+            把 $x$ 换成轨迹、$p$ 换成策略、$f$ 换成奖励，再小心处理多个时间步（推导几步就行，略繁琐，见幻灯片附录），得到：
+        </p>
+        $$\nabla_\theta\mathbb{E}_{\tau\sim\pi_\theta}[R(\tau)]\approx\sum_t R_t\,\nabla_\theta\log\pi_\theta(\hat a_t\mid\hat s_t), \qquad R_t = \sum_{t'=t}r_{t'}$$
+        <p>
+            $R_t$ 是从 $t$ 起的回报，$\hat a_1, \hat s_1, \hat r_1, \dots$ 是用 $\pi_\theta$ 采样的轨迹。解读很直观：$R_t$ 高，就抬高 $\pi_\theta(a_t\mid s_t)$；$R_t$ 低，就压低它。
+        </p>
+        <p>
+            它和最大似然很像，最大似然的梯度也是对数概率的梯度。两个关键差别：一是多了奖励，可正可负，最大似然里这一项相当于 1；二是期望不再是对数据集里的序列，而是对策略与环境交互产生的轨迹。也就是动态生成轨迹而非使用数据集，并且能按不同程度抬高或压低。
+        </p>
+        <h3>3. 附录里的推导</h3>
+        <p>
+            对轨迹分布 $p(\tau\mid\theta)$ 和 $R(\tau) = \sum_t r_t$ 用得分函数估计：$\nabla_\theta\mathbb{E}_{\tau}[R(\tau)] = \mathbb{E}_\tau[\nabla_\theta\log p(\tau\mid\theta)R(\tau)]$。轨迹概率是
+        </p>
+        $$p(\tau\mid\theta) = E(s_0)\prod_t\big[\pi_\theta(a_t\mid s_t)\,E(s_{t+1}\mid s_t, a_t)\big]$$
+        <p>
+            取对数后对 $\theta$ 求梯度，环境 $E$ 的项都是 0，只剩 $\nabla_\theta\sum_t\log\pi_\theta(a_t\mid s_t)$。所以不需要对环境求导。再对每一步的奖励用类似的论证（第 $t$ 步的奖励只受它之前动作的影响），对 $t$ 求和整理，就得到用每步回报 $R_t$ 写的形式 $\nabla_\theta\mathbb{E}_\tau[R(\tau)] = \mathbb{E}_\tau\big[\sum_t\nabla_\theta\log\pi_\theta(a_t\mid s_t)R_t\big]$。
+        </p>
+        <h3>4. 完整算法（朴素策略梯度 / REINFORCE）</h3>
+        <p>
+            对每次迭代：
+        </p>
+        <ol>
+            <li>收集轨迹 $(s_0, a_0, r_1), (s_1, a_1, r_2), \dots, (s_{T-1}, a_{T-1}, r_T)$。</li>
+            <li>计算回报 $R_t = \sum_{t'=t}r_{t'}$。</li>
+            <li>策略梯度损失 $\mathcal{L}_{\text{PG}} = -\sum_t R_t\log\pi_\theta(a_t\mid s_t)$。</li>
+            <li>反向传播，用 SGD 或 Adam 更新策略。</li>
+        </ol>
+        <p>
+            在 PyTorch 里一般不直接写梯度，而是写一个损失让框架求导。这个损失的梯度 $\nabla_\theta\mathcal{L}_{\text{PG}} = -\sum_t R_t\nabla_\theta\log\pi_\theta(a_t\mid s_t)$ 正好是策略梯度，所以写策略梯度的代码里常见这个损失。
+        </p>
+        <p>
+            有学生问：语言模型不是每个 token 都有奖励，中间步骤的值设成什么？在这个朴素版本里，中间步骤的回报是未来所有奖励之和，最后得 1，那所有步骤都是 1。后面有更好的办法。
+        </p>
+        <h3>5. 代码示例：CartPole</h3>
+        <p>
+            不用语言模型，而是一个简单的控制任务：小车上立着一根杆，智能体只能左移或右移，要保持平衡，杆倒了回合就结束。每一步都有奖励，活得越久奖励越高。这个能在笔记本电脑上跑。几个实用的点：大约 2016、2017 年 OpenAI 提出了 Gym，统一了各种环境的接口。CartPole 的观察不是截图，而是四个数：小车位置、速度、杆的角度、角速度；动作空间是左或右。接口是 reset 得到初始状态，step 传入动作，返回新状态、奖励、是否结束和其他信息。
+        </p>
+        <p>
+            策略是一个很简单的两层网络，输入四个数，输出两个动作的概率。训练循环就是上面四步：与环境交互收集轨迹，计算回报（带折扣，马上讲），损失是回报乘对数概率，然后用 PyTorch 的优化器更新。训练很快，平均奖励超过某个阈值（大约 470）就算解决了。但画出滑动平均奖励随回合的曲线，很嘈杂、不稳定：有时策略已经挺好了，学习算法却做了太大的改动把一切搞砸，失败一阵子。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、让学习更稳定</h2>
+        <p>
+            朴素策略梯度 $\hat g_t = R_t\nabla_\theta\log\pi_\theta(a_t\mid s_t)$ 是起点。大量研究在改进它，大致两条思路：更好地给梯度加权；控制每一步的步长，即每次更新策略改变多少。
+        </p>
+        <h3>1. 折扣</h3>
+        <p>
+            动作和奖励之间常有延迟。通用的办法是折扣：假设早期动作对未来回报的影响小于后期动作。以 Pong 为例，第一步怎么挪球拍并不太能预示最后输赢，但仍想调整它；后面可能有关键的几步；到最后屏幕上比分很高，就能看出会赢。引入折扣因子 $\gamma$，回报变成按时间远近打折的未来奖励之和：
+        </p>
+        $$R_t = \sum_{t'>t}\gamma^{t'-t-1}r_{t'}$$
+        <p>
+            例子：只在最后得 +1，$\gamma = 0.9$，从最后一个动作往前，六个动作分到 1、0.9、0.81、0.73、0.66、0.59。缺点是很朴素：游戏里确实有些时间步比别的关键，理想情况下应该把奖励分给它们，这叫信用分配（credit assignment）问题，折扣只是按时间衰减的粗糙做法。优点是很通用，任何环境都能试。
+        </p>
+        <h3>2. 基线</h3>
+        <p>
+            直觉：要考虑每个状态的难度，或者说在这个状态下的期望奖励。让语言模型"总结这篇论文"，它很擅长，事先预期奖励约 0.75，那么得到 0.8 比预期好一点（差 0.05），得到 0.3 虽然是正奖励，但比预期差（−0.45），并不是好结果。反过来，模型不擅长"证明这个定理"，预期只有 0.10，这时得到 0.20 就应该给正的学习信号。基线就是按事先的期望做调整：
+        </p>
+        $$\hat g_t = \big(R_t - b(s_t)\big)\nabla_\theta\log\pi_\theta(a_t\mid s_t), \qquad b(s_t)\approx\mathbb{E}\Big[\sum_{t'}\gamma^{f(t')}r_{t'}\Big]$$
+        <p>
+            $R_t$ 也可以是折扣回报。好的基线是期望回报，课上问这个函数前面叫什么，学生答：价值函数。这就是基于价值的方法与基于策略的方法的联系：策略训练的同时学一个价值函数。收集轨迹时有了状态和从这些状态最终得到的回报，训练一个模型从状态预测回报，再用它当基线。现在的直觉是：根据动作比预期好多少，来抬高它的对数概率。
+        </p>
+        <h3>3. 优势</h3>
+        <p>
+            更一般地问：策略梯度上最好的权重是什么？"优势"（advantage）起初有特定的技术定义，现在尤其在语言模型里，人们用它指策略梯度上用的任何权重：
+        </p>
+        $$\hat g_t = \hat A_t\nabla_\theta\log\pi_\theta(a_t\mid s_t)$$
+        <ul>
+            <li>基线：$\hat A_t = R_t - v(s_t)$。</li>
+            <li>时间差分（TD）残差（Sutton 和 Barto 1998）：$\hat A_t = \delta_t = r_t + \gamma v(s_{t+1}) - v(s_t)$，看的是相邻两步的价值差，可以推广到往前看 $k$ 步。</li>
+            <li>广义优势估计（GAE，Schulman 等 2015）：$\hat A_t = \sum_l(\gamma\lambda)^l\delta^v_{t+l}$。它有超参数，取一个极端得到基线（蒙特卡洛回报减价值），取另一个极端得到 TD 残差，中间可以插值。早期用 PPO 训练语言模型的论文用的就是 GAE。</li>
+        </ul>
+        <p>
+            下一讲会讲专门为语言模型发展的技术，基于一次生成多个输出。
+        </p>
+        <h3>4. 控制步长：PPO</h3>
+        <p>
+            更新有噪声，大的更新会让训练脱轨。缓解办法是一次别把策略挪得太远。很有影响的方法是近端策略优化（Proximal Policy Optimization，PPO，Schulman 等 2017）。先定义比率：
+        </p>
+        $$\text{ratio}(x, y) = \frac{p_\theta(y\mid x)}{p_{\theta_{\text{old}}}(y\mid x)}$$
+        <p>
+            训练中给当前策略拍个快照作为旧策略，再做几次梯度更新（比如三次）得到新策略。新策略给某个动作的概率高了很多，比率就很大；低了很多，比率就很小；变化不大则接近 1。PPO 的新目标：
+        </p>
+        $$L_{\text{PPO}} = \min\Big(\text{ratio}(x, y)A(x, y),\ \text{clip}\big(\text{ratio}(x, y), 1-\epsilon, 1+\epsilon\big)A(x, y)\Big)$$
+        <p>
+            比率过高或过低，即策略变化太大时，就把目标裁剪掉，防止策略行为大幅摆动。你可能会说调小学习率也能防止大的更新，有意思的是 PPO 看的是策略的行为，也就是它给各个动作的概率，据此动态调整更新幅度。它不是为语言模型发明的，但现在在语言模型里很常用，下一讲会看到实现。
+        </p>
+        <h3>5. 改进后的算法</h3>
+        <ol>
+            <li>收集轨迹。</li>
+            <li>计算优势，可能用到基线、价值函数 $v(s_t)$、折扣等。</li>
+            <li>计算损失：策略梯度损失或 PPO 损失。</li>
+            <li>反向传播并更新，这一步不变。</li>
+        </ol>
+        <p>
+            代码示例给 CartPole 加了一个学出来的价值函数 $v_\phi(s_t)$ 当基线：输入状态，预测最终回报，用观察到的回报和预测值之间的均方误差训练；优势就是回报减去价值。这个例子里还没用 PPO。只跑了一次，样本量是一，但训练更快，也更稳定一些，虽然还不完美。能学到好的价值函数时，这些技术在很多领域都有用。Sean 建议先看这种简单例子，复杂场景里底层想法不变，只是代码难读得多、实验也跑得久得多。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、下一讲预告</h2>
+        <p>
+            下一讲把这些用到 NLP 上。听起来像"直接套上去就行"，但细节里有很多创新和有意思的地方。
+        </p>
+        <ul>
+            <li>基于人类反馈的强化学习（RLHF，Ziegler 等 2019；Stiennon 等 2020；Ouyang 等 2022）：基本的 MDP、基于偏好的奖励、PPO。策略给定提示 $x$ 生成回答 $y$。难点是怎样给聊天回答打分，要训练一个奖励模型来模拟人对回答的偏好。</li>
+            <li>可验证奖励的强化学习（RLVR）：单步 MDP，0/1 的规则奖励，用以输出平均值为基线的 PPO（"GRPO"）。策略给定问题生成思维链加答案。某种意义上比 RLHF 简单，只是时间上后被重视。有意思的是，通过强化学习，模型能学会有效地使用思维链，比如思维链变长、在里面出现各种行为，解题能力大幅提升。这催生了一个新的研究领域和如今的推理模型，最近的 ChatGPT、Claude 都有"思考"这一步，至少部分来自用强化学习训练出好的思维链。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>七、参考资料</h2>
+        <ul>
+            <li>Andrej Karpathy, Deep Reinforcement Learning: Pong from Pixels（博客，2016）。</li>
+            <li>OpenAI Spinning Up in Deep RL。</li>
+            <li>Proximal Policy Optimization Algorithms（Schulman 等，2017）。</li>
+            <li>High-Dimensional Continuous Control Using Generalized Advantage Estimation（Schulman 等，2015）。</li>
+            <li>Williams, Simple Statistical Gradient-Following Algorithms for Connectionist Reinforcement Learning（1992）：REINFORCE。</li>
+            <li>Sutton &amp; Barto, Reinforcement Learning: An Introduction。</li>
+            <li>John Schulman 2016 年 Bay Area Deep Learning School 教程；David Silver 2015 年强化学习课程。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>八、小结</h2>
+        <p>
+            最大似然是模仿学习，面临任务不匹配、数据不匹配和暴露偏差。强化学习让模型自己生成数据，用奖励直接表达任务标准，成功和失败都能提供信号。形式上是一个 MDP：状态、动作、环境转移和奖励，策略与环境交互产生轨迹，目标是最大化期望回报。算法分基于策略、基于价值和基于模型三类。策略梯度用得分函数估计绕开了对奖励和环境求导：用采样轨迹估计梯度，回报高就抬高动作概率，回报低就压低；实现上是一个"回报乘对数概率"的损失。朴素版本不稳定，可以用折扣、基线（学一个价值函数）、TD 残差、GAE 等更好地给梯度加权，用 PPO 的比率裁剪限制每次更新对策略的改变。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-711: Advanced NLP · Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="15_扩散与流.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="17_大模型的强化学习.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十一讲：Agent 与多 Agent 通信 | CMU 11-664/763 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="10_工具使用.html">&larr; 上一讲</a>
+    <span>CMU 11-664/763: Lecture 11</span>
+    <a href="12_奖励模型与BestofN.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十一讲：Agent 与多 Agent 通信</h1>
+        <p class="subtitle">Agent 的定义与用途，OpenHands 演示，ReAct 与 CodeAct，任务跟踪工具与思考工具，网页的文本、可访问性树与标记集表示，提示缓存与上下文压缩，SWE-bench、WebArena 与 GAIA，用评判模型重排序多条轨迹，以及什么时候值得用多个 Agent</p>
+        <div class="author-meta">
+            主讲：Graham Neubig · 2025 年 9 月 30 日<br>
+            资料来源：<a href="https://web.archive.org/web/20251110/https://phontron.com/class/lminference-fall2025/schedule/" target="_blank">课程主页</a>（本讲的 HTML 幻灯片未能获取） · <a href="https://www.youtube.com/watch?v=ixLXrgF77ME" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述内容；课后学生报告未包含） · 主要阅读：ReAct（Yao 等，2022）；Executable Code Actions Elicit Better LLM Agents（CodeAct，Wang 等，2024）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、什么是 Agent</h2>
+        <p>
+            开头两条作业通知：第二次作业会在"地球上任何地方的今天"之内发布；第一次作业的反馈问卷是匿名的，为了鼓励填写用了一点博弈论，只要全班一半人填，所有人小测都多拿三分。
+        </p>
+        <p>
+            这一讲不讲怎样通过改架构或改模型提高 Agent 准确率，主要讲和推理有关的部分，但架构的东西绕不开，也会涉及。Agent 是迭代地使用工具来完成任务的系统，不是一次性用工具，而是反复用。如今几乎都由大模型驱动；以前有不靠大模型的 Agent，比如 Siri、Cortana，以及打航空公司客服电话时那种基于决策树和分类器的系统，现在仍在用，但新开发的基本都用大模型。
+        </p>
+        <p>
+            Agent 带来独特的推理挑战：推理和规划需要额外的推理步骤；环境表示，怎样表示工具调用返回的大量输出；长上下文建模，Agent 大概是除摘要、问答之外最大的长上下文用例；评估；评判模型（critic），和之后要讲的奖励模型类似，因为这是 Agent 课所以现在先讲；多 Agent 委派，讲得不多。
+        </p>
+        <p>
+            用途：有学生做过模拟搜索引擎用户的 Agent，预测用户点击后的下一步。主要用途有：软件开发，代码生成、调试、测试，比如 Anthropic 的 Claude Code、OpenAI 的 Codex，以及 Graham 在开发的开源 Agent OpenHands；网页自动化，数据抽取、填表、测试，闭源的有 OpenAI 的 Agent 模式，开源的有很流行的 browser-use；研究与分析，信息收集和写报告，聊天界面大多默认支持，还有 Perplexity Pro，开源的 Open Deep Research 起码有七个；交互环境，游戏（比如 Minecraft）、模拟、机器人。
+        </p>
+        <h3>OpenHands 演示</h3>
+        <p>
+            OpenHands 起初是开源工具，后来成为 Graham 参与的一家创业公司的一部分，是一个软件开发 Agent，也支持网页浏览等工具。课上让它"找到 CMU 2025 秋推理算法课的网站，下载作业，估计第一次作业要多久"。先用 GPT-5，但 GPT-5 推理很慢（他们用高推理强度，慢但很少出错），为了下课前能跑完换成 Claude。学生问是估计人还是它自己完成要多久：好问题，让它估计软件任务时长，它通常会说得比实际长得多。演示里它调用搜索工具找到课程（Graham 和 Amanda 主讲），进入作业页抽取信息，克隆代码，打开 PDF 往下滚动阅读。Graham 说别一直看着 Agent 干活，那是 Agent 的一种失败模式，看着太好玩、浪费你的时间，该让它去做，过后再回来检查。最后它估计 25 到 35 小时，可以对照反馈问卷看准不准。
+        </p>
+        <p>
+            学生问是否用 LangChain 之类。他们没用，自己设计了 Agent SDK。Graham 的看法是 LangGraph、LangChain、AutoGen 更适合固定的工作流：先做这个，把信息传给那个，再做那个。软件工程的工作流千变万化，比如刚才"看作业、估时长"这种他以前从没做过的流程，所以他们就做一个能做很多不同事情的单一 Agent，往里加工具，框架里实现了本讲要讲的各种推理方法，而不是在多个 Agent 之间委派，后者正是 LangGraph 和 AutoGen 擅长的。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、推理与规划</h2>
+        <p>
+            之前讲的推理主要是数学推理，大多是演绎：已有信息，按固定方式组合解题。这里更开放：根据总目标想出下一步最好做什么。
+        </p>
+        <h3>1. ReAct</h3>
+        <p>
+            标准做法来自 ReAct：先推理再行动。对比只行动的方式：给定任务，动作是"去 1 号抽屉"，观察"门关着"，再"打开 1 号门"……ReAct 在动作之间加入想法。两个好处：思维链提高准确率，Agent 也不例外；它会用自然语言告诉你在做什么，比如"我来帮你找网站""找到了，访问一下""我看到有作业页"，不看具体动作也能跟上进度。准确性和可读性。
+        </p>
+        <h3>2. CodeAct</h3>
+        <p>
+            ReAct 是多步、带推理的 Agent 方法；CodeAct 则让 Agent 写代码来执行动作，而不是逐个调用工具。比如要查 10 个商品的价格并找出最贵或最便宜的：原来要做一堆单独的工具调用，拿到结果后再调一次工具或让大模型去挑；现在直接写一个 Python 程序替你调用所有工具。这简化了动作空间，所有工作基本就是写 Python 程序，也能更高效地完成任务。现在很流行，很多 Agent 都有写代码式的动作空间，能运行 Python 或 bash。这对推理很重要：一次产生很大输出的动作，和许多产生小而简单输出的动作，是两种不同的选择；用 CodeAct 时也可以权衡，结果有把握时写大块代码，没把握时写小块。
+        </p>
+        <h3>3. 任务跟踪工具</h3>
+        <p>
+            ReAct 的规划很"反应式"（双关），每次只推理下一个最佳动作。OpenHands 等库最近引入了用工具做规划的系统：一个任务跟踪工具，提供结构化的任务管理，列出一个任务的各个步骤，每当某步状态变化就重新调用工具更新。课上让它"检查所有课程材料，看是否缺了参考资料，制定计划并逐项打勾"（后半句通常不必写，它会自发做，演示时为了保险）。它列出计划：检查所有起始代码文件、检查共享任务示例代码、核对要求……把第一项标为进行中，完成后标为完成。每次更新都会写出计划的全部条目，相当于刷新上下文窗口最近的部分，让它不会迷失；计划还存在磁盘上的 tasks.md 里，不会从上下文里消失。
+        </p>
+        <h3>4. 思考工具</h3>
+        <p>
+            Claude 推出 Claude Code 时引入：告诉 Agent，如果需要仔细想某件事，就在这个工具里写下长长的解释。这个工具没有任何作用，只是用来思考，输出想法后下一步再据此行动。有了推理模型大概就不需要，但它能把思维链较短、没专门训练过的模型变成能这样做的模型，算是一个推理时技巧：不改模型，却给了它更多思考的容量。
+        </p>
+        <p>
+            学生问：用长思维链的推理模型时这些框架会不会失效？Graham 认为大家都在用 ReAct，没有完全不推理的 Agent，区别只是短思维链还是专门训练过的长思维链，所以框架没失效，它一直都在。思考工具在训练过的模型上也许不必要；任务规划大概仍有用，即使训练模型原生规划，也不如把计划存在磁盘上、不占上下文也能回忆起来，而且至少方便看的人了解计划。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、环境表示</h2>
+        <p>
+            工具有动作也有观察，怎样表示观察？这对推理很重要，因为观察可能非常大。这里主要讲网页，Graham 做了很多网页 Agent。
+        </p>
+        <ul>
+            <li>文本：把网页（或 PowerPoint 等非文本内容）转成 Markdown，比如 LTI 主页变成简洁、好用的 Markdown，而不是大家熟悉、新改版的漂亮主页。OpenHands 用 Tavily 搜索引擎，还有很多搜索引擎专门为 Agent 生成这种表示。问题是网页上可以点击、滚动、输入，Markdown 里没有可交互元素的表示，想点"自然语言处理"那个链接，或者在文本框里输入，都无从表示。</li>
+            <li>可访问性树：HTML DOM 树的文本表示，是网页 Agent 的标准做法，最初为视障人士的读屏软件设计，这里直接复用。关键是给每个元素一个 ID，可点击的元素可以通过调用"点击这个 ID"的工具来点。这是 Agent 表示网页的原始方式。</li>
+            <li>视觉：越来越常见。VisualWebArena 的做法：截图，给图里每个元素画框、标上数字，相当于前面的 ID，可以通过数字点击；同时附上所有元素及编号的文本摘要，强化"这些是你能操作的元素"。这叫标记集（Set of Marks）。</li>
+        </ul>
+        <p>
+            Graham 补充（说忘了放幻灯片）：表示代码或文件系统里的文件时，不希望不小心读进一个一千万行的文件把上下文撑爆，所以要么训练模型，要么明确提供只读取部分行的工具，文件编辑工具也有这种能力。
+        </p>
+        <p>
+            学生问：图像配上文本，模型会不会更关注文本、忽视图像？取决于模型。大模型本来不擅长理解网页，九到十二个月前这还是大问题，大多数开源模型完全看不懂网页，做不了 OCR、识别不了字符、分不清哪个元素什么意思。好消息是可以自动生成无限多的标记集数据：在网页上自动画标记，问"这个网页上第 41 个元素是什么"，训练模型回答。他们有一篇论文造了数据集 MultiUI，用 10 种辅助训练任务提升网页理解，这样训练后模型很擅长理解网页，Graham 认为大多数基础模型公司现在都在做类似的事。学生问标记靠得很近时会不会弊大于利：人们试过不用标记集，用了明显更有效，所以才用；但未必是最优做法，还有改进空间。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、效率</h2>
+        <p>
+            Agent 的一大挑战是上下文长度。SWE-bench、WebArena 这类评测，对话历史可能多达约一百步，大约 50 次工具调用、100 个动作与观察，可达几十万 token。Graham 实际用 Agent 做过多达两千步的任务，那是几千万 token 的上下文，大多数模型处理不了，能处理也非常贵。网页尤其糟，网页可以很大。
+        </p>
+        <h3>1. 提示缓存</h3>
+        <p>
+            非常重要，后面专门讲：第一次发送系统提示和观察、得到动作，要计算所有表示；下一次，系统提示、观察和动作的自回归表示都已算过，只需输入新的观察和动作；以此类推。省下的计算意味着省钱省时间。实际上很多服务只缓存提示里的内容（系统消息和观察），聪明一点也能把动作缓存下来。
+        </p>
+        <h3>2. 上下文压缩</h3>
+        <p>
+            把之前的上下文去掉一部分或摘要掉。OpenHands 的几种做法也被 Gemini CLI、Claude Code 等编程工具广泛采用。
+        </p>
+        <ul>
+            <li>摘要：做了一定步数后，把之前的一部分步骤交给大模型摘要，去掉大约一半上下文，同时保留大部分相关信息。不完美，有时会丢掉之后有用的信息，但经过一番提示工程能做好，提示可以在代码库里看到。实验上在 SWE-bench 上成本降低 2 倍甚至更多，性能不变。也有"战争故事"：在 SWE-bench 上实验没问题，真正用起来却会做很蠢的事，比如发了 pull request，忘了自己发过，又一遍遍地发，只好在提示里写"记住你是否已经发过 PR"之类。这说明基准测试和真实使用之间的差距，但总体思路可行。</li>
+            <li>网页上下文压缩：网页大而嘈杂，最早出现在 WebArena 的 Agent 里。一种做法是只保留最近一次的可访问性树或截图，处理过一次后就从历史里删掉；挑战是提示缓存效果变差，因为丢掉了一部分输入，而且大网页仍然要处理一遍，很贵。另一种来自 Mind2Web 论文（这一点只是论文的次要部分，不在参考列表里）：先用一个很轻便宜的模型猜可访问性树里哪些元素最重要，只把这些元素及其祖先节点送进大模型。Graham 没听说多少人在这个语境下用它，但这样也许能保留更多历史又不伤性能，做网页 Agent 的话值得一试。</li>
+        </ul>
+        <p>
+            学生问：同一个网页反复获取，是否每次都重新处理表示？据 Graham 所知是的，每次都重新处理；但也许有些情况可以省，比如 Perplexity、ChatGPT 这类高流量搜索引擎，可以预先计算网页表示，值得一试。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、评估</h2>
+        <ul>
+            <li>SWE-bench：修复 GitHub 问题。输入是一个 issue 和代码库，比如"有数据泄漏"，Agent 要修改代码库修复问题。评估：与 issue 一同引入的、用来检查修复是否正确的单元测试必须全部通过才能得满分，修复前已有测试中选出的一部分也必须通过，即修好问题而不弄坏别的东西。原版有来自 12 个流行 Python 仓库的约 2000 个 issue。扩展很多：SWE-bench Verified，500 个经过核实、仅凭 issue 描述就能解决的问题，因为很多 issue 写得含糊，没法推出"正确"答案，现在大家都在它上面评估，上限大概接近 100，但也少了处理模糊问题的乐趣，Verified 得高分不等于能解决所有 GitHub 问题，那需要和人交互、问澄清问题；Multi-SWE-bench 包含多种编程语言；SWE-bench Multimodal 包含要修前端等多模态任务；SWE-rebench 每月更新新的 issue。</li>
+            <li>WebArena：Graham 实验室做的，很多人用它评估网页 Agent。搭了一批开源网站，对应常见的流行网站：One Stop Shop 是购物网站（相当于 Amazon），还有它的内容管理系统用来上架商品；Postmill 是开源版 Reddit；GitLab 对应 GitHub；还有 Wikipedia 等信息源。任务如"告诉我 2023 年 3 月我在食品上花了多少钱"，"建一个 Nolan 粉丝仓库，在 README 里列出诺兰获奥斯卡的电影"，都是复杂的多步网页交互。</li>
+            <li>GAIA：研究类，更准确说是偏研究的通用助理基准，比如"这个临床试验的入组人数是多少""读这个标签告诉我内容""看看 NASA 每日天文图"。由 Hugging Face 和 Meta 创建，上周刚发布了更现代的 GAIA 2，Graham 还没试过。</li>
+        </ul>
+        <p>
+            更多基准：OpenHands 仓库的评估目录实现了约 25 个基准，从编程到通用助理到网页导航；Prime Intellect 最近发布了环境中心（Environments Hub），环境可用于训练或评估，但多数更像评估环境。OpenHands 那边偏实用、马上能看出用途；环境中心那边更沙盒化、更容易运行。做研究项目可以先从环境中心开始，想做更复杂、更贴近真实使用的再转到 OpenHands 的，两者部分重叠。Agent 评估很贵，Graham 说要是有人能在推理上把它变快，他会很开心。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、评判模型</h2>
+        <p>
+            有一个第二意见来判断 Agent 做得怎么样会有帮助。用途：重排序多个候选以提高准确率；审计以确保安全或表现。
+        </p>
+        <p>
+            重排序的例子是和 UC Berkeley 合作的 SWE-Gym。论文两部分：用强化学习训练软件工程 Agent；训练一个评判模型，对多条 Agent 轨迹重排序。推理时展开 $N$ 次，挑最好的。结果：从当时约 20% 准确率的模型出发，展开次数每翻一倍，SWE-bench 分数大致上升一个固定量，从约 20 提到约 32。想要最好的基准分数，这非常有效，代价是推理要跑 16 次，而 Agent 本来就很贵。如果还不信它重要：刚发布的 Claude Sonnet 4.5 的结果图里，深色柱是单次推理，浅色柱就是多次展开再重排序。Anthropic 想赢 OpenAI、OpenAI 想赢 Anthropic，大家都这么做。Graham 不确定有多少人在生产中这样用，但比如要让 Agent 跑一个机器学习实验，很想让它成功，愿意花一万美元确保成功，这就是可行的选择。
+        </p>
+        <p>
+            训练很简单（Graham 说第一次做这套幻灯片，漏了几页）：展开一条轨迹，用单元测试评估结果，训练模型预测结果是否正确，这就是结果奖励模型（outcome reward model），只预测最终结果。也可以逐步给出中间奖励、预测每一步有多成功，即过程奖励模型（process reward model），但监督信号复杂得多，讲奖励模型时再谈。
+        </p>
+        <p>
+            学生问：既然能用测试判断是否解决，为什么不训练模型生成测试，而训练模型看轨迹预测？Graham 说我们真的该这么做，但模型生成单元测试的能力并不强；有的测试没通过也可能是成功的；有些任务（比如研究）根本没法写单元测试。但对软件工程，这是非常合适的方案，值得更多投入。SWT-bench（软件测试基准）、TestGenEval 等基准值得更多关注：软件测试听起来无聊，直到你意识到只要能写出很好的单元测试，Agent 通常就能替你解决问题。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、多 Agent 系统</h2>
+        <p>
+            为什么用多个 Agent？
+        </p>
+        <ul>
+            <li>专门化：直到六到十二个月前这还是很流行的理由，不同 Agent 解决不同子任务，常见类比是软件公司里不会让一个人同时做规划、实现和质量保证。Graham 同意软件公司里确实如此，但大模型能把这些都做好，吸收了各种专门知识，记得远比人多，所以他不太认同这个理由，尤其现在大模型做单项任务已经相当好。</li>
+            <li>可并行的复杂任务：理由很充分，一个 Agent 做一部分，另一个做另一部分。如果同时订阅了 ChatGPT 和 Claude，可以比较两者的深度研究：Claude 会让一个主 Agent 把很多研究子任务委派给不同 Agent，OpenAI 则全部串行做；OpenAI 可能查 30 篇资料，Claude 可能查 300 篇，结果全面得多。软件工程里更难这样拆，写的代码容易互相冲突，但仍然可能。</li>
+            <li>鲁棒性：把四个任务分给四个 Agent，再让另一个 Agent 复查，相当于充当评判模型。</li>
+        </ul>
+        <p>
+            为什么不用：要管理和集成的部件更多；任务分解可能很棘手；通信困难，要确保在 Agent 之间传递恰好正确的上下文。不想传太多，子 Agent 完成任务后只把摘要传回主 Agent 本是优点；但常见的失败是，OpenHands 以前有一个独立的网页浏览 Agent（现在合并成一个 Agent），它收集了一大堆信息，最后只给出很短的报告，信息不够，编程 Agent 就缺了浏览 Agent 其实已经发现的信息。所以需要真正有效的上下文传递方式。
+        </p>
+        <p>
+            学生问为什么上下文总以 token 传递，而不传 logit 或更深的表示。Graham 认为可以，最大的原因大概是最好的 Agent 模型很多是闭源的，通过 API 做不到；如果能用开源模型证明这很有用，也许能说服闭源模型的开发者支持。学生补充把隐藏状态传给下一个会更好，Graham 同意，好主意。
+        </p>
+        <p>
+            构建多 Agent 系统的框架有 LangGraph、AutoGen 等，通常提供上下文传递、工具实现等脚手架。Graham 认为它们适合快速搭建工作流很固定的 Agent 系统，比如"处理用户上传的文件，抽取一组固定信息，写进数据库"，而不是任意的研究或编程任务。它们提供可定制的 Agent、灵活的对话模式，需要时还能把事情交给人。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、参考资料</h2>
+        <ul>
+            <li>ReAct: Synergizing Reasoning and Acting in Language Models（Yao 等，2022）：主要阅读。</li>
+            <li>Executable Code Actions Elicit Better LLM Agents（CodeAct，Wang 等，2024）：主要阅读。</li>
+            <li>WebArena（Zhou 等）；VisualWebArena（Koh 等）；Mind2Web（Deng 等）。</li>
+            <li>SWE-bench（Jimenez 等）；GAIA（Mialon 等）；Training Software Engineering Agents and Verifiers with SWE-Gym（Pan 等）。</li>
+            <li>AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversation。</li>
+            <li>OpenHands Context Condensation（All Hands AI 博客）；Anthropic 与 AWS 关于提示缓存的文档。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>九、小结</h2>
+        <p>
+            Agent 是反复使用工具完成任务的系统，如今几乎都由大模型驱动，用于编程、网页自动化、研究和交互环境。规划上，ReAct 在每个动作前先推理，CodeAct 让 Agent 写程序一次调用多个工具，任务跟踪工具把计划写到磁盘并不断刷新到上下文里，思考工具给短思维链模型额外的思考空间。网页可以表示为 Markdown、带 ID 的可访问性树或带编号框的截图，视觉理解要靠专门的训练数据。长达数百甚至数千步的轨迹让上下文成为大问题，提示缓存、摘要式压缩、只保留最新网页或先挑出重要元素都能降低成本，但会带来遗忘等新问题。SWE-bench、WebArena、GAIA 是主要基准，评测本身就很贵。用结果奖励模型对多条轨迹重排序能稳定提升分数，前沿实验室发布成绩时也这么做。多 Agent 最有说服力的理由是并行和复查，而不是专门化，难点在于子 Agent 之间怎样传递恰当的上下文。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-664/763: Inference Algorithms for Language Modeling · Fall 2025</p>
+        <nav class="footer-nav">
+            <a href="10_工具使用.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="12_奖励模型与BestofN.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

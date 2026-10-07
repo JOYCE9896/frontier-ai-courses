@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第六讲：编程 Agent | CMU 11-768 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="05_规划任务分解与多Agent协作.html">&larr; 上一讲</a>
+    <span>CMU 11-768: Lecture 06</span>
+    <a href="07_电脑操作Agent.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第六讲：编程 Agent</h1>
+        <p class="subtitle">从补全一段代码，到在真实仓库里定位、修改、验证，再到整个软件开发流程</p>
+        <div class="author-meta">
+            主讲：Graham Neubig · 2026 年 9 月 10 日<br>
+            资料来源：<a href="https://www.cmu-agents.com/slides/lecture-06-coding-agents.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=1BWeH1oOM7k" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述内容）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、编程 Agent 的三个层次</h2>
+        <p>
+            编程是目前 Agent 用得最多、也最成熟的领域。课程把它分成三个层次：第一层是写代码，一次补全一段；第二层是修改仓库，同时改动多个文件；第三层是参与开发，覆盖软件的整个生命周期。一个编程 Agent 由三样东西组成：提示词、工具、LLM。这一讲先讲模型怎样学会写代码，再讲怎样评估生成的代码，然后讲 Agent 式编程的工作方式、工具和训练，最后扩展到前端开发和更广的软件工程任务。
+        </p>
+        <p>
+            Graham 说，这一讲重点放在后两个层次（修改仓库和参与开发），提示词部分前两讲已经讲得比较多。他还指出，现在已经没有哪个语言模型不会写代码了，因为编程是语言模型最有价值、用得最广的用途之一，但这种能力不是白来的，必须专门训练。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、会写代码的模型</h2>
+
+        <h3>1. 写代码需要什么能力</h3>
+        <p>
+            根据提示写代码需要三方面能力：语言，包括语法、API 和惯用写法；编辑，能同时参考空缺前后两边的代码；推理，从需求说明推出程序应该有的行为。
+        </p>
+        <p>
+            训练一个代码模型通常分三个阶段：预训练，在包含代码的大规模语料上训练；中期训练，加大代码比例，拉长上下文；强化学习后训练，训练推理能力，用执行结果作为奖励。
+        </p>
+        <p>
+            Graham 解释了"编辑"为什么单独列出来：我们写代码很少写一遍就扔，通常是反复修改，而语言模型天生不会改代码，必须专门训练。"推理"方面，编程和数学一样是推理模型最成功的应用，原因是这两类任务的结果比较容易验证。他问学生训练代码模型需要什么，学生答出了几点：词表里要有代码里会出现的 token；需要大量代码数据，比如来自 GitHub；还要懂 grep 这类操作系统工具，这一点在 Agent 场景下尤其重要，但即使只是写 bash 脚本也要用到。
+        </p>
+
+        <h3>2. 预训练：从代码和文字中学习</h3>
+        <p>
+            预训练的目标和普通语言模型一样，最小化下一个 token 的预测损失：
+        </p>
+        $$\mathcal{L}_{LM} = -\mathbb{E}_{x\sim D_{mix}} \sum_t \log p_\theta(x_t \mid x_{&lt;t})$$
+        <p>
+            其中 $D_{mix}$ 是混合数据：网页文本、技术文章、数学、源代码和文档。要保留代码的结构，包括缩进、文件边界、API，以及文字和代码之间的关系。训练过程中要评估：按领域分别看留出数据上的损失，再加上实际能否写出能运行的代码（参考 OLMo，Groeneveld 等，2024）。
+        </p>
+        <p>
+            Graham 提到一段历史：在代码变得重要之前，处理训练数据时常常把连续的空白压缩成一个空格。对 Python 来说这是灾难，因为缩进本身就有语法含义。文字里的代码块也要保持原样，比如 Markdown 里的代码块要留在代码块里。
+        </p>
+        <p>
+            数据的选择和清洗（参考 StarCoder）包括四件事：按语言和来源过滤，去掉自动生成的数据转储、编码损坏的内容和低价值的重复；去重，包括 fork 出来的仓库、项目里附带的第三方库、几乎相同的文件、到处复制的题解；控制来源，记录许可证、日期、作者选择退出的情况，过滤敏感数据；防止泄漏，按仓库或题目族划分训练和测试，并把评测题从训练数据中清除。
+        </p>
+        <p>
+            Graham 对这几点讲了具体原因。GitHub 上有成千上万甚至几十万的 fork，直接下载使用会造成大量重复。许可证方面，如果用专有许可证的代码训练了模型，发布后赚了很多钱，两年后代码的主人可能找上门要求分成；美国版权法在这件事上的规定比较模糊，要不要在意由你决定。有人不想让模型学太老的代码，所以要记录日期。敏感数据方面，大家会往仓库里上传各种不该传的东西，比如 API 密钥，他点名提醒在座的学生千万别这么做；有专门的工具能找出这些密钥，比如他和 Hugging Face 都用过的 TruffleHog。StarCoder 论文里有这些细节，Daniel 也参与了这项工作。
+        </p>
+
+        <h3>3. 代码的分词</h3>
+        <p>
+            代码的分词器要在代码和文字上一起学字节级 BPE 子词，变量名可能被拆成多个 token。空白字符必须保留，因为空格、制表符和换行在 Python 这类语言里本身就是语法。连续的空格要合并成一个 token，否则每个空格占一个 token，非常浪费。幻灯片展示了 StarCoder2 的真实切分：<code>if ready:</code> 换行后缩进四格 <code>return value</code>，切成 <code>if</code>、<code> ready</code>、<code>:</code>、换行加三个空格、<code> return</code>、<code> value</code>、换行。
+        </p>
+        <p>
+            有学生问，要不要专门给空白字符设 token，好让模型区分自然语言和代码。Graham 说，理论上 BPE 本来就是把字节合并起来，空白没必要特殊对待；但几乎所有分词器还是会把空白和非空白分开处理，原因是如果模型表现不太好，输出半个单词会很奇怪，分开处理能让模型尽量不输出残缺的词。Daniel 补充了 InCoder 里的经验：允许 token 跨越空白，代码的表示能紧凑约 40%，但会带来奇怪的问题。比如 import numpy as np 可能整个成为一个 token，模型在做自动补全时就很难只停在 import numpy 这里。改分词器在大规模训练中也容易出问题，要小心。
+        </p>
+        <p>
+            关于编程语言的偏好，Graham 问学生：你让模型"帮我写个做某件事的应用"，不说语言，它会用什么？学生答：大多是 Python；要做仪表盘时通常用 React。他讲了自己的经历：一个很重的数据处理流水线原本用 Python 写，他让模型改成 Rust 以提高速度。模型改了，可之后每次跑其他程序，它又回到 Python，他不得不每次都强调"用 Rust"。他认为这种偏好来自三个方面：Python 简洁易写；Python 流行；模型做强化学习时很可能是用 Python 解释器训练的。
+        </p>
+
+        <h3>4. 大规模代码预训练的例子</h3>
+        <p>
+            StarCoderBase（Li 等，2023）有 155 亿参数，训练了 1 万亿 token，覆盖 80 多种编程语言，数据包括源码、issue、commit 和 notebook。随着训练 token 增加，大多数语言的 pass@1（一次生成就通过测试的比例）都在上升。
+        </p>
+
+        <h3>5. 中期训练：加更多代码</h3>
+        <p>
+            在已有模型基础上继续训练，提高代码比例，同时保留文字和数学数据。比例要靠实验选：比较代码能力的提升和通用能力的保持。Code Llama 在 Llama 2 的基础上额外训练了 5000 亿 token，得到 7B、13B、34B 三个版本，然后再做上下文扩展。
+        </p>
+        <p>
+            Qwen2.5-Coder 的实验（论文表 3）显示了混合比例的影响：
+        </p>
+        <table>
+            <tr><th>代码 / 文字 / 数学</th><th>常规代码任务</th><th>MATH</th><th>MMLU</th></tr>
+            <tr><td>100 / 0 / 0</td><td>49.8</td><td>10.3</td><td>23.8</td></tr>
+            <tr><td>70 / 20 / 10</td><td>48.3</td><td>33.2</td><td>62.9</td></tr>
+        </table>
+        <p>
+            加入 30% 的文字和数学，代码分数只降了 1.5，数学和通用知识却大幅提高。
+        </p>
+        <p>
+            Graham 的解读是：Qwen 团队本想做一个纯粹的代码模型，全部用代码继续训练，结果数学和问答这些重要能力严重下降；改成代码、文字和数学混合后，代码能力只掉了一点，其他能力都保住了。现在没有人只拿模型写代码，所以这一点很重要。
+        </p>
+        <p>
+            处理长输入时，训练序列要把相关文件连起来，保留路径和跨文件依赖。比如 <code>types.py</code> 里定义 <code>Result.value</code> 可能是 None，<code>worker.py</code> 把 Result 传下去，<code>caller.py</code> 要补上空值检查。Qwen2.5-Coder 训练时从 8K 拉到 32K，再用 YaRN 扩展到 128K（第三讲讲过）。要验证跨文件补全、填空，以及短上下文能力没有退化。
+        </p>
+        <p>
+            Graham 说，最天真的做法是把一个仓库的所有文件拼起来当训练数据，但这常常超过最长的上下文。模型一般最多训练到一百万 token，而大多数像样的代码库都超过这个长度，据说 Google 的单一代码仓库有几十亿行。所以要按目录取文件，或者解析依赖图，把相互依赖的文件拼在一起。
+        </p>
+
+        <h3>6. 填空：同时利用空缺前后的代码</h3>
+        <p>
+            普通语言模型只能从左往右写。但编辑代码时，经常要在中间补一段，而后面的代码提供了重要线索。比如 <code>def is_positive(x: int) -&gt; ____:</code> 下一行是 <code>return x &gt; 0</code>，看到函数体返回的是比较结果，就能推出返回类型是 <code>bool</code>。
+        </p>
+        <p>
+            InCoder（Fried 等，ICLR 2023）的训练方法是：把原始代码切成前缀、一段内容、后缀，把中间那段挪到最后，用一个标记符号 <code>[M0]</code> 占位：训练序列是"前缀 [M0] 后缀 [M0] 内容 [END]"。这样模型仍然是从左往右生成，但生成中间内容时已经看过了后缀。推理时给"前缀 [M0] 后缀 [M0]"，让模型生成内容。可以有多个空缺，每个用不同的标记。这样模型不需要专门训练，就能做补全代码、推断类型、生成注释、重命名变量等编辑任务。
+        </p>
+        <table>
+            <tr><th>推理方式</th><th>后缀的用途</th><th>单行</th><th>多行</th></tr>
+            <tr><td>从左往右，1 个候选</td><td>不使用</td><td>48.2%</td><td>24.9%</td></tr>
+            <tr><td>从左往右，10 个候选</td><td>只用来给候选排序</td><td>54.9%</td><td>28.2%</td></tr>
+            <tr><td>因果掩码填空</td><td>用于生成</td><td>69.0%</td><td>38.6%</td></tr>
+        </table>
+        <p>
+            这组数据来自 HumanEval 改造的填空任务，指标是补全后函数通过测试的比例。而且在相同的 520 亿 token 训练预算下，用填空目标训练的模型在普通补全上也没有变差：HumanEval 从 6.0% 到 8.0%，MBPP 从 8.9% 到 10.9%。
+        </p>
+        <p>
+            有学生问训练时怎样决定挖几个空、每个空多长。Daniel 回答：用长尾分布采样，大多数时候只挖一个，有时两个，更少的时候三个，最多可以到很多个；空的长度也这样采样。Graham 补充说，也可以参照真实使用中常见的补全情况来设计这个分布。
+        </p>
+        <p>
+            参考资料里 OpenAI 的"Efficient Training of Language Models to Fill in the Middle"（2022）从更大范围验证了这一点：只要把文档中间的一段挪到末尾，自回归模型就能学会填空；即使大量训练数据都做了这种变换，在各种规模下，从左往右的生成能力（按困惑度和采样评估）都不受影响。论文据此建议今后的语言模型默认都用这种方式训练。
+        </p>
+        <p>
+            从代码中学习还有其他方式：commit 差异，给修改前代码和提交信息，预测修改后的代码（OctoPack）；诊断信息，给出错代码和报错，预测修复（DrRepair）；测试，用程序的测试结果作为奖励（CodeRL）；执行轨迹，预测程序执行了哪些行、各变量的状态（CodeExecutor）。
+        </p>
+        <p>
+            Graham 问学生，"出错代码加报错"这种数据哪里能几乎免费拿到？学生提到 Stack Overflow、GitHub issue、PR。他想说的是持续集成（CI）的测试记录：每次向仓库推送代码都会跑测试，GitHub 上保留了全部历史，可以看到某个版本的代码跑出了错误，后来的某个版本通过了测试并被合并。这是非常丰富的数据，不需要自己生成。当然，自己运行 Agent 也能生成这类数据，后面会讲到。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、怎样评估生成的代码</h2>
+
+        <h3>1. 和参考答案比文字</h3>
+        <p>
+            最直接的方法是和参考答案比较：精确匹配，或者 BLEU-4（统计连续 4 个 token 片段的重合度，并惩罚过短的输出）。问题是文字相近不等于行为相同。判断整数是否为正，参考答案是 <code>return x &gt; 0</code>；<code>return x &gt;= 0</code> 只差一个字符，但 x 为 0 时就错了；<code>return not (x &lt;= 0)</code> 写法完全不同，对整数却完全等价。CodeBLEU（Ren 等，2020）加入了语法树和数据流的比较；CodeBERTScore（Zhou 等，EMNLP 2023）用预训练模型把代码编码成向量，逐个 token 找最佳匹配，算出精确率、召回率和 F 值。
+        </p>
+        <p>
+            Graham 说，和参考答案比较的思路，他们自己在 2017 年的论文里也用过。课上问谁还在用 BLEU，他惊讶于还有不少人知道这个指标。CodeBLEU 的原理是：每个程序都能转成一棵抽象语法树，表示程序按编程语言的规则会怎样执行；再加上数据流的比较，即每个变量的值从哪里来。CodeBERTScore 是他们 2023 年的工作，做法是把两段代码的每个 token 都编码成向量，检查一段代码里的每个 token 在另一段里是否都有很好的对应。
+        </p>
+
+        <h3>2. 运行代码检查行为</h3>
+        <p>
+            更可靠的做法是运行。候选代码 <code>return x &gt;= 0</code>，测试输入 −1、0、1，期望输出 False、False、True。在隔离环境中运行，限制时间和内存，比较输出：输入 0 时实际返回 True，失败，因为 0 不是正数。
+        </p>
+        <table>
+            <tr><th>好处</th><th>缺点或局限</th></tr>
+            <tr><td>接受各种不同的正确写法</td><td>有限的测试可能漏掉错误行为</td></tr>
+            <tr><td>通过执行发现语义错误</td><td>需要可信的测试、依赖和隔离执行环境</td></tr>
+            <tr><td>检查的是实际行为</td><td>需要时间和稳定的运行环境</td></tr>
+        </table>
+        <p>
+            测试不充分的问题由 EvalPlus（Liu 等，2023）专门研究过。常用基准有：HumanEval，164 个 Python 函数，根据文档字符串补全，用隐藏单元测试检查；CodeContests，竞赛题（包括 Codeforces），根据题目写完整程序，编译并测试。
+        </p>
+        <p>
+            Graham 说，每一个有名的基准，都会有一篇论文抱怨它的单元测试写得不好：要么测试不够严格，错误的实现也能通过（假阳性）；要么测试检查的内容在给 Agent 的输入里根本没提（假阴性）。比如任务说"在界面右上角加一个写着 Learn More 的按钮"，测试却还检查按钮的背景色，因为这个要求是后来才明确的。他认为这是现在训练编程 Agent 的最大难题之一：任务越来越难，写出既少假阳性又少假阴性的测试非常困难。执行环境也有麻烦：只用 Python 标准库还好，否则要在 Docker 容器里预装全部依赖；即使装齐了，库的版本升级也可能让测试挂掉，于是新模型只因为测试过时就得了低分；大仓库的测试跑一遍也很耗时。
+        </p>
+        <p>
+            HumanEval 的题目据他说是 OpenAI 的人手工编写的一些有点刁钻的 Python 函数，不一定反映真实使用。CodeContests 是 Codeforces 风格的竞赛题，要求单步模型第一次提交就完全做对，很少有人能做到，所以需要大量推理。提出 HumanEval 的 2021 年论文里的模型也叫 Codex，他提醒不要和今天 OpenAI 的编程 Agent Codex 混淆，那是当年为 GitHub Copilot 做的代码补全模型。按那篇论文的摘要，Codex 在 HumanEval 上解出 28.8% 的题，GPT-3 为 0%；每题采样 100 次，能解出 70.2%。
+        </p>
+
+        <h3>3. pass@k</h3>
+        <p>
+            pass@k 是采样 k 个程序、至少有一个通过全部测试的概率（Chen 等，2021）。k 越大，分数越高，它衡量的是"多试几次能不能做出来"。
+        </p>
+
+        <h3>4. 非功能性需求</h3>
+        <p>
+            有些要求不是"对不对"，而是"好不好"。比如"让这段代码更快"，修改后输出不变、耗时更少。NoFunEval（Singhal 等，2024）包含 397 个代码编辑任务，按需求类型用不同方式检查：运行效率，跑测试并计时，按加速比打分；延迟或资源占用，和参考修改比较，用 DiffBLEU 打分；可维护性和安全，用 CodeQL 做静态检查，再乘以和参考修改的匹配度。
+        </p>
+        <p>
+            有学生问训练时是否考虑代码效率和复杂度。Graham 说，在非 Agent 的单步任务上，训练基本不考虑，只看对不对。一个例外是竞赛题通常有运行时限，超时就不得分。在 Agent 任务上考虑效率更常见。
+        </p>
+
+        <h3>5. 从测试结果中学习</h3>
+        <p>
+            DeepCoder（Luo 等，2025）用执行结果做强化学习：对每道题采样若干个回答（推理加最终代码），运行测试，通过就给奖励，然后更新模型，让得到奖励的回答更可能出现，再用更新后的模型重新采样。
+        </p>
+        <p>
+            课上用一个例子说明推理为什么重要：计算 1 + … + n，n 最大到 10<sup>12</sup>。逐个相加 <code>sum(range(n + 1))</code> 结果对但太慢。把首尾配对推出公式，并用 0 和 1 验证，得到 <code>n * (n + 1) // 2</code>，又对又快。如果只是凭记忆写公式，可能抄错成 <code>n * (n - 1) // 2</code>，n = 1 时就错了。
+        </p>
+        <p>
+            DeepCoder 的训练中，RL 阶段的回答长度上限从 16K 提高到 32K，评估时再给 64K（不继续训练），在 LiveCodeBench 上的成绩逐步接近 o3-mini。
+        </p>
+        <p>
+            课上有学生问：为什么模型写的代码里常有很多不必要的注释？Graham 说他只有猜测。第一，模型是在现有代码上训练的，现有代码就有注释。第二，模型被训练做推理，他怀疑存在一种隐性的激励：多写注释能"买"到更多 token，边写边想下一步。第三，现在的训练里大概加入了某种代码质量的判断模型，要求注释数量恰当，因为以前的编程模型常被抱怨写一大堆没人看的注释；较新版本的 Codex 发布时就特别强调不会再有注释刷屏。另一位老师补充，后训练时常有 RLHF 一步，训练一个奖励模型预测输出好不好，可读性是向人类标注者收集的评判之一，于是会间接地被强化。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、Agent 式编程</h2>
+
+        <h3>1. 从单步到多步</h3>
+        <p>
+            单步编程：一个自包含的提示，模型推理并写出代码，评估答案。Agent 式编程：给一个 issue 和已有的仓库文件，Agent 反复搜索、编辑、跑测试，最后交出补丁和证据。
+        </p>
+
+        <h3>2. 定位、编辑、验证的循环</h3>
+        <p>
+            课程用一个贯穿全讲的 bug 做例子：配置里把重试次数设为 0，程序却用了默认值 3。仓库里有 <code>cli.py</code>、<code>config.py</code>、<code>test_config.py</code>。
+        </p>
+        <p>
+            定位：零是在哪里变成默认值的？用 <code>rg 'retries'</code> 搜索，找到 <code>return config.get("retries") or 3</code>。在 Python 里 0 被当作"假"，所以 <code>0 or 3</code> 得到 3。先复现：运行对应的单元测试，得到 <code>AssertionError: 3 != 0</code>。现在要修的是这个判断条件，不是去改测试。
+        </p>
+        <p>
+            编辑：只有值为 None 时才用默认值。
+        </p>
+<pre><code># 修改前：所有"假"值都会变成默认值
+return config.get("retries") or 3
+
+# 修改后：显式设置的 0 能保留下来
+value = config.get("retries")
+return 3 if value is None else value</code></pre>
+        <p>
+            验证：跑已有测试，缺失时得 3，None 得 3，零得 0，正数得 2，4 个测试全部通过。如果零仍然变成 3，就回去继续定位值在哪里被改掉；如果某个默认情况坏了，就改规则再验证。失败会修正你的假设，推动下一轮循环。这个循环的概念来自 SWE-agent。
+        </p>
+        <p>
+            SWE-agent（Yang 等，2024）这篇论文的核心论点是：人类做软件开发时依赖 IDE 这类好用的工具，语言模型 Agent 也是一种新的"用户"，有自己的需求和能力，应该为它专门设计接口，论文称之为 Agent-计算机接口（ACI）。论文研究了接口设计怎样影响 Agent 的表现。
+        </p>
+
+        <h3>3. 另一种选择：固定工作流</h3>
+        <p>
+            Agentless（Xia 等）不让模型自由决定下一步，而是由开发者写死一个流程：先分层定位（文件、类或函数、具体位置），再生成多个候选修复，最后用测试筛选。上一讲说过，事先固定流程更便宜、更可预测。
+        </p>
+        <p>
+            Graham 介绍，Agentless 的作者 Steven Xia 现在是 CMU 新来的助理教授。先预测要改哪些文件，再预测哪些类和函数，再选出具体的行，最后用单步语言模型生成补丁。他说这个方法一度"令人沮丧地有效"：他当时正在做编程 Agent，发现对不少模型来说这个固定流程比 Agent 效果更好。原因是那时的模型被大量训练过单步解题，却没怎么训练过调用工具和验证循环。现在基本上大家都用 Agent 了。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、编程 Agent 的工具</h2>
+
+        <h3>1. 只给一个 shell</h3>
+        <p>
+            mini-SWE-agent 只提供一个 bash 接口，模型每次选一条命令：读和搜索用 <code>rg</code>、<code>cat</code>、<code>find</code>；编辑用 <code>sed</code>、Python 脚本或 <code>patch</code>；执行检查用 <code>pytest</code> 或构建命令。返回的是输出、退出码，以及是否超时。用 sed 改文件的例子：
+        </p>
+        <p>
+            Graham 问学生，只给一个 bash 工具有什么不理想的地方。有学生说还有 GDB 这类工具，他解释说 GDB 也能通过 bash 运行，这里说的是只提供"一个"bash 工具。另一位学生说到了要点：读、搜、改、测这几类操作占了工具调用的八九成，如果把它们封装成更高效的专用工具，Agent 会做得更好。比如编辑文件时，每次都要想用 sed、Python 还是 patch；要替换的内容里有很多反斜杠时，还得把反斜杠的转义数量写得分毫不差。所以几乎所有有竞争力的编程 Agent 都至少额外加了一个文件编辑工具。
+        </p>
+<pre><code>sed 's/^RETRIES = 3$/RETRIES = 5/' settings.py &gt; settings.new
+mv settings.new settings.py</code></pre>
+
+        <h3>2. 专门的编辑格式</h3>
+        <ul>
+            <li>整个文件重写：简单，但未改动的代码也要重复输出一遍。Pi 和 OpenCode 的 write、OpenHands 的 create 属于这种。</li>
+            <li>搜索替换：只发送旧内容和新内容，简洁，但旧内容必须在文件中唯一匹配。OpenHands、Pi、OpenCode 的 edit 属于这种，Aider 用 <code>&lt;&lt;&lt;&lt;&lt;&lt;&lt; SEARCH … ======= … &gt;&gt;&gt;&gt;&gt;&gt;&gt; REPLACE</code> 标记。</li>
+            <li>统一 diff（unified diff）：标准格式，带行号和上下文行。Aider 的变体省略了行号。</li>
+            <li>文件操作补丁：Codex 的格式，用 <code>*** Begin Patch</code>、<code>*** Update File:</code> 标出文件操作，只带上下文，不带行数。OpenCode 和 OpenHands 根据预设也会用它。</li>
+        </ul>
+        <p>
+            编辑格式的影响可能很大。Aider 的重构基准包含 89 个 Python 任务，要求把大类里的一个方法移到顶层函数，检查语法和代码是否保留完整。用 GPT-4 Turbo（gpt-4-1106-preview）时，搜索替换格式成功率 20%，简化的统一 diff 格式 61%。
+        </p>
+        <p>
+            Graham 解释了格式之间的取舍。统一 diff 要写行号，而让 Agent 写行号，它总是写错，补丁就应用不上。所以最常见的做法是一种很像 diff、但不写行号的格式，也就是搜索替换。他问学生搜索替换的缺点，学生答对了：如果文件里有好几处 retries = 3，就匹配不上唯一位置，Agent 必须多写几行上下文直到没有歧义。但这个缺点远小于它的好处，所以几乎所有编程 Agent 都用它。GPT-4 Turbo 在统一 diff 上表现好得多，是因为训练数据里见过更多这种格式。按 Aider 的文章，统一 diff 还明显减少了 GPT-4 Turbo 的"偷懒"，也就是在代码里写"……这里补充逻辑……"之类的注释而不写真正的代码。Graham 说这个问题现在没那么突出了，但仍然存在：直到最近，Gemini 在不少 Harness 里表现都很差，因为它是用自己独有的编辑格式训练的，和别人都不一样，大约几个月前才修好。编辑格式没处理好，可能成为 Agent 效果的一个主要瓶颈。
+        </p>
+
+        <h3>3. 找到相关的代码</h3>
+        <p>
+            从症状入手时，一个命令行参数、一个配置加载器、一个重试循环可能都能匹配上"retries"。要跟着值走：配置输入在哪里第一次读到零？默认值逻辑在哪里把零变成三？LocAgent（Chen 等，2025）把代码组织成依赖图：<code>config.py</code> 里的 <code>retry_count</code> 被 <code>cli.py</code> 调用，被 <code>test_config.py</code> 测试，结果被 <code>client.py</code> 的重试循环使用。先检索相关的邻近节点，再用执行来确认。
+        </p>
+        <p>
+            Graham 对 LocAgent 这类方法的评价是：按他的经验，很难让这种复杂方法比简单的搜索做得更好。最常用的搜索工具是 ripgrep（rg），也可以用 grep 或专门的代码搜索工具。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、评估和训练编程 Agent</h2>
+
+        <h3>1. SWE-bench 怎样评估</h3>
+        <p>
+            SWE-bench（Jimenez 等）从真实 GitHub issue 和对应的修复 PR 构建任务。评估看两类测试：原本失败、修复后应该通过的测试（验证要求的修复完成了）；原本通过、修复后仍要通过的测试（验证没有破坏已有行为）。
+        </p>
+        <p>
+            Graham 补充了两点细节。一是 SWE-bench 里的"harness"指的是测试框架，也就是运行测试的程序，和本课说的 Agent Harness 不是一回事。二是 Django、NumPy 这类大仓库，跑一遍完整测试可能要五到十分钟甚至更久，所以 SWE-bench 为每个 issue 选出了一小组必须通过的测试，也就是上面两类。按论文摘要，SWE-bench 包含来自 12 个流行 Python 仓库的 2,294 个问题。
+        </p>
+
+        <h3>2. 构建可运行的训练任务</h3>
+        <p>
+            一个可运行的任务包含：起始状态（文件、依赖、测试命令）；issue（要求的行为和复现方式）；检查（bug 在修复前失败，修复后行为恢复）。在收集训练轨迹之前，要先验证环境本身是可用的（SWE-Gym）。
+        </p>
+        <p>
+            Graham 说，Agent 领域的一个好消息是：评估是做出更好 Agent 的最大难题之一，而一旦能大量生成评估任务，就可以在这些任务上做强化学习，训练 Agent 做得更好。SWE-bench 只有评估集配置好了运行环境，所以他们做了 SWE-Gym，额外构建了训练环境。
+        </p>
+
+        <h3>3. 多步修复的强化学习</h3>
+        <p>
+            R2E-Gym（Jain 等，2025）的设定：模型的动作（搜索找到 config.py、编辑保留零、测试和结束）是训练目标；找到的文件、应用的补丁、测试输出只是上下文。最后只有一个终局奖励：修好了没有。目标是最大化轨迹的期望奖励 $\max_\theta \mathbb{E}_{\tau\sim\pi_\theta}[R(\tau)]$。难点是：最后失败了，并不能告诉你前面哪一步决策错了。
+        </p>
+        <p>
+            SWE-Gym（Pan 等，2024）在 32B 模型上研究了两个方向的扩展：增加训练数据，以及推理时用学出来的验证器从多个候选中挑选。
+        </p>
+        <p>
+            按 SWE-Gym 的论文摘要，它包含 2,438 个真实的 Python 任务，每个都有可执行的运行环境、单元测试和自然语言描述；用它训练的 Agent 在 SWE-bench Verified 和 Lite 上的解决率绝对提升最多 19 个百分点；再配合在 SWE-Gym 轨迹上训练的验证器做推理时扩展，在 Verified 和 Lite 上分别达到 32.0% 和 26.0%。Graham 在课上说，一个原本只有约 11% 准确率的模型，哪怕只用 500 个训练样本，也能提升不少。
+        </p>
+        <p>
+            他还特别提到一个没写在幻灯片上的项目：SWE-rebench。它持续从新的 PR 中构建 SWE-bench 格式的环境，目前覆盖 2024 年 12 月到 2026 年 6 月 30 日的 PR，分训练集和开发集；作者告诉他大约十月还会更新。这可能是目前最好的大规模公开编程 Agent 训练数据。R2E-Gym 走的是另一条路：它构建了 8,700 多个任务，用测试生成和"回译"的方法直接从 commit 构造可执行环境，减少对人写的 issue 和单元测试的依赖。
+        </p>
+
+        <h3>4. 通过注入 bug 制造任务</h3>
+        <p>
+            真实的 issue 数量有限。SWE-smith（Yang 等，2025）反过来做：从一个能运行、测试全通过的代码库出发，修改代码（不改测试），保留那些让测试新出现失败的修改。例子：原来 4 个测试全过；把条件改成 <code>return 3 if not value else value</code>，零又变成了三，3 过 1 失败；恢复后 4 个全过。这样就得到了一个有明确答案的修复任务。
+        </p>
+        <p>
+            Graham 把 SWE-smith 和软件工程里的变异测试（mutation testing）联系起来。变异测试的做法是：不确定自己的单元测试够不够全面时，故意对代码做一些本该让它出错的小改动，看测试能不能发现；如果改完测试还是全过，说明测试不够好。SWE-smith 受此启发，但方向相反：改代码，找出因此失败的测试，得到一个合成的修 bug 任务。好处是非常轻量，几乎能生成无限多的数据；缺点是这些 bug 不一定像真实世界里会遇到的。
+        </p>
+
+        <h3>5. 多语言和多 Harness</h3>
+        <p>
+            不同语言的项目结构不同：Python 有 <code>pyproject.toml</code>，用 pytest；TypeScript 有 <code>package.json</code>，用 <code>npm test</code>；Rust 有 <code>Cargo.toml</code>，用 <code>cargo test</code>。Agent 要先读项目配置，再决定用什么构建和测试命令。相关基准有 Multi-SWE-bench 和 SWE-bench Multilingual。
+        </p>
+        <p>
+            Harness 等于提示词、工具、Agent 循环和上下文管理的组合。同一个模型如果只在一种 Harness 里训练，换一种可能表现变差。Nemotron 3 Ultra 对每类任务至少用两种 Harness 训练；Polar 让 OpenHands、OpenCode、Codex 等原生 Harness 都通过一个共享的模型 API 代理调用同一个模型，收集轨迹和奖励来更新模型。
+        </p>
+        <p>
+            Graham 说，不同语言的约定不同是唯一的麻烦，而现在让编程 Agent 去适配这些约定已经很容易了。关于多 Harness 训练，他强调：模型期待的编辑格式和 Harness 提供的格式差别很大时，模型在没训练过的 Harness 里表现会变差，所以现在的模型提供商普遍会在 OpenHands、OpenCode、Codex 等多种 Harness 上训练。按 Multi-SWE-bench 的摘要，它覆盖 Java、TypeScript、JavaScript、Go、Rust、C 和 C++，共 1,632 个实例，由 68 位专家从 2,456 个候选中标注筛选。SWE-bench Multilingual 则有 300 个任务，来自 9 种语言的 42 个仓库。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、前端开发</h2>
+        <p>
+            前端 Agent 的循环多了一个在浏览器中验证的环节：定位组件和事件处理函数；修改逻辑和样式；在浏览器里操作（输入、点击、检查保存的状态），并截图查看渲染后的页面；检查失败就修改。SWE-bench Multimodal（Yang 等，2024）给 SWE-agent 加上了浏览器和截图工具。
+        </p>
+        <p>
+            Graham 提到一个让他意外的结果：几个月前，GLM 5.2 并不是多模态模型，看不了图片，却在前端设计竞技场（Front-end Design Arena）上排了第一。这动摇了他对"做好前端需要什么"的假设，但他仍然认为多模态能力很可能相当重要。他还说，常见的两种做法是把 GUI Agent 作为编程 Agent 的一个组件，或者用一个既能操作界面又能写代码的 Agent，下一讲会专门讲 GUI Agent。
+        </p>
+        <p>
+            验证有两种方式。浏览器 Agent 每一步由模型决定下一个动作，适合探索（下一讲的内容）。Playwright 脚本由模型写一段可重复运行的检查：在 Name 里填空格，点保存，断言保存的状态，截图。截图可以交给模型看，也可以和人工批准过的基准截图比较。
+        </p>
+        <p>
+            课上的例子：修复前，空白名字也能保存成一条记录；把 <code>value.length</code> 改成 <code>value.trim().length</code> 后，空白名字被拒绝。行为检查：没有新增记录，合法名字仍能保存。外观检查：错误提示显示在 Name 旁边，清晰可读。
+        </p>
+        <p>
+            SWE-bench Multimodal 的 issue 里带有图片，但评分依据仍然是测试：空白名字会报错且不新增记录，合法名字能保存，已有测试全部通过。issue 里有图片，不代表要用图片相似度来评分。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、更广的软件开发</h2>
+        <p>
+            修 bug 只是软件开发的一环。完整流程是：需求（用户需要什么、兼容性）；实现循环（编辑、测试）；评审（diff 和证据）；发布决定；部署和监控（线上信号、回滚方案）；维护（新需求、发现的故障）。测试通过只是其中一步，不等于可以发布。
+        </p>
+        <p>
+            Meyer 等（2019）统计了 5,928 个微软开发者自报的工作日：真正写代码（读写代码和测试）只占 15%，其余 85% 是会议和邮件、调试、跑测试、代码评审、需求和文档、帮助同事、学习和行政事务、休息等。
+        </p>
+        <p>
+            Graham 用了"内循环"和"外循环"来区分。内循环是前面讲的一切：修 bug、测试，一轮轮迭代。外循环是除此之外的所有事：代码评审、部署和监控、维护、规划和整理需求。我们希望 Agent 在这些方面都能帮忙，但它们更难定义，训练数据也更难找。他提醒，这项微软的调查是 2019 年做的，现在可能已经不同。
+        </p>
+        <table>
+            <tr><th>任务</th><th>产出</th><th>环境 / 验证方式</th><th>跨度</th></tr>
+            <tr><td>修复</td><td>补丁</td><td>仓库 / 回归测试</td><td>一个 issue</td></tr>
+            <tr><td>写库</td><td>实现</td><td>框架 / 包测试</td><td>很多函数</td></tr>
+            <tr><td>生成测试</td><td>新测试</td><td>有 bug 和修复后两个版本，看能否区分</td><td>一种行为</td></tr>
+            <tr><td>CI 修复</td><td>代码或配置</td><td>工作流 / 必需检查</td><td>一次构建</td></tr>
+            <tr><td>演进</td><td>累积的修改</td><td>持续存在的应用 / 里程碑加回归</td><td>相互依赖的多个任务</td></tr>
+        </table>
+        <ul>
+            <li>定位（CodeScout，2026）：给 issue 和仓库，预测需要修改的文件、模块和函数，在三个层级上分别和标准补丁比较算 F1 作为奖励。标准补丁不作为输入。</li>
+            <li>应用创建和修改（ViBench）：从零构建新应用 15 个；在参考 MVP 上扩展 45 个；在 Agent 自己之前做的 MVP 上扩展 45 个。每个结果都用人写的浏览器测试计划检查。</li>
+            <li>写库：Commit0 给出库的框架（函数体缺失）、文档和测试，要求整体实现并通过集成测试；ProgramBench 给一个参考可执行程序，Agent 通过输入探测观察输出，写一个行为一致的新实现，内部设计可以不同。</li>
+            <li>维护（SWE-Milestone，2026）、测试生成（SWT-Bench，Mündler 等，2024）。</li>
+            <li>CI 修复（LCA CI Builds Repair）：构建失败报 <code>EBADENGINE</code>，因为运行环境是 Node 16，而包要求 Node 18 以上。要检查包支持的运行时，把 setup-node 配置改成 20，然后重新安装、构建和测试。</li>
+        </ul>
+        <p>
+            能不能训练出通用的开发技能？思路是在找相关代码、根据规格实现函数、根据 issue 写 bug 测试这些子技能上做 SFT 或 RL，然后在新仓库的修复、写库、发现新 bug 等留出任务上，用相同的推理预算评估。SWE-Playground（Zhu、Gandhi、Neubig）自动生成项目供练习。Hybrid-Gym（2026）的 32B 结果：
+        </p>
+        <p>
+            Graham 对这几项补充了几句。CodeScout 是他们用强化学习做代码定位的工作，他推荐给想做强化学习课程项目的学生，因为它和编程 Agent 相关，又比较好上手，小模型也能做。ProgramBench 要求对一个可执行程序做逆向工程，从零重新实现，任务跨度很长；随着短任务越来越容易，这成了新的挑战。SWE-Milestone 不是只实现一个 issue，而是在一段时期里连续实现很多个，考察 Agent 会不会一边做一边把代码库搞得一团糟、越来越难维护，这是一些编程 Agent 的大问题。SWT-Bench 考察写测试的能力，他认为如果能写出很好的测试来验证 issue 是否真的解决，就已经赢了一半，因为这等于把任务说清楚了，而 Agent 很擅长反复迭代直到通过测试。部署这类运维任务目前还没有很好的基准，因为需要真实的基础设施，JetBrains 做过一个可以参考。SWE-Playground 和 Hybrid-Gym 是他和 Daniel 等人在 CMU 的工作，自动为修 bug 以外的软件工程任务生成训练环境。
+        </p>
+        <p>
+            课上时间到了，最后一部分"预测代码行为的模型"Graham 没有来得及讲，他说可以在答疑时间讨论。下面第九节按幻灯片整理。
+        </p>
+        <table>
+            <tr><th>任务</th><th>基础 32B</th><th>Hybrid-Gym 32B</th></tr>
+            <tr><td>SWE-bench Verified（修复）</td><td>7</td><td>32.4</td></tr>
+            <tr><td>SWT-Bench Verified（生成测试）</td><td>9.01</td><td>16.86</td></tr>
+            <tr><td>Commit0 Lite（写库）</td><td>8.34</td><td>13.45</td></tr>
+        </table>
+    </section>
+
+    <section>
+        <h2>九、预测代码行为的模型</h2>
+        <p>
+            Agent 有一个策略 $\pi(a \mid h)$：根据历史（看过的代码、工具结果）选择动作，比如"运行测试"，然后在真实环境中执行，观察到"断言失败"。也可以有一个世界模型 $p(o \mid h, a)$：不真正执行，而是预测执行结果。预测可能出错，而且预测也受历史影响。
+        </p>
+        <p>
+            预测执行的一个难点是共享引用：
+        </p>
+<pre><code>items = [1]
+alias = items
+alias.append(2)
+result = len(items)</code></pre>
+        <p>
+            正确结果是 items 和 alias 都是 [1, 2]，result 为 2。如果把 alias 当成一个副本，就会错误地预测 result 为 1。
+        </p>
+        <p>
+            预测在什么时候对 Agent 有用？假设有两个修复，A 是对的，B 是错的。模型预测 A 会失败、B 会通过，Agent 就会选 B 丢掉 A。所以要把两个候选都真正运行一下，检查模型判断得对不对，并且同时比较任务成功率和总延迟、token、工具调用次数。
+        </p>
+        <p>
+            相关工作有 CWM（FAIR CodeGen 团队，2025），从程序执行中学习；Code World Models / GIF-MCTS（Dainese 等，2024），构建和使用模拟器。开放问题包括：在同一批问题上同时测量预测误差和任务成功，看决策是否真的变好；把延迟、token 和真实环境调用算进成本；在留出的程序、依赖和环境上测试泛化；改变"何时退回真实执行"的阈值，同时测量失败和节省。
+        </p>
+    </section>
+
+    <section>
+        <h2>十、参考资料导读</h2>
+        <p>
+            这一讲没有指定阅读，参考资料有四十篇左右，按主题整理如下。
+        </p>
+        <h3>代码模型的训练</h3>
+        <ul>
+            <li>OLMo（Groeneveld 等，2024）：一个"真正开放"的语言模型，公开训练数据、代码和训练细节，目的是让研究者能科学地研究语言模型。本讲引用它说明训练中按领域评估的做法。</li>
+            <li>StarCoder（Li 等，2023）：BigCode 社区的开放模型，155 亿参数，8K 上下文，支持填空，用多查询注意力加速推理。StarCoderBase 在 The Stack（经许可的 GitHub 仓库合集，提供检查工具和退出机制）上训练了 1 万亿 token，再在 350 亿 Python token 上微调得到 StarCoder。</li>
+            <li>Evaluating Large Language Models Trained on Code（Chen 等，2021）：提出 Codex 模型和 HumanEval 基准，也是 pass@k 指标的出处；本讲用它说明连续空白合并成一个 token 的分词做法。</li>
+            <li>StarCoder2 的分词器文件：本讲分词示例的来源。</li>
+            <li>Code Llama（2023）：基于 Llama 2 的代码模型系列，有基础版、Python 专用版和指令版，7B 到 70B，用 16K 序列训练，在最长 10 万 token 的输入上也有提升。</li>
+            <li>Qwen2.5-Coder（2024）：在 Qwen2.5 基础上用超过 5.5 万亿 token 继续预训练，六个尺寸从 0.5B 到 32B，强调数据清洗、合成数据和均衡的数据配比，在保持通用和数学能力的同时提升代码能力。</li>
+            <li>InCoder（Fried 等，2022）：见第二节。它是第一个能直接零样本做代码填空的生成模型，评估了类型推断、注释生成、变量重命名等任务。</li>
+            <li>Efficient Training of Language Models to Fill in the Middle（Bavarian 等，2022）：见上文。</li>
+            <li>OctoPack（Muennighoff 等，2023）：利用 Git commit 天然是"代码修改加人写的说明"这一点做指令微调，整理了 350 种语言、4TB 的 commit 数据 CommitPack，在不使用 OpenAI 输出训练的模型中，HumanEval 成绩最好（46.2%）。</li>
+            <li>DrRepair（Yasunaga 与 Liang，2020）：从诊断信息（比如编译器报错）中学习修程序，用图结构把源代码和报错中的符号连起来推理，并用自监督的方式弥补标注数据少的问题。</li>
+            <li>CodeRL（2022）：指出只在"题目描述加标准答案"上做监督微调，会忽略单元测试这类有价值的信号，于是把预训练模型和深度强化学习结合，用测试结果作为反馈。</li>
+            <li>CodeExecutor（Liu 等，2023）：让预训练模型学习预测代码的执行过程。</li>
+            <li>A Syntactic Neural Model for General-Purpose Code Generation（Yin 与 Neubig，2017）：Graham 早年的工作，按语法规则生成抽象语法树来生成代码。</li>
+        </ul>
+        <h3>代码评估</h3>
+        <ul>
+            <li>CodeBLEU（Ren 等，2020）：BLEU 原本为自然语言设计，忽略了代码的语法和语义；精确匹配又太严，会低估写法不同但逻辑相同的输出。CodeBLEU 在 n-gram 匹配之外加入了语法树和数据流的匹配。</li>
+            <li>CodeBERTScore（Zhou 等，2023）：见上文。</li>
+            <li>EvalPlus（Liu 等，2023）：指出现有基准的测试用例在数量和质量上都不足以判断生成代码是否真的正确，于是自动大量扩充测试用例，重新评估后很多模型的分数明显下降。</li>
+            <li>AlphaCode（Li 等，2022）：提出 CodeContests 数据集，针对需要解决问题能力、而不只是把说明翻译成代码的竞赛题。</li>
+            <li>NoFunEval（Singhal 等，2024）：见上文。标题的意思是代码模型在功能正确性以外的要求上表现不佳。</li>
+            <li>DeepCoder（Luo 等，2025）：Together AI 和伯克利的团队发布的完全开源的 14B 代码推理模型，达到 o3-mini 的水平。</li>
+        </ul>
+        <h3>编程 Agent</h3>
+        <ul>
+            <li>SWE-agent（Yang 等，2024）、Agentless（Xia 等，2024）、mini-SWE-agent：见上文。Agentless 的论文标题就提出了问题：真的需要复杂的自主 Agent 吗？</li>
+            <li>Aider 的编辑格式文档和统一 diff 文章：见上文。Aider 会为常见模型自动选择最合适的编辑格式。</li>
+            <li>LocAgent（Chen 等，2025）：把代码库解析成有向异构图，表示文件、类、函数之间的包含、调用、继承等关系，让 Agent 沿着图做多跳推理来定位代码。</li>
+        </ul>
+        <h3>评估和训练编程 Agent</h3>
+        <ul>
+            <li>SWE-bench（Jimenez 等，2023）、SWE-Gym（Pan 等，2024）、R2E-Gym（Jain 等，2025）、SWE-smith（Yang 等，2025）、Multi-SWE-bench（2025）、SWE-bench Multilingual：见上文。SWE-smith 的摘要指出，以往的数据集最多只有几千个训练样本、来自 11 个或更少的仓库，整理过程要几百小时人工，配套的执行环境还要占几 TB 存储。</li>
+        </ul>
+        <h3>前端与更广的软件开发</h3>
+        <ul>
+            <li>SWE-bench Multimodal（Yang 等，2024）：SWE-bench 只有 Python 仓库，问题描述基本是文字。这个基准转向前端等视觉化的软件领域，issue 里带图片，考察现有系统能否泛化。</li>
+            <li>VisualWebArena（Koh 等，2024）：评估多模态网页 Agent 在需要视觉信息的真实网页任务上的表现，下一讲会详细讲。</li>
+            <li>Playwright 定位器文档：推荐按角色、文本、标签、占位文字等方式定位页面元素，定位器会自动等待和重试。</li>
+            <li>Commit0（2024）：给出库的 API 说明文档和一套交互式单元测试，要求 Agent 从零写出整个库。</li>
+            <li>ProgramBench（2026）：只给一个程序和它的文档，要求 Agent 自己设计架构并实现，考察整体开发软件的能力，而不是修一个 bug 或做一个明确的功能。</li>
+            <li>SWE-Milestone（2026）：提出 DeepCommit 流水线，从杂乱的 commit 记录中重建可验证的"里程碑"依赖图，评估 Agent 在持续演进的软件上工作的能力，关注时间上的依赖和技术债。</li>
+            <li>SWT-Bench（Mündler 等，2024）：基于真实 issue、标准修复和标准测试，考察代码 Agent 能否把用户的 issue 写成测试用例。</li>
+            <li>SWE-Playground（Zhu、Gandhi、Neubig，2025）：不依赖已有的 GitHub 仓库，自动生成项目和任务，覆盖修 issue 以外更多种类的软件工程任务。</li>
+            <li>Hybrid-Gym（2026）：先把轨迹拆成细粒度的组成部分，找出在不同任务间可迁移的技能，据此设计辅助训练任务，教模型掌握这些技能。</li>
+            <li>Code World Models / GIF-MCTS（Dainese 等，2024）：让 LLM 用 Python 代码写出环境的世界模型，供基于模型的强化学习做规划，并用蒙特卡洛树搜索来生成、改进和修复这段代码。用代码做规划比每次调用 LLM 更精确、可靠、可解释，也快得多。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>十一、小结</h2>
+        <p>
+            设计编程 Agent 涉及六个方面：代码模型，经过预训练、中期训练和基于执行奖励的 RL；Agent 式编程，用合适的工具完成定位、编辑、验证；Agent 训练，需要可运行的任务、修复奖励和多样的 Harness；前端开发，需要浏览器交互和视觉验证；更广的开发任务，包括定位、应用、写库、维护、测试和 CI；代码行为预测，用学出来的模型辅助执行和规划。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-768: AI Agents · Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="05_规划任务分解与多Agent协作.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="07_电脑操作Agent.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

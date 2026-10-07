@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十六讲：token 预算与训练时蒸馏 | CMU 11-664/763 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="14_推理扩展与模型规模.html">&larr; 上一讲</a>
+    <span>CMU 11-664/763: Lecture 16</span>
+    <a href="index.html">课程目录 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十六讲：token 预算与训练时蒸馏</h1>
+        <p class="subtitle">怎样衡量 token 预算，不同的 token 成本不同，从大模型蒸馏的几种方式，把 MBR 等推理策略蒸馏进模型，用推理策略挑选偏好对，用长度惩罚、可变长度思维链和简短提示缩短推理链，以及缩短推理的代价</p>
+        <div class="author-meta">
+            主讲：Amanda Bertsch · 2025 年 10 月 23 日<br>
+            资料来源：<a href="https://docs.google.com/presentation/d/1BW-b7kJjD7mXliqkOZ_Cmt_03IALhwiyxuEpjM2Ab2M/edit" target="_blank">课程幻灯片</a>（这一讲没有公开录像，本文只依据幻灯片整理） · 主要阅读：MBR and QE Finetuning: Training-time Distillation of the Best and Most Expensive Decoding Methods（Finkelstein 等，2024）；Direct Preference Optimization for Neural Machine Translation with Minimum Bayes Risk Decoding（Yang 等，2024）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、从"多花"转向"少花"</h2>
+        <p>
+            这一讲开始转向效率单元。过去几个月讲的是怎样在推理时多花计算得到更好的结果；上一讲讲这个成本什么时候值得；这一讲和本学期剩下的大部分讲怎样降低推理成本。这一讲关心的问题是：用你选定的推理方法，需要生成多少 token？
+        </p>
+        <h3>1. 为什么关心 token 预算</h3>
+        <p>
+            它是计算成本的代理；对 API 模型，它就是计算成本的度量。怎样衡量：$T$，以基座模型的 token 数计；$N$，以要考虑的序列数计；$S$，以每个序列的步数计；$C$，来自外部模型的成本。
+        </p>
+        <h3>2. 所有 token 都一样吗</h3>
+        <p>
+            不一样，影响成本的因素有：顺序生成还是并行生成；搜索还是采样；加入了多少额外信息，比如前瞻启发式或重打分器；有没有增加每个 token 计算量的策略（上一讲）。对 API 模型和本地生成都一样：输入 token 和输出 token 成本不同；完全复用相同的输入更便宜（第十一讲讲过提示缓存）。
+        </p>
+        <p>
+            这一讲看三个降低推理成本的思路：从更大的模型蒸馏；从一种推理技术蒸馏；缩短推理链。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、从更大的模型蒸馏</h2>
+        <p>
+            有两个模型 $P$ 和 $Q$：$P$ 运行很贵但很强，$Q$ 便宜但表现差一些。能否通过训练 $Q$ 获得 $P$ 的部分好处？幻灯片列了几种方式：
+        </p>
+        <ul>
+            <li>微调：用 $P$ 生成的输出微调 $Q$（Shirgaonkar 等 2024）。</li>
+            <li>匹配 logit：让 $Q$ 的输出分布匹配 $P$ 的（Xu 等 2024 的综述）。</li>
+            <li>匹配内部表示：让 $Q$ 的中间层表示接近 $P$ 的（PyTorch 知识蒸馏教程；TinyBERT，Jiao 等 2019）。</li>
+            <li>RLHF：用强模型提供反馈或奖励（Lambert 2025）。</li>
+            <li>排序或成对偏好：用强模型产生偏好对，做 DPO 之类的训练（Rafailov 等 2024）。</li>
+        </ul>
+        <p>
+            蒸馏在这些情况下有好处：有一个比任何本地模型都强的模型；没有预算或时间请人标注，又想为某个任务微调，而某个大模型在这个任务上表现不差；已有本地模型，但下游想要更小更快的。$P$ 和 $Q$ 也可以是同一个基座模型，只是"系统"不同，这就引出下一节。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、把推理策略蒸馏进模型</h2>
+        <h3>1. MBR 与 QE 微调</h3>
+        <p>
+            Finkelstein 等 2024 做英译德或英译日。常规流程：在英语到目标语的平行数据上预训练；在更高质量的数据上微调；测试时做 MBR（第十四讲）。他们比较：用微调前模型的各种解码输出来微调，和用人工参考译文来微调（同一批样本）。用基座模型自己输出的好处是不必限于有标注数据的样本。结论：从更强的模型蒸馏更好，从更强的模型配合高质量解码策略（MBR 或质量估计 QE 重排序）蒸馏最好。蒸馏之后，测试时再用 MBR 或 QE 还有帮助吗？基本没有；有帮助时，最好用训练时没用过的那种方法。
+        </p>
+        <h3>2. 用 MBR 挑选偏好对</h3>
+        <p>
+            Yang 等 2024：能否用重排序解码方法选出偏好的和被拒绝的输出对，用来做偏好优化？用 MBR 对一组输出排序后，选对的方式有：只取两头，（最好，最差）；在中间取一步，（最好，中间）和（中间，最差）；每一步都取，（最好，第 2），（第 2，第 3），……，（第 $N-1$，最差）；跨步取，（最好，第 5），（第 5，第 10），……
+        </p>
+        <h3>3. 用于指令遵循</h3>
+        <p>
+            这似乎是个普遍有用的策略，能否用来训练更好的指令遵循模型？Wu 等 2025（Better Instruction-Following Through Minimum Bayes Risk）做了这件事。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、缩短推理链</h2>
+        <h3>1. 带长度惩罚的强化学习</h3>
+        <p>
+            幻灯片问：还记得推理模型那一讲怎样处理这个问题吗？那一讲讲过余弦长度奖励和 L1。另一种做法：对超过 token 预算的正确答案加惩罚，或者直接判为错误。预算怎么定：
+        </p>
+        <ul>
+            <li>Kimi K2：按任务类型。</li>
+            <li>L1：用提示里也写明的某个值。</li>
+            <li>ThinkPrune（Hou 等 2025）：在训练过程中逐步缩小。剪枝之后，重新检查、"怀疑"之类的语句出现得少了。</li>
+        </ul>
+        <h3>2. 在可变长度的思维链上做 SFT</h3>
+        <p>
+            想法：如果在思维链数据上微调，就应该向模型展示下游可能希望它表现出的全部推理强度范围。怎样得到不同长度的推理链？提示一个有多种"推理强度"的模型；把长链压缩到不同程度；从模型采样很多条链，选最短的正确链。
+        </p>
+        <h3>3. 提示它写短一点</h3>
+        <p>
+            能不能直接让模型简短点？Chain of Draft（"写得更少、想得更快"）：在一些设置下，用少得多的 token 达到接近思维链的表现；少样本设置下更好；模型越强越好。
+        </p>
+        <h3>4. 缩短推理的代价</h3>
+        <p>
+            缩短推理链会伤害表现吗？不会的情况：模型本来会超出最大上下文长度；有些情况下，推理对任务来说"过长"，错误在层层累积。会的情况：在很多推理任务上，经验上会（Jin 等 2024 关于推理步数长度影响的研究）。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、参考资料</h2>
+        <ul>
+            <li>MBR and QE Finetuning: Training-time Distillation of the Best and Most Expensive Decoding Methods（Finkelstein 等，2024）：主要阅读。</li>
+            <li>Direct Preference Optimization for Neural Machine Translation with Minimum Bayes Risk Decoding（Yang 等，2024）：主要阅读。</li>
+            <li>Better Instruction-Following Through Minimum Bayes Risk（Wu 等，2025）。</li>
+            <li>Knowledge Distillation Using Frontier Open-source LLMs: Generalizability and the Role of Synthetic Data（Shirgaonkar 等，2024）；A Survey on Knowledge Distillation of Large Language Models（Xu 等，2024）；TinyBERT（Jiao 等，2019）。</li>
+            <li>ThinkPrune（Hou 等，2025）；Efficient Reasoning Models: A Survey。</li>
+            <li>The Impact of Reasoning Step Length on Large Language Models（Jin 等，2024）；Chain of Draft: Thinking Faster by Writing Less。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>六、小结</h2>
+        <p>
+            token 预算是推理成本的代理，对 API 模型就是成本本身，但不同 token 的成本不同：并行与顺序、搜索与采样、输入与输出、能否复用缓存都有影响。降低成本的第一条路是蒸馏：把强系统的行为蒸馏进较弱的模型，强系统可以是更大的模型、更好的推理策略，或两者兼有；MBR 或 QE 蒸馏进微调数据后，测试时再用同一种方法就不太有帮助了，MBR 排序还能用来构造偏好对。第二条路是缩短推理链：用长度惩罚或按任务、提示、训练进度设定的预算做强化学习，在不同长度的思维链上做 SFT，或者直接提示模型写草稿式的短推理。在不降低表现的前提下减少推理很难，但已经有多种可用的策略。
+        </p>
+        <p>
+            课表上之后的几讲（第 17 讲扩散模型、第 18 讲定义效率，以及第 19 到 24 讲的硬件、KV 缓存、推测解码、线性化注意力、MLC-LLM 和库的实现）没有公开的录像或幻灯片，这份笔记到此为止。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-664/763: Inference Algorithms for Language Modeling · Fall 2025</p>
+        <nav class="footer-nav">
+            <a href="14_推理扩展与模型规模.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="index.html">课程目录 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

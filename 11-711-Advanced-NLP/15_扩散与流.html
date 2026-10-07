@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十五讲：扩散与流 | CMU 11-711 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="14_研究能力与实验设计.html">&larr; 上一讲</a>
+    <span>CMU 11-711: Lecture 15</span>
+    <a href="16_强化学习基础.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十五讲：扩散与流（多模态大模型三）</h1>
+        <p class="subtitle">前向加噪与反向去噪，噪声调度，从证据下界推出预测噪声的训练目标，DDPM 的采样，噪声与分数函数的联系，分类器引导与无分类器引导，潜空间扩散与 DiT，SDE 与概率流 ODE，流匹配与 Stable Diffusion 3</p>
+        <div class="author-meta">
+            主讲：Sean Welleck · 2026 年 3 月 10 日<br>
+            资料来源：<a href="https://cmu-l3.github.io/anlp-spring2026/static_files/anlp-s2026-15-multimodal-iii.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=EVt3hulvnl0" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述内容；流匹配部分课上没来得及讲，依据幻灯片整理） · <a href="https://github.com/cmu-l3/anlp-spring2026-code/tree/main/15_diffusion" target="_blank">课堂代码</a> · 主要阅读：Denoising Diffusion Probabilistic Models（Ho 等，2020）；Flow Matching Guide and Code（Lipman 等，2024）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、本讲的位置</h2>
+        <p>
+            这是这学期新加的一讲，回到多模态这条线。课表上从这里往后都算"进阶话题"，前面讲的是基础，从 NLP 的角度看，扩散算是进阶内容。三讲之前那张图里有多种模型组合，这一讲关注的是：给定任意条件信息（文本、另一张图，或者两者的序列，对本讲不太重要），生成非常好的图像。
+        </p>
+        <p>
+            例子是 Stable Diffusion 3，已经两年了，但还算新：给它各种提示，能生成独特的组合，每张图都比前两讲多模态课里展示的样本好得多。本讲讲清它背后的建模思路：先讲扩散的基础，也就是让扩散真正起飞的那个最初的模型；再简要讲扩展和推广；如果来得及，再讲比扩散更一般的流匹配。读最先进的论文时，这些东西都会被提到，至少见过一次比较好。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、扩散的基本想法</h2>
+        <p>
+            两个过程。一个从数据出发逐步加噪，图像从左到右越来越模糊，最后变成纯噪声，叫前向过程；另一个从噪声出发逐步去噪，最终恢复出真实图像，叫反向过程。
+        </p>
+        <p>
+            前向过程 $q$ 是固定的，每一步给出下一时刻的分布，每一步都比上一步更嘈杂。有马尔可夫假设，每一步只依赖前一步，联合分布就是各步条件分布的乘积：
+        </p>
+        $$q(x_{1:T}\mid x_0) = \prod_{t=1}^T q(x_t\mid x_{t-1})$$
+        <p>
+            反向过程形式相同，方向相反，比如 $x_1$ 以 $x_2$ 为条件。这是要学的东西，是一个神经网络：
+        </p>
+        $$p_\theta(x_{0:T}) = p(x_T)\prod_{t=1}^T p_\theta(x_{t-1}\mid x_t)$$
+        <p>
+            噪声很容易得到，从标准高斯采样即可；运行网络 $T$ 步，希望最后得到真实数据。接下来的问题是怎样形式化、怎样得到训练目标。诀窍是一切都用高斯，这样得到的分布都很好处理，最终能推出损失函数和采样方法。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、前向过程与噪声调度</h2>
+        <p>
+            假设前向过程是高斯的，每一步加一点高斯噪声，最终基本上变成标准高斯噪声：
+        </p>
+        $$q(x_t\mid x_{t-1}) = \mathcal{N}\big(x_t;\ \sqrt{\alpha_t}\,x_{t-1},\ (1-\alpha_t)I\big)$$
+        <p>
+            系数 $\alpha_t$ 控制每一步加多少噪声。Sean 说这一讲不必盯住每个系数和记号，他已经把细节完整写进幻灯片。因为都是高斯，可以推出一个关键性质：能直接从 $x_0$ 跳到任意时刻 $x_t$，而且这也是一个高斯：
+        </p>
+        $$q(x_t\mid x_0) = \mathcal{N}\big(x_t;\ \sqrt{\bar\alpha_t}\,x_0,\ (1-\bar\alpha_t)I\big), \qquad \bar\alpha_t = \prod_{i=1}^t\alpha_i$$
+        <p>
+            可以理解成各步的系数乘在一起。能跳步，推损失函数就方便多了。DDPM 论文（本讲阅读，读起来很密）里会看到重参数化：把这个分布的样本看作对一个标准高斯样本的确定性变换：
+        </p>
+        $$x_t = \sqrt{\bar\alpha_t}\,x_0 + \sqrt{1-\bar\alpha_t}\,\epsilon, \qquad \epsilon\sim\mathcal{N}(0, I)$$
+        <p>
+            后面会反复用这种重参数化来简化问题。
+        </p>
+        <p>
+            噪声调度是一个设计选择。要求：从数据开始，$\bar\alpha_0 = 1$，这时噪声项被消掉，就是原始数据；以噪声结束，$\bar\alpha_T\approx 0$；通常单调递减。原始论文用的是最简单的线性调度，$\alpha_t = 1-\beta_t$：
+        </p>
+        $$\beta_t = \beta_1 + \frac{t-1}{T-1}(\beta_T - \beta_1), \qquad \beta_1 = 0.0001,\ \beta_T = 0.02,\ T = 1000$$
+        <p>
+            记号多，但想法很简单，起点和终点之间线性插值。这样得到的 $\bar\alpha_t$ 从 1.0 开始，以纯噪声结束。很快就有人尝试别的调度。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、训练：从证据下界到预测噪声</h2>
+        <h3>1. 先看终点</h3>
+        <p>
+            标准扩散模型的训练目标最后会非常简单，推导过程有时有点繁琐，所以先看终点：
+        </p>
+        $$L(\theta) = \mathbb{E}_{t, x_0, \epsilon}\big[\|\epsilon - \hat\epsilon_\theta(x_t, t)\|^2\big]$$
+        <p>
+            采样一张图像 $x_0$，采样一个时刻 $t$（比如均匀采样，决定图像有多嘈杂），采样随机噪声 $\epsilon$。用重参数化公式算出加噪后的图像 $x_t$，让网络预测加进去的噪声。听起来有点怪，下面看它的依据。直观上，有了嘈杂的图像，又预测出加了什么噪声，就足以还原图像。课堂代码里训练扩散模型真的就是这个简单的目标，当然有各种变体。
+        </p>
+        <h3>2. 证据下界</h3>
+        <p>
+            第十二讲 VAE 里见过证据下界（ELBO）。目标是最大化 $\log p_\theta(x_0)$。VAE 里引入隐变量后，最大化数据似然就要把隐变量积分掉。这里的联系是：把扩散的中间时刻 $x_{1:T}$ 看作一串隐变量，要最大化最终真实数据的似然，同样要把它们积分掉，同样算不了：
+        </p>
+        $$\log p_\theta(x_0) = \log\int p_\theta(x_{0:T})\,dx_{1:T}$$
+        <p>
+            用同样的两个技巧。重要性采样：引入一个提议分布，乘一个 1，写成对提议分布的期望，这里的提议分布就是前向过程。再用 Jensen 不等式交换对数和期望：
+        </p>
+        $$\log p_\theta(x_0) = \log\mathbb{E}_{q(x_{1:T}\mid x_0)}\!\left[\frac{p_\theta(x_{0:T})}{q(x_{1:T}\mid x_0)}\right] \ge \mathbb{E}_{q(x_{1:T}\mid x_0)}\!\left[\log\frac{p_\theta(x_{0:T})}{q(x_{1:T}\mid x_0)}\right] = \text{ELBO}$$
+        <p>
+            和 VAE 不同的是，用前向过程当提议分布，经过一番巧妙的展开和整理，ELBO 分解成三项：
+        </p>
+        $$L = \mathbb{E}_q\Big[\underbrace{D_{KL}\big(q(x_T\mid x_0)\,\|\,p(x_T)\big)}_{L_T:\ \text{先验匹配}} + \sum_{t=2}^T\underbrace{D_{KL}\big(q(x_{t-1}\mid x_t, x_0)\,\|\,p_\theta(x_{t-1}\mid x_t)\big)}_{L_{t-1}:\ \text{去噪}}\ \underbrace{-\log p_\theta(x_0\mid x_1)}_{L_0:\ \text{重建}}\Big]$$
+        <p>
+            第一项匹配最终的噪声，没有可学参数，不有趣。最后一项是最后一步的重建，如果有一千步，不必在这一步上花太多时间。关键是中间的去噪项：一个 KL 散度，一边是要学的反向步 $p_\theta(x_{t-1}\mid x_t)$，另一边是 $q(x_{t-1}\mid x_t, x_0)$。后者也是从 $x_t$ 走到 $x_{t-1}$，但以数据 $x_0$ 为条件，某种意义上"知道答案"，可以看作网络为了最终到达数据应该怎样去噪的标准答案。
+        </p>
+        <h3>3. 化成一个回归损失</h3>
+        <p>
+            因为都是高斯，可以证明（这里不给证明）这个后验也是高斯，而且能用前向过程解析地写出来：
+        </p>
+        $$q(x_{t-1}\mid x_t, x_0) = \mathcal{N}\big(x_{t-1};\ \mu_q(x_t, x_0),\ \sigma_q^2(t)I\big)$$
+        $$\mu_q(x_t, x_0) = \frac{\sqrt{\bar\alpha_{t-1}}(1-\alpha_t)}{1-\bar\alpha_t}\,x_0 + \frac{\sqrt{\alpha_t}(1-\bar\alpha_{t-1})}{1-\bar\alpha_t}\,x_t$$
+        <p>
+            眯着眼看，就是一些噪声调度的系数乘上数据 $x_0$ 和当前时刻的 $x_t$。把学到的反向过程也设为高斯，方差不学、取同样的 $\sigma_q^2(t)$，只学均值：
+        </p>
+        $$p_\theta(x_{t-1}\mid x_t) = \mathcal{N}\big(x_{t-1};\ \mu_\theta(x_t, t),\ \sigma_q^2(t)I\big)$$
+        <p>
+            这样 KL 两边是方差相同的两个高斯，化简后就是一个 L2 损失，像回归一样让网络预测目标均值：
+        </p>
+        $$L_{t-1}\propto\|\mu_q(x_t, x_0) - \mu_\theta(x_t, t)\|^2$$
+        <h3>4. 预测数据，或预测噪声</h3>
+        <p>
+            这已经是不错的损失了，但还不是"预测噪声"。DDPM 论文想做得更好，用重参数化预测别的东西，这种"预测噪声还是预测数据"的选择在后来的方法里也会反复出现。观察 $\mu_q$ 的公式：噪声调度已知，$x_t$ 也已知，网络唯一不知道的是 $x_0$。所以与其预测整个均值，不如只预测 $x_0$，再用已知的量拼出均值，两者等价：
+        </p>
+        $$\mu_\theta(x_t, t) = \frac{\sqrt{\bar\alpha_{t-1}}(1-\alpha_t)}{1-\bar\alpha_t}\,x_\theta(x_t, t) + \frac{\sqrt{\alpha_t}(1-\bar\alpha_{t-1})}{1-\bar\alpha_t}\,x_t$$
+        <p>
+            这就是数据预测损失 $L = \mathbb{E}_{x_0, t, \epsilon}\|x_\theta(x_t, t) - x_0\|^2$：无论在哪个时刻，网络都尝试预测原始图像。目标可能变化更小，也许更容易学。
+        </p>
+        <p>
+            还能再重参数化一次。由 $x_t = \sqrt{\bar\alpha_t}\,x_0 + \sqrt{1-\bar\alpha_t}\,\epsilon$ 解出 $x_0 = \big(x_t - \sqrt{1-\bar\alpha_t}\,\epsilon\big)/\sqrt{\bar\alpha_t}$，代入上式，得到：
+        </p>
+        $$\mu_\theta(x_t, t) = \frac{1}{\sqrt{\alpha_t}}\left(x_t - \frac{1-\alpha_t}{\sqrt{1-\bar\alpha_t}}\,\epsilon_\theta(x_t, t)\right)$$
+        <p>
+            测试时唯一不知道的是噪声，所以让模型只预测噪声，得到噪声预测损失：
+        </p>
+        $$L = \mathbb{E}_{t, x_0, \epsilon}\|\epsilon_\theta(x_t, t) - \epsilon\|^2$$
+        <p>
+            两种都可以试，原论文认为预测噪声效果更好。训练总结：$t\sim\text{Uniform}\{1, \dots, T\}$，$\epsilon\sim\mathcal{N}(0, I)$，算出 $x_t$，训练网络预测加进去的噪声：
+        </p>
+        $$L_{\text{simple}}(\theta) = \mathbb{E}_{t, x_0, \epsilon}\big[\|\epsilon - \hat\epsilon_\theta(x_t, t)\|^2\big]$$
+    </section>
+
+    <section>
+        <h2>五、采样</h2>
+        <p>
+            自回归模型逐 token 采样，扩散模型的采样对应反向过程。反向过程是高斯，有个均值；要注意网络现在预测的不是均值而是噪声。采样时当前的图像 $x_t$ 已知（就是正在生成的东西），系数由训练时的噪声调度决定。所以：从噪声开始，对 $t = T, \dots, 1$，运行网络得到 $\epsilon_\theta$，代入上式得到 $\mu_\theta$，再从这个高斯里采样，得到下一步。
+        </p>
+        <p>
+            原论文（DDPM，Ho 等 2020）用 $T = 1000$，在不同数据集上训练，能生成人脸和各种图像，看起来比前面讲的方法有希望得多。（模型连 Shutterstock 的水印也复现出来了，图是从论文网站上取的。）课堂代码有一个简单实现，推荐在 Google Colab 的 GPU 上跑，训练大约 10 分钟，能生成 MNIST 数字并可视化去噪过程。
+        </p>
+        <p>
+            有学生问预测噪声用什么网络。原来和课堂代码里用的是 U-Net，基于卷积，先下采样再上采样，形状像字母 U；后来人们开始用 Transformer，有一篇很有影响的 Diffusion Transformer 论文。另一个学生问怎样让网络生成特定的图：目前讲的是无条件生成，模型只学训练图像集的分布，每次调用采样都给出一张来自这个分布的图。条件生成马上讲。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、从噪声到梯度：分数函数</h2>
+        <p>
+            读这些论文时会看到扩散与基于分数（score-based）的生成模型之间的联系，要解释后面的方法必须讲一下。为了不让记号太乱，把中间时刻记作隐变量 $z_t$，把噪声调度折叠成两个系数：
+        </p>
+        $$z_t = a_t x_0 + \sigma_t\epsilon, \qquad a_t = \sqrt{\bar\alpha_t},\ \sigma_t = \sqrt{1-\bar\alpha_t}$$
+        <p>
+            分布 $p(z_t)$ 的分数（score）定义为 $\nabla_{z_t}\log p(z_t)$：对数概率对数据的梯度，看的是数据怎样变化能让对数概率升高或降低。把它看作一个向量场，它指向 $z_t$ 概率增大的方向。
+        </p>
+        <p>
+            结论（不证明）：在这种形式下，边缘分布的分数满足 Tweedie 公式：
+        </p>
+        $$\nabla_{z_t}\log p(z_t) = -\frac{\bar\epsilon}{\sigma_t}, \qquad \bar\epsilon = \mathbb{E}_{x_0\sim p(x_0\mid z_t)}[\epsilon\mid z_t]$$
+        <p>
+            注意 $\bar\epsilon$ 带横线，是期望噪声：处在某个位置 $z_t$ 时，可能来自多个不同的真实数据点，对所有可能的数据取平均得到的噪声。DDPM 最小化 $\mathbb{E}\|\epsilon_\theta(z_t, t) - \epsilon\|^2$，对给定时刻会抽到各种 $x_0$，最优的噪声预测器会收敛到这个期望噪声。于是：
+        </p>
+        $$\epsilon_\theta(z_t, t)\approx -\sigma_t\nabla_{z_t}\log p(z_t)$$
+        <p>
+            DDPM 隐式地学到了分数函数。直观上，预测加了什么噪声，就知道该往哪个方向去噪，而去噪就是往概率更高的方向走。后面的方法会反复用到噪声和梯度的这层关系。
+        </p>
+        <p>
+            小结 DDPM：定义一个固定的前向过程，用噪声逐步破坏数据；训练网络逆转每一步（比如预测噪声）；从噪声采样，逐步去噪来生成。直观上，模型学会指向概率密度更高的方向。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、条件生成与引导</h2>
+        <p>
+            要告诉模型生成什么，比如数字 4、"狗"，或者开头那些复杂的提示，就要建一个条件模型：把文本嵌入成向量，以它为条件生成。还可以用一些技术让模型更紧地跟随条件，常见的是无分类器引导，先讲分类器引导。
+        </p>
+        <h3>1. 分类器引导</h3>
+        <p>
+            假设有一个分类器 $p_\phi(c\mid z_t)$，输入一张嘈杂的图像，给出某个类别 $c$ 在图中的概率（数字 0 到 9，或者狗、猫等物体）。回想 $\epsilon_\theta(z_t)\approx -\sigma_t\nabla_{z_t}\log p(z_t)$，想让模型生成 4，就取分类器的梯度：数据往哪个方向变，"图里是 4"的概率增加最多。把两个梯度合起来，得到修改后的噪声（Dhariwal 和 Nichol 2021）：
+        </p>
+        $$\tilde\epsilon_{\theta,\phi}(z_t, c) = \epsilon_\theta(z_t, c) - w\,\sigma_t\nabla_{z_t}\log p_\phi(c\mid z_t)$$
+        <p>
+            然后用 $\tilde\epsilon_{\theta,\phi}$ 跑同样的采样算法。局限很多：分类器从哪来？得专门训练一个在嘈杂图像上判断类别的分类器，有点麻烦；怎样平衡两项；对一个学出来的模型求梯度，会不会被钻空子。
+        </p>
+        <h3>2. 无分类器引导</h3>
+        <p>
+            无分类器引导（classifier-free guidance，Ho 和 Salimans 2022）用类似的思路，但不需要单独训练分类器。训练很简单：只训练一个扩散模型，有时给它条件信息，有时不给。比如数字数据集，有时只给图像，有时再加上数字的嵌入。采样时用修改后的分数：
+        </p>
+        $$\tilde\epsilon_\theta(z_t, c) = (1+w)\,\epsilon_\theta(z_t, c) - w\,\epsilon_\theta(z_t)$$
+        <p>
+            它看的是有条件和无条件时噪声方向的差别，某种意义上提取了条件信息带来的东西。$1+w$ 和 $-w$ 的形式可以这样推出：假设一个隐式分类器 $p(c\mid z_t)\propto p(z_t\mid c)/p(z_t)$，它的梯度是 $\nabla_{z_t}\log p(c\mid z_t) = -\frac{1}{\sigma_t}[\epsilon^*(z_t, c) - \epsilon^*(z_t)]$，代入分类器引导就得到上式。用 $w$ 调节条件的影响：生成"狗"的图，有些图里有狗但也有湖和山，调大引导（比如 $w = 3.0$），狗的特征就更突出。
+        </p>
+        <p>
+            现在还有网站托管较早的 Stable Diffusion，界面上有一个"guidance scale"参数，应该就是这个。Sean 用它生成"匹兹堡的印象派画，包括天际线和桥"和"匹兹堡的真实照片"，它对匹兹堡的了解不算全面，但大致有了。
+        </p>
+        <h3>3. 其他扩展</h3>
+        <p>
+            扩散后来成了一个巨大的研究领域，几个代表：
+        </p>
+        <table>
+            <thead>
+                <tr><th>问题</th><th>解法</th><th>核心思路</th><th>文献</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>在像素空间做太贵</td><td>潜空间扩散</td><td>在自编码器（比如很好的 VAE）的隐空间里扩散，再用解码器还原</td><td>Rombach 等 2022</td></tr>
+                <tr><td>架构</td><td>Diffusion Transformer（DiT）</td><td>用 Transformer 替换卷积的 U-Net</td><td>Peebles &amp; Xie 2022</td></tr>
+                <tr><td>随机采样</td><td>确定性路径与 ODE 求解器</td><td>更可预测的跳步，采样步数更少</td><td>Song 等 2021</td></tr>
+                <tr><td>采样慢（原论文要 1000 步）</td><td>蒸馏</td><td>把扩散模型当老师，训练学生用一半步数完成同样的事</td><td>Salimans &amp; Ho 2022</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section>
+        <h2>八、连续时间视角</h2>
+        <p>
+            把步数推到无穷，得到连续的过程，适合用微分方程描述（Song 等 2021）。扩散可以看作一个随机微分方程（SDE），$dw$ 是噪声项：
+        </p>
+        $$dz = f(t)\,z\,dt + g(t)\,dw$$
+        <p>
+            一个经典结果说这个 SDE 可以在时间上反转，反向 SDE 里出现了分数函数：
+        </p>
+        $$dz = \big[f(t)\,z - g(t)^2\nabla_z\log p_t(z)\big]dt + g(t)\,d\bar w$$
+        <p>
+            DDPM 的噪声预测器估计的就是分数，可以直接代进去：$\nabla_z\log p_t(z)\approx -\epsilon_\theta(z, t)$（差一个系数 $1/\sigma_t$）。Sean 说细节不展开，但现代扩散论文会默认你知道这些。
+        </p>
+        <p>
+            再进一步，能否得到确定性的版本？对任何扩散 SDE，都有一个确定性的常微分方程，称为概率流 ODE，它的解和 SDE 有相同的边缘分布 $p_t(z)$：
+        </p>
+        $$dz = \Big[f(t)\,z - \frac{1}{2}g(t)^2\nabla_z\log p_t(z)\Big]dt$$
+        <p>
+            论文里有一张图：白线是 ODE 的轨迹，红线是 SDE 的多次运行，跑无穷多次红线，得到的边缘分布与 ODE 相同。这带来了更好推理的机会：可以用 ODE 求解器（把学到的网络放在循环里）及相关技术，加快采样。它也引出一个问题：这个 ODE 是从扩散推出来的，能不能直接设计别的方式，从噪声"流"向数据，甚至比扩散更好？
+        </p>
+    </section>
+
+    <section>
+        <h2>九、流匹配</h2>
+        <p>
+            课上时间到了，Sean 只讲了引入的一页，说不会考，但把关键思路放在了幻灯片里，最近的论文会大量使用和组合这些思想。以下依据幻灯片整理（Lipman 等 2022；Albergo 和 Vanden-Eijnden 2022；Liu 等 2022；综述见 Lipman 等 2024）。
+        </p>
+        <p>
+            核心思路：学一个速度场，让你能从一个分布移动到另一个分布。设计一条在 $p_0$（比如噪声）和 $p_1$（目标数据分布）之间插值的路径，训练模型预测沿路径已知的速度，采样时把速度场从 $t=0$ 积分到 $t=1$。
+        </p>
+        <p>
+            速度场 $v_t:\mathbb{R}^d\to\mathbb{R}^d$ 通过 ODE 定义一个流 $\phi_t:\mathbb{R}^d\to\mathbb{R}^d$：
+        </p>
+        $$\frac{d}{dt}\phi_t(x) = v_t(\phi_t(x)), \qquad \phi_0(x) = x$$
+        <p>
+            从 $X_0\sim p_0$ 出发，流沿着速度场搬运样本。如果 $v_t$ 选得对，$X_1 = \phi_1(X_0)$ 就是来自 $p_1 = p_{\text{data}}$ 的样本。所以要学 $v_\theta\approx v_t$。很自然的目标是：
+        </p>
+        $$\mathcal{L}_{\text{FM}} = \mathbb{E}_{t, X_t}\|v_\theta(X_t, t) - v_t(X_t)\|^2$$
+        <p>
+            但我们不知道 $v_t$。办法是为每个数据点 $x_1$ 定义一条条件路径，最简单的是直线：
+        </p>
+        $$X_{t\mid 1} = (1-t)X_0 + t\,x_1, \qquad \frac{d}{dt}X_{t\mid 1} = x_1 - X_0$$
+        <p>
+            条件速度就是 $x_1 - X_0$，于是得到条件流匹配损失：
+        </p>
+        $$\mathcal{L}_{\text{CFM}} = \mathbb{E}_{t, x_1, X_0}\|v_\theta(X_t, t) - (x_1 - X_0)\|^2, \qquad X_t = (1-t)X_0 + t\,x_1$$
+        <p>
+            关键结果：$\mathcal{L}_{\text{CFM}}$ 与 $\mathcal{L}_{\text{FM}}$ 给出同样的最优 $v_\theta$。和 DDPM 相比，流匹配直接学一个路径为直线的 ODE，更容易用较少的步数积分。
+        </p>
+        <h3>案例：Stable Diffusion 3</h3>
+        <p>
+            Stable Diffusion 3（Esser 等 2024）把本讲的几样东西组合起来：用流匹配，并更频繁地采样中间时刻；在预训练自编码器的隐空间里建模；文本条件把 CLIP 文本编码器的向量和 T5 的向量拼在一起。论文里比较了流匹配的变体、DDPM 的变体和连续时间视角下的方法。
+        </p>
+        <p>
+            这和 NLP 也有关系：你可以用自然语言让它生成一只狗。
+        </p>
+    </section>
+
+    <section>
+        <h2>十、参考资料</h2>
+        <ul>
+            <li>Denoising Diffusion Probabilistic Models（Ho 等，2020）：DDPM，主要阅读。</li>
+            <li>Flow Matching Guide and Code（Lipman 等，2024）：主要阅读。</li>
+            <li>Diffusion Models Beat GANs on Image Synthesis（Dhariwal &amp; Nichol，2021）：分类器引导。</li>
+            <li>Classifier-Free Diffusion Guidance（Ho &amp; Salimans，2022）。</li>
+            <li>High-Resolution Image Synthesis with Latent Diffusion Models（Rombach 等，2022）。</li>
+            <li>Scalable Diffusion Models with Transformers（Peebles &amp; Xie，2022）：DiT。</li>
+            <li>Score-Based Generative Modeling through Stochastic Differential Equations（Song 等，2021）。</li>
+            <li>Progressive Distillation for Fast Sampling of Diffusion Models（Salimans &amp; Ho，2022）。</li>
+            <li>Flow Matching for Generative Modeling（Lipman 等，2022）；Building Normalizing Flows with Stochastic Interpolants（Albergo &amp; Vanden-Eijnden，2022）；Flow Straight and Fast（Liu 等，2022）。</li>
+            <li>Scaling Rectified Flow Transformers for High-Resolution Image Synthesis（Esser 等，2024）：Stable Diffusion 3。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>十一、小结</h2>
+        <p>
+            扩散模型有一个固定的前向过程，按噪声调度逐步给数据加高斯噪声，因为全是高斯，可以从 $x_0$ 一步跳到 $x_t$。把中间时刻当作隐变量，用和 VAE 一样的重要性采样与 Jensen 不等式得到证据下界，其中关键的去噪项是两个同方差高斯之间的 KL，化为预测后验均值的 L2 损失；再重参数化，可以改为预测原始数据或预测噪声，DDPM 选了后者，训练就是"随机加噪、预测噪声"。采样从噪声开始，每步用预测的噪声算出均值再采样。噪声预测器其实近似于分数函数，这让分类器引导和无分类器引导可以通过修改噪声来加强条件。潜空间扩散、DiT、确定性采样和蒸馏让它更快更好；连续时间下扩散是一个 SDE，对应一个边缘分布相同的概率流 ODE。流匹配直接学一个沿直线路径从噪声流向数据的速度场，Stable Diffusion 3 用的就是它。
+        </p>
+        <p>
+            下一讲开始讲强化学习。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-711: Advanced NLP · Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="14_研究能力与实验设计.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="16_强化学习基础.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

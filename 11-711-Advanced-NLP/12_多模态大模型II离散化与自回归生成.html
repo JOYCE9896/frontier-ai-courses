@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十二讲：多模态大模型（二）：图像 token 与自回归生成 | CMU 11-711 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="11_多模态大模型I视觉理解.html">&larr; 上一讲</a>
+    <span>CMU 11-711: Lecture 12</span>
+    <a href="13_评估方法.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十二讲：多模态大模型（二）：图像 token 与自回归生成</h1>
+        <p class="subtitle">四种生成建模范式，逐像素的自回归模型及其局限，VAE 与证据下界，VQ-VAE 把图像离散成 token，VQ-GAN，DALL-E 与 Chameleon 用一个自回归模型同时生成文本和图像</p>
+        <div class="author-meta">
+            主讲：Sean Welleck · 2026 年 2 月 19 日<br>
+            资料来源：<a href="https://cmu-l3.github.io/anlp-spring2026/static_files/anlp-s2026-12-multimodal-ii.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=tvZyZ2uNZqY" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述内容） · <a href="https://github.com/cmu-l3/anlp-spring2026-code/tree/main/12_multimodal_ii" target="_blank">课堂代码</a> · 主要阅读：VQ-VAE（van den Oord 等，2017）；Taming Transformers（Esser 等，2021）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、目标：同时生成文本和图像</h2>
+        <p>
+            上一讲的视觉语言模型能接受文本和图像、输出文本。这一讲关注输出端：能不能有一个模型，既生成文本也生成图像，而且两者可以交错。剧透一下：以目前的技术，要让一个模型同时以最先进的质量生成文本和图像很难。最好的文本模型基于自回归，最好的图像模型基于扩散，下一讲专讲后者。课上用了一个有点过时的例子：让 GPT-4o "生成一幅匹兹堡的印象派装裱画"，它能生成图，也能用文字对话。ChatGPT 具体怎么做的不得而知。
+        </p>
+        <p>
+            本讲分三部分：生成建模的几种基本范式；直接把图像当作像素序列做自回归建模；学一个更紧凑的离散表示，也就是"图像 token"。和上一讲不同，这里模型不仅要接收压缩后的图像 token，还要生成它们，所以方法会有所不同。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、四种生成建模范式</h2>
+        <p>
+            生成模型：有一个数据分布，训练一个概率模型，再从中采样生成东西。处理的数据不只是文本，所以要考虑什么工具最适合建模各种数据。深度学习时代发展出的主要范式（这张图已经有点过时，也许还该加上基于流的模型，它比扩散更一般一些）：
+        </p>
+        <ul>
+            <li>自回归：把联合分布拆成多步预测，按某种顺序每次生成一个维度，$p_\theta(x_0), p_\theta(x_1\mid x_0), \dots, p_\theta(x_T\mid x_{&lt;T})$。文本有天然的从左到右的顺序；图像也可以按光栅扫描顺序（从左到右、从上到下）。</li>
+            <li>变分自编码器（VAE）：一个编码器 $q_\phi(z\mid x)$ 把图像压缩成一个隐变量 $z$，一个解码器 $p_\theta(x\mid z)$ 把它解压回来。如果隐空间被约束成标准高斯，生成时从高斯采样一个 $z$，送进解码器就得到图像。</li>
+            <li>生成对抗网络（GAN）：一个双人博弈。判别器 $D(x)$ 判断输入是真实图像还是生成器造的假图像；生成器 $G(z)$ 学着骗过判别器。判别器越强，能骗过它的图就越逼真，这个信号用来训练生成器。</li>
+            <li>扩散：把数据一步步加噪，直到变成纯噪声；学习反过来，从噪声出发逐步去噪，生成数据。下一讲专讲。</li>
+        </ul>
+        <p>
+            深究起来这几种其实互有联系。这一讲只讨论怎样改造前面的方法来达到目标：一个 Transformer 接收向量、产出向量。如果能把图像切成 token，模型产出的 token 又能变回图像，就可以沿用所有已有的技术。需要两样东西：图像分词器（上一讲讲过），以及图像"反分词器"（de-tokenizer），能把模型产出的 token 方便地还原成图像。
+        </p>
+        <p>
+            两种尝试：一是什么特别的都不做，把单个像素当 token，模型直接生成像素，不需要反分词器；二是学一个离散的分词器和反分词器，即 VQ-VAE 和 VQ-GAN。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、尝试一：逐像素的自回归模型</h2>
+        <p>
+            把图像 $x_{\text{img}}\in\mathbb{R}^{H\times W\times C}$ 展平成一个长序列 $x_1, \dots, x_T$，每个位置是 1 到 256 之间的像素值，就像一个字符串，词表只有 256 个。把大量图像转成序列，训练一个语言模型：
+        </p>
+        $$\mathcal{L}_{\text{MLE}} = \sum_{t=1}^T -\log p_\theta(x_t\mid x_{&lt;t})$$
+        <p>
+            这个想法多年来被以各种形式尝试过：
+        </p>
+        <ul>
+            <li>PixelRNN（van den Oord 等 2016）：用 RNN。可以给模型一部分图像，让它补全。图像很小、有点模糊，但显然学到了图像的结构，不是随机的。同一批作者之后又有基于卷积的 PixelCNN 等改进。</li>
+            <li>Image Transformer（Parmar 等 2018）：Transformer 出现后的同类尝试，能生成完整图像或补全。</li>
+            <li>iGPT（OpenAI 2020）：论文《Generative Pretraining from Pixels》其实不是为了生成图像，而是学习表示、再微调做分类，同时试了自回归和 BERT 式预训练；配套博客里则展示了预测像素生成的图像。</li>
+        </ul>
+        <p>
+            有学生问这和 BERT 的掩码有点像吗？BERT 是遮住随机位置，这里是从上到下、从左到右按固定顺序；有了一致的生成顺序，就能直接生成。
+        </p>
+        <h3>两个挑战</h3>
+        <ul>
+            <li>序列长度：一张 1024×1024 的 RGB 图像，逐像素预测就是 300 万个 token。视频还是一串图像。这些工作通常要修改架构以节省内存，比如 Image Transformer 改了注意力模式。有学生问能否先用一个模型生成一部分、再由另一个模型逐步放大（多分辨率生成），Sean 说可能有人试过，这里考虑的是最简单的极端情况。</li>
+            <li>每个像素携带的语义信息很少。一个词 token 往往信息量很大，可能是冠词、提示语法结构，可能是一个人名；而要表达"图里有一只狗"，需要很多像素共同构成，它们之间有依赖关系。所以需要大量数据。</li>
+        </ul>
+        <p>
+            人们仍在研究这条路。Google 的一个团队 2025 年 11 月发表的工作（Yan 等）为下一个像素预测拟合了缩放定律：与语言 token 相比，像素的计算最优配置需要每个参数多得多的 token，也许因为单个像素的信息少；但随计算量增加，模型在表示（分类）和生成两方面都在变好，损失与这些指标虽不完全相关但有相当关联。他们认为如果将来投入大量计算、缩放定律持续成立，这条路有前景，只是代价可能很高。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、尝试二：学一个紧凑的离散分词器</h2>
+        <p>
+            目标是学一个分词器和反分词器，比如词表 8000 个 token，一张图用 1024 个 token 表示，而不是 300 万个，上下文短得多、省内存得多。方法是向量量化变分自编码器（Vector-Quantized VAE，VQ-VAE）。它在很多尝试中被使用，最近一些大规模训练多模态模型的工作也用到类似的思路，比如 Meta 的 Chameleon。这也是学习变分自编码器的好机会。
+        </p>
+        <h3>1. 标准 VAE</h3>
+        <p>
+            VAE（Kingma 和 Welling 2013）要学会把数据（比如图像）压缩成一个低维表示 $z$，再用它重建或生成新数据。假设数据这样产生：先从先验分布（比如标准高斯）采样一个隐变量 $z\sim p(z)$，再由解码器 $p_{\theta_{\text{dec}}}(x\mid z)$ 变成数据；编码器 $q_{\theta_{\text{enc}}}(z\mid x)$ 把数据映射成隐变量。训练平衡两个目标：
+        </p>
+        <ul>
+            <li>重建好输入：重建损失 $-\log p_{\theta_{\text{dec}}}(x\mid z)$，训练解码器从编码器给出的隐变量重建数据。</li>
+            <li>让 $z$ 表现良好：正则项 $D_{KL}\big(q_{\theta_{\text{enc}}}(z\mid x)\,\|\,\mathcal{N}(0, I)\big)$，让编码器输出的分布接近标准高斯。两者都是高斯时有闭式解。</li>
+        </ul>
+        $$\mathcal{L}_{\text{VAE}}(x) = -\mathbb{E}_{q_{\theta_{\text{enc}}}(z\mid x)}\big[\log p_{\theta_{\text{dec}}}(x\mid z)\big] + D_{KL}\big(q_{\theta_{\text{enc}}}(z\mid x)\,\|\,p(z)\big)$$
+        <p>
+            训练后，从先验采样 $z\sim p(z)$ 送进解码器就能生成。一个实现细节：期望是对编码器的分布取的，而采样操作不可微，没法直接反向传播。办法是重参数化技巧（reparameterization trick）：把采样看作从一个固定的标准分布（比如高斯）里抽噪声，编码器则是对这个噪声的确定性变换，这样整个过程就可微了。
+        </p>
+        <h3>2. 证据下界</h3>
+        <p>
+            这个损失可以从最大似然推出来，下一讲讲扩散时还会遇到。目标是最大化 $\log p(x)$。模型有隐变量，要把它积分掉，而 $z$ 是高维向量，这个积分算不了，所以要做一些巧妙的变换：
+        </p>
+        $$\log p(x) = \log\int p(x, z)\,dz = \log\int q(z\mid x)\frac{p(x, z)}{q(z\mid x)}\,dz = \log\mathbb{E}_{q(z\mid x)}\!\left[\frac{p(x,z)}{q(z\mid x)}\right]$$
+        <p>
+            第二步引入了另一个分布 $q$（它将是编码器），相当于乘了一个 1，这叫重要性采样（importance sampling），机器学习里常见。然后用 Jensen 不等式（对数是凹函数）把期望和对数交换，得到一个不等式：
+        </p>
+        $$\ge \mathbb{E}_{q(z\mid x)}\!\left[\log\frac{p(x,z)}{q(z\mid x)}\right] = \mathbb{E}_{q(z\mid x)}\big[\log p(x\mid z)\big] + \mathbb{E}_{q(z\mid x)}\!\left[\log\frac{p(z)}{q(z\mid x)}\right] = \mathbb{E}_{q(z\mid x)}\big[\log p(x\mid z)\big] - D_{KL}\big(q(z\mid x)\,\|\,p(z)\big) = -\mathcal{L}_{\text{VAE}}$$
+        <p>
+            这就是证据下界（Evidence Lower Bound，ELBO），"证据"是贝叶斯术语，指数据的对数概率。优化它就是在推高对数似然的一个下界。
+        </p>
+        <p>
+            原始 VAE 论文有个很酷的演示：把数字 6 和数字 1 的图像分别编码，在隐空间里做插值，比如取两者中点的向量，送进解码器，能得到在 6 和 1 之间渐变的图像。VAE 后来发展成一个大领域，有成千上万篇论文。
+        </p>
+        <h3>3. 从连续到离散：VQ-VAE</h3>
+        <p>
+            标准 VAE 用一个连续向量编码和解码图像。如果把分词器看作 VAE 的编码器、反分词器看作解码器，只需让隐空间变成离散的：编码器给出一串离散的数，解码器从这串数还原图像。处理离散数据的麻烦在于不好求梯度，需要一些技巧。VQ-VAE（van den Oord 等 2017）的做法：
+        </p>
+        <ul>
+            <li>编码器：$x\to z_e(x)\in\mathbb{R}^d$，先得到一个连续向量。</li>
+            <li>量化器：有一个码本（codebook），即一组 $K$ 个可学习的向量 $e_1, \dots, e_K$，相当于词表。把 $z_e(x)$ 和每个码本向量比较，找最近邻：
+                $$k^* = \arg\min_{j\in\{1,\dots,K\}}\|z_e(x) - e_j\|_2, \qquad z_q(x) = e_{k^*}$$
+                这一块图像就被编码成了数字 $k^*$（比如 5）。可以看作编码器给出一个把全部质量放在一个码本向量上的分布 $q(z = k\mid x)$。</li>
+            <li>解码器：$p(x\mid z_q(x))$，从量化后的向量重建图像。</li>
+        </ul>
+        <p>
+            训练的损失有三项：
+        </p>
+        $$\mathcal{L} = \log p(x\mid z_q(x)) + \big\|\text{sg}[z_e(x)] - e\big\|_2^2 + \beta\,\big\|z_e(x) - \text{sg}[e]\big\|_2^2$$
+        <p>
+            第一项是重建，和原始 VAE 类似。sg 表示停止梯度（stop gradient），把它包住的东西当作固定目标。第二项把编码器的输出当目标，让被选中的码本向量靠近它，用来更新码本。第三项反过来，把码本向量当目标，让编码器的输出靠近它，免得编码器在隐空间里随意乱跑。
+        </p>
+        <p>
+            还有一个问题：最近邻选择不可微。他们用直通梯度估计（straight-through gradient estimator）：反向传播到这里时，直接把解码器输入处的梯度复制给编码器输出，跳过这个选择操作。这是一个很粗略的梯度估计，但处理离散数据时常要这样做。
+        </p>
+        <p>
+            一张图不只用一个码本向量。隐向量保留二维结构，每个位置各做一次查找，所以一张图对应一个离散数字矩阵，比如这个位置是 3，那个位置是 53。展平就是一个代表这张图的序列。如果模型生成了这样一串数字，保留码本，查出对应的向量，送进解码器，就得到了图像。有学生问上一页的嵌入空间和这里是不是同一个：可以看成离散的数字矩阵，也可以看成嵌入向量，两者一一对应。
+        </p>
+        <p>
+            另一个学生问 VQ-VAE 的表达力是否来自 token 的数量和层级：只用一个向量，就受限于码本的大小；位置越多，组合数指数增长。Sean 说这正是它的局限：几百万维的图像，要用大约一千个 token、每个 token 大约一千种取值来表示，隐空间比数据空间小得多，只能指望图像位于某个低维流形上；实践中会丢失信息，尤其是细节。
+        </p>
+        <p>
+            课堂代码在 MNIST 上实现了 VQ-VAE。可以看各个位置用了哪些码本索引，它学会了一个表示空白背景的 token，空白处解码器的任务很简单；这么简单的图像，重建得很好。
+        </p>
+        <h3>4. DALL-E 的分词器</h3>
+        <p>
+            在一切都并入 ChatGPT 之前，OpenAI 有独立的文生图模型 DALL-E（之后有 DALL-E 2、3）。第一代用的就是这种离散 VAE，编码器和解码器可以下载。把一张图编码成离散 token 再重建，效果很好，但仔细看有点模糊，没有原图锐利，丢了一些细节。有学生问反复编码解码一百次会不会变成噪声：取决于编码器有没有在自己解码出的图像上训练过；也有学生认为保留下来的是最关键的信息，也许能稳定。Sean 说不确定。
+        </p>
+        <h3>5. VQ-GAN</h3>
+        <p>
+            VQ-GAN（Esser 等 2021，引用很多）用同样的码本思路，但改了训练编码器和解码器的目标：加入 GAN 目标和感知损失（perceptual loss）。生成器 $G$（解码器）和编码器 $E$ 给出 $\hat x = G(\text{select}(E(x)))$，判别器 $D$ 的目标是：
+        </p>
+        $$\mathcal{L}_{\text{GAN}} = \log D(x) + \log\big(1 - D(\hat x)\big)$$
+        <p>
+            判别器想让真实图像的分数高、生成图像的分数低（最大化这个目标），生成器则反过来（最小化它），逼着它生成逼真的图像。两组参数交替优化：固定判别器更新生成器去骗它，再固定生成器更新判别器。实际中让这个过程稳定很难，曾是一个大研究方向。有学生问生成器有没有显式的重建损失：有，除了 GAN 目标还加了感知损失等。
+        </p>
+        <p>
+            然后训练 Transformer：用分词器（编码器）把大量图像切成 token，展平成序列，训练自回归模型 $\mathcal{L} = \mathbb{E}_{x_{\text{img}}}[-\log\prod_t p(x_t\mid x_{&lt;t})]$。比如 32×32 = 1024 个 token，远少于逐像素建模（256×256 = 65536）。生成一串离散 token，交给解码器，就得到图像，结果比 PixelRNN 好看不少，但远不完美。Chameleon 用的正是 VQ-GAN 这一类分词器。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、把图像 token 加进语言模型</h2>
+        <p>
+            最后一步很简单：已有图像 token，再加上文本 token，词表里两种都有；收集文本和图像混合的数据，训练自回归模型。
+        </p>
+        <h3>1. DALL-E（OpenAI 2021）</h3>
+        <p>
+            两步：先训练离散 VAE 压缩图像；再把文本 token 和图像 token 拼在一起，训练自回归 Transformer。文本在前、图像在后，所以文本就是提示，描述想要的图，比如"一间有两个水槽、一个柜子和一个浴缸的浴室"，模型生成图像。论文测试了一些独特的组合，比如"一只穿圣诞毛衣的小刺猬在遛狗"（Sean 挑的是好的例子，失败的例子里狗也变成了刺猬）。细节很离谱，只是大致抓住了意思。剧透：DALL-E 2 比较了自回归和扩散，最终选了扩散，DALL-E 3 也基于扩散，以获得真正高质量的图像。
+        </p>
+        <h3>2. Chameleon（Meta 2024）</h3>
+        <p>
+            把这个思路做大：它就是一个语言模型，只是多了图像 token，那么扩大规模，也许就得到一个能同时生成文本和图像的好模型。他们训练了 VQ-GAN 式的分词器和反分词器，收集了 10 万亿 token 做预训练，并保证数据混合了两种模态。例子：提示里既有图像又有文字，模型的回答先生成一段文字，再生成一张图，再接着生成文字。某种意义上，实现了本讲开头的目标：输入输出都可以是两种模态。
+        </p>
+        <h3>3. 取舍</h3>
+        <ul>
+            <li>优点：统一的生成模型，一切都是自回归，一切都是 token。</li>
+            <li>缺点：离散分词器带来信息损失。分词器和反分词器是单独学的模型，和主模型并不统一；隐空间的瓶颈会丢掉信息。DALL-E 论文里的一张图也许本意是说明损失不大，但换个角度看，想要非常高质量的图像就会出问题，有些合成例子里大量结构被丢掉了。</li>
+        </ul>
+        <p>
+            要生成最先进质量的图像，用的是另一种范式，下一讲的扩散；只是用扩散来同时生成文本会更麻烦。
+        </p>
+        <p>
+            有学生问为什么最先进的模型在图像里生成文字仍很吃力。Sean 说下一讲也许可以找些相关方法加进来。对自编码器类方法而言，文字的信息密度很高，隐表示必须保留重建所有文字所需的信息；离散 VAE 要把图里的全部文字压进少量 token，并不清楚怎么做到；如果图像本身又很多样，隐空间瓶颈就更容易丢信息。另一个学生问模型生成普通文本时是否也经过图像 token：不是，词表里仍有独立的 BPE 文本 token，生成文本用的是它们；图像 token 之所以是图像 token，是因为有一个能把它们解码成图像的解码器。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、参考资料</h2>
+        <ul>
+            <li>Neural Discrete Representation Learning（van den Oord 等，2017）：VQ-VAE，主要阅读。用向量量化学习离散隐表示，配合强大的自回归先验，能生成高质量的图像、视频和语音。</li>
+            <li>Taming Transformers for High-Resolution Image Synthesis（Esser 等，2021）：VQ-GAN，主要阅读。用卷积网络学习富含上下文的离散码本，再用 Transformer 建模码本 token 的组合，实现高分辨率图像合成。</li>
+            <li>Auto-Encoding Variational Bayes（Kingma &amp; Welling，2013）：VAE。</li>
+            <li>Pixel Recurrent Neural Networks（van den Oord 等，2016）；Image Transformer（Parmar 等，2018）；Generative Pretraining from Pixels（Chen 等，2020）。</li>
+            <li>Zero-Shot Text-to-Image Generation（Ramesh 等，2021）：DALL-E。</li>
+            <li>Chameleon: Mixed-Modal Early-Fusion Foundation Models（Meta，2024）。</li>
+            <li>Rethinking Generative Image Pretraining: How Far Are We from Scaling Up Next-Pixel Prediction?（Yan 等，2025）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>七、小结</h2>
+        <p>
+            生成模型有自回归、VAE、GAN、扩散等范式。最直接的办法是把图像展平成像素序列训练语言模型，但序列太长、每个像素信息太少，需要大量数据和计算。更实用的办法是学一个离散的分词器和反分词器：VAE 用编码器和解码器配合重建项与 KL 正则学习隐空间，损失来自证据下界；VQ-VAE 用码本把连续向量量化成离散 token，用停止梯度设计码本损失，用直通估计解决不可微；VQ-GAN 再加入对抗和感知损失。图像变成几百上千个 token 后，就能和文本 token 一起训练自回归模型，DALL-E 和 Chameleon 就是这样做的，好处是统一，代价是分词器的信息损失，难以达到最先进的图像质量。
+        </p>
+        <p>
+            下一讲是评估方法；扩散与流的内容在第 15 讲。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-711: Advanced NLP · Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="11_多模态大模型I视觉理解.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="13_评估方法.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

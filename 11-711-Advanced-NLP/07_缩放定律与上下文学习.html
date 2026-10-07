@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第七讲：缩放定律与上下文学习 | CMU 11-711 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="06_预训练.html">&larr; 上一讲</a>
+    <span>CMU 11-711: Lecture 07</span>
+    <a href="08_微调与蒸馏.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第七讲：缩放定律与上下文学习</h1>
+        <p class="subtitle">训练就是花计算量，C ≈ 6ND，幂律与双对数图，数据、模型规模与计算量的缩放定律，Chinchilla 的计算最优配比，用缩放定律选超参数；提示的三种方式，上下文学习的现象，对话格式与系统提示，思维链与提示链</p>
+        <div class="author-meta">
+            主讲：Sean Welleck · 2026 年 2 月 3 日<br>
+            资料来源：<a href="https://cmu-l3.github.io/anlp-spring2026/static_files/anlp-s2026-07-pretraining2-prompting.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=cw5aGZ4Mid4" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述内容） · <a href="https://github.com/cmu-l3/anlp-spring2026-code/tree/main/07_icl_prompting" target="_blank">课堂代码</a> · 主要阅读：Language Models are Few-Shot Learners（Brown 等，2020）；Deep Learning Scaling is Predictable, Empirically（Hestness 等，2017）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、预训练是一个资源分配问题</h2>
+        <p>
+            这一讲分两部分：继续讲预训练，引入缩放定律（scaling laws）这个一般性的思路，用它来决定模型多大、训练多少 token，甚至学习率和批大小；然后快速过一遍提示，熟悉术语和基本思想。
+        </p>
+        <p>
+            上一讲看到：数据越多、模型越大，损失越低，但似乎有收益递减。真要预训练一个大模型时，这是个资源分配问题：手上有一笔钱、一批 GPU，要决定模型多大，是加训练数据还是做大模型，还是两者都要，用哪种架构，最后那次训练用什么学习率。最终的大规模训练通常只有一次机会，所以要先做小规模实验，再做可靠的外推。
+        </p>
+        <h3>训练就是花计算量</h3>
+        <p>
+            训练的本质是对训练序列做前向传播和反向传播，再更新参数，也就是在花计算量（浮点运算次数，FLOPs）。OpenAI 早期的缩放定律论文（Kaplan 等 2020）给了一个粗略但很好用的近似：
+        </p>
+        $$C \approx 6ND$$
+        <p>
+            $N$ 是模型参数量，$D$ 是训练 token 数，$C$ 是计算量。直观理解：前向时，矩阵乘法可以写成很多乘积项的和，每个参数参与一次乘法、一次累加，所以前向约 $2N$ 次运算；反向时每个参数参与两次矩阵乘法，一次算对输入的梯度，一次算对权重本身的梯度，约 $4N$ 次。细看具体架构会略有出入。以 Llama 2 的 7B 版本为例，训练了 2 万亿 token：
+        </p>
+        $$C \approx 6\times 7\times 10^9\times 2\times 10^{12} = 8.4\times 10^{22}\ \text{FLOPs}$$
+        <p>
+            这个公式把整个预训练压缩成了三个变量。接下来要问：性能（比如损失）怎样随它们变化？数据缩放：增加 $D$，损失怎样？模型缩放：增加 $N$，损失怎样？计算缩放：增加计算量时，该加 $D$ 还是加 $N$？
+        </p>
+    </section>
+
+    <section>
+        <h2>二、幂律与双对数图</h2>
+        <p>
+            缩放定律是关于模型性能的简单、可预测的规律。做法是在很多配置上做实验，找出趋势。OpenAI 那篇论文的经典图里，纵轴是对数损失，横轴分别是计算量、数据集大小、参数量，三张图都是直线。
+        </p>
+        <p>
+            幂律（power law）是这种形式：
+        </p>
+        $$y = a\cdot x^b \quad\Longrightarrow\quad \log y = \log a + b\log x$$
+        <p>
+            两边取对数就是一个线性关系，所以在双对数坐标上画出来是一条直线。要记住底层数据其实是一条下降的曲线，只是在对数尺度上看起来是直的。$b$ 越负，下降越快。
+        </p>
+        <p>
+            怎样解读？假设 $x$ 翻倍：
+        </p>
+        $$y_{\text{new}} = a(2x)^b = a x^b\cdot 2^b = y\cdot 2^b$$
+        <p>
+            比如 $b = -0.3$，$2^{-0.3}\approx 0.81$，翻倍带来约 19% 的下降；$b = -0.7$，下降更多。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、数据缩放</h2>
+        <p>
+            一个重要的经验观察：用交叉熵损失训练的自回归语言模型，损失随数据量呈幂律下降。Hestness 等 2017 年的论文里，横轴是训练集大小、纵轴是最小验证损失，都是对数尺度；几种不同的语言模型（两层、四层 LSTM 等）的实际损失都很好地贴合拟合出来的虚线。几年后 OpenAI 在 Transformer 上看到了同样的关系：
+        </p>
+        $$L(D) = \left(\frac{D}{D_c}\right)^{-0.095}$$
+        <p>
+            $D_c$ 是常数。$2^{-0.095}\approx 0.936$，数据翻倍，损失下降约 6.4%。损失可靠地下降，但这 6.4% 是令人鼓舞还是令人沮丧，取决于数据翻倍有多难。
+        </p>
+        <p>
+            自己做这样的图：用很多不同大小的数据集训练模型，并保证模型大小不是瓶颈（模型太小就装不下大数据集），所以一般选一个很大的模型。细节上，可以为每个数据集大小设置相应的学习率调度，让学习率按训练 token 数退火。然后在双对数坐标上画点，做线性回归。
+        </p>
+        <p>
+            Hestness 论文里还有一张图，损失在双对数图上也开始弯曲。这正是上一讲说的：交叉熵损失的下限是数据分布的熵，也就是不可约损失。数据太少时，结果不可靠；中间是幂律区间；最后必然趋平，逼近熵。目前看到的缩放图大都表明我们仍处于幂律区间，还没趋平。Hestness 这篇论文为缩放关系提供了很多动机，值得一读。
+        </p>
+        <h3>用途举例</h3>
+        <ul>
+            <li>数据构成：OpenAI 论文里固定测试集（WebText2，网页数据），比较在书籍、维基百科、Common Crawl 上预训练的效果。无论用哪个，测试损失都在下降，只是整体平移；Common Crawl 也是网页数据，最好。可以把这个想法推广到寻找最优的预训练数据配比。</li>
+            <li>重复数据的效果（Muennighoff 等）：手上有一万亿 token，是再去收集一万亿，还是把这一万亿训练两遍？他们仔细拟合了缩放定律，发现重复数据确实能可靠地降低测试损失，但到一定程度后收益递减，大约重复 4 遍是个不错的数字。</li>
+        </ul>
+        <p>
+            学生问了几个问题。现在的大模型是否不再划分训练集和测试集？如果只训练一个 epoch，训练损失基本等于测试损失（数据来自同一分布），几万亿 token 连一遍都没过完时，可以放心看训练损失；但如果要比较不同的训练分布，或者重复了数据（可能过拟合），就需要一个固定的测试集。图上每个点都是一个训练好的模型吗？是的，这种图做起来很贵；缩放定律的目的就是在小规模上做实验、再往前外推，大公司能负担更多实验。测试损失的微小差别能说明能力上的差别吗？这是个好问题：缩放通常看测试损失，但损失只是实际能力的代理，两者不一定完全一致，上一讲 LLaMA 的例子就是如此；大体上损失降低和下游表现相关，但选数据集等决策时，也要评估下游任务。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、模型规模缩放</h2>
+        <p>
+            模型大小也有类似的幂律关系。从不同大小模型的损失曲线还能看出：大模型需要的样本更少。要达到同样的测试损失，大模型需要的 token 比小模型少。
+        </p>
+        <p>
+            也可以用来做决策。比如在各种参数量下比较 Transformer 和 LSTM 的测试损失：Transformer 在每个规模上都更低，而且如果趋势延续，LSTM 不会在更大规模上追上来。这些结论都是经验性的，依赖具体实验设置，但至少提供了数据。OpenAI 那篇论文还做了很多实验：加深还是加宽（增大隐藏维度），超参数之间的比例，等等。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、计算量缩放</h2>
+        <h3>1. 怎么画</h3>
+        <p>
+            计算量 $C = 6ND$ 有两个变量要变。做法：训练一批大小不同、token 数不同的模型，把每个模型训练过程中每一步的损失画出来（浅蓝色曲线）；在每个计算量水平上，选损失最低的那个点（黑色），这些点构成计算最优的前沿（compute optimal）；对这些（计算量，损失）点在双对数坐标上做线性回归（橙色线），这就是缩放定律，比如 $L(C)\propto 1/C^{0.05}$。也就是说，计算量分配得最优时，损失随计算量呈幂律下降。
+        </p>
+
+        <h3>2. Chinchilla：选模型大小和 token 数</h3>
+        <p>
+            DeepMind 的论文《Training Compute-Optimal Large Language Models》训练的模型叫 Chinchilla，所以常被称为 Chinchilla 论文，Sean 推荐阅读。他们做了大量不同大小模型的实验，在每个计算量上找到计算最优的点，再把这些点的参数量（或 token 数）对计算量作图，拟合直线外推：在某个大得多的计算预算下，最优的是约 670 亿参数的模型，训练约 1.5 万亿 token。用更小的模型、训练更多 token，按他们的数据，同样的计算量会得到更高的损失。论文用了三种方法估计（这里讲的是对训练曲线取最小值，另外两种不细讲），结果略有差异但大体一致。
+        </p>
+        <p>
+            一个重要结论：拟合出的系数表明，参数量和数据量应该大致同比例增加。这篇论文引起关注的原因之一是它与 OpenAI 的结论相矛盾：OpenAI 认为预算更应该花在做大模型上，而 Chinchilla 认为数据同样重要。
+        </p>
+        <p>
+            实践中呢？现在的模型通常按系列发布，模型大小很大程度上由推理速度和部署场景决定。比如一家公司想要一个能在笔记本上跑的尺寸，定下尺寸后，就在预算内用尽可能多的 token 训练它。所以计算最优分析提供了很多见解，但实际做法会有所不同。
+        </p>
+
+        <h3>3. 用缩放定律选批大小和学习率</h3>
+        <p>
+            DeepSeek LLM 的论文在小规模上做了大量实验，外推出更大计算预算下的最优批大小和学习率：随计算预算增大，最优批大小变大，最优学习率变小（至少在他们的实验里如此），并用这些预测为最终的训练选超参数。
+        </p>
+        <p>
+            小结：可以从计算量的角度理解预训练，计算量由模型大小和 token 数决定；缩放定律是某个变量（计算量、数据量）与性能（损失）之间观察到的关系，可以用来外推，帮助为昂贵的预训练做决策：用什么数据配比、多大的模型、什么超参数。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、提示</h2>
+        <p>
+            预训练完成后，想直接用模型，就要用到提示（prompting）这一类技术：用一个格式化函数 $f$ 把输入 $x$ 变成一段提示，促使模型去完成任务，然后从 $p_\theta(y\mid f(x))$ 生成输出。比如 $x$ = "I love advanced NLP!"，$f(x)$ = "Classify this sentence's sentiment as either Positive or Negative: 'I love advanced NLP!'."，希望输出 "The sentence is positive."。问题很多，比如模型输出一堆数字怎么办。
+        </p>
+        <p>
+            生成用的是第三讲的自回归采样：逐个采样 token、接回上下文，直到遇到结束 token 或达到长度预算（比如 1000 个 token）。第 9 讲会详细讲生成算法。
+        </p>
+        <h3>1. 不用提示</h3>
+        <p>
+            预训练模型只会续写文本。给它一个前缀 "When a dog sees a squirrel, it will usually"，它会续写成 "bark a lot, especially at close range." 或 "start to chase after it. When it does…"。下载一个预训练模型、不做任何格式化，看到的就是这种行为。
+        </p>
+        <h3>2. 指令提示（零样本）</h3>
+        <p>
+            给一条指令，让模型做特定任务，$f(x;\ \text{instruction})$。叫零样本（zero-shot），是因为提示里没有给 $(x, y)$ 示例。用预训练模型这样做会遇到问题：输出格式五花八门，比如课堂代码里一次输出 "negative"，另一次输出类似 "array([0, 0])" 的东西，放进生产系统就是真问题；换个措辞效果就变；模型可能根本没训练过遵循指令，或只支持特定格式。下一讲会讲专门为此微调模型，让它可靠地遵循任务描述和输出格式。即使是微调过的模型，除非用多种提示措辞训练过，效果也可能随措辞变化。
+        </p>
+        <h3>3. 指令加示例（少样本）</h3>
+        <p>
+            在提示里再给 $K$ 个输入输出示例 $[(x,y)_1, \dots, (x,y)_K]$，最后给测试输入 $x_{\text{test}}$，模型如果顺着模式走，就会输出 $y_{\text{test}}$。由 GPT-3 论文推广开。示例让模型明白任务格式和预期输出，而且不需要更新任何参数，所以叫上下文学习（in-context learning，ICL）：像监督学习一样有示例，但一切都在上下文里。课堂代码里加了"Classification: positive"、"Classification: negative"这样的示例后，一个很小的预训练模型也更守格式了。当然仍然没有保证，现在上线一般会用指令微调过的模型，但总要考虑它不遵守格式的概率。真实的输入输出可能更复杂，比如 Llemma 用于 MATH 数据集的提示。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、上下文学习的一些现象</h2>
+        <p>
+            一个大体的发现：海量预训练之后，模型可能已经见过和某些任务相似的数据，比如上一讲 GPT-2 论文里那段讨论法语和英语、几乎就是在做翻译的论坛文字。所以上下文学习有时只是在"检索任务"：从模型已有的分布里把任务调出来，而不是真的学会一个新任务。人们做了很多实验来区分这两种情况。
+        </p>
+        <ul>
+            <li>Agarwal 等 2024 年研究了多样本上下文学习（many-shot ICL）。在 MATH 数据集上，只给输入、不给输出（无监督 ICL，提示里说明了答案格式）反而比给完整的输入输出示例更好。这说明模型本来就会解这类数学题，并不是从示例里学会的；示例甚至有害，因为它们可能把模型引向某种特定解法，比如示例的解答很短、跳了很多步，还不如让模型按自己的方式写。（还有一种"强化 ICL"，用模型自己生成的输出当示例。）</li>
+            <li>翻转标签：做情感分析时把标签打乱，比如非常负面的影评要输出 positive。模型必须学会一个新模式。示例很少时表现很差；示例越来越多，它逐渐学会新模式，准确率回升。说明模型从预训练带来了"正面评论就输出正面"的偏向，少量示例不足以推翻它；也有用抽象标签 A、B、C 代替的实验。</li>
+            <li>不同模型利用大量示例的能力不同。</li>
+            <li>模型对示例的细微变化很敏感：示例的顺序（Lu 等 2021），标签是否平衡、示例是否覆盖所有标签（Zhang 等 2022）。这些发现也可能随模型而变。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>八、对话提示</h2>
+        <p>
+            现在很多模型被微调成聊天机器人（下一讲细讲），输入以消息列表的格式给出：
+        </p>
+        <ul>
+            <li>system：给系统的消息，影响它的行为，比如"请把影评分类为 positive 或 negative"。</li>
+            <li>user：用户输入的消息，比如"This movie is a banger."。</li>
+            <li>assistant：系统输出的消息。</li>
+        </ul>
+        <p>
+            多轮交互就是一串这样的消息。实际上它们会被拼成一个字符串，大量使用特殊 token 标记边界，比如 Llama 3 的格式。有的公司公开了系统提示，比如 Anthropic 2024 年 11 月版 Claude 的系统提示写得非常详细：要逐步推理，说明知识截止日期，怎样对待有害请求，怎样数单词、字母、字符，使用 Markdown，甚至要在用户问起时帮助他们学习提示技巧。系统提示在很大程度上决定了聊天系统的行为。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、思维链与提示链</h2>
+        <h3>1. 思维链</h3>
+        <p>
+            在解题类任务上，一个重大突破是：让模型先写出中间步骤，表现会好得多。这叫思维链（chain of thought，Wei 等 2022）。最初的做法是在少样本示例里手写推理过程，让模型在给出答案前先解释推理；一个理解是，这给了模型自适应的计算时间。很多模型在基础算术题上本来很吃力，写出步骤后好了很多。
+        </p>
+        <p>
+            没有示例时，模型也可能输出推理链：预训练或微调数据里有思维链风格的数据，系统提示里也可能要求这样做。Kojima 等 2022 年发现，对 PaLM、InstructGPT 这样的模型，只要在问题后面加一句类似"让我们一步步想"的话就有效。课程后面还会多次遇到这个思想：专门训练模型输出思维链，以及能否用很长的思维链提升性能。
+        </p>
+        <h3>2. 问题分解与提示链</h3>
+        <p>
+            把问题分解成多步：提出一个子问题，查询搜索引擎，重复，同样用少样本示例教会模型这种格式。更一般地，可以把多次调用提示过的模型（以及外部函数）"链"起来，叫提示链（prompt chains）。有相关的软件库，比如 Sasha Rush 的 MiniChain。
+        </p>
+    </section>
+
+    <section>
+        <h2>十、参考资料</h2>
+        <ul>
+            <li>Language Models are Few-Shot Learners（Brown 等，2020）：GPT-3，主要阅读。展示了大规模语言模型在不更新参数、只靠提示里的少量示例时，就能完成翻译、问答、算术等多种任务。</li>
+            <li>Deep Learning Scaling is Predictable, Empirically（Hestness 等，2017）：主要阅读。在多个领域证实泛化误差随训练集大小呈幂律下降。</li>
+            <li>Scaling Laws for Neural Language Models（Kaplan 等，2020）。</li>
+            <li>Training Compute-Optimal Large Language Models（Hoffmann 等，2022）：Chinchilla。</li>
+            <li>DeepSeek LLM: Scaling Open-Source Language Models with Longtermism（DeepSeek AI，2024）：用缩放定律选批大小和学习率。</li>
+            <li>Scaling Data-Constrained Language Models（Muennighoff 等）：重复数据的缩放定律。</li>
+            <li>Many-Shot In-Context Learning（Agarwal 等，2024）。</li>
+            <li>Chain-of-Thought Prompting Elicits Reasoning in Large Language Models（Wei 等，2022）；Large Language Models are Zero-Shot Reasoners（Kojima 等，2022）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>十一、小结</h2>
+        <p>
+            预训练可以理解为花计算量，$C\approx 6ND$。损失随数据量、参数量和计算量都呈幂律下降，在双对数图上是直线；数据翻倍，损失大约下降 6.4%；曲线最终会趋于数据的熵。大模型更省样本。在固定计算量下，Chinchilla 发现参数量和 token 数应该大致同比例增加。缩放定律的价值在于用小规模实验外推大规模决策，包括数据配比、模型大小、批大小和学习率。提示是不训练就使用模型的方式：不加提示只会续写，零样本给指令，少样本给示例，也就是上下文学习；上下文学习有时只是在调出模型已有的能力，并且对示例的顺序和标签分布很敏感。对话模型用系统、用户、助手三种角色组织输入；思维链让模型先写出中间步骤，多个提示调用可以串成提示链。
+        </p>
+        <p>
+            下一讲讲微调：怎样把基础模型训练成能遵循指令的模型，以及蒸馏。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-711: Advanced NLP · Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="06_预训练.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="08_微调与蒸馏.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

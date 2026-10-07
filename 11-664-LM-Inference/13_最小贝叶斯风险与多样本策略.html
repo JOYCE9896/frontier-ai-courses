@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十四讲：最小贝叶斯风险与多样本策略 | CMU 11-664/763 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="12_奖励模型与BestofN.html">&larr; 上一讲</a>
+    <span>CMU 11-664/763: Lecture 14</span>
+    <a href="14_推理扩展与模型规模.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十四讲：最小贝叶斯风险与多样本策略</h1>
+        <p class="subtitle">概率最高的输出不一定最好，用其他样本作伪参考估计风险，MBR 的三个组成部分：分布、证据集与假设集、度量，由粗到细的 MBR 与基于置信度的剪枝，自洽性是 MBR 的特例，以及不能精确匹配时的通用自洽性</p>
+        <div class="author-meta">
+            主讲：Amanda Bertsch · 2025 年 10 月 9 日<br>
+            资料来源：<a href="https://docs.google.com/presentation/d/1WiLhDob25YOb1YU1AVwVPWYvKRK9HJR4v57_pLizndk/edit" target="_blank">课程幻灯片</a>（这一讲没有公开录像，本文只依据幻灯片整理，补充的解释以前几讲的内容为准） · 主要阅读：It's MBR All the Way Down: Modern Generation Techniques Through the Lens of Minimum Bayes Risk（Bertsch、Xie 等，2023）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、概率最高的输出就是最好的吗</h2>
+        <p>
+            课表上第 13 讲是 Omar Khattab 的客座讲座"系统而非模型"，没有录像，幻灯片 PDF 也拿不到，所以这里直接接到第 14 讲。这一讲是"多样本策略"的第二部分。
+        </p>
+        <p>
+            概率低的输出往往比概率高的差："The cat sat down."（0.3）、"The cat grew wings."（0.001）、"The cat ran away."（0.25），猫长出翅膀显然不好。但只比较概率最高的那些时，就没那么清楚了。实际中，模型分数分布的最顶端和我们关心的大多数指标相关性并不好（第四讲讲过似然陷阱）。
+        </p>
+        <p>
+            看六个输出：0.3 "The cat sat down."，0.25 "The cat ran away."，0.2 "The cat sprinted off."，0.149 "The cat got out of there."，0.1 "The cat is very small."，0.001 "The cat grew wings."。单个最可能的输出是"猫坐下了"，但 60% 的概率质量说的都是"猫离开了"，只是这部分概率分散在几个相似的说法上。
+        </p>
+        <p>
+            那什么让输出好？"猫坐下了"概率高，但和其他生成不一样；"猫跑开了"概率高，又和其他生成相似，风险更低。我们要的是概率高、风险低的输出。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、估计风险</h2>
+        <p>
+            幻灯片上的类比：一道小测题拿不准，于是作弊问了十个最聪明的朋友，6 个说 A，3 个说 B，1 个说 C，你会选哪个？想法是：把其余候选生成当作伪参考（pseudo-references），评估当前输出与它们每一个的一致程度。为此要选一个度量 $G(y, y')$。
+        </p>
+        <p>
+            要在整个分布上估计风险，但通常不可能把模型的所有输出都采样出来。不知道完整分布时怎么办？采样来估计（第二讲讲过）。从模型采样得到证据集 $Y_e$，输出出现的频率就是其概率的估计：采样几百万条序列，A 比 B 常见一倍，就会看到 A 出现两倍多次。
+        </p>
+        <h3>最小贝叶斯风险</h3>
+        <p>
+            最小贝叶斯风险（Minimum Bayes Risk，MBR）解码选出概率高、风险低的输出：
+        </p>
+        $$\hat y = \arg\max_{y\in Y_h}\frac{1}{|Y_e|}\sum_{y'\in Y_e}G(y, y')$$
+        <p>
+            它在模拟什么？如果 $Y_e$ 是真实的参考答案，这正是"选出得分最高的输出"。我们不知道真实参考答案的分布，于是用另一个分布（模型的分布）做代理。
+        </p>
+        <p>
+            另一个视角：束搜索是在概率空间里寻找众数，MBR 是在由增益度量定义的特征空间里寻找众数。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、MBR 的组成部分</h2>
+        <h3>1. 分布</h3>
+        <p>
+            从哪个分布采样？祖先采样得到的是模型学到的分布，是很好的默认选择。也可以用修改过的分布，但要想清楚为什么修改：有的解码策略是为了得到更好的单个输出而操纵分布；有的是为了让输出互不相同，这就违背了蒙特卡洛估计的本意；有的是为了改变整体分布，比如对齐，和 MBR 结合是合理的。
+        </p>
+        <h3>2. 证据集与假设集</h3>
+        <p>
+            一个顾虑：这样做好像为了分布层面的性质，丢掉了所有让单个输出更好的技巧，而我们也想用那些花哨的解码技巧。办法是把用作证据的样本和用作候选输出的样本分开：证据集作伪参考，假设集（候选）是可能返回给用户的输出。一般 $|Y_h| &lt; |Y_e|$，有时 $Y_h\subset Y_e$。
+        </p>
+        <h3>3. 度量</h3>
+        <p>
+            用度量 $G$ 做 MBR，一般在这个度量上会比其他方法都好，但有过拟合某个度量的风险。Bertsch、Xie 等 2023 发现 MBR 对所用度量相当稳健。
+        </p>
+        <h3>4. 合理的默认设置</h3>
+        <ul>
+            <li>计算风险的分布：你的模型的分布。</li>
+            <li>计算风险用的证据（伪参考）：祖先采样。</li>
+            <li>要考虑的假设（候选输出）：你能得到的最好的输出，可以来自多种采样方法。</li>
+            <li>评估相似度的度量：你在下游关心的某个度量，但可能过度优化它。</li>
+        </ul>
+        <p>
+            如果证据和假设用同一批输出，就用接近原分布、质量又较高的采样，比如 epsilon 采样（第三讲）。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、更便宜的 MBR</h2>
+        <p>
+            MBR 需要：采样证据集（以及可选的单独假设集）；把每个假设与每个证据比较；取聚合分数最高的。采样不是 MBR 特有的问题，用任何高效、并行的采样都行；比较这一步要做 $|Y_h|\times|Y_e|$ 次度量计算，是主要开销；取最大值则极其便宜。
+        </p>
+        <h3>1. 由粗到细的 MBR</h3>
+        <p>
+            Eikema 和 Aziz 2022 的两个关键改进：至少一个集合较小时更快；度量便宜时更快。
+        </p>
+        <ul>
+            <li>缩小集合：证据集必须从要最小化风险的那个分布采样，很可能有重复（可以缓存重复样本的分数）；假设集可以是任何东西，选项越多，碰上真正好答案的机会越大。</li>
+            <li>更便宜的度量：很难有既便宜又很好的度量，那就各用一个：先用便宜的度量在大假设集上做 MBR，过滤搜索空间；筛成较小的假设集；再用更好的度量重新做 MBR 选出最终答案。</li>
+        </ul>
+        <p>
+            由粗到细的过滤同时提升了结果和效率，还能让假设集不再依赖祖先采样。
+        </p>
+        <h3>2. 基于置信度的剪枝</h3>
+        <p>
+            Cheng 和 Vlachos 2023 的想法：假设集里有一些不怎么好的假设，但我们花了大量时间为每个假设算精确分数，能不能早点放弃差的？算法：从大假设集和小证据集开始；每一步淘汰按当前证据成为最佳的可能性足够低的假设；增大证据集；重复，直到证据集达到预定的最大规模，再在剩下的假设上做 MBR 并返回答案。
+        </p>
+        <p>
+            怎样判断一个假设不太可能是最好的？想知道的是"按最终证据，$y'$ 是 $Y$ 中最好假设的概率"，现在只知道"按小得多的证据集，$y'$ 是否最好"，要估计这个嘈杂观察的误差。"$y'$ 是最好的"不好处理，换成更简单的"$y'$ 比当前排第一的 $\tilde y$ 好的概率"。有一组针对伪参考的当前分数 $S$，用自助法（bootstrap）：从 $S$ 中有放回地重抽很多组 $S'$，每组都算 $\text{score}(y')\ge\text{score}(\tilde y)$ 是否成立，得到估计概率 $P(\text{score}(y')\ge\text{score}(\tilde y))$，低于阈值就剪掉。流程：从少量参考开始；算每个假设对每个参考的分数；自助估计每个假设至少和当前最佳一样好的可能性；丢掉成功可能性低的假设；用更多参考重复。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、自洽性与通用自洽性</h2>
+        <p>
+            自洽性（Wang 等 2023，第七讲讲过）：用思维链提示求答案；采样多个输出；从每个输出抽出答案（忽略解释）；返回出现最多的答案。它和 MBR 的关系：候选是"推理链加最终答案"，度量是最终答案的精确匹配，此时 MBR 选出的就是与其他样本一致次数最多的答案，即多数投票。
+        </p>
+        <p>
+            不能做精确匹配怎么办，比如开放式生成？通用自洽性（Universal Self-Consistency，Chen、Aksitov 等 2023）：把所有候选拼在一起交给大模型，让它选出与其他回答最一致的那个，用模型的判断代替精确匹配。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、参考资料</h2>
+        <ul>
+            <li>It's MBR All the Way Down: Modern Generation Techniques Through the Lens of Minimum Bayes Risk（Bertsch、Xie 等，2023）：主要阅读。</li>
+            <li>Is MAP Decoding All You Need? The Inadequacy of the Mode in Neural Machine Translation（Eikema &amp; Aziz，2020）。</li>
+            <li>Sampling-Based Approximations to Minimum Bayes Risk Decoding for Neural Machine Translation（Eikema &amp; Aziz，2022）：由粗到细。</li>
+            <li>High Quality Rather than High Model Probability: Minimum Bayes Risk Decoding with Neural Metrics（Freitag 等）。</li>
+            <li>Faster Minimum Bayes Risk Decoding with Confidence-based Pruning（Cheng &amp; Vlachos，2023）。</li>
+            <li>Efficient Minimum Bayes Risk Decoding using Low-Rank Matrix Completion Algorithms；Frustratingly Easy Model Ensemble for Abstractive Summarization。</li>
+            <li>Self-Consistency（Wang 等，2023）；Universal Self-Consistency for Large Language Model Generation（Chen、Aksitov 等，2023）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>七、小结</h2>
+        <p>
+            从一组输出里选一个，可以看作最小化风险：概率质量可能分散在多个意思相同的说法上，单个最可能的输出未必代表模型的主流意见。MBR 把其他样本当伪参考，选出与它们平均一致度最高的输出，相当于在度量定义的特征空间里找众数。证据集最好用祖先采样贴近模型分布，假设集可以用任何能得到好输出的方法，度量选下游关心的（MBR 对度量相当稳健）。计算量主要在两两比较，可以由粗到细先用便宜度量过滤，或者用自助法估计每个假设胜过当前最佳的概率、逐步淘汰。自洽性就是以答案精确匹配为度量的 MBR，通用自洽性则让大模型来判断哪个回答与其他最一致。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-664/763: Inference Algorithms for Language Modeling · Fall 2025</p>
+        <nav class="footer-nav">
+            <a href="12_奖励模型与BestofN.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="14_推理扩展与模型规模.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

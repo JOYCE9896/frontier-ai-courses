@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第九讲：解码算法 | CMU 11-711 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="08_微调与蒸馏.html">&larr; 上一讲</a>
+    <span>CMU 11-711: Lecture 09</span>
+    <a href="10_检索增强生成与深度研究.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第九讲：解码算法</h1>
+        <p class="subtitle">解码是在一棵树上做选择，作为优化的贪心与束搜索，MAP 解码的退化：重复、空序列与非典型，祖先采样与复合误差，top-k、top-p 与温度，KV 缓存，计算受限与访存受限，以及加速推理的三个层面和推测解码</p>
+        <div class="author-meta">
+            主讲：Sean Welleck · 2026 年 2 月 10 日<br>
+            资料来源：<a href="https://cmu-l3.github.io/anlp-spring2026/static_files/anlp-s2026-09-decoding.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=MRtYdi4CdmA" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述内容） · <a href="https://github.com/cmu-l3/anlp-spring2026-code/tree/main/09_decoding" target="_blank">课堂代码</a> · 主要阅读：From Decoding to Meta-Generation（Welleck 等，2024）第 1 到 3 节
+        </div>
+    </header>
+
+    <section>
+        <h2>一、从学习转到推理</h2>
+        <p>
+            前面讲了建模（分类还是生成，自回归还是别的，用什么架构）和学习（最大似然还是别的，要不要预训练，能用什么数据和监督）。这一讲专讲推理：学完之后怎样用模型，具体就是怎样从语言模型生成文本。作业一里已经用到了。这里有很多有意思的算法和奇怪的现象，尤其在小模型或训练得不好的模型上；加速推理也是一个非常活跃的研究方向。幻灯片改编自两处：USC 博士生 Matthew Finlayson 在 NeurIPS 2024 推理教程中负责的部分，以及 CMU 博士生 Amanda Bertsch 去年在本课的客座讲座。那次 NeurIPS 和 Taylor Swift 的演唱会撞在同一座城市，酒店被订光，会议还推迟了几天，所以例子里很多和 Taylor Swift 有关。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、基本设定</h2>
+        <p>
+            自回归语言模型把输出序列的概率分解为一串下一个 token 的条件分布（用 $y$ 表示完整序列 $y_{1:T}$）：
+        </p>
+        $$p_\theta(y_{1:T}\mid x) = \prod_{t=1}^T p_\theta(y_t\mid y_{&lt;t}, x)$$
+        <p>
+            每一项给出下一个 token 的分布。选一个 token，加进上下文，就得到新的下一个 token 分布。可以把解码定义为：不断选择下一个 token，直到得到一个输出。这不是普适的定义，只针对自回归模型。
+        </p>
+        <p>
+            这其实是在一棵树上搜索：第一步有很多选择（图上只画两个最可能的），选了一个，树就往下展开，可能性空间极大。生成一个序列，就是从根走到某个叶子。两个问题：什么样的序列是好的，也就是目标是什么；目标是关于整个序列的全局目标，可每一步只能做局部选择，怎样做局部选择才能达到全局目标。这一讲讲两种视角：把解码看作优化，把解码看作采样。两者也可以互相结合。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、作为优化的解码</h2>
+        <p>
+            目标是在输出空间 $\mathcal{Y}$ 中找到某个打分最高的序列。手头只有模型，最自然的打分就是模型的概率：
+        </p>
+        $$\hat y = \arg\max_{y\in\mathcal{Y}} p_\theta(y\mid x)$$
+        <p>
+            这是在找分布的众数，所以叫寻找众数（mode-seeking）；从贝叶斯的角度看，有先验 $\theta$ 和证据 $x$，在后验 $p_\theta(y\mid x)$ 里找众数，所以也叫最大后验（Maximum A Posteriori，MAP）解码。读这方面的论文会常看到这些术语。难点是输出空间随长度指数增长，只能靠局部决策去逼近。
+        </p>
+        <h3>1. 贪心解码</h3>
+        <p>
+            每一步选概率最大的 token：$\hat y_t = \arg\max_{y_t\in V} p_\theta(y_t\mid\hat y_{&lt;t}, x)$。比如下一个 token 分布里 "American" 概率最高，就选它。乍看像是解决了问题，其实并不能保证找到概率最大的序列。一旦选了局部最优的那个（比如概率 0.6），后面的 token 概率可能都很低，乘起来反而不如一开始选一个局部次优的选项、之后概率都很高的路径。课上有一个 GPT-2 的真实例子：选 "singer" 那条路，最终的序列概率比局部最优的那条更高。
+        </p>
+        <h3>2. 束搜索</h3>
+        <p>
+            束搜索（beam search）是一种宽度受限的广度优先搜索：同时保留几条最可能的路径。以束宽 2 为例：看所有可能的下一个 token，保留概率最高的两个；分别展开它们，在所有候选里再保留得分最高的两个；如此继续，直到得到完整的序列。束宽 $B = 1$ 就是贪心解码；$B$ 等于所有可能（$|V|^{T_{\max}}$，比如词表 5 万、长度 128，是天文数字）就是精确的 MAP。实践中用小得多的值，比如 16，当作超参数。也可以在束搜索里用采样代替取前 $B$ 个，引入随机性，还能增加输出的多样性。
+        </p>
+        <p>
+            Hugging Face 里，贪心是 model.generate(do_sample=False, num_beams=1)，束搜索是 num_beams=b。
+        </p>
+        <p>
+            在大语言模型之前，束搜索在机器翻译、摘要这类封闭式任务里广泛使用，是标准解码算法，增大束宽常能提升效果。现在的一些语言模型库甚至没有实现束搜索，人们多用采样。原因一是下面要讲的退化现象，二是计算成本：束越宽，推理开销越大，常常不划算。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、MAP 解码的问题</h2>
+        <h3>1. 重复陷阱</h3>
+        <p>
+            用小的预训练模型（比如 SmolLM2-135M）做贪心解码，很快就会看到模型陷入重复循环，课堂代码可以复现。奇怪的是，模型会给这种循环很高的概率，一旦进入就自我强化，概率越来越高，只看概率的话永远跳不出来，确切原因还没完全弄清。在开放式任务里尤其常见：输出分布熵很高时，概率最高的路径可能有点"非典型"，走下去就掉进循环。缓解办法：解码时加重复惩罚（如果下一个 token 构成重复，就压低它的分数），或者修改训练的损失函数专门惩罚重复。现在经过指令微调的较强模型这种情况少多了，但各家 API 仍然提供重复惩罚选项，说明还会发生；可能是封闭式任务的训练，或者用好的奖励函数做强化学习，自然地压制了这些异常序列。
+        </p>
+        <h3>2. 短序列</h3>
+        <p>
+            Stahlberg 和 Byrne 2019 年用一种巧妙的剪枝方法，在某些任务上真正求出了精确的 MAP 解，发现概率最高的输出竟然是空序列：给输入后直接输出结束符。补救办法是长度归一化：既然概率天然随长度下降，束搜索时就把分数按长度归一化，这是个合理的变通。问题是每修补一种退化，解码过程就复杂一点，比如长度归一化和重复惩罚都带来新的超参数。
+        </p>
+        <h3>3. 非典型</h3>
+        <p>
+            信息论里有"典型集"的概念。一枚硬币正面概率 0.6，抛 100 次，哪个结果概率最高？全是正面，每次乘 0.6，出现一次反面就要乘 0.4。可如果写代码模拟抛 100 次，几乎永远得不到 100 个正面。分布的大部分质量分散在你实际采样会得到的那些结果上，概率最大的单个结果只占微不足道的一点，它不在典型集里。类似地，概率最高的生成也可能是非典型的，那些重复的、提前结束的序列正是这种非典型结果（Meister 等 2022 有专门讨论）。补救办法是采样。
+        </p>
+        <h3>4. 概率最高就是最好吗</h3>
+        <p>
+            低概率的输出往往比高概率的差，但在最靠前的几个输出之间比较，就不那么清楚了。比如 "the cat sat down" 和 "the cat ran away" 都合理，很难说哪个更好，解码可能需要概率之外的信号来打破平局。另外，同一个意思可能有多种说法："It ran away"、"It sprinted off"、"It got out of there"，概率被分摊到这些表面形式上，合计 0.6，单看每一个都不如 "the cat sat down" 高。所以我们往往想要"可能"但不是"最可能"的输出。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、采样</h2>
+        <p>
+            现在的大模型 API（比如 Together.ai 的 playground）提供的是温度、top-p、top-k 等采样选项，可能根本没有束搜索。不去找众数，而是从分布中抽样：概率高的出现得更多，但也有机会抽到别的。这能增加多样性，探索分布的不同区域，也可能避开非典型序列。
+        </p>
+        <h3>1. 祖先采样</h3>
+        <p>
+            最基本的是祖先采样（ancestral sampling），名字来自图模型：从顶端开始依次对每个节点采样。每一步从下一个 token 分布里抽一个：$\hat y_t\sim p_\theta(y_t\mid\hat y_{&lt;t}, x)$。这一次可能抽到 American，下一次是别的。由图模型的性质，这等价于从整个序列的联合分布 $y_{1:T}\sim p_\theta(y_{1:T}\mid x)$ 中采样。每一步是对 $V$ 个元素的类别分布采样，又快又简单，PyTorch 里有现成实现。课堂代码演示了一种实现：构造累积分布，均匀抽一个 0 到 1 之间的数，看它落在哪一段，就选那个 token；线性查找可以改成二分查找。抽得够多，经验分布会收敛到真实分布。
+        </p>
+        <h3>2. 祖先采样的问题</h3>
+        <p>
+            人们用贪心解码看到重复，转而用采样，又看到胡言乱语。比如 "The weather today is very cold outside as it got cold the night before. 14 the teacher is going to give a card tomorrow."，像是走神了，出现 "14" 也许是以为自己在列表里；再抽一次可能讲起了山和外星人。原因是模型不完美，尤其是要拟合整个互联网文本分布、规模又有限的预训练模型：
+        </p>
+        <ul>
+            <li>长尾：每一步有 5 万甚至 10 万个选择，softmax 让每个 token 的概率都不为零。即使每个"坏" token 概率都很小，加起来也不可忽视。这叫重尾（heavy tail）。</li>
+            <li>复合误差：设每一步抽到坏 token 的总概率为 $\epsilon$，长度为 $T$ 的序列一个坏 token 都没抽到的概率是 $(1-\epsilon)^T$。$\epsilon = 0.01$、$T = 128$ 时约 0.276；$\epsilon = 0.05$、$T = 128$ 时约 0.0014；$\epsilon = 0.01$、$T = 1024$ 时约 0.000033。</li>
+        </ul>
+        <p>
+            实际情况要细致一些：一句话开头熵高，容易出错；后面只是补上正确语法、几乎是确定的位置，出错概率很低；模型有时也能从错误里恢复过来。但这说明了自回归模型的复合误差问题。
+        </p>
+        <h3>3. 截断长尾</h3>
+        <p>
+            既然问题在尾巴，就把尾巴截掉：低于某个阈值的 token 概率设为零，剩下的重新归一化后再采样。
+        </p>
+        <ul>
+            <li>top-k 采样：只从概率最高的 $k$ 个 token 里采样，$\hat y_t\sim p_\theta(y_t\mid y_{&lt;t}, x)/Z_t$（若 $y_t$ 在前 $k$ 个），否则为 0。问题是固定的 $k$ 不一定合适：分布很分散时，可能应该考虑更多选项。</li>
+            <li>top-p 采样：按概率从高到低累加，累计超过 $p$ 后截断。分布分散在多个合理选项上时，它会比 top-k 保留更多；分布很尖时，两者效果差不多。</li>
+        </ul>
+        <p>
+            用了截断后，同一个例子变成 "The weather today is very cold with low temperature of 30 but there's still some rain."，合理多了。这些方法提出时有不少启发式成分，评估靠人工：让标注者比较两段文本哪个更好，总体上截断方法生成的文本更连贯，于是成了标准选项。后来又有 epsilon 采样、eta 采样、min-p 等变体，各有理由，本质上都是对下一个 token 分布做某种截断或变换。Hugging Face 里：祖先采样 do_sample=True，top-k 加 top_k=20，top-p 加 top_p=0.9。
+        </p>
+        <h3>4. 温度采样</h3>
+        <p>
+            比 top-k、top-p 更常见。不截断，而是人为地让分布更尖或更平：
+        </p>
+        $$\text{softmax}(x, \tau)_i = \frac{\exp(x_i/\tau)}{\sum_j\exp(x_j/\tau)}$$
+        <p>
+            $\tau$ 是温度，比如 0.9。$\tau > 1$ 让分布更平，$\tau = 2$ 几乎接近均匀分布；$\tau < 1$ 让分布更尖，把更多质量分给众数；$\tau\to 0$ 等价于贪心解码，所以温度太低会遇到贪心的问题，$\tau = 1$ 又可能遇到胡言乱语。很少把温度设到 1 以上，除非想要非常多样的输出，但那等于在破坏模型的分布。温度 0.5 的输出和 top-k、top-p 差不多；温度 1.5 的输出比祖先采样还离谱。
+        </p>
+        <p>
+            有学生问提高温度是不是意味着更有创造力。Sean 说通常不是：模型对什么合理有自己的分布，提高温度只是人为地抬高本不太可能的东西，模型越好，这样做越没道理；降低温度至少是把质量集中到模型认为合理的东西上。另一个学生问为什么不引入某种效用函数来最大化。这正是他漏讲的一点：优化和采样可以互补。比如想最大化概率，可以采样一百万个序列，挑概率最高的；更一般地，用采样生成候选，再用效用函数挑选。有好的效用函数时，这类算法非常实用，课程最后一讲会讲。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、KV 缓存</h2>
+        <p>
+            用 Transformer 生成序列时，KV 缓存是一定要做的。解码到第 $t$ 步，新 token 要对之前所有位置 $\le t$ 做注意力，需要所有过去 token 的键和值。如果每一步都重新算，总共要做 $O(T^2)$ 的计算：第 1 步算 $k_1, v_1$，第 2 步算 $k_1, v_1, k_2, v_2$，第 3 步又从头算……而因果掩码保证过去 token 的键和值不受后面 token 影响，算出来都一样，重算纯属浪费。所以把之前算好的键值存起来。缓存与重算完全等价，又能加速，所以一定要用。
+        </p>
+        <p>
+            以一层、一个注意力头为例，第 $t$ 步：
+        </p>
+        $$q_t = h_t W_Q\in\mathbb{R}^{1\times d_k}, \qquad k_t = h_t W_K\in\mathbb{R}^{1\times d_k}, \qquad v_t = h_t W_V\in\mathbb{R}^{1\times d_v}$$
+        <p>
+            已缓存 $K_{1:t-1}\in\mathbb{R}^{(t-1)\times d_k}$、$V_{1:t-1}\in\mathbb{R}^{(t-1)\times d_v}$。把 $k_t$ 接到 $K_{1:t-1}$ 后面、$v_t$ 接到 $V_{1:t-1}$ 后面，再算注意力：
+        </p>
+        $$z_t = \text{softmax}\!\left(\frac{q_t K_{1:t}^\top}{\sqrt{d_k}}\right)V_{1:t}$$
+        <p>
+            不缓存的话，每一步都要重算 $K_{1:t} = [h_1; \dots; h_t]W_K$ 和 $V_{1:t}$。解码时查询只是一个向量。课堂代码有一个简单 Transformer 的 KV 缓存实现，也可以看 LLaMA 或 minGPT 的代码里和 cache 相关的部分。实验结果：序列越长，不缓存的平方代价越明显，有缓存的生成时间低得多。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、解码为什么慢</h2>
+        <p>
+            有了 KV 缓存就够了吗？不够，而且问题更微妙。除了实际的计算，还有内存：每个运算要从内存把张量读进来，算完可能再写回去。GPU 有一个内存层级，有很快的内存也有较慢的内存，解码算法不小心的话会在两者之间反复搬数据，严重拖慢速度。后面讲的 FlashAttention 就是巧妙地减少这类搬运。一个运算的耗时大致是：
+        </p>
+        $$\text{time} = \max\left(\frac{\text{运算的 FLOPs}}{\text{设备的 FLOP/s}},\ \frac{\text{传输的数据量 (GB)}}{\text{内存带宽 (GB/s)}}\right)$$
+        <ul>
+            <li>计算受限（compute-bound）：瓶颈在计算。比如矩阵乘 $A = BC$，有 $O(mkn)$ 次运算，读入 $O(mk + kn)$ 字节，维度合适时计算量远大于数据量。</li>
+            <li>访存受限（memory-bound）：瓶颈在内存带宽。比如矩阵乘向量 $a = Bx$，只有 $O(mk)$ 次运算，却要读 $O(mk)$ 字节，计算相对数据搬运很少。</li>
+        </ul>
+        <p>
+            解码一个 token 很像矩阵乘向量：只有一个查询、一个 token。推理和解码中很多运算都是访存受限的。后面讲并行时会看具体 GPU 的峰值 FLOP/s。
+        </p>
+        <h3>"加速"指什么</h3>
+        <ul>
+            <li>延迟（latency）：一个用户等一个回复要多久。比如在笔记本上跑模型，一次生成一个序列，关心首 token 时间（处理完提示、生成第一个 token）和单个请求的总时间。</li>
+            <li>吞吐量（throughput）：每秒完成多少请求，每秒生成多少 token。比如大批量处理时，某个请求可能因为批里别的更长而被拖慢，但总体每秒完成更多。</li>
+        </ul>
+        <p>
+            两者常有取舍，而且还要和质量权衡，比如量化权重能提高效率但降低质量。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、加速推理的三个层面</h2>
+        <h3>1. 加速单个 token</h3>
+        <table>
+            <tr><th>目标</th><th>策略</th><th>例子</th></tr>
+            <tr><td>减少内存带宽压力</td><td>缩小要搬运的数据</td><td>量化（GPTQ、AWQ，第 19 讲），蒸馏，GQA/MQA 等架构元素</td></tr>
+            <tr><td>提高 FLOP/s</td><td>优化运算在特定硬件上的执行</td><td>FlashAttention（第 22 讲），torch.compile、算子融合、定制内核</td></tr>
+            <tr><td>减少 FLOPs</td><td>在架构里少算</td><td>混合专家（第 21 讲，每次只路由到一部分参数），Mamba（第 22 讲，不用 Transformer）</td></tr>
+        </table>
+        <p>
+            分组查询注意力和多查询注意力名义上减少了运算，实际收益主要来自减少昂贵的数据搬运。这些手段常常相辅相成。
+        </p>
+
+        <h3>2. 加速整个序列：推测解码</h3>
+        <p>
+            即使都做了，还能改进生成整个序列的算法本身。思路是在自回归解码里利用时间上的并行。一类是推测解码（speculative decoding）：用便宜的模型先起草几个 token，再用目标模型并行验证。另一类是不用自回归模型，比如扩散，一次并行生成多个 token；文本扩散这一讲不展开，它的代价是引入条件独立假设。
+        </p>
+        <p>
+            推测解码的直觉：有些 token 很难（熵高），有些很容易。比如童谣 "The cow jumped over the moon"，看到 "the cow jumped" 后，"over the moon" 很容易；生成句号后，结束符也很容易。做法：
+        </p>
+        <ol>
+            <li>小的草稿模型 $q$ 从当前前缀出发，快速往前生成 $K$ 个 token（贪心或采样）。</li>
+            <li>把这 $K$ 个 token 接到前缀后，大模型 $p$ 只做一次前向，同时得到这 $K$ 个位置的下一个 token 分布。</li>
+            <li>逐个决定接受还是拒绝草稿 token，接受概率为
+                $$\alpha_i = \min\!\left(1,\ \frac{p(\text{token}\mid\dots)}{q(\text{token}\mid\dots)}\right)$$
+                大模型给的概率不低于小模型时直接接受，否则以小于 1 的概率接受。接受很快，直接往下走；一旦拒绝，就由大模型在这里重新采样（从两者分布之差的正部归一化后采样），后面的草稿全部丢弃。</li>
+        </ol>
+        <p>
+            令人惊讶的是，可以证明按这个规则接受和拒绝，等价于直接从原模型的分布采样。这里加速的不是单个下一个 token 分布的计算，而是整个采样算法，结果和祖先采样完全一样。
+        </p>
+
+        <h3>3. 加速多个序列</h3>
+        <ul>
+            <li>复用状态：如果多次生成共用一个提示，为每次生成分别重算 KV 缓存很傻。更一般地，多个生成之间共享的任何前缀都应该复用缓存。SGLang 推理库的 RadixAttention 做的就是这种缓存；vLLM 最初的 PagedAttention 则是在共享提示、多次生成的场景下更聪明地分配内存（分页）。</li>
+            <li>改进批处理：更好地调度并发的生成，比如连续批处理（continuous batching）。</li>
+            <li>程序级优化：把对模型的多次调用看成一个程序，优化整个生成程序的计算图，比如 SGLang、DSPy，第 23 讲会讲。</li>
+        </ul>
+        <p>
+            这些推理库还有很多别的技术，这里只是一个高层的概览，方便以后入门。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、参考资料</h2>
+        <ul>
+            <li>From Decoding to Meta-Generation: Inference-time Algorithms for Large Language Models（Welleck 等，2024）第 1 到 3 节：主要阅读。综述了从逐 token 生成到元生成（多次调用模型、结合外部信息）的推理时算法。</li>
+            <li>On NMT Search Errors and Model Errors: Cat Got Your Tongue?（Stahlberg &amp; Byrne，2019）：精确 MAP 解常常是空序列。</li>
+            <li>The Curious Case of Neural Text Degeneration（Holtzman 等，2020）：top-p（nucleus）采样。</li>
+            <li>Locally Typical Sampling（Meister 等，2022）：典型性视角。</li>
+            <li>Fast Inference from Transformers via Speculative Decoding（Leviathan 等，2023）；Accelerating Large Language Model Decoding with Speculative Sampling（Chen 等，2023）。</li>
+            <li>vLLM（PagedAttention）、SGLang（RadixAttention）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>十、小结</h2>
+        <p>
+            自回归模型的解码是在一棵指数大的树上逐步做局部选择。作为优化，目标是概率最高的序列（MAP）：贪心解码不能保证找到它，束搜索保留多条路径，是传统翻译和摘要的标准做法。但 MAP 会退化：重复循环、空序列、非典型输出，而且概率最高不一定最好。作为采样，祖先采样等价于从联合分布采样，但长尾和复合误差导致胡言乱语；top-k、top-p 截断长尾，温度让分布变尖或变平，温度趋于零就是贪心。采样也可以和效用函数结合做优化。效率方面，KV 缓存避免重算过去的键值；解码大多是访存受限的；加速可以从单个 token（量化、FlashAttention、混合专家）、整个序列（推测解码，结果与原分布完全一致）和多个序列（共享前缀、连续批处理、程序级优化）三个层面入手。
+        </p>
+        <p>
+            下一讲是客座讲座：Akari Asai 讲检索、检索增强生成与深度研究。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-711: Advanced NLP · Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="08_微调与蒸馏.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="10_检索增强生成与深度研究.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

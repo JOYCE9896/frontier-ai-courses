@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第四讲：循环神经网络与注意力的起源 | CMU 11-711 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="03_自回归语言模型.html">&larr; 上一讲</a>
+    <span>CMU 11-711: Lecture 04</span>
+    <a href="05_注意力与Transformer.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第四讲：循环神经网络与注意力的起源</h1>
+        <p class="subtitle">序列模型的三种做法，RNN 的结构、训练与推理，梯度消失的成因，门控与残差连接，GRU 与 LSTM，编码器-解码器，以及为翻译而发明的注意力</p>
+        <div class="author-meta">
+            主讲：Sean Welleck · 2026 年 1 月 22 日<br>
+            资料来源：<a href="https://cmu-l3.github.io/anlp-spring2026/static_files/anlp-s2026-04-rnns.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=Q459NFqqs2Q" target="_blank">课堂录像</a>（本文依据录像字幕整理课堂口述内容） · <a href="https://github.com/cmu-l3/anlp-spring2026-code/tree/main/04_recurrent" target="_blank">课堂代码</a> · 主要阅读：Cho 讲义第 4 章、5.5 到 5.6 节、第 6 章
+        </div>
+    </header>
+
+    <section>
+        <h2>一、为什么还要学 RNN</h2>
+        <p>
+            这是第一讲关于序列架构的课，之后还有 Transformer，以及课程末尾的混合专家模型和长序列架构。Transformer 出现之前，循环神经网络（Recurrent Neural Network，RNN）是最先进的方法。现在虽然只偶尔见到 RNN，但它的思想、它和 Transformer 之间的取舍，仍然是一些前沿实验性架构想要吸收的东西。课程末尾讲到那些架构时，就会发现它们在借鉴 RNN。Transformer 也不是凭空出现的，它的一些组件正来自 RNN 时代的想法，最重要的就是注意力：它最早是在 RNN 的背景下发明的。
+        </p>
+        <p>
+            上一讲的 n 元模型最大的局限是上下文太短，只有两三个 token。RNN 至少在理论上可以有无限长的上下文，于是可以用完整的自回归分解：
+        </p>
+        $$P(X) = \prod_{t=1}^T p_\theta(x_t\mid x_1, \dots, x_{t-1})$$
+        <p>
+            实际上要得到真正的无限上下文并不容易，这一讲会看到原因。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、序列模型</h2>
+        <p>
+            先定义一个抽象的概念：序列模型（序列架构）是一个从序列到序列的函数，$f_\theta(x_1, \dots, x_{|x|}) \to h_1, \dots, h_{|x|}$。输入长度可变，每个输入 token 对应一个输出向量 $h_t \in \mathbb{R}^d$，叫隐藏状态。有了这些表示，可以拿它做很多事。比如语言建模：在每个位置接一个线性层加 softmax，用当前位置的表示预测下一个 token 的分布：
+        </p>
+        $$p_\theta(\cdot\mid x_{&lt;t}) = \text{softmax}(W h_t)$$
+        <p>
+            要区分"架构给出表示"和"用这些表示做什么"，语言模型只是用法之一。$f_\theta$ 有三种实现思路：
+        </p>
+        <ul>
+            <li>循环（recurrence）：把隐藏状态一步步往后传，随时间演化。表示建立在对历史的编码之上。本讲内容。</li>
+            <li>卷积（convolution）：每个位置只看一个固定大小的局部窗口，比如前后共三个 token。讲图像时会简单提到。</li>
+            <li>注意力（attention）：每个位置看所有位置，学习一个加权平均。可以看作卷积的推广，窗口变成了全部位置。下一讲的 Transformer 完全建立在它之上。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>三、RNN 的结构</h2>
+        <p>
+            通常把 RNN 画成沿时间展开的样子。底部是 token，比如 "a bad movie"，各自经过嵌入层。隐藏状态先初始化（全零或很小的随机数）。在每一步，RNN 单元接收当前 token 的嵌入和上一步的隐藏状态，输出新的隐藏状态。标准 RNN（Elman 网络，1990）是：
+        </p>
+        $$h_t = \sigma\big(W_h h_{t-1} + W_x x_t + b\big), \qquad W_h \in \mathbb{R}^{d\times d},\ W_x \in \mathbb{R}^{d\times d_{\text{in}}},\ b \in \mathbb{R}^d$$
+        <p>
+            和以前见过的东西没有本质区别：对输入做线性变换，对上一步隐藏状态做另一个线性变换，加偏置，再过一个激活函数 $\sigma$（tanh、ReLU 等）。唯一的新东西是它接收上一步的隐藏状态。可学习的参数是两个权重矩阵和偏置（还有嵌入层），它们在每一步都相同。
+        </p>
+        <h3>两种用法</h3>
+        <ul>
+            <li>序列分类：取最后一个隐藏状态 $h_T$，它在某种意义上包含了整个序列的信息，接输出层 $[p_1, p_2, p_3] = \text{softmax}(W h_T)$。和上一讲的架构相比，句子可以任意长，长度不同也不用改架构。</li>
+            <li>语言建模：在每一步都接输出层，$p(x_t\mid x_{&lt;t}) = \text{softmax}(W h_t)$，第一步输入一个特殊的开始符。这个想法很早就有，Mikolov 等人 2010 年的论文就叫《Recurrent neural network based language model》，名字很直白。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>四、训练与推理</h2>
+        <h3>1. 训练：沿时间反向传播</h3>
+        <p>
+            每一步的输出层都有一个标签（语言建模时就是下一个 token）和一个损失，把所有损失加起来得到总损失。展开后的 RNN 是一个结构良好的有向无环计算图，和前馈网络没有本质区别，都是一串可微运算最后接一个损失，所以可以直接用反向传播。历史上这叫沿时间反向传播（backpropagation through time，BPTT）。注意参数在各个位置是共享的（parameter tying），梯度会在各个位置上累加。
+        </p>
+        <p>
+            有学生问"权重不随时间变化"是不是也包括反向传播的过程。这里有两种"时间"：一种是序列里的位置，第一个 token 和第二个 token 用的权重相同；另一种是训练的进程，每处理一批数据、做一次反向传播，权重就会更新。
+        </p>
+        <p>
+            以语言建模为例，每个位置的损失是 $-\log p_\theta(x_t\mid x_{&lt;t})$，序列结束时还有 $-\log p_\theta(\text{END}\mid x_{\le 3})$。这仍然是最大似然：
+        </p>
+        $$\max_\theta\sum_{x\in D_{\text{train}}}\log p_\theta(x) \ \equiv\ \min_\theta -\sum_{x\in D_{\text{train}}}\sum_t\log p_\theta(x_t\mid x_{&lt;t})$$
+        <p>
+            和 n 元模型相比，唯一的区别是上下文不再限于 $n-1$ 个 token。
+        </p>
+
+        <h3>2. RNN 作为语言模型的优缺点</h3>
+        <p>
+            缺点：难以并行训练。要算最后一步的输出分布，需要 $h_3$；要 $h_3$，需要 $h_2$；要 $h_2$，需要 $h_1$。每一步的变换都是非线性的，没法拆开，只能按顺序一步步算。下一讲的 Transformer 没有在时间步之间传递的隐藏状态，更容易把计算拆开分到多个设备上。
+        </p>
+        <p>
+            优点在推理时。生成时，从开始符出发做一次前向，得到输出分布，采样一个词，比如 "The"，把它作为下一步的输入，再采样 "cat"，依此类推。生成 cat 只需要上一步的隐藏状态和当前输入的 token。即使前面已经有一百万个 token，生成第一百万零一个也只需要存一个隐藏状态，不用回头对所有历史做计算。内存需求是常数，每一步是 $O(1)$ 的局部计算，长度为 $T$ 的序列总共 $O(T)$。Transformer 每一步都要对之前所有位置算注意力，总共是 $O(T^2)$。这正是人们一直想从 RNN 借鉴点什么的根本原因。
+        </p>
+        <p>
+            直观上，可以把隐藏状态理解为一种记忆：模型要把预测下一个 token 所需的一切都塞进这个向量里，一步步往后传。
+        </p>
+
+        <h3>3. 代码</h3>
+        <p>
+            课堂代码手写了一个 RNN（PyTorch 有现成的实现，这里为了看清细节），仍然是生成人名。有一行代码几乎出现在所有训练语言模型的代码库里：输入是各个位置的 token，标签是下一个 token，也就是把索引错开一位。RNN 单元就是幻灯片上的公式；完整模型加上嵌入层和输出层，隐藏状态初始化为零，用一个 for 循环逐步应用 RNN 单元。
+        </p>
+        <p>
+            为了批量训练，长短不一的名字要用 pad 补齐成矩阵，并且损失不能算在 pad 上。原因是：同一个名字在这一批里可能补了 4 个 pad，在另一批里只补了 2 个，如果 pad 也计入损失，这个名字贡献的损失就会随它碰巧和谁分在一批而变化。
+        </p>
+        <p>
+            训练后生成的名字明显比 n 元模型好，有了真实人名里常见的结构，不再局限于只看前两个 token。代码示例是一个受控的对比：其他一切和上一讲的神经 n 元模型相同，只是换成了循环架构。还演示了提示：强制以 "S" 开头，生成的名字就都以 S 开头。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、梯度消失</h2>
+        <h3>1. 现象</h3>
+        <p>
+            反向传播时，最后一步的梯度是正常的；往前传，每过一步都要乘上一些矩阵，梯度越来越小：$\partial L/\partial h_3$ 正常，$\partial L/\partial h_2$ 小，$\partial L/\partial h_1$ 很小，$\partial L/\partial h_0$ 极小。序列够长时，学习算法几乎得不到来自很早的 token 的信号，也就学不到长距离依赖，只能学到近处的关系。这叫梯度消失（vanishing gradient）。反过来，梯度沿时间越传越大、最后变成无穷，叫梯度爆炸。
+        </p>
+
+        <h3>2. 原因</h3>
+        <p>
+            看标准 RNN $h_t = \tanh(W_{\text{in}}x_t + W h_{t-1})$，输出 $y_T = W_{\text{out}}h_T$，对隐藏状态的权重 $W$ 求梯度。按链式法则，会出现这样一项：
+        </p>
+        $$\frac{\partial h_T}{\partial h_t} = \frac{\partial h_T}{\partial h_{T-1}}\frac{\partial h_{T-1}}{\partial h_{T-2}}\cdots\frac{\partial h_{t+1}}{\partial h_t} = \prod_{t'=t}^{T-1}\frac{\partial h_{t'+1}}{\partial h_{t'}}, \qquad \frac{\partial h_{t'+1}}{\partial h_{t'}} = \text{diag}\big(\tanh'(W_{\text{in}}x_{t'+1} + W h_{t'})\big)\,W$$
+        <p>
+            问题出在这个连乘上。第一，tanh 的导数在 0 到 1 之间，很多个小于 1 的数相乘会越来越小。第二，$W$ 被反复相乘。把它做特征分解 $W = VDV^{-1}$，连乘相当于 $D^{T-t}$：如果最大的特征值小于 1，它随距离指数趋于 0；大于 1，则趋于无穷。除非运气好到最大特征值恰好是 1，否则不是消失就是爆炸。这说明梯度消失源自 RNN 的结构本身。阅读材料里有完整推导。
+        </p>
+        <p>
+            这在实际中是大问题：RNN 要么学不好长依赖，要么训练时出现数值错误。这促使人们设计新的循环架构，其中有一些很有意思的思想。
+        </p>
+        <p>
+            有学生问换一个激活函数是否有帮助，因为上面的论证用到了 tanh 导数在 0 到 1 之间。Sean 说这是个好问题；用 ReLU 的话，他猜还得担心梯度爆炸，因为权重矩阵仍在反复相乘，矩阵太"大"就会出问题。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、门控与残差</h2>
+        <h3>1. 门控</h3>
+        <p>
+            想法是让模型学会控制信息如何跨时间步流动：这一步是原样保留隐藏状态，还是修改它。引入一个可学习的门（gate），取值在 0 到 1 之间，并且隐藏状态的每一维都有自己的门值：
+        </p>
+        $$z_t = \sigma(W_{zx}x_t + W_{zh}h_{t-1}), \qquad h_t = (1 - z_t)\cdot h_{t-1} + z_t\cdot\tilde h_t$$
+        <p>
+            这里 $\sigma$ 是 sigmoid。$z_t$ 接近 1 时，隐藏状态换成新的候选状态 $\tilde h_t$（比如普通 RNN 的更新）；$z_t = 0$ 时，原样保留上一步的隐藏状态。此时 $\partial h_t/\partial h_{t-1} = 1$，梯度在 $t_1$ 到 $t_2$ 之间连乘仍然是 1，不会衰减。所以模型如果想保存某个长距离依赖，可以在许多步里把门设为 0，把信息一直带到后面。由于每一维有自己的门，模型可能学会让某些维度专门存长期信息，其他维度像普通 RNN 一样工作。
+        </p>
+        <p>
+            例子："The cat, which sat on the mat, was hungry"，假设中间隔了上千个字符。预测 hungry 时需要记得前面说的是一只动物，模型可以学会把相应的门设为 0，保留 cat 的信息。
+        </p>
+
+        <h3>2. 残差连接</h3>
+        <p>
+            如果去掉门，公式变成：
+        </p>
+        $$h_t = h_{t-1} + \tilde h_t$$
+        <p>
+            这叫残差连接（residual connection），也叫跳跃连接：模型只需要学新旧隐藏状态之间的差。它和门控相关，但可以看作独立的思想，在机器学习里很多地方都会出现。它是残差网络（ResNet）的核心结构，ResNet 对计算机视觉影响很大；下一讲的 Transformer 里也会用到。
+        </p>
+
+        <h3>3. GRU</h3>
+        <p>
+            门控循环单元（Gated Recurrent Unit，GRU，Cho 等 2014）可以直接替换 RNN 单元，它有两个门：
+        </p>
+        $$z_t = \sigma(W_z x_t + U_z h_{t-1}), \qquad r_t = \sigma(W_r x_t + U_r h_{t-1})$$
+        $$\hat h_t = \tanh\big(W_h x_t + U_h(r_t\odot h_{t-1})\big), \qquad h_t = (1 - z_t)\odot h_{t-1} + z_t\odot\hat h_t$$
+        <p>
+            更新门 $z_t$ 决定是保留旧隐藏状态还是换成候选状态，就是上面讲的那个门。重置门 $r_t$ 用在候选状态里：如果想彻底清掉隐藏状态里存的信息，只靠更新门做不到；把重置门设为 0，候选状态就完全由当前输入决定。
+        </p>
+
+        <h3>4. LSTM</h3>
+        <p>
+            另一个非常流行的循环架构是长短期记忆网络（Long Short-Term Memory，LSTM，Hochreiter 和 Schmidhuber 1997）。它有四个门，公式更多，所以课上没逐条讲；理解了门控和 GRU 的定义方式，就能看懂它的论文或维基百科条目。除了门之外，它还多了一个隐藏向量，叫上下文向量（cell state），专门用来存长期信息，可以理解为一个长期记忆、一个短期记忆。第一个门决定是否更新上下文，其余的门决定怎样更新。
+        </p>
+        <p>
+            实践中，GRU 和 LSTM 都可以直接替换基本 RNN。在 PyTorch 里把 RNN 换成 GRU，其余代码不用改；LSTM 因为多了一个向量，代码要稍作调整。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、编码器-解码器</h2>
+        <p>
+            前面一直在生成人名，但我们真正想做的是输入输出任务：翻译，根据对话历史生成回复，等等。这就是编码器-解码器（encoder-decoder）架构的动机。在大型只含解码器的语言模型出现之前，最先进的机器翻译系统就是这样搭的。
+        </p>
+        <p>
+            用两个 RNN（或 GRU、LSTM）。编码器读入输入序列 $x_1, \dots, x_3$（比如一句英文或一段对话历史），把它表示成一个上下文向量 $c \in \mathbb{R}^d$，最简单就是取编码器的最后一个隐藏状态。解码器是另一个 RNN，生成输出序列（日文句子或回复），建模 $p_\theta(y_1, \dots, y_T\mid x)$。怎样利用 $c$ 有几种做法，不同论文略有不同：用它初始化解码器的隐藏状态；在每一步的循环更新里都输入它，比如 $W[h_t; x_t; c]$；或者在每一步的输出层用它，$\text{softmax}(W[h_t; c])$。具体选哪种并不太重要，关键是编码器给出输入的表示，解码器以某种方式使用它（Cho 等 2014）。训练和之前一样，只是条件化在 $x$ 上：
+        </p>
+        $$\min_\theta\sum_{(x,y)\in D}\sum_t -\log p_\theta(y_t\mid y_{&lt;t}, x)$$
+        <p>
+            问题是：模型真能把所需的全部信息都塞进最后这一个向量吗？翻译一篇长文档时，每个输出位置需要的输入信息并不相同：译这一句时，相关的可能只是文档的一小部分；译下一句时，相关的又是另一部分。只用一个向量，就得把所有预测步骤需要的信息全都编码进去，这很受限。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、注意力</h2>
+        <h3>1. 基本想法</h3>
+        <p>
+            Bahdanau 等人 2015 年的论文《Neural Machine Translation by Jointly Learning to Align and Translate》提出：把输入序列的每个 token 都编码成一个向量，解码时在每一步对这些向量做加权组合，权重叫注意力权重。这样每个解码步骤都有自己的上下文向量。具体做法：
+        </p>
+        <ul>
+            <li>键（key）：编码器每个位置的隐藏状态 $h^{\text{enc}}_1, \dots, h^{\text{enc}}_N$。</li>
+            <li>查询（query）：解码器当前的隐藏状态 $h$。</li>
+            <li>算注意力分数 $\alpha_n = \text{score}(h, h^{\text{enc}}_n)$，通常再归一化，使它们在 0 到 1 之间、总和为 1。</li>
+            <li>输出加权和 $c = \sum_{n=1}^N \alpha_n h^{\text{enc}}_n$。</li>
+        </ul>
+        <p>
+            打分函数有几种选择：点积 $q^\top k$；双线性 $q^\top W k$（多了权重矩阵，没有非线性）；非线性 $w^\top\tanh(W[q; k])$，相当于一个小网络。原论文用的是非线性版本；后来发现双线性也很好；Transformer 用的是点积再加缩放，下一讲讲。
+        </p>
+        <p>
+            可以从信息检索的角度理解：当前隐藏状态是一个查询，编码器的每个隐藏状态是一个键，查看每个键和查询有多匹配。还可以给每个键配一个单独的值（value），这一讲里键和值是同一个东西，到 Transformer 才分开。归一化之后，可以把注意力看作模型要学会分配一份总量为 1 的"概率预算"。得到上下文向量后，可以用在输出层，比如 $\text{logits} = \tanh(W_{\text{out}}[c_t; h_t])$，也可以并入循环更新。有学生问解码器初始隐藏状态是否可学习：一般用零向量或随机向量，零向量很常见。
+        </p>
+
+        <h3>2. 可解释的注意力图</h3>
+        <p>
+            原论文里有一张著名的图：英法翻译时，横轴是英文句子，纵轴是法文句子，每个格子的亮度是注意力权重。模型学会了把注意力放在与当前预测的词相对应的那个词上，得到的上下文向量随时间变化、并且和当前这一步相关。
+        </p>
+
+        <h3>3. 代码：反转带噪声的名字</h3>
+        <p>
+            为了让注意力学到非平凡的模式，课上设计了一个玩具任务：输入一个名字，输出它的反转，比如 romulus → sulumor。并且在输入的每个字符后插入一个随机噪声字符，比如 rnommuudloutsv → sulumor。看模型会不会学会忽略噪声。
+        </p>
+        <p>
+            编码器和解码器都用 GRU；查询是解码器当前隐藏状态经过一个线性变换（这是课上的一个设计选择），用点积注意力，softmax 归一化。训练时的前向一次处理整批数据，由 PyTorch 内部处理时间步；生成时则必须逐个 token：先编码输入，再一步步嵌入、过循环层、算注意力、得输出分布。这里用的是贪心解码，每步取概率最大的 token（第 9 讲会讲解码算法）。
+        </p>
+        <p>
+            有意思的是，这个条件生成任务的验证损失比生成人名低得多。Sean 解释：单纯生成人名时，第一个字母可以是 A、S、D 等很多合法选项，训练时这个样本把 Z 的概率往上推，那个样本又把 A 往上推，数据本身有不确定性（熵），损失永远到不了零。反转任务给定输入后只有一个正确答案（输出里没有噪声字符），熵低得多，模型可以把全部概率压在这个答案上。
+        </p>
+        <p>
+            模型能正确反转名字。注意力可视化显示，在输出每个字符时，它看的正是输入里对应的那个字符，并且学会了几乎不看噪声字符。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、参考资料</h2>
+        <ul>
+            <li>Natural Language Understanding with Distributed Representation（Cho，2015）第 4 章、5.5 到 5.6 节、第 6 章：本讲主要阅读，包含梯度消失的完整推导。</li>
+            <li>Recurrent neural network based language model（Mikolov 等，2010）：用 RNN 做语言模型。</li>
+            <li>Learning Phrase Representations using RNN Encoder-Decoder for Statistical Machine Translation（Cho 等，2014）：编码器-解码器与 GRU。</li>
+            <li>Long Short-Term Memory（Hochreiter &amp; Schmidhuber，1997）：LSTM。</li>
+            <li>Why LSTMs Stop Your Gradients From Vanishing: A View from the Backwards Pass（Weber，2017，博客）。</li>
+            <li>Neural Machine Translation by Jointly Learning to Align and Translate（Bahdanau 等，2015）：提出注意力，让模型在生成每个译词时自动搜索源句中相关的部分，不必把整句压成一个固定长度的向量。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>十、小结</h2>
+        <p>
+            RNN 把隐藏状态一步步往后传，理论上可以利用无限长的上下文，用沿时间反向传播训练，仍是最大似然。它难以并行训练，但推理时内存恒定、每步计算是局部的。基本 RNN 的梯度在时间上连乘，会消失或爆炸，学不到长距离依赖；门控让模型能原样保留隐藏状态，残差连接只学差值，GRU 和 LSTM 基于这些思想，可以直接替换 RNN。编码器-解码器把输入压成一个上下文向量交给解码器，但一个向量装不下所有信息；注意力让解码器在每一步用当前隐藏状态作查询，对编码器的所有隐藏状态做加权求和，每一步得到不同的上下文向量。
+        </p>
+        <p>
+            注意力是一个通用的思想。下一讲会看到它的其他变体和用法，以及完全建立在注意力之上的 Transformer。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-711: Advanced NLP · Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="03_自回归语言模型.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="05_注意力与Transformer.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

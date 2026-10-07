@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十五讲：推理扩展与模型规模 | CMU 11-664/763 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="13_最小贝叶斯风险与多样本策略.html">&larr; 上一讲</a>
+    <span>CMU 11-664/763: Lecture 15</span>
+    <a href="15_token预算与训练时蒸馏.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十五讲：推理扩展与模型规模</h1>
+        <p class="subtitle">花多少推理计算才值得，AlphaCode 与帕累托最优，计算最优推理的定义，多数投票的准确率上限，Snell 等：测试时计算的收益取决于题目难度，评估时必须计入成本，以及按每个 token 扩展计算的 ParScale、HARP 与 IMPACT</p>
+        <div class="author-meta">
+            主讲：Amanda Bertsch · 2025 年 10 月 21 日<br>
+            资料来源：<a href="https://docs.google.com/presentation/d/1tJ1RbjrmWqRhuF-TwwHUDIYO1CCiEWh8IKTPKerzKWY/edit" target="_blank">课程幻灯片</a>（这一讲没有公开录像，本文只依据幻灯片整理） · 主要阅读：Scaling LLM Test-Time Compute Optimally can be More Effective than Scaling Model Parameters（Snell 等，2024）；Inference Scaling Laws（Wu 等，2024）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、花多少推理计算才值得</h2>
+        <p>
+            前面已经讲了很多在推理时多花计算换更好答案的办法：增大束宽，加 FUDGE、RAD 这样的推理时适配器，自我修正，思维链，Best-of-N，MBR。但怎样知道花多少计算是值得的？
+        </p>
+        <h3>1. AlphaCode 与大规模生成</h3>
+        <p>
+            AlphaCode（Li 等 2022）是最早在竞赛编程上真正令人印象深刻的系统之一，做法就是大规模生成：采样海量程序再过滤。它的结果图展示了准确率随样本数、随计算时间的变化。
+        </p>
+        <h3>2. 帕累托最优</h3>
+        <p>
+            假设同时关心准确率和每道题需要的秒数。帕累托最优指没法在不让一项变差的前提下让另一项变好。幻灯片上的练习：每题 10 秒时，帕累托最优的选择是什么？准确率 25% 时呢？需要注意，帕累托最优是在问题空间的语境里说的，图上没画出的模型可能更便宜、准确率更高；也是在你关心的目标的语境里说的，换成按样本数画图，答案可能不同。
+        </p>
+        <p>
+            什么时候用更贵的推理技术比用更大的模型好？要看情况，可能关心的有：推理时的浮点运算成本；训练加推理的总浮点运算，摊到若干次推理调用上；得到最终答案的时间；运行模型需要多大的 GPU。每种标准答案都不同。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、计算最优推理</h2>
+        <p>
+            这一讲的假设：有一组固定的模型（别人训练好的）；有足够大的 GPU 放下它们（可能要分片到多块）；以浮点运算量为度量。推理的浮点运算量大致与以下几项成线性关系（效率单元会细讲）：活跃参数量；每个输出生成的 token 数；生成的输出个数。目标是计算最优推理：花同样的浮点运算得到最好的表现。
+        </p>
+        <h3>1. Wu 等的定义</h3>
+        <p>
+            把一道题上的错误率 $E$ 看作模型参数量 $N$、生成 token 数 $T$、推理策略 $S$ 的函数，在固定预算 $C = \text{FLOPs}(N, T; S)$ 下求：
+        </p>
+        $$(N^*, T^*, S^*) = \arg\min_{N, T, S\,:\,\text{FLOPs}(N, T; S) = C} E(N, T; S)$$
+        <p>
+            他们研究基于采样的投票：多数投票，以及用奖励模型分数给候选加权的加权多数投票。
+        </p>
+        <h3>2. 一直采样下去会怎样</h3>
+        <p>
+            结论：随着样本数增加，（加权）多数投票会逼近一个最高准确率。直觉：考虑长度不超过 $L$ 的所有序列（很大但有限）；如果一个序列由某条推理路径 $r$、推理结束符 $e$ 和答案 $y$ 组成（即 $rey$），就说它投给了 $y$；$y_i$ 的概率质量就是所有 $rey_i$ 的概率之和。如果能对某个输入 $x$ 写出所有序列及其归一化概率，就能找出总概率最高的 $y$，算出多数投票的结果；于是模型答对样本 $(x_i, y_i)$ 当且仅当 $y_i$ 在所有候选中概率质量最大。在整个数据集上，准确率就是真实答案 $y_i$ 概率质量最大的比例：
+        </p>
+        $$\text{Acc}_{\text{maj}}\to\frac{1}{M}\sum_{i=1}^M\mathbb{1}\Big[y_i = \arg\max_y\sum_r p(r\,e\,y\mid x_i)\Big]$$
+        <p>
+            加权多数投票则在求和里乘上奖励模型的分数。所以多数投票的表现在期望上有上界。这说得通：从 GPT-2 采一千万个样本也得不到 GPT-5 的水平。能不能比多数投票做得更好？
+        </p>
+        <h3>3. Snell 等：考虑其他修正策略</h3>
+        <p>
+            Snell 等关心的两种策略：迭代修改答案；用过程奖励模型做验证器进行搜索。最好的方法取决于生成预算。核心洞见：测试时计算的收益取决于题目难度。
+        </p>
+        <p>
+            怎样定义难度？MATH 数据集自带难度分档，但他们发现自己构造更有效：在一部分数据上估计 pass@1，再分成五个分位档。
+        </p>
+        <p>
+            什么时候用更大的模型、什么时候扩展测试时计算？取决于：怎样扩展计算，有的推理方法扩展得更好；扩展多少，推理计算越多，相对多扩参数的好处越大（幻灯片上原话）；题目多难，越简单的题，从扩展测试时计算中获益越多。他们的图里，星号在线上方表示该扩展推理，在线下方表示该扩展参数。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、评估推理策略必须计入成本</h2>
+        <p>
+            Kapoor、Stroebl 等 2024（AI Agents That Matter）关心 AI Agent：很多论文用同一个基座模型、不同的推理技术，很多论文提出的系统可能包含不止一个模型。比较时必须考虑成本，尤其是把单个模型和系统相比时。前沿实验室也开始采用这种比较方式，幻灯片以 Claude 3 的发布为例。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、按每个 token 扩展计算</h2>
+        <p>
+            到目前为止：扩展模型（参数）等于每个 token 花更多浮点运算；扩展推理计算等于生成更多 token。但推理计算不一定这样扩展，能不能在推理时决定"每个 token"多花一些？扩展计算时间是个老想法，RNN 上表现为循环（第七讲的自适应计算时间），Transformer 上这里看几个近期方法（还有更多），重点是轻量或无需训练的干预。
+        </p>
+        <h3>1. ParScale</h3>
+        <p>
+            Chen 等 2025 的并行扩展。变换：在输入开头加一个随机初始化的软提示，得到 $P$ 条并行流；聚合：把各流的输出拼起来，用一个 MLP 预测每次前向传播的权重，加权平均成一个输出。他们经验地拟合了 ParScale 和标准模型的损失曲线：$P$ 条并行流大致相当于把参数量从 $N$ 扩展到 $O(N\log P)$。
+        </p>
+        <ul>
+            <li>表现随 $P$ 提升；越大的模型从并行计算中获益越多。</li>
+            <li>编程任务比记忆类任务获益更大。他们的论点是：参数量与记忆的联系更紧，推理计算与推理能力的联系更紧。</li>
+            <li>用 200 亿 token 的中期训练就能把一个模型转成 ParScale。</li>
+        </ul>
+        <h3>2. HARP</h3>
+        <p>
+            Storaï 等 2025。扩展计算是好事，但推理时并非每个决定都同样难，应该只为难的预测扩展计算。怎样判断难？如果下一个 token 的分布比较平，模型就"不太确定"，把"犹豫"定义为香农熵超过某个阈值。怎样为难的预测获取更多信息？和 ParScale 类似，给输入加噪声再过一遍模型，HARP 的噪声是随机丢弃嵌入向量的一些元素：
+        </p>
+        <ol>
+            <li>做正常的前向传播。</li>
+            <li>检查 logit 分布的熵是否足够高。</li>
+            <li>熵高就用加噪的输入再做一次前向传播，把两次平均。</li>
+        </ol>
+        <p>
+            优点：不需要训练；只在需要时花额外计算；能和其他推理技术结合。缺点：原始传播和重构必须顺序进行，比原模型慢；每个 token 的计算只能是原来的 1 倍或 2 倍。
+        </p>
+        <h3>3. IMPACT</h3>
+        <p>
+            Storaï 等 2025。问题：ParScale 和 HARP 会使 KV 缓存失效，因为改变了输入，每一层注意力缓存的键值都要变，要么保存原始缓存（很占空间），要么每个 token 重新计算（很费时间）。能不能在不使缓存失效的前提下扩展每个 token 的计算？做法：保持输入和 KV 缓存不变，只丢弃线性层里的一些权重，即上下文稀疏：把对应激活足够小（低于某个阈值）的线性层权重置零，但 KV 缓存不变，所以实际改变的是残差流和注意力的查询。表现好于基座模型，差于 HARP，在推理任务上更好；在长序列任务上效率节省很大。天下没有免费的午餐：更高效，但有性能代价。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、参考资料</h2>
+        <ul>
+            <li>Scaling LLM Test-Time Compute Optimally can be More Effective than Scaling Model Parameters（Snell 等，2024）：主要阅读。</li>
+            <li>Inference Scaling Laws: An Empirical Analysis of Compute-Optimal Inference for Problem-Solving with Language Models（Wu 等，2024）：主要阅读。</li>
+            <li>Competition-Level Code Generation with AlphaCode（Li 等，2022）。</li>
+            <li>AI Agents That Matter（Kapoor、Stroebl 等，2024）。</li>
+            <li>Parallel Scaling Law for Language Models（ParScale，Chen 等，2025）。</li>
+            <li>HARP: Hesitation-Aware Reframing in Transformer Inference Pass（Storaï 等，2025）。</li>
+            <li>A Theory of Inference Compute Scaling；Scaling Inference-Efficient Language Models；Train Large, Then Compress。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>六、小结</h2>
+        <p>
+            用更大的模型还是更多的推理计算，答案是看情况：取决于用哪种推理计算、问题类型和难度，以及服务系统在时间和空间上的限制。帕累托最优只在给定的模型集合和给定的目标下才有意义。在固定浮点运算预算下，可以联合选择参数量、生成 token 数和推理策略；多数投票随样本增加会趋向一个由模型概率质量决定的上限，要超过它需要更好的修正或验证策略，而测试时计算对简单题收益更大。评估时要同时看准确率和推理成本。推理计算既可以靠生成更多 token 扩展，也可以靠每个 token 多花计算：ParScale 用多条加了软提示的并行流，HARP 只在熵高时多做一次加噪前向，IMPACT 用上下文稀疏避免让 KV 缓存失效，代价是一定的性能损失。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-664/763: Inference Algorithms for Language Modeling · Fall 2025</p>
+        <nav class="footer-nav">
+            <a href="13_最小贝叶斯风险与多样本策略.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="15_token预算与训练时蒸馏.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
