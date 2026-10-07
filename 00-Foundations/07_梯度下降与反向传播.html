@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>07. 梯度下降与反向传播 | AI 基础</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="06_softmax与交叉熵.html">&larr; 上一篇</a>
+    <span>AI 基础 07</span>
+    <a href="index.html">目录 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>07. 梯度下降与反向传播</h1>
+        <p class="subtitle">有了损失之后，怎样一步步调整参数让它变小，以及怎样高效算出每个参数该往哪个方向调</p>
+        <div class="author-meta">
+            需要的预备知识：<a href="06_softmax与交叉熵.html">06. Softmax 与交叉熵</a>；知道导数表示函数的变化率（会在文中复习）<br>
+            整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、训练要解决什么问题</h2>
+        <p>
+            一个模型内部有很多可以调整的数，叫参数。同样的模型结构，参数取值不同，对同一个输入给出的分数就不同。上一篇讲了怎样用损失衡量一次预测有多差。把训练数据上所有预测的损失取平均，就得到一个数，它只取决于参数的取值。训练模型就是找一组参数，让这个平均损失尽量小。
+        </p>
+        <p>
+            难点在于参数非常多。一个小型的图像分类网络就有几百万个参数，GPT-3 有 1750 亿个。不可能把所有取值组合都试一遍。我们需要一种方法，从当前参数出发，知道往哪个方向改一点能让损失变小，然后反复这样改。梯度下降就是这种方法，反向传播则负责算出"往哪个方向改"。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、只有一个参数的情况</h2>
+
+        <h3>1. 导数告诉我们往哪走</h3>
+        <p>
+            先看最简单的情况：只有一个参数 $w$，损失是
+        </p>
+        $$L(w) = (w - 3)^2$$
+        <p>
+            这是一个开口向上的抛物线，在 $w = 3$ 时取最小值 0。我们假装不知道答案，从 $w = 0$ 出发，看能不能自己找到 3。
+        </p>
+        <p>
+            导数 $L'(w)$ 表示：$w$ 增加一点点时，$L$ 变化多少。导数为正，说明 $w$ 增大时损失也增大，应该减小 $w$；导数为负，说明 $w$ 增大时损失减小，应该增大 $w$。无论哪种情况，往导数的相反方向走都能让损失变小。导数的绝对值越大，说明这里损失变化越快。
+        </p>
+        <p>
+            这个例子的导数是 $L'(w) = 2(w - 3)$。在 $w = 0$ 处，导数是 $-6$，是负的，所以应该增大 $w$。
+        </p>
+
+        <h3>2. 更新规则</h3>
+        <p>
+            梯度下降每一步按下面的规则更新参数：
+        </p>
+        $$w \leftarrow w - \eta \cdot L'(w)$$
+        <p>
+            箭头表示"用右边算出的值替换 $w$"。$\eta$（希腊字母，读作 eta）是一个人为设定的小正数，叫学习率，控制每一步走多远。减号保证了往导数的相反方向走。
+        </p>
+        <p>
+            取 $\eta = 0.1$，从 $w = 0$ 开始走几步：
+        </p>
+        <table>
+            <tr><th>步数</th><th>$w$</th><th>损失 $L(w)$</th><th>导数 $L'(w)$</th><th>下一个 $w$</th></tr>
+            <tr><td>0</td><td>0</td><td>9</td><td>−6</td><td>$0 - 0.1 \times (-6) = 0.6$</td></tr>
+            <tr><td>1</td><td>0.6</td><td>5.76</td><td>−4.8</td><td>1.08</td></tr>
+            <tr><td>2</td><td>1.08</td><td>3.686</td><td>−3.84</td><td>1.464</td></tr>
+            <tr><td>3</td><td>1.464</td><td>2.359</td><td>−3.072</td><td>1.771</td></tr>
+            <tr><td>4</td><td>1.771</td><td>1.510</td><td>−2.458</td><td>2.017</td></tr>
+        </table>
+        <p>
+            $w$ 一步步靠近 3，损失一直在下降。越靠近最低点，导数越小，每一步走得也越短，所以不会冲过头。继续走下去，$w$ 会无限接近 3。
+        </p>
+
+        <h3>3. 学习率不能太大也不能太小</h3>
+        <p>
+            如果把学习率改成 $\eta = 1.1$，结果完全不同：
+        </p>
+        <table>
+            <tr><th>步数</th><th>$w$</th><th>损失</th></tr>
+            <tr><td>0</td><td>0</td><td>9</td></tr>
+            <tr><td>1</td><td>6.6</td><td>12.96</td></tr>
+            <tr><td>2</td><td>−1.32</td><td>18.66</td></tr>
+            <tr><td>3</td><td>8.18</td><td>26.87</td></tr>
+        </table>
+        <p>
+            每一步都跨过了最低点，落到另一侧更高的位置，损失越来越大，这叫发散。反过来，学习率太小（比如 0.0001）虽然方向对，但要走几万步才能接近 3。实际训练大模型时，学习率是最需要仔细调的设置之一，常见的做法是开始时从很小的值逐渐升高（叫预热，warmup），之后再慢慢降低。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、很多参数的情况</h2>
+        <p>
+            真实模型有很多参数，损失 $L$ 同时取决于所有参数。这时对每个参数分别求导：固定其他参数不动，只看这一个参数变一点时损失变多少。这叫偏导数，参数 $w_1$ 的偏导数写作 $\dfrac{\partial L}{\partial w_1}$，符号 $\partial$ 读作"偏"。
+        </p>
+        <p>
+            把所有参数的偏导数排成一列，就是梯度，写作 $\nabla L$（$\nabla$ 读作 nabla）。如果有一百万个参数，梯度就是一百万个数组成的向量，每个数告诉对应的参数该往哪个方向调、调多少。梯度下降对所有参数同时执行同样的更新：
+        </p>
+        $$w_k \leftarrow w_k - \eta \cdot \frac{\partial L}{\partial w_k}, \quad \text{对每一个参数 } w_k$$
+        <p>
+            课程里常用 $\theta$（读作 theta）表示"全部参数"，写成 $\theta \leftarrow \theta - \eta \nabla L(\theta)$，意思和上面一样。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、随机梯度下降</h2>
+        <p>
+            严格来说，损失应该是全部训练数据上的平均。但大模型的训练数据有几万亿个 token，每走一步都把全部数据算一遍，代价太大。
+        </p>
+        <p>
+            实际做法是每一步只随机取一小批数据，比如 32 条或 1024 条，用这一小批的平均损失算梯度，然后更新参数。这一小批叫 mini-batch，批里的数据条数叫 batch size。一小批数据算出的梯度和全部数据的梯度不完全一样，带有随机的误差，但方向大体正确，而计算量小得多。这种方法叫随机梯度下降（stochastic gradient descent，SGD）。把全部训练数据完整过一遍叫一个 epoch。
+        </p>
+        <p>
+            今天训练大模型很少直接用最基础的 SGD，而是用它的改进版本，最常见的是 Adam 和 AdamW。它们的主要改进是给每个参数自动调整步长：一个参数的梯度长期很大，就让它走得小心一点；长期很小，就让它走得大胆一点。基本思路仍然是"往梯度的相反方向走一步"。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、梯度从哪里来：手算一个例子</h2>
+        <p>
+            梯度下降需要每个参数的偏导数。第二节的例子损失函数很简单，导数一眼就能写出来。真实的神经网络是很多层计算套在一起，损失和参数之间隔着好几步。我们用一个小例子看怎样一步步算出来。
+        </p>
+
+        <h3>1. 前向计算</h3>
+        <p>
+            一个最小的分类模型：输入一个数 $x$，有两个参数 $w$ 和 $b$，判断输入是否属于某个类别。计算分三步：
+        </p>
+        <ol>
+            <li>算分数：$z = w \cdot x + b$</li>
+            <li>把分数变成概率：$p = \sigma(z) = \dfrac{1}{1 + e^{-z}}$。$\sigma$ 叫 sigmoid 函数，把任意实数压到 0 和 1 之间，相当于只有两个类别时的 softmax。</li>
+            <li>算损失：正确答案是"属于"，损失是 $L = -\ln p$。</li>
+        </ol>
+        <p>
+            取 $x = 2$，当前参数 $w = 0.5$，$b = -0.5$。从输入算到损失，这个方向叫前向计算：
+        </p>
+        <table>
+            <tr><th>步骤</th><th>计算</th><th>结果</th></tr>
+            <tr><td>分数</td><td>$z = 0.5 \times 2 + (-0.5)$</td><td>0.5</td></tr>
+            <tr><td>概率</td><td>$p = \sigma(0.5)$</td><td>0.6225</td></tr>
+            <tr><td>损失</td><td>$L = -\ln 0.6225$</td><td>0.4741</td></tr>
+        </table>
+
+        <h3>2. 链式法则</h3>
+        <p>
+            我们想知道 $\dfrac{\partial L}{\partial w}$：$w$ 变一点，$L$ 变多少。但 $w$ 不直接影响 $L$，它先影响 $z$，$z$ 再影响 $p$，$p$ 再影响 $L$。
+        </p>
+        <p>
+            链式法则说：沿着这条链，把每一步的变化率乘起来就行。如果 $w$ 变一点会让 $z$ 变 2 倍那么多，$z$ 变一点会让 $p$ 变 0.235 倍，$p$ 变一点会让 $L$ 变 $-1.6$ 倍，那么 $w$ 变一点，$L$ 就变 $2 \times 0.235 \times (-1.6)$ 倍。写成公式：
+        </p>
+        $$\frac{\partial L}{\partial w} = \frac{\partial L}{\partial p} \cdot \frac{\partial p}{\partial z} \cdot \frac{\partial z}{\partial w}$$
+        <p>
+            右边每一项都只涉及相邻的两个量，叫局部导数，都很好算。
+        </p>
+
+        <h3>3. 反向计算</h3>
+        <p>
+            从损失出发，往回一步步算局部导数，再乘起来：
+        </p>
+        <table>
+            <tr><th>局部导数</th><th>公式</th><th>数值</th></tr>
+            <tr><td>$\dfrac{\partial L}{\partial p}$</td><td>$-\dfrac{1}{p}$</td><td>−1.6065</td></tr>
+            <tr><td>$\dfrac{\partial p}{\partial z}$</td><td>$p(1 - p)$（sigmoid 的导数）</td><td>0.2350</td></tr>
+            <tr><td>$\dfrac{\partial L}{\partial z}$</td><td>前两项相乘</td><td>−0.3775</td></tr>
+            <tr><td>$\dfrac{\partial z}{\partial w}$</td><td>$x$</td><td>2</td></tr>
+            <tr><td>$\dfrac{\partial z}{\partial b}$</td><td>1</td><td>1</td></tr>
+        </table>
+        <p>
+            于是：
+        </p>
+        $$\frac{\partial L}{\partial w} = -0.3775 \times 2 = -0.7551, \qquad \frac{\partial L}{\partial b} = -0.3775 \times 1 = -0.3775$$
+        <p>
+            注意 $\dfrac{\partial L}{\partial z} = -0.3775$ 恰好等于 $p - 1 = 0.6225 - 1$。这就是上一篇讲的 $p_i - y_i$：正确答案的 $y = 1$，模型给的概率是 0.6225。sigmoid 加交叉熵和 softmax 加交叉熵一样，合在一起时导数是"预测概率减正确答案"。
+        </p>
+
+        <h3>4. 更新一步，验证损失下降</h3>
+        <p>
+            用学习率 $\eta = 0.1$ 更新两个参数：
+        </p>
+        $$w \leftarrow 0.5 - 0.1 \times (-0.7551) = 0.5755$$
+        $$b \leftarrow -0.5 - 0.1 \times (-0.3775) = -0.4622$$
+        <p>
+            用新参数重新做一遍前向计算：$z = 0.5755 \times 2 - 0.4622 = 0.6888$，$p = \sigma(0.6888) = 0.6657$，损失 $= -\ln 0.6657 = 0.4069$。损失从 0.4741 降到了 0.4069，正确答案的概率从 0.6225 升到 0.6657。训练就是把这个过程在海量数据上重复几万到几百万次。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、反向传播</h2>
+
+        <h3>1. 计算图</h3>
+        <p>
+            上面的例子可以画成一串节点：$w, b, x \to z \to p \to L$。每个节点是一个中间结果，箭头表示"由谁算出来"。真实的神经网络也是这样一张图，只是节点有几百万到几十亿个，分成很多层。这张图叫计算图。
+        </p>
+        <p>
+            反向传播（backpropagation）就是在计算图上系统地执行第五节的过程：
+        </p>
+        <ol>
+            <li>前向：从输入沿着图算到损失，把每个节点的中间值都存下来（比如例子里的 $z$ 和 $p$，算局部导数时要用）。</li>
+            <li>反向：从损失出发，沿着箭头的反方向，每经过一个节点，就把已经得到的"损失对这个节点的导数"乘上这个节点的局部导数，传给它的上一个节点。</li>
+        </ol>
+        <p>
+            走完一遍，图里每个参数都拿到了自己的偏导数。
+        </p>
+
+        <h3>2. 为什么要从后往前</h3>
+        <p>
+            例子里 $w$ 和 $b$ 共用了 $\dfrac{\partial L}{\partial z} = -0.3775$ 这一段，算一次就够了，再分别乘上各自的 $x$ 和 1。在深层网络里，前面层的所有参数都要经过后面所有层才能影响损失，后面这些层的导数乘积是大家共用的。从损失往回走，每一段只算一次，向前传递给需要的参数。
+        </p>
+        <p>
+            如果换一种方式，对每个参数单独从头算一遍，有多少参数就要重复多少遍，十亿个参数就是十亿遍。反向传播只需要一次反向计算就得到全部梯度，计算量大约是前向计算的两倍。这是深度学习能训练大模型的前提。
+        </p>
+
+        <h3>3. 在 PyTorch 里</h3>
+        <p>
+            写模型时不需要手算任何导数。PyTorch 等框架会在前向计算时自动记录计算图，调用 <code>backward()</code> 就执行反向传播。上面的例子用代码写出来：
+        </p>
+<pre><code>import torch
+
+x = torch.tensor(2.0)
+w = torch.tensor(0.5, requires_grad=True)   # 需要求梯度的参数
+b = torch.tensor(-0.5, requires_grad=True)
+
+z = w * x + b
+p = torch.sigmoid(z)
+loss = -torch.log(p)       # 前向：loss = 0.4741
+
+loss.backward()            # 反向传播
+print(w.grad, b.grad)      # -0.7551  -0.3775，和手算一致
+
+with torch.no_grad():      # 梯度下降更新一步
+    w -= 0.1 * w.grad
+    b -= 0.1 * b.grad</code></pre>
+        <p>
+            真实训练代码的结构也是这样：取一批数据，前向算损失，<code>backward()</code> 算梯度，优化器更新参数，然后清空梯度进入下一批。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、训练中常见的问题</h2>
+        <p>
+            梯度消失和梯度爆炸。反向传播要把很多局部导数连乘。如果每一层的局部导数都小于 1，比如 0.5，乘上 50 层后是 $0.5^{50} \approx 10^{-15}$，前面层的参数几乎得不到更新，这叫梯度消失；如果都大于 1，连乘后变得极大，参数一步被改得面目全非，这叫梯度爆炸。早期的循环神经网络深受这个问题困扰，后来的残差连接、层归一化、LSTM 的门控等设计，很大程度上就是为了让梯度能顺利传回去。课程讲 RNN 和 Transformer 时会反复提到这一点。
+        </p>
+        <p>
+            局部最小值。神经网络的损失函数不像第二节的抛物线那样只有一个最低点，梯度下降可能停在一个"附近都比它高、但不是全局最低"的位置。实践中发现，对参数很多的大网络，这通常不是严重问题，找到的解一般都足够好。
+        </p>
+        <p>
+            训练损失下降，不代表模型在新数据上也表现好。模型可能只是记住了训练数据。这个问题叫过拟合，第 8 篇会专门讲。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、小结</h2>
+        <p>
+            训练就是调整参数让损失变小。梯度下降每一步把每个参数往它偏导数的相反方向移动一小步，步长由学习率控制，太大会发散，太小走得慢。实际训练每步只用一小批数据估计梯度，叫随机梯度下降，大模型通常用它的改进版 AdamW。偏导数由链式法则得到：沿着计算图把局部导数相乘。反向传播从损失往回走，共用的部分只算一次，一遍反向就得到全部参数的梯度，PyTorch 的 <code>backward()</code> 自动完成这件事。
+        </p>
+    </section>
+
+    <section>
+        <h2>在课程笔记里继续读</h2>
+        <ul>
+            <li><a href="../CS224N-NLP-with-Deep-Learning/02_反向传播与神经网络基础.html">Stanford CS224N 第二讲</a>：神经元、非线性激活、损失函数与梯度下降，以及用链式法则一次算出所有梯度的反向传播。</li>
+            <li><a href="../11-711-Advanced-NLP/02_学到的表示与分词.html">CMU 11-711 第二讲</a>：手推梯度、SGD、计算图与反向传播。</li>
+            <li><a href="../11-711-Advanced-NLP/04_循环神经网络.html">CMU 11-711 第四讲</a>：循环神经网络中的梯度消失问题。</li>
+            <li><a href="../CS336-Language-Modeling-from-Scratch/02_PyTorch资源核算与显存精算.html">Stanford CS336 第二讲</a>：前向、反向和优化器各占多少计算量和显存。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>AI 基础 · Notes curated by Joyce</p>
+        <nav class="footer-nav">
+            <a href="06_softmax与交叉熵.html">&larr; 上一篇</a>
+            <a href="index.html">目录</a>
+            <a href="../index.html">全部课程</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
