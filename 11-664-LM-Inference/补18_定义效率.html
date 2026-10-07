@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十八讲（补充）：定义效率 | CMU 11-664/763 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="补17_扩散语言模型.html">&larr; 上一讲</a>
+    <span>CMU 11-664/763: Lecture 18（补充）</span>
+    <a href="补19_推理与硬件.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十八讲（补充）：定义效率</h1>
+        <p class="subtitle">参数量、FLOPs、速度为什么会给出相反的结论，语言模型推理特有的指标（首 token 时间、每 token 时间、吞吐量、带宽利用率），延迟约束下的有效吞吐，以及能耗</p>
+        <div class="author-meta">
+            原课：Defining Efficiency，Graham Neubig · 2025 年 10 月 30 日<br>
+            本讲没有公开资料，以下根据其他公开资料整理，不是原课内容：<a href="https://arxiv.org/abs/2110.12894" target="_blank">The Efficiency Misnomer</a>（Dehghani 等，ICLR 2022）；Databricks 博客 <a href="https://www.databricks.com/blog/llm-inference-performance-engineering-best-practices" target="_blank">LLM Inference Performance Engineering: Best Practices</a>（2023）；<a href="https://arxiv.org/abs/2401.09670" target="_blank">DistServe</a>（Zhong 等，2024）；<a href="https://arxiv.org/abs/2307.09701" target="_blank">Efficiency Pentathlon</a>（Peng 等，2023）；<a href="https://arxiv.org/abs/2504.17674" target="_blank">Energy Considerations of LLM Inference and Efficiency Optimizations</a>（Fernandez、Na 等，2025）
+        </div>
+    </header>
+
+    <section>
+        <h2>说明</h2>
+        <p>
+            课表上第 18 讲是 Graham Neubig 讲"定义效率"，没有公开录像和幻灯片。这是课程效率单元的开头，后面几讲会讲硬件、KV 缓存、推测解码和各种系统优化，而这些优化都要先回答一个问题：所谓"更高效"，用什么来衡量。这篇补充根据上面列出的论文和技术博客整理。
+        </p>
+    </section>
+
+    <section>
+        <h2>一、"更高效"是一个需要说清楚的词</h2>
+        <p>
+            第 16 讲已经提到，不同的 token 成本不同：并行生成和顺序生成、输入和输出、能不能复用缓存，代价都不一样。这一讲把这个问题系统化。
+        </p>
+        <p>
+            设想两个模型 A 和 B。A 的参数比 B 少一半，B 生成一个回答需要的计算量比 A 少，而在同一张 GPU 上，A 处理一条请求比 B 快，但同时服务一百个用户时 B 的总产出更高。哪个更高效？答案取决于你关心的是什么：显存够不够、电费多少、用户等多久、一台服务器能接多少用户。效率不是一个数，而是一组需要根据场景挑选的指标。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、常见的成本指标</h2>
+        <p>
+            Dehghani 等人 2021 年的论文 The Efficiency Misnomer（"效率的误称"）系统整理了机器学习论文里常用的成本指标，并指出它们经常互相矛盾。
+        </p>
+
+        <h3>1. 参数量</h3>
+        <p>
+            模型里可训练的数字有多少个。它容易统计，能大致判断模型放不放得进显存。但它不反映计算量：如果同一组参数在计算中被反复使用多次（参数共享），参数量很小，计算可能很慢。论文的例子是 Universal Transformer，它在每一层重复使用同一组参数。反过来，混合专家（MoE）模型的参数量非常大，但每个 token 只经过其中一小部分专家，计算量和一个小得多的稠密模型差不多。
+        </p>
+
+        <h3>2. FLOPs</h3>
+        <p>
+            完成一次计算需要的浮点运算次数（乘法和加法）。它和硬件无关，可以在纸上算出来，所以论文里很常用。它的问题是忽略了两件事。一是并行程度：同样的 FLOPs，能并行计算的操作比必须一步步顺序进行的操作快得多。二是访问内存的代价：在现代 GPU 上，从显存读数据往往比做乘法更慢，很多操作的实际瓶颈是内存访问而不是计算。下一讲会详细讲这一点。
+        </p>
+
+        <h3>3. 速度：吞吐量与延迟</h3>
+        <p>
+            直接测量运行时间，最接近实际体验，但和硬件、软件实现、代码质量都紧密相关，换一台机器、换一个框架结果就可能变。速度又分两种：
+        </p>
+        <ul>
+            <li>吞吐量：单位时间处理多少样本或 token。</li>
+            <li>延迟：处理一个样本或一批样本要多长时间。</li>
+        </ul>
+        <p>
+            两者的区别在于批处理。一批 100 个样本在 1 秒内处理完，吞吐量是每秒 100 个，延迟是 1 秒。把批次加大，吞吐量通常会上升，但每个样本等待的时间也会变长。实时交互的应用关心延迟，离线批量处理关心吞吐量。
+        </p>
+
+        <h3>4. 指标之间会互相矛盾</h3>
+        <p>
+            论文的图 1 比较了普通 Transformer、Universal Transformer（参数共享）和 Switch Transformer（MoE）在 SuperGLUE 上的准确率随成本的变化。按参数量画，Universal Transformer 的扩展曲线看起来最好；按 FLOPs 或实际速度画，排名反过来了。如果只看参数量就决定扩大哪个模型，可能会选错，白白浪费大量资源。
+        </p>
+        <p>
+            训练和推理的成本也可能给出不同的结论。参数共享的模型在推理时很省显存，但训练时反向传播需要保存的激活值并不比普通模型少。论文引用云服务商的估计，80% 到 90% 的机器学习计算负载是推理，所以推理成本通常被视为主要成本；但对需要频繁重新训练的系统（比如推荐系统），训练成本同样重要。
+        </p>
+        <p>
+            论文的建议是：不要只报告一个指标，至少同时给出参数量、FLOPs 和实际速度，并写清楚测量用的硬件和设置。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、语言模型推理特有的指标</h2>
+
+        <h3>1. 首 token 时间与每 token 时间</h3>
+        <p>
+            语言模型生成分两个阶段（第 1 讲讲过）：预填充一次性处理输入的提示词，解码一个一个地生成输出 token。两个阶段的性质不同，所以分开衡量：
+        </p>
+        <ul>
+            <li>首 token 时间（Time To First Token，TTFT）：从发出请求到看到第一个输出 token 的时间，主要由预填充决定。对聊天这类实时交互很重要。</li>
+            <li>每 token 时间（Time Per Output Token，TPOT）：之后每生成一个 token 平均要多久，决定用户感受到的"打字速度"。每 token 100 毫秒相当于每秒 10 个 token，大约是每分钟 450 个英文单词，比大多数人的阅读速度快。</li>
+        </ul>
+        <p>
+            一次请求的总延迟可以近似写成：
+        </p>
+        $$\text{延迟} = \text{TTFT} + \text{TPOT} \times \text{输出 token 数}$$
+        <p>
+            吞吐量则是服务器上所有用户、所有请求加起来每秒生成多少个输出 token。
+        </p>
+
+        <h3>2. 输入和输出的成本很不对称</h3>
+        <p>
+            Databricks 的测试发现，在 MPT 系列模型上，多加 512 个输入 token 增加的延迟，比多生成 8 个输出 token 还少。原因是输入在预填充阶段并行处理，输出在解码阶段顺序生成。所以估算平均延迟时，基本可以只看输出长度：预期输出多少个 token，乘以平均每 token 时间。这也解释了为什么 API 服务商对输出 token 的收费通常是输入 token 的好几倍。
+        </p>
+
+        <h3>3. 批大小：吞吐量与延迟的取舍</h3>
+        <p>
+            同一篇博客在一张 A100 上测试 MPT-7B（输入 512 个 token，输出 64 个）：批大小为 1 时，每秒处理 0.9 个请求；批大小为 64 时，每秒 12.5 个，提高了约 14 倍。继续加到 128，吞吐量几乎不再增长，每个请求的延迟却变成原来的约 4 倍。服务部署时要在这条曲线上选一个点：用户能接受多长的延迟，就在这个范围内尽量加大批次。
+        </p>
+
+        <h3>4. 带宽利用率</h3>
+        <p>
+            解码阶段在批大小不大时，瓶颈通常是显存带宽，而不是计算能力：每生成一个 token，都要把全部模型参数（以及 KV 缓存）从显存读一遍，真正的计算很快就做完了，大部分时间在等数据。所以衡量解码是否高效，常用模型带宽利用率（Model Bandwidth Utilization，MBU）：
+        </p>
+        $$\text{MBU} = \frac{\text{实际达到的带宽}}{\text{硬件峰值带宽}}, \qquad \text{实际带宽} = \frac{\text{模型参数大小} + \text{KV 缓存大小}}{\text{TPOT}}$$
+        <p>
+            例子：一个 70 亿参数的模型用 16 位精度存储约 14 GB。如果每 token 时间是 14 毫秒，那么每 14 毫秒读了 14 GB，实际带宽约每秒 1 TB。在峰值带宽每秒 2 TB 的硬件上，MBU 是 50%。MBU 接近 100% 说明硬件被充分利用。对于以计算为瓶颈的预填充阶段，对应的指标是模型算力利用率（MFU），即实际完成的计算量占峰值算力的比例。
+        </p>
+        <p>
+            同一篇博客还观察到，延迟随模型规模的增长慢于参数量的增长：MPT-30B 的参数约为 MPT-7B 的 4 倍，延迟约为 2.5 倍；Llama2-70B 的延迟约为 Llama2-13B 的 2 倍。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、在延迟约束下衡量吞吐：goodput</h2>
+        <p>
+            实际的服务往往有服务等级目标（Service Level Objective，SLO），比如"90% 的请求首 token 时间低于 1 秒、每 token 时间低于 50 毫秒"。只看吞吐量会误导：一个系统可以通过把批次开得很大来提高吞吐量，但如果大部分请求都超过了延迟上限，这些吞吐对用户没有意义。
+        </p>
+        <p>
+            DistServe（Zhong 等，2024）用 goodput 来衡量：在满足 TTFT 和 TPOT 两个约束的前提下，每张 GPU 能承受的最大请求速率。它还指出，大多数服务系统把预填充和解码放在同一批 GPU 上一起批处理，两个阶段会互相干扰：一个长提示词的预填充会让同批正在解码的请求卡住。系统只能牺牲其中一个指标，或者多配资源。DistServe 把两个阶段分到不同的 GPU 上，分别为它们选择资源和并行方式。在多种模型、应用和延迟要求下，它能多服务 7.4 倍的请求，或者在同样的请求量下满足严格 12.6 倍的延迟目标，同时让 90% 以上的请求满足约束。
+        </p>
+        <p>
+            同站 <a href="../11-768-AI-Agents/12_强化学习系统.html">CMU 11-768 第十二讲</a>讲连续批处理时提到的"分块预填充"和"预填充与解码分离"，就是这个问题的两种解决方式。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、能耗</h2>
+        <p>
+            除了时间和金钱，能耗也是重要的成本，关系到电费和碳排放。一个直觉的估算方法是：用 FLOPs 乘以每次运算的能耗，或者用 GPU 的理论功耗乘以运行时间。
+        </p>
+        <p>
+            Fernandez、Na 等人 2025 年的研究（作者包括本课程第 19 讲的讲者 Clara Na 和助教 Vashisth Tiwari）发现，这类简单估算会明显低估真实的能耗。他们模拟了真实的推理负载，按输入输出长度的分布和批大小的变化分组测量，覆盖了不同的软件框架、解码策略、GPU 型号、在线与离线服务、模型并行配置。结论是：各种推理优化能省多少能耗，强烈依赖于负载的形态（输入多长、输出多长、批多大）、软件栈和硬件。正确地组合使用相关的优化，总能耗最多可以比未优化的基线降低 73%；但同一个优化放到不合适的场景里，效果可能很小。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、怎样公平地比较</h2>
+        <p>
+            速度依赖硬件，这让不同机构的结果很难比较：一个实验室用 H100，另一个用 A100，数字没法放在一起。Efficiency Pentathlon（Peng 等，2023）尝试解决这个问题。它提供一个严格控制的统一硬件平台，所有提交的模型在同样的机器上测试；设计了几种模仿真实应用的使用场景，比如请求一条一条到达、请求随机到达、大批量离线处理；并同时报告延迟、吞吐量、显存占用和能耗。它的出发点也是：FLOPs 等指标上的改进，经常无法转化为实际应用中的进步。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、回头看前面的推理算法</h2>
+        <p>
+            有了这些指标，可以重新审视前面各讲的方法：
+        </p>
+        <ul>
+            <li>Best-of-N 和自洽性（第 7、12 讲）生成 N 个候选。如果 N 个候选并行生成，延迟几乎不变，吞吐量和能耗按 N 倍增加；如果共享提示词的预填充（第 20 讲补充篇的前缀共享），成本还能进一步降低。</li>
+            <li>长思维链和推理模型（第 9 讲）主要增加的是输出 token，而输出 token 正是最贵、最影响延迟的部分。这就是第 16 讲讨论缩短推理链的原因。</li>
+            <li>第 15 讲的计算最优推理需要先定义"计算"指什么：是 FLOPs、生成的 token 数、实际时间还是金钱，不同的定义会得出不同的最优策略。</li>
+            <li>扩散语言模型（第 17 讲补充篇）降低了单个请求的延迟，但在大批量服务时，吞吐量的优势未必同样明显。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>八、小结</h2>
+        <p>
+            参数量、FLOPs、速度各自只反映成本的一个侧面，而且可能给出相反的结论：参数共享让参数量小而计算不少，MoE 让参数量大而计算不多，FLOPs 忽略了并行度和内存访问。语言模型推理要分开看预填充和解码：首 token 时间、每 token 时间、吞吐量，以及解码阶段的显存带宽利用率；输出 token 比输入 token 贵得多，批次越大吞吐越高但延迟越长。实际服务要在延迟约束下衡量有效吞吐（goodput）。能耗不能简单地从 FLOPs 推算，优化的效果取决于负载形态、软件和硬件。报告效率时应同时给出多个指标并写明测量条件。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-664/763: Inference Algorithms for Language Modeling · Fall 2025</p>
+        <nav class="footer-nav">
+            <a href="补17_扩散语言模型.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="补19_推理与硬件.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

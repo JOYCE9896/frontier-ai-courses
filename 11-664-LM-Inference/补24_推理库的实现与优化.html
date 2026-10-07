@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第二十四讲（补充）：推理库的实现与优化 | CMU 11-664/763 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="补23_构建MLC-LLM.html">&larr; 上一讲</a>
+    <span>CMU 11-664/763: Lecture 24（补充）</span>
+    <a href="index.html">课程目录 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第二十四讲（补充）：推理库的实现与优化</h1>
+        <p class="subtitle">一个推理引擎由哪几部分组成：以约 1200 行的 Nano-vLLM 为例，看请求怎样排队、KV 缓存块怎样分配和复用、预填充与解码怎样调度、CUDA Graph 怎样去掉启动开销，再看 FlashAttention 与 FlashInfer 这类注意力计算核</p>
+        <div class="author-meta">
+            原课：Library Implementation and Optimization，Graham Neubig · 2025 年 11 月 25 日<br>
+            本讲没有公开资料，以下根据其他公开资料整理，不是原课内容：开源项目 <a href="https://github.com/GeeeekExplorer/nano-vllm" target="_blank">Nano-vLLM</a> 的源代码；<a href="https://arxiv.org/abs/2309.06180" target="_blank">vLLM</a>（Kwon 等，2023）；<a href="https://arxiv.org/abs/2312.07104" target="_blank">SGLang</a>（Zheng 等，2023）；<a href="https://arxiv.org/abs/2205.14135" target="_blank">FlashAttention</a>（Dao 等，2022）；<a href="https://arxiv.org/abs/2501.01005" target="_blank">FlashInfer</a>（Ye 等，2025）
+        </div>
+    </header>
+
+    <section>
+        <h2>说明</h2>
+        <p>
+            课表上最后一讲是 Graham Neubig 讲推理库的实现与优化，没有公开录像和幻灯片。前面几讲（第 19 到 22 讲补充篇）分别讲了硬件、KV 缓存、推测解码、模型结构，这一讲把它们放回一个完整的推理引擎里，看实际的代码是怎么组织的。vLLM 和 SGLang 的代码量都很大，不适合入门阅读，这里用 Nano-vLLM 做例子：它是一个从零实现的轻量版 vLLM，Python 代码约 1200 行，实现了前缀缓存、张量并行、torch.compile 和 CUDA Graph，接口与 vLLM 相同。下文对代码的描述依据它在 GitHub 上的源代码。
+        </p>
+    </section>
+
+    <section>
+        <h2>一、推理引擎要做的事</h2>
+        <p>
+            从外面看，推理引擎只做一件事：收到一批提示词，返回生成的文本。Nano-vLLM 的用法和 vLLM 一样：
+        </p>
+<pre><code>from nanovllm import LLM, SamplingParams
+
+llm = LLM("/模型路径", tensor_parallel_size=1)
+params = SamplingParams(temperature=0.6, max_tokens=256)
+outputs = llm.generate(["Hello, Nano-vLLM."], params)</code></pre>
+        <p>
+            内部要解决的问题是前面几讲讨论过的：怎样把很多请求组成批次以提高吞吐量（第 18、19 讲补充篇）；怎样管理有限的显存给每个请求存 KV 缓存（第 20 讲补充篇）；怎样让 GPU 不空等。Nano-vLLM 把这些拆成几个模块：
+        </p>
+        <table>
+            <tr><th>模块</th><th>文件</th><th>职责</th></tr>
+            <tr><td>引擎</td><td>engine/llm_engine.py</td><td>接收请求，循环调用调度器和模型执行器，直到所有请求完成</td></tr>
+            <tr><td>调度器</td><td>engine/scheduler.py</td><td>决定这一步处理哪些请求，是做预填充还是解码</td></tr>
+            <tr><td>块管理器</td><td>engine/block_manager.py</td><td>把 KV 缓存显存切成块，分配、回收、按前缀复用</td></tr>
+            <tr><td>模型执行器</td><td>engine/model_runner.py</td><td>准备输入，在 GPU 上运行模型，采样出下一个 token；负责 CUDA Graph 和多卡</td></tr>
+            <tr><td>模型与算子</td><td>models/、layers/</td><td>Qwen3 模型的定义，注意力、线性层、旋转位置编码、采样器等</td></tr>
+        </table>
+    </section>
+
+    <section>
+        <h2>二、主循环</h2>
+        <p>
+            引擎的核心是一个很短的循环。<code>generate</code> 先把所有提示词分词，包装成序列对象，放进调度器的等待队列，然后反复调用 <code>step</code>：
+        </p>
+<pre><code>def step(self):
+    seqs, is_prefill = self.scheduler.schedule()          # 1. 选出这一步要算的序列
+    token_ids = self.model_runner.call("run", seqs, is_prefill)  # 2. 在 GPU 上跑一步
+    self.scheduler.postprocess(seqs, token_ids, is_prefill)      # 3. 记录新 token，检查是否结束
+    ...</code></pre>
+        <p>
+            每一步只生成一个 token（对每个被选中的序列）。这就是第 18 讲补充篇和 11-768 第十二讲提到的连续批处理：调度在"每一步"的粒度上进行，序列一结束就离开批次，等待中的请求可以在下一步加入。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、调度器：先预填充，再解码</h2>
+        <p>
+            调度器维护两个队列：等待队列（还没做完预填充的请求）和运行队列（正在逐 token 解码的请求）。每一步的逻辑是：
+        </p>
+        <ol>
+            <li>如果等待队列里有请求，这一步就做预填充。从队头依次取请求，直到达到两个上限之一：本步最多处理的序列数（默认 512），或本步最多处理的 token 总数（默认 16384）。如果第一个请求的提示词太长，超过了 token 上限，就只处理它的一部分，剩下的下一步再处理，这就是分块预填充。</li>
+            <li>如果没有等待的请求，这一步就做解码：运行队列里的每个序列各生成一个 token。</li>
+        </ol>
+        <p>
+            Nano-vLLM 的做法是预填充优先，同一步里不混合预填充和解码。这样实现简单，但新请求到达时，正在解码的请求要等这一步预填充做完，会出现第 18 讲补充篇说的预填充干扰解码的问题。vLLM 等成熟的系统支持在同一步里混合两者，或者把它们分到不同的 GPU 上。
+        </p>
+
+        <h3>显存不够时：抢占</h3>
+        <p>
+            解码时，序列每长出一个块的 token，就需要一个新的 KV 块。如果空闲块用完了，调度器会抢占：把运行队列末尾（最晚加入）的序列踢回等待队列，释放它的所有 KV 块，让其他序列继续。被抢占的序列以后要重新做预填充，用重新计算换取显存。这是吞吐量和公平性之间的一种简单折中。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、块管理器：分页与前缀缓存</h2>
+
+        <h3>1. 分页</h3>
+        <p>
+            这是第 20 讲补充篇讲的 PagedAttention 的实现。启动时，模型执行器先测量模型权重和一次预热计算占用了多少显存，再按设定的利用率（默认使用 90% 的显存）算出剩下的空间能放多少个 KV 块，一次性分配一个大张量：
+        </p>
+<pre><code>kv_cache = torch.empty(2, 层数, 块数, 块大小, KV头数, 每头维度)</code></pre>
+        <p>
+            开头的 2 是 K 和 V。Nano-vLLM 默认每块存 256 个 token。块管理器维护空闲块队列、每个块的引用计数，以及每个序列的块表（第几块对应显存里的哪一块）。注意力计算时，按块表到这个大张量里取对应的 KV。
+        </p>
+
+        <h3>2. 用哈希实现前缀缓存</h3>
+        <p>
+            每个块填满之后，块管理器会算它的哈希值。哈希的输入是这一块的 token，加上前一块的哈希值，所以一个块的哈希实际上代表了从开头到这一块为止的整个前缀。哈希值和块编号记在一张表里。
+        </p>
+        <p>
+            新请求进来分配块时，块管理器逐块计算它提示词的哈希，在表里查找。如果找到，并且块里存的 token 确实相同（防止哈希碰撞），就直接让这个请求的块表指向已有的块，引用计数加一，这部分不用再做预填充。第一个不匹配的块之后，才分配新块、真正计算。请求结束后，块的引用计数归零，被放回空闲队列，但它的内容和哈希暂时保留；只要在被重新分配之前又有相同前缀的请求进来，仍然能命中。
+        </p>
+        <p>
+            这与 vLLM 的自动前缀缓存思路相同。SGLang 的 RadixAttention 用前缀树组织，能以 token 为粒度匹配；按块哈希的方式只能以块为单位匹配，实现更简单。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、模型执行器：消除 CPU 开销</h2>
+
+        <h3>1. 问题：小批量解码时 CPU 成了瓶颈</h3>
+        <p>
+            第 19 讲补充篇提到第三种瓶颈：开销。模型的一次前向计算由几百个 GPU 计算核组成（每层的线性层、注意力、归一化、激活函数……），每个都要由 CPU 端的 Python 和 PyTorch 发起。解码时每个计算核处理的数据很少，GPU 几微秒就算完，而 CPU 发起一个计算核也要几微秒，于是 GPU 经常在等 CPU。小模型、小批量时这个问题最严重。
+        </p>
+
+        <h3>2. CUDA Graph</h3>
+        <p>
+            CUDA Graph 的办法是：先把一次完整前向计算的所有计算核"录制"下来，之后每次只需要一条指令"重放"整段录像，CPU 不再逐个发起。限制是录制时张量的形状和内存地址都固定了。
+        </p>
+        <p>
+            Nano-vLLM 的处理方法是：启动时，针对一组批大小（1、2、4、8，然后 16、32、48……每隔 16 一档，直到上限）分别录制解码的计算图，所有图共用一块显存池。解码时，如果实际批大小是 13，就选不小于 13 的最小一档（16），把 13 个序列的输入拷进预先分配好的固定张量的前 13 行，其余位置填上空值，然后重放。多算 3 行的浪费远小于省下的 CPU 开销。预填充的输入长度变化太大，不使用 CUDA Graph，直接执行。
+        </p>
+
+        <h3>3. torch.compile 与算子融合</h3>
+        <p>
+            Nano-vLLM 还用 torch.compile 编译部分算子（比如归一化、激活函数、旋转位置编码），把多个逐元素操作融合成一个计算核，减少显存读写（第 19 讲补充篇的算子融合）。
+        </p>
+
+        <h3>4. 张量并行</h3>
+        <p>
+            多卡时，引擎为每张额外的 GPU 启动一个进程，各自加载模型的一部分（把每层的权重矩阵按列或按行切开）。主进程通过共享内存把"运行哪个方法、传什么参数"发给其他进程，所有进程同时计算，在需要汇总的地方做一次跨卡通信。
+        </p>
+
+        <h3>5. 效果</h3>
+        <p>
+            项目的测试配置是：RTX 4070 笔记本 GPU（8 GB 显存），Qwen3-0.6B 模型，256 个请求，输入和输出长度都在 100 到 1024 个 token 之间随机。vLLM 用时 98.37 秒，吞吐量每秒 1362 个 token；Nano-vLLM 用时 93.41 秒，每秒 1434 个 token。这说明对离线批量推理，核心的几项优化（分页、前缀缓存、连续批处理、CUDA Graph）就能拿到大部分的性能。vLLM 的大量代码用于支持在线服务、各种模型结构、硬件、量化格式和分布式部署。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、注意力计算核</h2>
+
+        <h3>1. FlashAttention</h3>
+        <p>
+            标准的注意力实现会先算出完整的注意力分数矩阵（$N \times N$，$N$ 是序列长度），写到显存，再读回来做 softmax，再写回去，再读回来乘以 V。序列一长，这个矩阵很大，反复读写显存成了主要开销。
+        </p>
+        <p>
+            FlashAttention（Dao 等，2022）的出发点是：注意力算法应该考虑 IO，也就是 GPU 显存和芯片上高速存储之间的读写。它把 Q、K、V 切成小块（分块，tiling），每次把一小块读进芯片上的 SRAM，在芯片上算完这一块的注意力，用"在线 softmax"的技巧边算边更新结果，完整的 $N \times N$ 矩阵从不写进显存。结果是精确的，不是近似。显存读写大幅减少，训练 GPT-2（序列长度 1K）快 3 倍，BERT-large 比当时的 MLPerf 训练速度纪录快 15%。
+        </p>
+        <p>
+            解码时情况不同：每次只有一个查询向量，但要读很长的 KV。针对这种情况的变体（如 Flash-Decoding）把 KV 沿序列方向切成几段，分给不同的 GPU 计算单元并行计算，最后合并结果，让长上下文解码也能用满 GPU。
+        </p>
+
+        <h3>2. FlashInfer</h3>
+        <p>
+            推理时的注意力比训练复杂得多：KV 缓存是分页存储的，不同请求长度不同，有的请求共享前缀，有的在做预填充有的在做解码，还要和 CUDA Graph 兼容。FlashInfer（Ye 等，2025）是专门为推理服务设计的注意力引擎：
+        </p>
+        <ul>
+            <li>用块稀疏格式统一表示各种 KV 缓存布局（分页、共享前缀等），并支持组合使用，优化显存访问、减少冗余读取。</li>
+            <li>提供可定制的注意力模板，通过即时编译（JIT）生成适合各种变体（不同的掩码、位置编码等）的计算核。</li>
+            <li>用负载均衡的调度算法应对请求长度的动态变化，同时保持与需要固定配置的 CUDA Graph 兼容。</li>
+        </ul>
+        <p>
+            FlashInfer 已被集成进 SGLang、vLLM 和 MLC 引擎。与其他服务方案相比，它在 LLM 服务基准上把 token 间延迟降低 29% 到 69%（相对编译器后端），长上下文推理延迟降低 28% 到 30%，并行生成提速 13% 到 17%。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、成熟的推理框架还做了什么</h2>
+        <p>
+            把 Nano-vLLM 当作骨架，vLLM、SGLang 这样的框架在此之上增加了：
+        </p>
+        <ul>
+            <li>在线服务：与 OpenAI 兼容的 HTTP 接口、流式输出、请求优先级和超时处理。</li>
+            <li>更细的调度：预填充与解码混合批处理、预填充与解码分离部署（第 18 讲补充篇的 DistServe）；SGLang 还让 CPU 端的调度与 GPU 计算重叠进行，进一步减少开销。</li>
+            <li>本课程讲过的推理算法：并行采样、束搜索、推测解码（第 21 讲补充篇）、约束解码（第 23 讲补充篇的 XGrammar）。SGLang 的前端语言能直接写出多次调用、分叉、约束这类程序（第 13 讲补充篇的复合 AI 系统）。</li>
+            <li>各种量化格式、MoE 模型的专家并行、多模态模型、LoRA 适配器的动态加载。</li>
+            <li>多种硬件后端：NVIDIA、AMD、TPU 等。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>八、全课回顾</h2>
+        <p>
+            这是这门课的最后一讲。回头看整门课的结构：前半部分讲生成算法，怎样从一个训练好的模型里得到好的输出（采样、搜索、受控生成）；中间讲推理与 Agent（思维链、自我修正、推理模型、工具、Agent）；然后讲把生成当作子程序的元生成（奖励模型与 Best-of-N、MBR、推理时扩展、token 预算）；最后的效率单元讲怎样把这些算法的成本降下来（扩散、效率的定义、硬件、KV 缓存、推测解码、线性注意力与稀疏、编译、推理库）。
+        </p>
+        <p>
+            第 1 讲提出的问题贯穿始终：我们可以在推理时花更多计算换取更好的结果，问题是怎样花得聪明，以及怎样让同样的计算更便宜。前者是算法问题，后者是系统问题，这门课把两者放在了一起。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、小结</h2>
+        <p>
+            一个推理引擎的核心是一个按步执行的循环：调度器每一步选出要处理的序列（Nano-vLLM 中预填充优先，长提示词分块处理，显存不足时抢占最晚加入的序列）；块管理器把 KV 缓存显存切成固定大小的块，用引用计数共享，用"本块 token 加前一块哈希"的链式哈希实现前缀缓存；模型执行器用 CUDA Graph 预先录制各档批大小的解码计算，消除小批量时的 CPU 开销，并用 torch.compile 融合算子、用多进程实现张量并行。注意力计算核方面，FlashAttention 通过分块和在线 softmax 避免把完整的注意力矩阵写入显存，FlashInfer 为分页、共享前缀、动态长度的推理场景提供统一、可定制、兼容 CUDA Graph 的注意力实现。约 1200 行代码的 Nano-vLLM 在离线批量推理上能达到与 vLLM 相当的速度，说明这几项优化是性能的主体。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-664/763: Inference Algorithms for Language Modeling · Fall 2025</p>
+        <nav class="footer-nav">
+            <a href="补23_构建MLC-LLM.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="index.html">课程目录 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

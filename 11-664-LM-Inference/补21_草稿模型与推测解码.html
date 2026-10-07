@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第二十一讲（补充）：草稿模型与推测解码 | CMU 11-664/763 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="补20_前缀共享与KV缓存优化.html">&larr; 上一讲</a>
+    <span>CMU 11-664/763: Lecture 21（补充）</span>
+    <a href="补22_线性化注意力与稀疏模型.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第二十一讲（补充）：草稿模型与推测解码</h1>
+        <p class="subtitle">先猜后验：为什么验证几个 token 和生成一个一样快，怎样用拒绝采样保证输出分布不变，期望加速比怎么算，草稿从哪里来（小模型、Medusa 头、EAGLE），树形推测，以及长上下文和大批量下的推测解码</p>
+        <div class="author-meta">
+            原课：Draft Models and Speculative Decoding，Beidi Chen 客座讲座 · 2025 年 11 月 13 日<br>
+            本讲没有公开资料，以下根据其他公开资料整理，不是原课内容：<a href="https://arxiv.org/abs/2211.17192" target="_blank">Fast Inference from Transformers via Speculative Decoding</a>（Leviathan 等，2022）；<a href="https://arxiv.org/abs/2302.01318" target="_blank">Speculative Sampling</a>（Chen 等，DeepMind，2023）；<a href="https://arxiv.org/abs/2401.10774" target="_blank">Medusa</a>（Cai 等，2024）；<a href="https://arxiv.org/abs/2401.15077" target="_blank">EAGLE</a>（Li 等，2024）；Beidi Chen 课题组的 <a href="https://arxiv.org/abs/2402.12374" target="_blank">Sequoia</a>（2024）、<a href="https://arxiv.org/abs/2404.11912" target="_blank">TriForce</a>（2024）、<a href="https://arxiv.org/abs/2408.11049" target="_blank">MagicDec</a>（2024）
+        </div>
+    </header>
+
+    <section>
+        <h2>说明</h2>
+        <p>
+            课表上第 21 讲是 Beidi Chen 的客座讲座，没有公开录像和幻灯片。Beidi Chen 任教于 CMU 电子与计算机工程系，她的课题组在推测解码和长上下文推理效率方面做了一系列工作。这篇补充先讲推测解码的基本原理（根据最早的两篇论文），再介绍几种主流的草稿方法，最后介绍她课题组的三项工作。原课具体讲了哪些内容无从得知。
+        </p>
+    </section>
+
+    <section>
+        <h2>一、出发点：验证比生成便宜</h2>
+        <p>
+            第 19 讲补充篇算过：在 H100 上用一个 70 亿参数的模型解码，批大小为 1 时，每生成一个 token 要把 14 GB 参数读一遍，约 4.2 毫秒，而真正的计算只要约 0.014 毫秒。GPU 的算力几乎全闲着。
+        </p>
+        <p>
+            这带来一个机会：如果手上已经有几个"候选"的后续 token，让大模型一次前向计算同时给这几个位置打分，耗时和只算一个位置几乎一样，因为参数还是只读一遍，多出的计算量 GPU 完全承担得起。这和预填充一次处理很多 token 是同一个道理。
+        </p>
+        <p>
+            问题是候选从哪来。推测解码的想法是：用一个便宜的草稿模型先快速猜出后面 $\gamma$ 个 token，再让大模型（目标模型）一次并行地检查它们。猜对的直接接受，从第一个猜错的位置开始丢弃。Leviathan 等人的论文指出，困难的语言建模任务里有很多容易的子任务，比如补全一个常见短语、写出代码里的固定语法，小模型就能猜对。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、保证结果不变：推测采样</h2>
+
+        <h3>1. 贪心解码的情况</h3>
+        <p>
+            如果用贪心解码（每步取概率最高的 token），验证很简单：大模型在每个位置算出自己会选的 token，和草稿逐个比较，一致就接受，第一个不一致的位置换成大模型的选择，后面全部丢弃。输出和大模型单独贪心解码完全相同。
+        </p>
+
+        <h3>2. 采样的情况</h3>
+        <p>
+            如果要从大模型的分布中采样，"和大模型选的一样"就没有意义了，因为采样本身是随机的。Leviathan 等人和 DeepMind 的 Chen 等人几乎同时提出了一种修改过的拒绝采样，保证最终输出的分布和直接从大模型采样完全一样。
+        </p>
+        <p>
+            设在某个位置，大模型的分布是 $p$，草稿模型的分布是 $q$，草稿模型从 $q$ 中采样出 token $x$。规则是：
+        </p>
+        <ol>
+            <li>以概率 $\min\!\left(1, \dfrac{p(x)}{q(x)}\right)$ 接受 $x$。也就是说，如果大模型认为 $x$ 的概率不比草稿模型低，一定接受；如果草稿模型高估了 $x$，按比例接受。</li>
+            <li>如果拒绝，就从修正后的分布 $\dfrac{\max(0,\ p - q)}{\sum \max(0,\ p - q)}$ 中重新采样一个 token。这个分布只在大模型比草稿模型更看好的那些 token 上有概率。</li>
+        </ol>
+
+        <h3>3. 用数字验证</h3>
+        <p>
+            设词表只有 A、B、C 三个 token，大模型的分布 $p = (0.5, 0.3, 0.2)$，草稿模型的分布 $q = (0.7, 0.2, 0.1)$。草稿模型高估了 A，低估了 B 和 C。
+        </p>
+        <ul>
+            <li>草稿采到 A（概率 0.7）：接受概率是 $0.5 / 0.7 \approx 0.714$。所以 A 最终被输出的概率是 $0.7 \times 0.714 = 0.5$。</li>
+            <li>草稿采到 B 或 C：$p \geq q$，一定接受。B 经此途径输出的概率是 0.2，C 是 0.1。</li>
+            <li>拒绝只会发生在草稿采到 A 时，概率是 $0.7 \times (1 - 0.714) = 0.2$。修正分布是 $\max(0, p - q) = (0, 0.1, 0.1)$，归一化后为 $(0, 0.5, 0.5)$。所以经拒绝途径，B 和 C 各得到 $0.2 \times 0.5 = 0.1$。</li>
+        </ul>
+        <p>
+            合计：A 是 0.5，B 是 $0.2 + 0.1 = 0.3$，C 是 $0.1 + 0.1 = 0.2$，正好等于大模型的分布 $p$。草稿模型猜得好不好，只影响速度，不影响结果。
+        </p>
+        <p>
+            这里有一个细节：验证 $\gamma$ 个草稿 token 时，大模型的那一次前向计算在每个位置都给出了分布。如果全部 $\gamma$ 个都被接受，最后一个位置之后的分布也已经算好了，可以免费再采一个 token。所以每一轮至少产出 1 个 token（第一个就被拒绝时，用修正分布采样的那个），最多产出 $\gamma + 1$ 个。
+        </p>
+
+        <h3>4. 能快多少</h3>
+        <p>
+            设每个草稿 token 被接受的概率大致为 $\alpha$（各位置独立），每轮猜 $\gamma$ 个。每轮期望产出的 token 数是：
+        </p>
+        $$\frac{1 - \alpha^{\gamma + 1}}{1 - \alpha}$$
+        <p>
+            例如 $\alpha = 0.8$，$\gamma = 4$：$(1 - 0.8^5) / 0.2 = (1 - 0.328) / 0.2 \approx 3.36$。也就是大模型每做一次前向计算，平均产出约 3.4 个 token。实际加速比还要扣掉草稿模型本身的时间，以及验证多个位置带来的少量额外开销。$\gamma$ 越大，潜在收益越大，但后面的草稿越可能被浪费，所以存在一个最优值。
+        </p>
+        <p>
+            Leviathan 等人在 T5-XXL 上得到 2 到 3 倍的加速，输出完全相同；Chen 等人在 700 亿参数的 Chinchilla 上，在分布式设置下得到 2 到 2.5 倍的解码加速。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、草稿从哪里来</h2>
+
+        <h3>1. 独立的小模型</h3>
+        <p>
+            最直接的选择是同一系列里的小模型，比如用 1B 模型给 70B 模型打草稿。它们用同样的数据训练，分词器相同，预测比较一致。缺点是要额外维护和部署一个模型，并且同一系列里不一定有合适大小的小模型。
+        </p>
+
+        <h3>2. Medusa：在大模型上加几个预测头</h3>
+        <p>
+            Medusa（Cai 等，2024）不要单独的草稿模型，而是在大模型最后一层的输出上加几个额外的"解码头"：第 1 个头预测下一个 token 之后的那个，第 2 个头预测再往后一个，依此类推。这些头一次就能给出后面多个位置的候选。
+        </p>
+        <p>
+            每个头给出几个候选，组合起来形成一棵候选树。Medusa 用树形注意力掩码让大模型在一次前向计算中验证整棵树：每个候选 token 只能看到它在树上的祖先。只训练新加的头、主干模型冻结（Medusa-1），可以无损地加速 2.2 倍以上；头和主干一起微调（Medusa-2），加速可达 2.3 到 3.6 倍，但需要特殊的训练方法保住主干模型的能力。论文还提出了"典型接受"方案，放宽接受条件以提高接受率，这时输出分布不再与原模型严格相同。
+        </p>
+
+        <h3>3. EAGLE：在特征层面做自回归</h3>
+        <p>
+            EAGLE（Li 等，2024）观察到，与其预测下一个 token，不如预测大模型倒数第二层的特征向量，后者更平滑、更容易预测。但只根据特征预测特征存在不确定性：同样的特征后面可能接不同的 token，导致后续特征不同。EAGLE 的解决办法是把已经采样出的、领先一步的 token 也作为输入，消除这种不确定性。它用一个很轻量的自回归头完成预测。在 LLaMA2-Chat 70B 上，延迟加速 2.7 到 3.5 倍，吞吐量翻倍，并保持生成分布不变。
+        </p>
+        <p>
+            近年来一些模型在预训练时就加入了多 token 预测（MTP）模块，比如 DeepSeek-V3，这些模块可以直接用作草稿，思路与 Medusa、EAGLE 相近。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、Beidi Chen 课题组的工作</h2>
+
+        <h3>1. Sequoia：树应该长什么样</h3>
+        <p>
+            Medusa 和 EAGLE 都用树形的候选，但树的形状（每层几个分支、多深）通常是手工设定的。Sequoia（Chen 等，2024）用动态规划，根据各位置的接受率，找出在给定节点数量下期望接受 token 数最多的树结构。这样推测的预算（每次验证多少个候选）加大时，收益能持续增长。
+        </p>
+        <p>
+            它还提出了一种新的采样与验证方法，在不同的采样温度下表现都更稳定；并加入一个"硬件感知"的优化器，针对具体的 GPU 自动选择树的大小和深度，因为不同硬件上"验证多少个 token 仍然几乎免费"的界限不同（第 19 讲补充篇的算术强度）。在 A100 上，Sequoia 让 Llama2-7B、Llama2-13B、Vicuna-33B 的解码分别加速最多 4.04、3.73、2.27 倍。在参数放不下 GPU、需要从 CPU 内存加载（offloading）的设置下，它在 L40 上把 Llama2-70B 的精确推理做到每 token 0.56 秒，比他们自己优化过的 offloading 系统（每 token 5.6 秒）快约 10 倍。offloading 时读参数特别慢，一次验证很多 token 的收益也就特别大。
+        </p>
+
+        <h3>2. TriForce：长上下文的分层推测</h3>
+        <p>
+            长上下文时，瓶颈不再是参数，而是 KV 缓存（第 20 讲补充篇）：每生成一个 token 都要读取 12.8 万个 token 的 KV。用一个小模型打草稿帮助不大，因为大模型验证时仍要读全部 KV。
+        </p>
+        <p>
+            TriForce（Sun 等，2024）用两层推测解决这个问题。中间层的草稿用的就是目标模型本身的权重，但只配一份稀疏的 KV 缓存：通过检索只取出和当前位置最相关的一部分 KV。这样草稿既准（模型相同），又快（读的 KV 少）。这个中间层自己的速度还不够快，所以再用一个更小的模型给它打草稿。最终由完整 KV 的目标模型验证，结果无损。在 A100 上，Llama2-7B-128K 加速最多 2.31 倍；在两张 RTX 4090 上 offloading 运行时，每 token 0.108 秒，只比 A100 上的普通自回归慢一倍。
+        </p>
+
+        <h3>3. MagicDec：大批量下推测解码仍然有用</h3>
+        <p>
+            通常的看法是，推测解码只在小批量时有用：批量大了，GPU 算力被批处理占满，验证多个 token 不再"免费"，推测反而拖慢吞吐量。MagicDec（Sadhukhan 等，2024，作者包括本课程助教 Vashisth Tiwari）指出，对中长序列，这个看法不成立。
+        </p>
+        <p>
+            理由是：随着批大小和序列长度增加，瓶颈从读参数转移到读 KV 缓存，而 KV 缓存不能在请求之间共享，批再大，它的算术强度也不会提高，解码始终受带宽限制。所以验证多个 token 仍然近乎免费。MagicDec 用带稀疏 KV 缓存的草稿模型（与 TriForce 的思路类似）专门应对 KV 瓶颈，并建立理论模型选择最优的草稿策略。结果显示，在中长序列上，批大小从 32 到 256，Llama3.1-8B 都能加速最多 2.51 倍，而且批越大，加速可以越明显。这意味着推测解码可以同时改善延迟和吞吐量。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、实际使用时的问题</h2>
+        <ul>
+            <li>接受率依赖任务。代码、格式化输出等可预测性强的内容接受率高；开放式创作接受率低。</li>
+            <li>采样温度越高，大模型的分布越平，草稿越难猜中。Sequoia 专门处理了不同温度下的稳定性。</li>
+            <li>草稿模型和目标模型要一致。<a href="../11-768-AI-Agents/12_强化学习系统.html">CMU 11-768 第十二讲</a>讲过，在 RL 训练中目标模型每一步都在变，固定的草稿接受率会逐渐下降，需要让草稿也在线训练。</li>
+            <li>vLLM、SGLang 等推理框架都内置了推测解码，支持小模型草稿、EAGLE、MTP 等多种方式。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>六、和本课程其他内容的联系</h2>
+        <ul>
+            <li>第 2、3 讲讲采样和温度。推测采样是一种不改变分布的采样加速方法，温度、top-p 等修改要作用在 $p$ 和 $q$ 上之后再做拒绝采样。</li>
+            <li>第 16 讲讲蒸馏。草稿模型和大模型越像，接受率越高，所以常用蒸馏来训练草稿模型。</li>
+            <li>扩散语言模型（第 17 讲补充篇）一次生成多个位置，推测解码则在自回归框架内"一次确认多个位置"，两者都在绕开逐 token 顺序生成的限制。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>七、小结</h2>
+        <p>
+            解码受显存带宽限制，大模型一次验证多个 token 的时间和生成一个差不多。推测解码让便宜的草稿先猜 $\gamma$ 个 token，大模型并行验证：以 $\min(1, p/q)$ 的概率接受，拒绝时从 $\max(0, p - q)$ 重新采样，最终分布与大模型完全相同。每轮期望产出 $(1-\alpha^{\gamma+1})/(1-\alpha)$ 个 token，实际加速通常在 2 到 4 倍。草稿可以来自小模型、附加的预测头（Medusa）、特征层面的轻量自回归（EAGLE）或模型自带的 MTP 模块，组织成树一次验证多条路径效果更好。Sequoia 用动态规划和硬件感知优化树的形状；TriForce 用"同一模型加稀疏 KV"作中间层草稿处理长上下文；MagicDec 说明在长序列下，瓶颈是 KV 缓存，推测解码在大批量时依然能提速。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-664/763: Inference Algorithms for Language Modeling · Fall 2025</p>
+        <nav class="footer-nav">
+            <a href="补20_前缀共享与KV缓存优化.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="补22_线性化注意力与稀疏模型.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

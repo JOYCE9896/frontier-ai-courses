@@ -38,7 +38,7 @@
 | Stanford | [CS224N: NLP with Deep Learning](https://joyce9896.github.io/frontier-ai-courses/CS224N-NLP-with-Deep-Learning/) | Christopher Manning | 从词向量、Transformer 到推理训练，斯坦福最长寿的 NLP 课 |
 | Stanford | [CME296: Diffusion & Large Vision Models](https://joyce9896.github.io/frontier-ai-courses/CME296-Diffusion-and-Large-Vision-Models/) | Afshine Amidi、Shervine Amidi | 扩散、分数匹配与流匹配的推导，潜空间、DiT 架构、训练蒸馏与评估 |
 | CMU | [11-711: Advanced NLP](https://joyce9896.github.io/frontier-ai-courses/11-711-Advanced-NLP/) | Sean Welleck | 研究生 NLP 核心课（2026 春，23 讲）：语言模型、Transformer、预训练、微调与解码、检索、多模态、评估、强化学习、Agent、量化、并行、MoE、长序列与推理时扩展 |
-| CMU | [11-664/763: Inference Algorithms for LMs](https://joyce9896.github.io/frontier-ai-courses/11-664-LM-Inference/) | Graham Neubig、Amanda Bertsch | 语言模型推理算法（2025 秋，已整理 15 讲）：采样与搜索、受控生成、思维链与推理模型、工具与 Agent、奖励模型、MBR、推理时扩展与效率 |
+| CMU | [11-664/763: Inference Algorithms for LMs](https://joyce9896.github.io/frontier-ai-courses/11-664-LM-Inference/) | Graham Neubig、Amanda Bertsch | 语言模型推理算法（2025 秋，24 讲，其中 9 讲为依据其他公开资料写的补充篇）：采样与搜索、受控生成、思维链与推理模型、工具与 Agent、奖励模型、MBR、推理时扩展，以及 KV 缓存、推测解码、硬件与推理引擎等效率主题 |
 | CMU | [11-768: AI Agents](https://joyce9896.github.io/frontier-ai-courses/11-768-AI-Agents/) | Graham Neubig、Daniel Fried | 基于大语言模型的 Agent：工具、上下文、记忆、规划、SFT 与 RL 训练、RL 系统与安全（课程进行中，已整理 13 讲） |
 
 ### Non-Technical
