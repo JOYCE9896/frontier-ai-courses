@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>对比几种解码方法 | 动手练习</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+    <style>
+        pre.code code, pre.output code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.82rem; line-height: 1.5; white-space: pre; }
+        pre.output { border-left: 4px solid #7a5c2e; }
+        .label { font-size: 0.85rem; color: #888; margin-bottom: -1rem; }
+        img.figure { max-width: 100%; height: auto; display: block; margin: 1.5rem 0; }
+    </style>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="02_手写一个BPE分词器.html">&larr; 上一篇</a>
+    <span>动手练习 03</span>
+    <a href="index.html">练习目录 &rarr;</a>
+</nav>
+
+
+<article>
+    <header>
+        <h1>练习 03：对比几种解码方法</h1>
+        <p class="subtitle">模型只给出下一个词的概率，怎样从概率里挑词，决定了写出来的是车轱辘话、通顺的故事还是乱码。用练习 01 的小模型把贪心、束搜索、温度、top-k、top-p 各跑一遍，并排看结果，再用数字量一量</p>
+        <div class="author-meta">
+            对应课程内容：<a href="../11-664-LM-Inference/03_常用采样方法.html">CMU 11-664 第三讲（常用采样方法）</a>、<a href="../11-664-LM-Inference/04_束搜索及其变体.html">第四讲（束搜索）</a>，<a href="../CS224N-NLP-with-Deep-Learning/11_推理上解码DeepSeek-R1与GRPO.html">CS224N 第十一讲</a>的解码部分。<br>
+            零基础读前预备：<a href="../00-Foundations/06_softmax与交叉熵.html">softmax 与交叉熵</a>；需要先读<a href="01_从零写一个小LLaMA.html">练习 01</a>，这里直接用它训练好的模型<br>
+            完整代码：<code>01-Labs/code/decoding/</code>（decoding.py、compare.py、measure.py、plot_temps.py）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、要做的是什么</h2>
+        <p>
+            练习 01 训练出的模型，每一步只做一件事：给出下一个 token 的概率分布，4096 个 token 每个一个概率。它本身不会"写"。真正把 token 一个个挑出来、接成一段话的，是模型外面的一小段程序，叫解码算法。
+        </p>
+        <p>
+            同一个模型，换一种解码算法，写出来的东西可以差别很大。这一篇用同一个训练好的模型，实现并对比七种设置：
+        </p>
+        <ul>
+            <li>贪心：每一步都选概率最高的。</li>
+            <li>束搜索：同时保留几条候选，最后挑整体概率最高的一条。</li>
+            <li>纯采样：按模型给的概率抽签。</li>
+            <li>温度 0.7 和温度 1.8：抽签之前先把概率分布变尖或者变平。</li>
+            <li>top-k 和 top-p：抽签之前先把概率低的尾巴砍掉。</li>
+        </ul>
+        <p>
+            先在同一个开头上让每种方法各写一段，用眼睛看；再在 40 个开头上各写 100 个 token，用三个数字量。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、七种方法的代码</h2>
+        <h3>贪心</h3>
+        <p>
+            最简单的做法：每一步取概率最高的 token 接上去。argmax 就是"取最大值所在的位置"。
+        </p>
+        <pre class="code"><code>def greedy(ids, n):
+    &quot;&quot;&quot;贪心：每一步都选概率最高的 token。&quot;&quot;&quot;
+    ids = list(ids)
+    for _ in range(n):
+        nxt = next_logprobs(ids).argmax().item()
+        ids.append(nxt)
+        if nxt == EOT: break
+    return ids</code></pre>
+
+        <h3>采样，以及温度、top-k、top-p</h3>
+        <p>
+            采样是按概率抽签：一个 token 的概率是 30%，它就有 30% 的机会被抽中。在此基础上有三个常用的调节旋钮：
+        </p>
+        <ul>
+            <li>温度：抽签前把模型的打分（logits）除以温度再做 softmax。温度小于 1，高分和低分的差距被拉大，分布变尖，高概率的 token 更占优势；温度大于 1，差距被缩小，分布变平，低概率的 token 也有了机会。温度趋近 0 时就等于贪心。</li>
+            <li>top-k：只在概率最高的 k 个 token 里抽，其余的概率设为 0。</li>
+            <li>top-p（也叫核采样）：把 token 按概率从高到低排，从头开始累加，加到总和刚好达到 p（比如 0.9）为止，只在这些 token 里抽。模型很确定时，可能前两三个就够 0.9 了；模型不确定时，要几十个才够。所以 top-p 保留的个数会随情况变，top-k 是固定的。</li>
+        </ul>
+        <p>
+            砍掉尾巴之后，剩下的概率加起来不到 1 了，所以最后要除以总和重新归一化。
+        </p>
+        <pre class="code"><code>def sample(ids, n, temperature=1.0, top_k=None, top_p=None, gen=None):
+    &quot;&quot;&quot;按概率抽签。temperature 调整分布的平坦程度，top_k / top_p 先砍掉概率低的尾巴再抽。&quot;&quot;&quot;
+    ids = list(ids)
+    for _ in range(n):
+        logits = next_logprobs(ids) / temperature
+        probs = F.softmax(logits, dim=-1)
+        if top_k is not None:
+            # 只留概率最高的 k 个，其余设为 0
+            kth = torch.topk(probs, top_k).values[-1]
+            probs = torch.where(probs &gt;= kth, probs, torch.zeros_like(probs))
+        if top_p is not None:
+            # 从高到低排序，留下累计概率刚好达到 p 的那些 token
+            sp, si = torch.sort(probs, descending=True)
+            cum = torch.cumsum(sp, 0)
+            keep = cum - sp &lt; top_p          # 加上它之前累计还不到 p，就保留它
+            probs = torch.zeros_like(probs).scatter(0, si[keep], sp[keep])
+        probs = probs / probs.sum()           # 砍掉尾巴后重新归一化，让概率加起来等于 1
+        nxt = torch.multinomial(probs.cpu(), 1, generator=gen).item()
+        ids.append(nxt)
+        if nxt == EOT: break
+    return ids</code></pre>
+
+        <h3>束搜索</h3>
+        <p>
+            贪心有个问题：每一步只看眼前。第一步选了概率最高的词，可能把后面的路走窄，整句话加起来反而不如另一条路。束搜索的办法是同时保留几条候选（这里 5 条，叫束宽）：每一步把每条候选都往后延伸 5 种可能，得到 25 条，按整条的累计对数概率排序，留下最好的 5 条，继续。最后返回累计概率最高的那一条。
+        </p>
+        <p>
+            为什么用对数概率相加，而不是概率相乘？一整句的概率是每一步概率连乘，乘上几十个小于 1 的数，结果会小到计算机存不下；取对数之后乘法变成加法，数值稳定。两种排序结果一样。
+        </p>
+        <pre class="code"><code>def beam_search(ids, n, width=5):
+    &quot;&quot;&quot;束搜索：同时保留得分最高的 width 条候选，每步把每条都往后延伸一个 token，再留下最好的 width 条。
+    得分是整条续写的对数概率之和。&quot;&quot;&quot;
+    beams = [(0.0, list(ids))]               # (累计对数概率, token 序列)
+    finished = []
+    for _ in range(n):
+        cands = []
+        for score, seq in beams:
+            lp = next_logprobs(seq)
+            top = torch.topk(lp, width)
+            for v, i in zip(top.values.tolist(), top.indices.tolist()):
+                cands.append((score + v, seq + [i]))
+        cands.sort(key=lambda c: c[0], reverse=True)
+        beams = []
+        for score, seq in cands:
+            if seq[-1] == EOT:
+                finished.append((score, seq))
+            else:
+                beams.append((score, seq))
+            if len(beams) == width: break
+        if len(finished) &gt;= width: break
+    pool = finished + beams
+    return max(pool, key=lambda c: c[0])[1]</code></pre>
+    </section>
+
+    <section>
+        <h2>三、同一个开头，七种写法</h2>
+        <p>
+            开头都是"Once upon a time, there was a little girl named Mia. She"，每种方法续写最多 120 个 token。用到随机抽签的几种方法都用同一个随机种子（3），这样它们的差别只来自方法本身。
+        </p>
+        <pre class="code"><code>methods = {
+    &quot;贪心&quot;: lambda: greedy(ids, N),
+    &quot;束搜索（宽度 5）&quot;: lambda: beam_search(ids, N, width=5),
+    &quot;纯采样（温度 1，不砍尾巴）&quot;: lambda: sample(ids, N, gen=torch.Generator().manual_seed(3)),
+    &quot;温度 0.7&quot;: lambda: sample(ids, N, temperature=0.7, gen=torch.Generator().manual_seed(3)),
+    &quot;温度 1.8&quot;: lambda: sample(ids, N, temperature=1.8, gen=torch.Generator().manual_seed(3)),
+    &quot;top-k（k = 40）&quot;: lambda: sample(ids, N, top_k=40, gen=torch.Generator().manual_seed(3)),
+    &quot;top-p（p = 0.9）&quot;: lambda: sample(ids, N, top_p=0.9, gen=torch.Generator().manual_seed(3)),
+}
+print(&quot;开头：&quot;, prompt)
+for name, fn in methods.items():
+    print(f&quot;\n=== {name} ===&quot;)
+    print(text(fn()))</code></pre>
+        <p class="label">贪心：</p>
+        <pre class="output"><code>=== 贪心 ===
+Once upon a time, there was a little girl named Mia. She was very excited because she was going to the park. She put on her shoes and ran to the park.
+
+When Mia arrived at the park, she saw a big tree. She wanted to climb it. She climbed up the tree and started to climb. She was so happy!
+
+Mia started to climb the tree. She was so excited to climb the tree. She was so excited! She climbed up the tree and down the tree.
+
+Mia was so happy. She had so much fun climbing the tree. She was so excited to go down the tree. She was</code></pre>
+        <p>
+            开头很正常，越往后越绕圈子："She was so excited to climb the tree. She was so excited! She climbed up the tree and down the tree."反复说爬树和开心。练习 01 里温度 0 的那段"He is not a dog. He is a dog."是同一个现象：每一步都选最可能的词，而一句话说过一遍之后，模型会觉得再说一遍的可能性更高，于是掉进循环。
+        </p>
+        <p class="label">束搜索（宽度 5）：</p>
+        <pre class="output"><code>=== 束搜索（宽度 5） ===
+Once upon a time, there was a little girl named Mia. She was three years old and loved to play outside. One day, Mia&#x27;s mom said, &quot;Mia, let&#x27;s go for a walk in the park.&quot; Mia was so excited and said, &quot;Yes, let&#x27;s go!&quot;
+
+They walked and walked until they came to a big tree. Mia&#x27;s mom said, &quot;Let&#x27;s climb the tree!&quot; Mia was so excited and said, &quot;Yes, let&#x27;s do it!&quot;
+
+Mia and her mom climbed the tree and started to climb the tree. Mia&#x27;s mom said, &quot;Be careful, Mia. Don&#x27;t climb too high.&quot; Mia</code></pre>
+        <p>
+            比贪心更有条理，有对话、有情节，看起来更像一个完整的故事。但也能看出套路："Mia was so excited and said, "Yes, let's go!""和后面的"Mia was so excited and said, "Yes, let's do it!""几乎一样，还有"climbed the tree and started to climb the tree"。束搜索找的是"整体最可能"的文本，而最可能的文本往往是最平淡、最常见的说法。
+        </p>
+        <p class="label">纯采样（温度 1，不砍尾巴）：</p>
+        <pre class="output"><code>=== 纯采样（温度 1，不砍尾巴） ===
+Once upon a time, there was a little girl named Mia. She loved to design things. She beZ&#x27;re very creative and kind. Every day, her mom would take their photo and show her around her home. Mia loved her photo very much and daily asked it to keep all her company.
+
+One day, Mia kept trying to make something special. She found an interesting golden leaf that was very soft and colorful. Mia was so excited and couldn&#x27;t believe how pretty it looked. It was a wonderful looking shell. Mia thought it was a dream! She put the lake in the air and enjoyed it so much â€�</code></pre>
+        <p>
+            没有重复了，用词也丰富（design、creative、golden leaf），但冒出很多奇怪的东西："She beZ're"根本不是词；"asked it to keep all her company"不通；前面说找到一片叶子，后面变成贝壳，又"把湖举到空中"。结尾的"â€"是 TinyStories 原始数据里的一种乱码（某些引号在编码转换时出了错），分词器把它学成了 token，但它在数据里很少见，概率很低，只有纯采样这种不砍尾巴的方法才会抽到它。
+        </p>
+        <p class="label">温度 0.7：</p>
+        <pre class="output"><code>=== 温度 0.7 ===
+Once upon a time, there was a little girl named Mia. She loved to play outside in the winter. One day, Mia&#x27;s friend, Tom, came to play with her. Tom said, &quot;Mia, let&#x27;s play a game. Let&#x27;s play a game.&quot;
+
+Mia and Tom played a game. They ran, jumped, and laughed. Mia had so much fun. She was happy that Tom could play the game. Mia was happy that Tom was not shy. From that day on, Mia and Tom played together every day.</code></pre>
+        <p>
+            通顺、简单，情节完整，有开头和结尾。也有一点重复（"Let's play a game. Let's play a game."），但比贪心轻很多。
+        </p>
+        <p class="label">温度 1.8：</p>
+        <pre class="output"><code>=== 温度 1.8 ===
+Once upon a time, there was a little girl named Mia. She loved to design hid behind tow winZ&#x27;reawsnight because Mia had tie them spark&#x27;s toe their crownes and go squeeze out his co sharp spoon as fast as they could to da wake up good milkly than being to�. Every Wortaths child who ask tenday sounded and impressed summer looks up at them on cannot answer them anymore. Thankspgie MeL boys were mad out ha huntched- benimb- walking through b deer winong. Mia to apand As mommyJill laid the lake looked weird tiny - tree that wavedating â€</code></pre>
+        <p>
+            开头几个词还对（"She loved to design"，和纯采样一样，因为用的是同一个随机种子，开头几步抽中的是同样的 token），很快就成了一串不相干的词和碎片。温度太高，几千个低概率的 token 加起来的机会压过了合理的那几个。
+        </p>
+        <p class="label">top-k（k = 40）：</p>
+        <pre class="output"><code>=== top-k（k = 40） ===
+Once upon a time, there was a little girl named Mia. She loved to draw. One day, she drew a big heart! Mia was happy because her pictures were even more nice. Mia drew a pretty picture with her fingers.
+
+Mia showed her pictures to her mom. Her mom was so proud to see Mia&#x27;s arrwork. Mia was very proud of her picture. She showed it to Mia and said, &quot;Look, Mom! I made it. It&#x27;s so pretty with a big heart.&quot; Tom&#x27;s mom smiled and said, &quot;I will show you, Mia.&quot;
+
+Mia and her mom continued to draw and draw until Mia was happy</code></pre>
+        <p class="label">top-p（p = 0.9）：</p>
+        <pre class="output"><code>=== top-p（p = 0.9） ===
+Once upon a time, there was a little girl named Mia. She loved to draw. One day, she drew a big heart! Mia was happy because her pictures were even more nice. Mia drew a pretty picture with her fingers.
+
+Mia showed her card to her mom. Her mom was so proud of her. She showed her a beautiful picture. Mia was happy and showed her cat, Bob, the picture of Mia. She showed him her picture and showed him a pretty picture of the flowers.
+
+Mia&#x27;s mom said, &quot;That&#x27;s a special picture, Mia. It&#x27;s a very beautiful poem.&quot; Mia loved the poem and felt proud that she</code></pre>
+        <p>
+            这两段都比纯采样通顺得多，没有乱码和不存在的词。两段的第一段完全一样：同一个随机种子下，只要被抽中的 token 在两种方法里都没被砍掉，抽签结果就相同；到"Mia showed her"之后，两者保留的候选集合不同，就分开了。剩下的错误是情节上的：top-k 那段突然冒出"Tom's mom"，top-p 那段说画画、最后又说"It's a very beautiful poem"（诗）。这些是模型本身能力的问题，解码算法帮不上忙。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、看清温度在做什么</h2>
+        <p>
+            拿"The cat was very ___"这个位置，画出不同温度下概率最高的 12 个 token：
+        </p>
+        <img class="figure" src="img/decoding_temps.png" alt="三个温度下 The cat was very 后面概率最高的 12 个 token 的柱状图">
+        <pre class="output"><code>温度 0.5: happy 58.9%，scared 15.4%，sad 10.9%，excited 7.9%，surprised 1.3%；前 12 名以外合计 1.5%
+温度 1.0: happy 21.9%，scared 11.2%，sad 9.4%，excited 8.0%，surprised 3.2%；前 12 名以外合计 31.9%
+温度 1.8: happy 4.3%，scared 3.0%，sad 2.7%，excited 2.5%，surprised 1.5%；前 12 名以外合计 78.0%</code></pre>
+        <ul>
+            <li>温度 1.0 是模型原本的分布：happy 21.9%，前 12 名之外的几千个 token 加起来还有 31.9%。</li>
+            <li>温度 0.5：happy 涨到 58.9%，前 12 名之外只剩 1.5%，几乎只会选那几个最常见的词。</li>
+            <li>温度 1.8：happy 只有 4.3%，前 12 名之外合计 78%。也就是说，有将近八成的机会会抽到一个排在 12 名以后的 token，这就是上面那段乱码的来源。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>五、用数字量一量</h2>
+        <p>
+            一段例子可能是碰巧。下面取 40 篇训练时没见过的故事，用每篇的前 12 个 token 当开头，每种方法各续写 100 个 token，算三个指标：
+        </p>
+        <ul>
+            <li>重复率：续写里连续 4 个 token 组成的片段，有多少在前面已经出现过。越高越像车轱辘话。</li>
+            <li>不同二元组比例：把所有续写里相邻的两个 token 都列出来，不重复的占多少。越高说明用词越多样（但乱码也会让它变高）。</li>
+            <li>平均对数概率：模型自己给这段续写的打分，每个 token 平均的对数概率，越接近 0 说明模型越觉得这段话"正常、常见"。</li>
+        </ul>
+        <pre class="code"><code>def repeat_rate(cont):
+    &quot;&quot;&quot;续写里的 4 元组（连续 4 个 token），有多少是前面已经出现过的。&quot;&quot;&quot;
+    grams = ngrams(cont, 4)
+    seen, rep = set(), 0
+    for g in grams:
+        rep += g in seen; seen.add(g)
+    return rep / max(len(grams), 1)</code></pre>
+        <p class="label">运行输出：</p>
+        <pre class="output"><code>方法                   重复率       不同二元组比例      平均对数概率      用时
+贪心                   7.8%         31.4%         -0.57     19秒
+束搜索（宽度 5）            7.6%         31.3%         -0.48     97秒
+纯采样                  0.6%         62.8%         -1.94     18秒
+温度 0.7               2.1%         50.1%         -1.02     19秒
+温度 1.8               0.0%         96.6%         -7.63     18秒
+top-k（k = 40）        0.8%         56.4%         -1.45     19秒
+top-p（p = 0.9）       1.2%         55.0%         -1.35     29秒</code></pre>
+        <ul>
+            <li>贪心和束搜索的重复率是 7.6% 到 7.8%，各种采样都在 2% 以下。不同二元组比例只有 31%，采样方法是 50% 到 63%：两种搜索方法写出来的东西又重复又单调。</li>
+            <li>束搜索的平均对数概率是 -0.48，比贪心的 -0.57 高。它确实做到了自己的目标，找到了模型认为更可能的文本，但重复率并没有降下来。"模型认为最可能"不等于"写得最好"，11-664 第四讲把这叫作束搜索的诅咒：束开得越宽，越接近概率最高的输出，实际效果反而可能更差。</li>
+            <li>温度 1.8 的不同二元组比例最高（96.6%），但平均对数概率是 -7.63，相当于每个 token 平均只有约 0.05% 的概率（$e^{-7.63}$）。多样性高只是因为在胡乱堆词。</li>
+            <li>温度 0.7、top-k、top-p 处在中间：重复率低，用词比搜索方法丰富，对数概率又远高于纯采样和高温度。这也是实际使用中最常见的几种设置。</li>
+            <li>代价：束搜索每一步要对 5 条候选各算一次，用了 97 秒，是贪心的 5 倍。top-p 每一步要把 4096 个概率排一次序，比 top-k 慢一些（29 秒对 19 秒）。</li>
+        </ul>
+
+        <h3>纯采样到底多常抽到尾巴</h3>
+        <p>
+            CS224N 第十一讲讲过一个算术：即使每一步有 95% 的机会落在"合理"的区域，连续 30 步都落在里面的机会也只有 $0.95^{30} \approx 21\%$，写长了总会碰到坏词。这里直接数一数：纯采样的每一步，被抽中的 token 在模型的排名是第几。
+        </p>
+        <pre class="output"><code>纯采样时，被抽中的 token 在模型的排名：
+  一共 3819 步
+  排在前    1 名以内： 56.7%
+  排在前    5 名以内： 81.5%
+  排在前   40 名以内： 93.7%
+  排在前  100 名以内： 96.4%
+  排在前 1000 名以内： 99.5%
+  排在第 40 名以后：242 步，平均每 100 个 token 有 6.3 个</code></pre>
+        <p>
+            一半多的时候（56.7%）纯采样抽中的就是第 1 名，81.5% 的时候在前 5 名。但每 100 个 token 里，平均有 6.3 个排在第 40 名以后，0.5% 甚至排在 1000 名以后。一个 100 个 token 的小故事，平均会混进六个"不太对"的词，上面那些 beZ're 和乱码就是这么来的。top-k = 40 正好把排在 40 名以后的全部砍掉。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、小结</h2>
+        <ul>
+            <li>贪心和束搜索追求"最可能"，结果容易重复、单调。它们适合答案确定的任务，比如翻译、做数学题、事实问答，这时只有一个正确答案，不需要多样性。</li>
+            <li>纯采样不会重复，但会抽到尾巴里的怪词；温度太高更糟。</li>
+            <li>写故事、聊天这类开放任务，一般用温度 0.7 到 1.0，配合 top-p（0.9 到 0.95）或 top-k，砍掉尾巴、保留多样性。</li>
+            <li>解码算法只能决定"怎样挑"，挑的范围还是模型给的。情节前后矛盾这种问题，要靠更好的模型来解决。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>七、和课程内容的对照</h2>
+        <ul>
+            <li>温度、top-k、top-p 和各种采样方法的理论：<a href="../11-664-LM-Inference/03_常用采样方法.html">CMU 11-664 第三讲</a>。</li>
+            <li>束搜索、长度问题和束搜索的诅咒：<a href="../11-664-LM-Inference/04_束搜索及其变体.html">CMU 11-664 第四讲</a>。</li>
+            <li>贪心和束搜索的重复、何时用贪心何时用采样、Best-of-N：<a href="../CS224N-NLP-with-Deep-Learning/11_推理上解码DeepSeek-R1与GRPO.html">CS224N 第十一讲</a>。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>动手练习 · Notes curated by Joyce</p>
+        <nav class="footer-nav">
+            <a href="02_手写一个BPE分词器.html">&larr; 上一篇</a>
+            <a href="../index.html">返回主目录</a>
+            <a href="index.html">练习目录 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
