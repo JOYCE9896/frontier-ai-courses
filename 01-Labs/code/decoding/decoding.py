@@ -1,4 +1,4 @@
-"""几种解码方法：贪心、束搜索、纯采样、温度、top-k、top-p。都用练习 01 训练好的小 LLaMA。"""
+"""Decoding methods: greedy, beam search, pure sampling, temperature, top-k, top-p. All use the small LLaMA trained in lab 01."""
 import os, sys
 import torch
 import torch.nn.functional as F
@@ -18,13 +18,13 @@ model.eval()
 
 @torch.no_grad()
 def next_logprobs(ids):
-    """给一串 token，返回模型对下一个 token 的对数概率（4096 个数）。"""
+    """Given a list of tokens, return the model's log-probabilities for the next token (4096 numbers)."""
     x = torch.tensor([ids[-Config.max_seq_len:]], device=dev)
     return F.log_softmax(model(x)[0][0, -1].float(), dim=-1)
 
 
 def greedy(ids, n):
-    """贪心：每一步都选概率最高的 token。"""
+    """Greedy: always pick the most likely token."""
     ids = list(ids)
     for _ in range(n):
         nxt = next_logprobs(ids).argmax().item()
@@ -34,22 +34,23 @@ def greedy(ids, n):
 
 
 def sample(ids, n, temperature=1.0, top_k=None, top_p=None, gen=None):
-    """按概率抽签。temperature 调整分布的平坦程度，top_k / top_p 先砍掉概率低的尾巴再抽。"""
+    """Draw a token according to the probabilities. temperature flattens or sharpens the distribution;
+    top_k / top_p cut off the low-probability tail before drawing."""
     ids = list(ids)
     for _ in range(n):
         logits = next_logprobs(ids) / temperature
         probs = F.softmax(logits, dim=-1)
         if top_k is not None:
-            # 只留概率最高的 k 个，其余设为 0
+            # keep only the k most likely tokens, set the rest to 0
             kth = torch.topk(probs, top_k).values[-1]
             probs = torch.where(probs >= kth, probs, torch.zeros_like(probs))
         if top_p is not None:
-            # 从高到低排序，留下累计概率刚好达到 p 的那些 token
+            # sort from most to least likely and keep tokens until the running total reaches p
             sp, si = torch.sort(probs, descending=True)
             cum = torch.cumsum(sp, 0)
-            keep = cum - sp < top_p          # 加上它之前累计还不到 p，就保留它
+            keep = cum - sp < top_p          # keep a token if the total before it is still below p
             probs = torch.zeros_like(probs).scatter(0, si[keep], sp[keep])
-        probs = probs / probs.sum()           # 砍掉尾巴后重新归一化，让概率加起来等于 1
+        probs = probs / probs.sum()           # renormalize after cutting the tail so the probabilities sum to 1
         nxt = torch.multinomial(probs.cpu(), 1, generator=gen).item()
         ids.append(nxt)
         if nxt == EOT: break
@@ -57,9 +58,9 @@ def sample(ids, n, temperature=1.0, top_k=None, top_p=None, gen=None):
 
 
 def beam_search(ids, n, width=5):
-    """束搜索：同时保留得分最高的 width 条候选，每步把每条都往后延伸一个 token，再留下最好的 width 条。
-    得分是整条续写的对数概率之和。"""
-    beams = [(0.0, list(ids))]               # (累计对数概率, token 序列)
+    """Beam search: keep the width best candidates; at each step extend every candidate by one token and keep
+    the width best again. A candidate's score is the sum of the log-probabilities of its tokens."""
+    beams = [(0.0, list(ids))]               # (total log-probability, token list)
     finished = []
     for _ in range(n):
         cands = []
@@ -82,7 +83,7 @@ def beam_search(ids, n, width=5):
 
 
 def logprob_of(ids, start):
-    """模型给 ids[start:] 这段续写的平均每 token 对数概率（越接近 0，模型越觉得它'正常'）。"""
+    """Average per-token log-probability the model gives to ids[start:] (closer to 0 = more "normal" to the model)."""
     x = torch.tensor([ids[-Config.max_seq_len:]], device=dev)
     with torch.no_grad():
         lp = F.log_softmax(model(x)[0][0].float(), dim=-1)

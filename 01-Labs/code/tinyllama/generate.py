@@ -1,4 +1,4 @@
-"""用训练好的模型：看它对下一个 token 的概率分布，再用不同的开头写故事。"""
+"""Use the trained model: look at its next-token probabilities, then write stories from different openings."""
 import os
 import torch
 import torch.nn.functional as F
@@ -14,17 +14,17 @@ model = TinyLlama(Config()).to(dev)
 model.load_state_dict(torch.load(os.path.join(RUN, "model.pt"), map_location=dev))
 model.eval()
 
-# 1. 模型对下一个 token 的猜测：取概率最高的 5 个
-print("=== 下一个 token 概率最高的 5 个 ===")
+# 1. The model's guesses for the next token: the 5 most likely
+print("=== top 5 next tokens ===")
 for text in ["Once upon a", "Lily went to the park with her", "The cat was very", "Tom was sad because he lost his"]:
     ids = torch.tensor([tok.encode(text).ids], device=dev)
     with torch.no_grad():
         probs = F.softmax(model(ids)[0][0, -1], dim=-1)
     top = torch.topk(probs, 5)
-    guesses = "，".join(f"{tok.decode([i])!r} {p:.1%}" for p, i in zip(top.values.tolist(), top.indices.tolist()))
+    guesses = ", ".join(f"{tok.decode([i])!r} {p:.1%}" for p, i in zip(top.values.tolist(), top.indices.tolist()))
     print(f"{text} ___  ->  {guesses}")
 
-# 2. 用不同的开头写故事
+# 2. Stories from different openings
 def write(prompt, temperature, seed=0):
     torch.manual_seed(seed)
     idx = torch.tensor([tok.encode(prompt).ids], device=dev)
@@ -32,10 +32,10 @@ def write(prompt, temperature, seed=0):
     return tok.decode([t for t in out if t != eot])
 
 for prompt in ["Once upon a time, there was a little robot", "Sara and her dog went to the beach.", "The old tree in the forest"]:
-    print(f"\n=== 开头：{prompt}（温度 0.8）===")
+    print(f"\n=== opening: {prompt} (temperature 0.8) ===")
     print(write(prompt, 0.8))
 
-print("\n=== 同一个开头，不同温度 ===")
+print("\n=== same opening, different temperatures ===")
 for t in [0, 0.5, 1.0, 1.5]:
-    print(f"\n--- 温度 {t}{'（贪心：每次都选概率最高的）' if t == 0 else ''} ---")
+    print(f"\n--- temperature {t}{' (greedy: always the most likely token)' if t == 0 else ''} ---")
     print(write("One day, Ben found a box", t, seed=1))

@@ -1,4 +1,4 @@
-"""一个从零写的小 LLaMA：RMSNorm + RoPE + 因果自注意力 + SwiGLU 前馈层。"""
+"""A small LLaMA written from scratch: RMSNorm + RoPE + causal self-attention + SwiGLU feed-forward."""
 import math
 from dataclasses import dataclass
 import torch
@@ -9,15 +9,15 @@ import torch.nn.functional as F
 @dataclass
 class Config:
     vocab_size: int = 4096
-    dim: int = 384          # 每个 token 的向量长度
-    n_layers: int = 6       # Transformer 块的层数
-    n_heads: int = 6        # 注意力头数，每个头 384/6 = 64 维
-    hidden_dim: int = 1024  # SwiGLU 前馈层的中间维度
-    max_seq_len: int = 256  # 一次最多看多少个 token
+    dim: int = 384          # length of each token's vector
+    n_layers: int = 6       # number of Transformer blocks
+    n_heads: int = 6        # attention heads, each 384/6 = 64 dimensions
+    hidden_dim: int = 1024  # inner size of the SwiGLU feed-forward layer
+    max_seq_len: int = 256  # the most tokens the model sees at once
 
 
 class RMSNorm(nn.Module):
-    """把向量除以它的均方根，再乘一个可学习的缩放。比 LayerNorm 少了减均值这一步。"""
+    """Divide a vector by its root mean square, then multiply by a learned scale. LayerNorm without the mean subtraction."""
     def __init__(self, dim, eps=1e-5):
         super().__init__()
         self.eps = eps
@@ -29,7 +29,7 @@ class RMSNorm(nn.Module):
 
 
 def rope_tables(head_dim, max_seq_len, base=10000.0):
-    """预先算好每个位置、每对维度的旋转角的 cos 和 sin。"""
+    """Precompute cos and sin of the rotation angle for every position and every pair of dimensions."""
     freqs = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))  # (head_dim/2,)
     pos = torch.arange(max_seq_len).float()                                   # (T,)
     angles = torch.outer(pos, freqs)                                          # (T, head_dim/2)
@@ -37,7 +37,7 @@ def rope_tables(head_dim, max_seq_len, base=10000.0):
 
 
 def apply_rope(x, cos, sin):
-    """把 x 的维度两两配对，每一对在二维平面上按位置旋转。x: (B, heads, T, head_dim)"""
+    """Pair up the dimensions of x and rotate each pair in its 2D plane by a position-dependent angle. x: (B, heads, T, head_dim)"""
     x1, x2 = x[..., 0::2], x[..., 1::2]
     T = x.shape[-2]
     cos, sin = cos[:T], sin[:T]
@@ -55,30 +55,30 @@ class Attention(nn.Module):
         self.wk = nn.Linear(cfg.dim, cfg.dim, bias=False)
         self.wv = nn.Linear(cfg.dim, cfg.dim, bias=False)
         self.wo = nn.Linear(cfg.dim, cfg.dim, bias=False)
-        # 因果遮盖：位置 i 只能看位置 <= i
+        # causal mask: position i may only look at positions <= i
         mask = torch.tril(torch.ones(cfg.max_seq_len, cfg.max_seq_len, dtype=torch.bool))
         self.register_buffer("mask", mask, persistent=False)
 
     def forward(self, x, cos, sin):
         B, T, D = x.shape
-        # 1. 算 query、key、value，并拆成多个头: (B, heads, T, head_dim)
+        # 1. compute query, key, value and split them into heads: (B, heads, T, head_dim)
         q = self.wq(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.wk(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         v = self.wv(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        # 2. 只对 q 和 k 加旋转位置编码
+        # 2. apply rotary position encoding to q and k only
         q, k = apply_rope(q, cos, sin), apply_rope(k, cos, sin)
-        # 3. 缩放点积注意力：每个位置对之前所有位置打分，softmax 后对 value 加权平均
+        # 3. scaled dot-product attention: score every earlier position, softmax, then average the values
         scores = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)  # (B, heads, T, T)
         scores = scores.masked_fill(~self.mask[:T, :T], float("-inf"))
         weights = F.softmax(scores, dim=-1)
         out = weights @ v                                             # (B, heads, T, head_dim)
-        # 4. 把各个头拼回去，再做一次线性变换
+        # 4. concatenate the heads and apply one more linear map
         out = out.transpose(1, 2).contiguous().view(B, T, D)
         return self.wo(out)
 
 
 class SwiGLU(nn.Module):
-    """前馈层：silu(x W1) 逐元素乘以 (x W3)，再乘 W2 投影回去。"""
+    """Feed-forward layer: silu(x W1) times (x W3) element-wise, projected back with W2."""
     def __init__(self, cfg):
         super().__init__()
         self.w1 = nn.Linear(cfg.dim, cfg.hidden_dim, bias=False)
@@ -90,7 +90,7 @@ class SwiGLU(nn.Module):
 
 
 class Block(nn.Module):
-    """一个 Transformer 块：先归一化再注意力，加残差；先归一化再前馈，加残差。"""
+    """One Transformer block: norm -> attention -> add residual; norm -> feed-forward -> add residual."""
     def __init__(self, cfg):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.dim)
@@ -112,7 +112,7 @@ class TinyLlama(nn.Module):
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layers)])
         self.norm = RMSNorm(cfg.dim)
         self.lm_head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
-        self.lm_head.weight = self.tok_emb.weight  # 输入嵌入和输出层共用一个矩阵
+        self.lm_head.weight = self.tok_emb.weight  # input embedding and output layer share one matrix
         cos, sin = rope_tables(cfg.dim // cfg.n_heads, cfg.max_seq_len)
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
@@ -129,7 +129,7 @@ class TinyLlama(nn.Module):
         logits = self.lm_head(self.norm(x))       # (B, T, vocab)
         loss = None
         if targets is not None:
-            # 每个位置都在预测下一个 token，用交叉熵衡量预测得多准
+            # every position predicts the next token; cross-entropy measures how good the predictions are
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
 
@@ -140,14 +140,14 @@ class TinyLlama(nn.Module):
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :]
             if temperature == 0:
-                nxt = logits.argmax(-1, keepdim=True)          # 贪心
+                nxt = logits.argmax(-1, keepdim=True)          # greedy
             else:
                 logits = logits / temperature
                 if top_k is not None:
                     v, _ = torch.topk(logits, top_k)
                     logits[logits < v[:, [-1]]] = float("-inf")
                 probs = F.softmax(logits, dim=-1)
-                nxt = torch.multinomial(probs, 1)              # 按概率抽一个
+                nxt = torch.multinomial(probs, 1)              # draw one token according to the probabilities
             idx = torch.cat([idx, nxt], dim=1)
             if eot_id is not None and nxt.item() == eot_id:
                 break

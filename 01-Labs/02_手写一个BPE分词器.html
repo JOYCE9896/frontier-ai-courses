@@ -57,20 +57,23 @@
     <section>
         <h2>二、文字在计算机里是字节</h2>
         <p>
+            （几个非英文的例子，比如"地""猫咪"和后面的中文句子，放在单独的数据文件 samples.json 里，代码里的 SAMPLES 就是读进来的这些例子。）
+        </p>
+        <p>
             计算机存文字，最终存的是一串 0 到 255 之间的整数，每个整数叫一个字节。把字符变成字节的规则叫编码，现在几乎都用 UTF-8：英文字母和常用符号各占 1 个字节，带重音的拉丁字母占 2 个，汉字一般占 3 个，emoji 占 4 个。
         </p>
-        <pre class="code"><code>print(&quot;=== 1. 文字在计算机里是字节 ===&quot;)
-for s in [&quot;a&quot;, &quot;cat&quot;, &quot;é&quot;, &quot;地&quot;, &quot;猫咪&quot;, &quot;😀&quot;]:
+        <pre class="code"><code>print(&quot;=== 1. Text is stored as bytes ===&quot;)
+for s in SAMPLES[&quot;byte_examples&quot;]:
     b = s.encode(&quot;utf-8&quot;)
-    print(f&quot;{s!r:6} -&gt; {len(s)} 个字符，{len(b)} 个字节: {list(b)}&quot;)</code></pre>
+    print(f&quot;{s!r:6} -&gt; {len(s)} character(s), {len(b)} byte(s): {list(b)}&quot;)</code></pre>
         <p class="label">运行输出：</p>
-        <pre class="output"><code>=== 1. 文字在计算机里是字节 ===
-&#x27;a&#x27;    -&gt; 1 个字符，1 个字节: [97]
-&#x27;cat&#x27;  -&gt; 3 个字符，3 个字节: [99, 97, 116]
-&#x27;é&#x27;    -&gt; 1 个字符，2 个字节: [195, 169]
-&#x27;地&#x27;    -&gt; 1 个字符，3 个字节: [229, 156, 176]
-&#x27;猫咪&#x27;   -&gt; 2 个字符，6 个字节: [231, 140, 171, 229, 146, 170]
-&#x27;😀&#x27;    -&gt; 1 个字符，4 个字节: [240, 159, 152, 128]</code></pre>
+        <pre class="output"><code>=== 1. Text is stored as bytes ===
+&#x27;a&#x27;    -&gt; 1 character(s), 1 byte(s): [97]
+&#x27;cat&#x27;  -&gt; 3 character(s), 3 byte(s): [99, 97, 116]
+&#x27;é&#x27;    -&gt; 1 character(s), 2 byte(s): [195, 169]
+&#x27;地&#x27;    -&gt; 1 character(s), 3 byte(s): [229, 156, 176]
+&#x27;猫咪&#x27;   -&gt; 2 character(s), 6 byte(s): [231, 140, 171, 229, 146, 170]
+&#x27;😀&#x27;    -&gt; 1 character(s), 4 byte(s): [240, 159, 152, 128]</code></pre>
         <p>
             为什么要从字节开始，而不是从"字符"开始？因为世界上的字符有十几万种，而字节只有 256 种。以 256 个字节作为最初的词表，任何文字（中文、阿拉伯文、emoji、乱码）都能表示出来，不会出现"不认识的字"。这叫字节级 BPE。代价是：一个汉字一开始要拆成 3 个 token，要靠后面的合并才能变回一个。
         </p>
@@ -81,14 +84,14 @@ for s in [&quot;a&quot;, &quot;cat&quot;, &quot;é&quot;, &quot;地&quot;, &quot
         <p>
             在合并之前，先把文本粗略切成"词"，规定 BPE 只能在一个词的内部合并，不能跨词。否则模型可能学到"the cat"中间带空格的这种 token，或者把"dog."和"dog!"当成两个不相干的东西。这里用一个正则表达式（一种描述文字模式的写法）来切：一串英文字母（前面可以带一个空格）算一个词，一串数字算一个词，一串其他符号算一个词，空白单独算。
         </p>
-        <pre class="code"><code># 预切分：先把文本粗切成&quot;词&quot;，BPE 只在词的内部合并，不会跨词。
-# 依次匹配：带可选前导空格的英文字母串、数字串、其他符号串（包括中文），以及空白。
+        <pre class="code"><code># Pre-tokenization: first cut the text into rough &quot;words&quot;; BPE merges only inside a word, never across words.
+# Alternatives, in order: letters with an optional leading space, digits, other symbols (including Chinese), whitespace.
 PRETOKEN = re.compile(r&quot; ?[A-Za-z]+| ?[0-9]+| ?[^\sA-Za-z0-9]+|\s+(?!\S)|\s+&quot;)
 
 def pretokenize(text):
     return PRETOKEN.findall(text)</code></pre>
         <p class="label">运行输出（空格显示成 ␣）：</p>
-        <pre class="output"><code>=== 2. 预切分 ===
+        <pre class="output"><code>=== 2. Pre-tokenization ===
 [&#x27;Once&#x27;, &#x27;␣upon&#x27;, &#x27;␣a&#x27;, &#x27;␣time&#x27;, &#x27;,&#x27;, &#x27;␣Lily&#x27;, &#x27;␣had&#x27;, &#x27;␣3&#x27;, &#x27;␣cats&#x27;, &#x27;!&#x27;, &#x27;␣&#x27;, &#x27;␣她很开心。&#x27;]</code></pre>
         <p>
             注意空格是粘在后一个词的前面的："␣upon"而不是"upon"。这样"upon"出现在句首和句中时是两个不同的 token，模型也就知道了这里有没有空格，解码时能一字不差地还原。中文没有空格，"␣她很开心。"整个被当成了一个词，这个简单的规则对中文并不合适，第九节会看到它的后果。GPT-2、GPT-4 用的正则表达式更复杂一些，比如会把 's、'll 这类缩写单独切出来，但思路一样。
@@ -111,7 +114,7 @@ def pretokenize(text):
             词表大小 = 256 个字节 + 学到的合并规则条数。要 4096 的词表，就学 3840 条规则。
         </p>
         <pre class="code"><code>def merge_pair(tokens, pair, new):
-    &quot;&quot;&quot;在一个 token 序列里，把所有相邻的 pair 换成 new。&quot;&quot;&quot;
+    &quot;&quot;&quot;Replace every adjacent occurrence of pair in a token sequence with new.&quot;&quot;&quot;
     out, i = [], 0
     while i &lt; len(tokens):
         if i &lt; len(tokens) - 1 and (tokens[i], tokens[i + 1]) == pair:
@@ -120,27 +123,27 @@ def pretokenize(text):
             out.append(tokens[i]); i += 1
     return out</code></pre>
         <pre class="code"><code>def train(text, vocab_size, log=None):
-    &quot;&quot;&quot;从文本学 vocab_size - 256 条合并规则。返回合并列表，每条是 (左, 右)，都是 bytes。&quot;&quot;&quot;
-    # 1. 统计每个&quot;词&quot;出现几次。同一个词不管出现多少次，只需要处理一次，再乘上次数。
+    &quot;&quot;&quot;Learn vocab_size - 256 merge rules from text. Returns a list of (left, right) pairs of bytes.&quot;&quot;&quot;
+    # 1. Count how often each word occurs. A word that occurs 100,000 times is processed once and weighted by its count.
     word_counts = Counter(pretokenize(text))
-    # 2. 每个词先拆成单个字节。词表一开始就是 256 种字节。
+    # 2. Split every word into single bytes. The vocabulary starts as the 256 possible bytes.
     words = {w: [bytes([b]) for b in w.encode(&quot;utf-8&quot;)] for w in word_counts}
     merges = []
     while 256 + len(merges) &lt; vocab_size:
-        # 3. 数所有相邻的两个 token 一起出现了多少次
+        # 3. Count how often each pair of adjacent tokens occurs
         pairs = Counter()
         for w, toks in words.items():
             for a, b in zip(toks, toks[1:]):
                 pairs[(a, b)] += word_counts[w]
         if not pairs:
             break
-        # 4. 取次数最多的一对；次数相同时取字典序大的，保证结果确定
+        # 4. Take the most frequent pair; on ties take the lexicographically larger one so results are deterministic
         best = max(pairs, key=lambda p: (pairs[p], p))
         new = best[0] + best[1]
         merges.append(best)
         if log is not None:
             log(len(merges), best, pairs[best], words)
-        # 5. 在所有词里把这一对合并成新 token
+        # 5. Apply the merge in every word
         for w in words:
             if len(words[w]) &gt; 1:
                 words[w] = merge_pair(words[w], best, new)
@@ -154,34 +157,34 @@ def pretokenize(text):
             先用一句很短的绕口令"Peter Piper picked a peck of pickled peppers"训练，只学 8 条规则，把每一步合并之前各个词的切分状态都打印出来：
         </p>
         <p class="label">运行输出（␣ 表示空格，| 隔开不同的词）：</p>
-        <pre class="output"><code>=== 3. 在一句绕口令上训练 BPE ===
-训练文本: Peter Piper picked a peck of pickled peppers
+        <pre class="output"><code>=== 3. Training BPE on a tongue twister ===
+training text: Peter Piper picked a peck of pickled peppers
 
-第 1 次合并：p + e -&gt; pe（出现 4 次）
-  合并前各词的切分： P e t e r | ␣ P i p e r | ␣ p i c k e d | ␣ a | ␣ p e c k | ␣ o f | ␣ p i c k l e d | ␣ p e p p e r s
+merge 1: p + e -&gt; pe (4 occurrences)
+  words before this merge: P e t e r | ␣ P i p e r | ␣ p i c k e d | ␣ a | ␣ p e c k | ␣ o f | ␣ p i c k l e d | ␣ p e p p e r s
 
-第 2 次合并：c + k -&gt; ck（出现 3 次）
-  合并前各词的切分： P e t e r | ␣ P i pe r | ␣ p i c k e d | ␣ a | ␣ pe c k | ␣ o f | ␣ p i c k l e d | ␣ pe p pe r s
+merge 2: c + k -&gt; ck (3 occurrences)
+  words before this merge: P e t e r | ␣ P i pe r | ␣ p i c k e d | ␣ a | ␣ pe c k | ␣ o f | ␣ p i c k l e d | ␣ pe p pe r s
 
-第 3 次合并：pe + r -&gt; per（出现 2 次）
-  合并前各词的切分： P e t e r | ␣ P i pe r | ␣ p i ck e d | ␣ a | ␣ pe ck | ␣ o f | ␣ p i ck l e d | ␣ pe p pe r s
+merge 3: pe + r -&gt; per (2 occurrences)
+  words before this merge: P e t e r | ␣ P i pe r | ␣ p i ck e d | ␣ a | ␣ pe ck | ␣ o f | ␣ p i ck l e d | ␣ pe p pe r s
 
-第 4 次合并：p + i -&gt; pi（出现 2 次）
-  合并前各词的切分： P e t e r | ␣ P i per | ␣ p i ck e d | ␣ a | ␣ pe ck | ␣ o f | ␣ p i ck l e d | ␣ pe p per s
+merge 4: p + i -&gt; pi (2 occurrences)
+  words before this merge: P e t e r | ␣ P i per | ␣ p i ck e d | ␣ a | ␣ pe ck | ␣ o f | ␣ p i ck l e d | ␣ pe p per s
 
-第 5 次合并：pi + ck -&gt; pick（出现 2 次）
-  合并前各词的切分： P e t e r | ␣ P i per | ␣ pi ck e d | ␣ a | ␣ pe ck | ␣ o f | ␣ pi ck l e d | ␣ pe p per s
+merge 5: pi + ck -&gt; pick (2 occurrences)
+  words before this merge: P e t e r | ␣ P i per | ␣ pi ck e d | ␣ a | ␣ pe ck | ␣ o f | ␣ pi ck l e d | ␣ pe p per s
 
-第 6 次合并：e + d -&gt; ed（出现 2 次）
-  合并前各词的切分： P e t e r | ␣ P i per | ␣ pick e d | ␣ a | ␣ pe ck | ␣ o f | ␣ pick l e d | ␣ pe p per s
+merge 6: e + d -&gt; ed (2 occurrences)
+  words before this merge: P e t e r | ␣ P i per | ␣ pick e d | ␣ a | ␣ pe ck | ␣ o f | ␣ pick l e d | ␣ pe p per s
 
-第 7 次合并：␣ + pick -&gt; ␣pick（出现 2 次）
-  合并前各词的切分： P e t e r | ␣ P i per | ␣ pick ed | ␣ a | ␣ pe ck | ␣ o f | ␣ pick l ed | ␣ pe p per s
+merge 7: ␣ + pick -&gt; ␣pick (2 occurrences)
+  words before this merge: P e t e r | ␣ P i per | ␣ pick ed | ␣ a | ␣ pe ck | ␣ o f | ␣ pick l ed | ␣ pe p per s
 
-第 8 次合并：␣ + pe -&gt; ␣pe（出现 2 次）
-  合并前各词的切分： P e t e r | ␣ P i per | ␣pick ed | ␣ a | ␣ pe ck | ␣ o f | ␣pick l ed | ␣ pe p per s
+merge 8: ␣ + pe -&gt; ␣pe (2 occurrences)
+  words before this merge: P e t e r | ␣ P i per | ␣pick ed | ␣ a | ␣ pe ck | ␣ o f | ␣pick l ed | ␣ pe p per s
 
-学到的 8 条合并规则: pe，ck，per，pi，pick，ed，␣pick，␣pe</code></pre>
+the 8 merge rules learned: pe, ck, per, pi, pick, ed, ␣pick, ␣pe</code></pre>
         <p>
             一步步看：
         </p>
@@ -199,58 +202,58 @@ def pretokenize(text):
             现在换成真实数据：2 万篇 TinyStories，约 1800 万个字节，学 3840 条规则，得到 4096 的词表（和练习 01 一样大）。
         </p>
         <pre class="code"><code>text = &quot;\n&quot;.join(stories)
-print(f&quot;训练文本：{len(stories):,} 篇故事，{len(text):,} 个字符，{len(text.encode()):,} 个字节&quot;)
+print(f&quot;training text: {len(stories):,} stories, {len(text):,} characters, {len(text.encode()):,} bytes&quot;)
 words = pretokenize(text)
-print(f&quot;预切分后共 {len(words):,} 个词，其中不同的词 {len(set(words)):,} 个&quot;)
+print(f&quot;after pre-tokenization: {len(words):,} words, {len(set(words)):,} distinct&quot;)
 
 t0 = time.time()
 def log(step, pair, count, _):
     if step &lt;= 30 or step % 500 == 0 or step == 4096 - 256:
         a, b = pair[0].decode(errors=&quot;replace&quot;), pair[1].decode(errors=&quot;replace&quot;)
-        print(f&quot;第 {step:4d} 条：{a!r:&gt;10} + {b!r:&lt;10} -&gt; {(a+b)!r:&lt;14} 出现 {count:&gt;7,} 次   （{time.time()-t0:.0f} 秒）&quot;, flush=True)
+        print(f&quot;merge {step:4d}: {a!r:&gt;10} + {b!r:&lt;10} -&gt; {(a+b)!r:&lt;14} {count:&gt;7,} occurrences   ({time.time()-t0:.0f}s)&quot;, flush=True)
 merges = train(text, 4096, log=log)</code></pre>
         <p class="label">运行输出：</p>
-        <pre class="output"><code>训练文本：20,000 篇故事，17,910,905 个字符，17,935,942 个字节
-预切分后共 4,387,855 个词，其中不同的词 14,453 个
-第    1 条：       &#x27;h&#x27; + &#x27;e&#x27;        -&gt; &#x27;he&#x27;           出现 525,590 次   （0 秒）
-第    2 条：       &#x27; &#x27; + &#x27;t&#x27;        -&gt; &#x27; t&#x27;           出现 495,518 次   （1 秒）
-第    3 条：       &#x27; &#x27; + &#x27;a&#x27;        -&gt; &#x27; a&#x27;           出现 391,084 次   （1 秒）
-第    4 条：       &#x27; &#x27; + &#x27;s&#x27;        -&gt; &#x27; s&#x27;           出现 286,881 次   （1 秒）
-第    5 条：       &#x27; &#x27; + &#x27;w&#x27;        -&gt; &#x27; w&#x27;           出现 251,214 次   （1 秒）
-第    6 条：       &#x27;n&#x27; + &#x27;d&#x27;        -&gt; &#x27;nd&#x27;           出现 238,320 次   （1 秒）
-第    7 条：      &#x27; t&#x27; + &#x27;he&#x27;       -&gt; &#x27; the&#x27;         出现 224,432 次   （1 秒）
-第    8 条：       &#x27;e&#x27; + &#x27;d&#x27;        -&gt; &#x27;ed&#x27;           出现 192,625 次   （1 秒）
-第    9 条：      &#x27; a&#x27; + &#x27;nd&#x27;       -&gt; &#x27; and&#x27;         出现 168,257 次   （1 秒）
-第   10 条：      &#x27; t&#x27; + &#x27;o&#x27;        -&gt; &#x27; to&#x27;          出现 156,810 次   （1 秒）
-第   11 条：       &#x27; &#x27; + &#x27;b&#x27;        -&gt; &#x27; b&#x27;           出现 152,833 次   （1 秒）
-第   12 条：       &#x27;i&#x27; + &#x27;n&#x27;        -&gt; &#x27;in&#x27;           出现 149,564 次   （1 秒）
-第   13 条：       &#x27; &#x27; + &#x27;h&#x27;        -&gt; &#x27; h&#x27;           出现 142,039 次   （1 秒）
-第   14 条：      &#x27; w&#x27; + &#x27;a&#x27;        -&gt; &#x27; wa&#x27;          出现 130,428 次   （1 秒）
-第   15 条：       &#x27;r&#x27; + &#x27;e&#x27;        -&gt; &#x27;re&#x27;           出现 130,066 次   （1 秒）
-第   16 条：       &#x27; &#x27; + &#x27;f&#x27;        -&gt; &#x27; f&#x27;           出现 126,828 次   （1 秒）
-第   17 条：       &#x27;o&#x27; + &#x27;u&#x27;        -&gt; &#x27;ou&#x27;           出现 126,697 次   （1 秒）
-第   18 条：       &#x27;i&#x27; + &#x27;t&#x27;        -&gt; &#x27;it&#x27;           出现 123,832 次   （1 秒）
-第   19 条：       &#x27; &#x27; + &#x27;l&#x27;        -&gt; &#x27; l&#x27;           出现 103,534 次   （1 秒）
-第   20 条：       &#x27; &#x27; + &#x27;c&#x27;        -&gt; &#x27; c&#x27;           出现 102,968 次   （1 秒）
-第   21 条：       &#x27; &#x27; + &#x27;d&#x27;        -&gt; &#x27; d&#x27;           出现  99,384 次   （1 秒）
-第   22 条：       &#x27; &#x27; + &#x27;he&#x27;       -&gt; &#x27; he&#x27;          出现  97,152 次   （1 秒）
-第   23 条：       &#x27;e&#x27; + &#x27;r&#x27;        -&gt; &#x27;er&#x27;           出现  97,086 次   （1 秒）
-第   24 条：       &#x27; &#x27; + &#x27;m&#x27;        -&gt; &#x27; m&#x27;           出现  92,445 次   （1 秒）
-第   25 条：       &#x27; &#x27; + &#x27;p&#x27;        -&gt; &#x27; p&#x27;           出现  91,877 次   （1 秒）
-第   26 条：     &#x27; wa&#x27; + &#x27;s&#x27;        -&gt; &#x27; was&#x27;         出现  88,877 次   （1 秒）
-第   27 条：       &#x27; &#x27; + &#x27;T&#x27;        -&gt; &#x27; T&#x27;           出现  87,474 次   （1 秒）
-第   28 条：       &#x27;o&#x27; + &#x27;m&#x27;        -&gt; &#x27;om&#x27;           出现  86,380 次   （1 秒）
-第   29 条：       &#x27; &#x27; + &#x27;o&#x27;        -&gt; &#x27; o&#x27;           出现  81,913 次   （1 秒）
-第   30 条：       &#x27;a&#x27; + &#x27;y&#x27;        -&gt; &#x27;ay&#x27;           出现  81,138 次   （1 秒）
-第  500 条：       &#x27;o&#x27; + &#x27;b&#x27;        -&gt; &#x27;ob&#x27;           出现   3,165 次   （7 秒）
-第 1000 条：      &#x27;at&#x27; + &#x27;er&#x27;       -&gt; &#x27;ater&#x27;         出现   1,150 次   （13 秒）
-第 1500 条：  &#x27; color&#x27; + &#x27;ful&#x27;      -&gt; &#x27; colorful&#x27;    出现     579 次   （19 秒）
-第 2000 条：      &#x27; w&#x27; + &#x27;ide&#x27;      -&gt; &#x27; wide&#x27;        出现     334 次   （25 秒）
-第 2500 条：       &#x27;u&#x27; + &#x27;ce&#x27;       -&gt; &#x27;uce&#x27;          出现     220 次   （30 秒）
-第 3000 条： &#x27; remind&#x27; + &#x27;ed&#x27;       -&gt; &#x27; reminded&#x27;    出现     161 次   （35 秒）
-第 3500 条：     &#x27; pe&#x27; + &#x27;bble&#x27;     -&gt; &#x27; pebble&#x27;      出现     127 次   （40 秒）
-第 3840 条：    &#x27;leph&#x27; + &#x27;one&#x27;      -&gt; &#x27;lephone&#x27;      出现     108 次   （43 秒）
-训练完成：共 3840 条合并规则，用时 43 秒</code></pre>
+        <pre class="output"><code>training text: 20,000 stories, 17,910,905 characters, 17,935,942 bytes
+after pre-tokenization: 4,387,855 words, 14,453 distinct
+merge    1:        &#x27;h&#x27; + &#x27;e&#x27;        -&gt; &#x27;he&#x27;           525,590 occurrences   (1s)
+merge    2:        &#x27; &#x27; + &#x27;t&#x27;        -&gt; &#x27; t&#x27;           495,518 occurrences   (1s)
+merge    3:        &#x27; &#x27; + &#x27;a&#x27;        -&gt; &#x27; a&#x27;           391,084 occurrences   (1s)
+merge    4:        &#x27; &#x27; + &#x27;s&#x27;        -&gt; &#x27; s&#x27;           286,881 occurrences   (1s)
+merge    5:        &#x27; &#x27; + &#x27;w&#x27;        -&gt; &#x27; w&#x27;           251,214 occurrences   (1s)
+merge    6:        &#x27;n&#x27; + &#x27;d&#x27;        -&gt; &#x27;nd&#x27;           238,320 occurrences   (1s)
+merge    7:       &#x27; t&#x27; + &#x27;he&#x27;       -&gt; &#x27; the&#x27;         224,432 occurrences   (1s)
+merge    8:        &#x27;e&#x27; + &#x27;d&#x27;        -&gt; &#x27;ed&#x27;           192,625 occurrences   (1s)
+merge    9:       &#x27; a&#x27; + &#x27;nd&#x27;       -&gt; &#x27; and&#x27;         168,257 occurrences   (1s)
+merge   10:       &#x27; t&#x27; + &#x27;o&#x27;        -&gt; &#x27; to&#x27;          156,810 occurrences   (1s)
+merge   11:        &#x27; &#x27; + &#x27;b&#x27;        -&gt; &#x27; b&#x27;           152,833 occurrences   (1s)
+merge   12:        &#x27;i&#x27; + &#x27;n&#x27;        -&gt; &#x27;in&#x27;           149,564 occurrences   (1s)
+merge   13:        &#x27; &#x27; + &#x27;h&#x27;        -&gt; &#x27; h&#x27;           142,039 occurrences   (1s)
+merge   14:       &#x27; w&#x27; + &#x27;a&#x27;        -&gt; &#x27; wa&#x27;          130,428 occurrences   (1s)
+merge   15:        &#x27;r&#x27; + &#x27;e&#x27;        -&gt; &#x27;re&#x27;           130,066 occurrences   (1s)
+merge   16:        &#x27; &#x27; + &#x27;f&#x27;        -&gt; &#x27; f&#x27;           126,828 occurrences   (1s)
+merge   17:        &#x27;o&#x27; + &#x27;u&#x27;        -&gt; &#x27;ou&#x27;           126,697 occurrences   (1s)
+merge   18:        &#x27;i&#x27; + &#x27;t&#x27;        -&gt; &#x27;it&#x27;           123,832 occurrences   (1s)
+merge   19:        &#x27; &#x27; + &#x27;l&#x27;        -&gt; &#x27; l&#x27;           103,534 occurrences   (1s)
+merge   20:        &#x27; &#x27; + &#x27;c&#x27;        -&gt; &#x27; c&#x27;           102,968 occurrences   (1s)
+merge   21:        &#x27; &#x27; + &#x27;d&#x27;        -&gt; &#x27; d&#x27;            99,384 occurrences   (1s)
+merge   22:        &#x27; &#x27; + &#x27;he&#x27;       -&gt; &#x27; he&#x27;           97,152 occurrences   (1s)
+merge   23:        &#x27;e&#x27; + &#x27;r&#x27;        -&gt; &#x27;er&#x27;            97,086 occurrences   (1s)
+merge   24:        &#x27; &#x27; + &#x27;m&#x27;        -&gt; &#x27; m&#x27;            92,445 occurrences   (1s)
+merge   25:        &#x27; &#x27; + &#x27;p&#x27;        -&gt; &#x27; p&#x27;            91,877 occurrences   (1s)
+merge   26:      &#x27; wa&#x27; + &#x27;s&#x27;        -&gt; &#x27; was&#x27;          88,877 occurrences   (1s)
+merge   27:        &#x27; &#x27; + &#x27;T&#x27;        -&gt; &#x27; T&#x27;            87,474 occurrences   (1s)
+merge   28:        &#x27;o&#x27; + &#x27;m&#x27;        -&gt; &#x27;om&#x27;            86,380 occurrences   (1s)
+merge   29:        &#x27; &#x27; + &#x27;o&#x27;        -&gt; &#x27; o&#x27;            81,913 occurrences   (1s)
+merge   30:        &#x27;a&#x27; + &#x27;y&#x27;        -&gt; &#x27;ay&#x27;            81,138 occurrences   (1s)
+merge  500:        &#x27;o&#x27; + &#x27;b&#x27;        -&gt; &#x27;ob&#x27;             3,165 occurrences   (7s)
+merge 1000:       &#x27;at&#x27; + &#x27;er&#x27;       -&gt; &#x27;ater&#x27;           1,150 occurrences   (13s)
+merge 1500:   &#x27; color&#x27; + &#x27;ful&#x27;      -&gt; &#x27; colorful&#x27;        579 occurrences   (19s)
+merge 2000:       &#x27; w&#x27; + &#x27;ide&#x27;      -&gt; &#x27; wide&#x27;            334 occurrences   (25s)
+merge 2500:        &#x27;u&#x27; + &#x27;ce&#x27;       -&gt; &#x27;uce&#x27;              220 occurrences   (30s)
+merge 3000:  &#x27; remind&#x27; + &#x27;ed&#x27;       -&gt; &#x27; reminded&#x27;        161 occurrences   (35s)
+merge 3500:      &#x27; pe&#x27; + &#x27;bble&#x27;     -&gt; &#x27; pebble&#x27;          127 occurrences   (40s)
+merge 3840:     &#x27;leph&#x27; + &#x27;one&#x27;      -&gt; &#x27;lephone&#x27;          108 occurrences   (43s)
+done: 3840 merge rules in 43s</code></pre>
         <p>
             怎样读这段输出：
         </p>
@@ -273,7 +276,7 @@ merges = train(text, 4096, log=log)</code></pre>
         <pre class="code"><code>class Tokenizer:
     def __init__(self, merges):
         self.merges = merges
-        self.rank = {pair: i for i, pair in enumerate(merges)}   # 合并规则的先后顺序
+        self.rank = {pair: i for i, pair in enumerate(merges)}   # the order in which merges were learned
         self.vocab = [bytes([b]) for b in range(256)] + [a + b for a, b in merges]
         self.id_of = {tok: i for i, tok in enumerate(self.vocab)}
         self.cache = {}
@@ -283,7 +286,7 @@ merges = train(text, 4096, log=log)</code></pre>
             return self.cache[word]
         toks = [bytes([b]) for b in word.encode(&quot;utf-8&quot;)]
         while len(toks) &gt; 1:
-            # 在当前相邻对里，找最早学到的那条合并规则来用；一条都用不了就结束
+            # among the current adjacent pairs, apply the merge that was learned earliest; stop when none applies
             pairs = [(self.rank.get(p, float(&quot;inf&quot;)), p) for p in zip(toks, toks[1:])]
             r, p = min(pairs)
             if r == float(&quot;inf&quot;):
@@ -300,19 +303,19 @@ merges = train(text, 4096, log=log)</code></pre>
         return b&quot;&quot;.join(self.vocab[i] for i in ids).decode(&quot;utf-8&quot;, errors=&quot;replace&quot;)
 
     def pieces(self, text):
-        &quot;&quot;&quot;返回每个 token 对应的字节，方便看切分结果。&quot;&quot;&quot;
+        &quot;&quot;&quot;The bytes of each token, handy for looking at how a text is split.&quot;&quot;&quot;
         return [self.vocab[i] for i in self.encode(text)]
 
     def truncated(self, vocab_size):
-        &quot;&quot;&quot;BPE 的合并是一条条按顺序学的，所以只取前 vocab_size-256 条，就得到一个更小词表的分词器。&quot;&quot;&quot;
+        &quot;&quot;&quot;Merges are learned one after another, so keeping the first vocab_size-256 gives a smaller tokenizer.&quot;&quot;&quot;
         return Tokenizer(self.merges[: vocab_size - 256])</code></pre>
         <p class="label">运行输出：</p>
-        <pre class="output"><code>=== 1. 编码与解码 ===
-原文: Once upon a time, a little rabbit named Benny found a shiny key.
-切分: Once | ␣upon | ␣a | ␣time | , | ␣a | ␣little | ␣rabbit | ␣named | ␣Benny | ␣found | ␣a | ␣shiny | ␣key | .
-ID:   [427, 438, 258, 393, 44, 258, 395, 1137, 489, 1380, 589, 258, 957, 2058, 46]
-解码: Once upon a time, a little rabbit named Benny found a shiny key.
-解码后和原文一样吗？ True</code></pre>
+        <pre class="output"><code>=== 1. Encoding and decoding ===
+text:    Once upon a time, a little rabbit named Benny found a shiny key.
+pieces:  Once | ␣upon | ␣a | ␣time | , | ␣a | ␣little | ␣rabbit | ␣named | ␣Benny | ␣found | ␣a | ␣shiny | ␣key | .
+IDs:     [427, 438, 258, 393, 44, 258, 395, 1137, 489, 1380, 589, 258, 957, 2058, 46]
+decoded: Once upon a time, a little rabbit named Benny found a shiny key.
+identical to the original? True</code></pre>
         <p>
             这句话里每个词都成了一个 token，包括 rabbit、Benny、shiny。解码后和原文完全一样：BPE 是无损的，切开再拼回去，一个字节都不会丢。
         </p>
@@ -326,15 +329,15 @@ ID:   [427, 438, 258, 393, 44, 258, 395, 1137, 489, 1380, 589, 258, 957, 2058, 4
         <pre class="code"><code>for v in [256, 512, 1024, 2048, 4096]:
     t = tok.truncated(v)
     n = len(t.encode(val))
-    print(f&quot;词表 {v:5d}：{n:8,} 个 token，平均每个 token {nbytes/n:.2f} 个字节   例句切分：{show(t, &#x27;The little girl was happy.&#x27;)}&quot;)</code></pre>
+    print(f&quot;vocab {v:5d}: {n:8,} tokens, {nbytes/n:.2f} bytes per token   example: {show(t, &#x27;The little girl was happy.&#x27;)}&quot;)</code></pre>
         <p class="label">运行输出：</p>
-        <pre class="output"><code>=== 2. 词表越大，序列越短 ===
-测试文本：验证集前 1000 篇故事（训练时没见过），共 793,374 个字节
-词表   256： 793,374 个 token，平均每个 token 1.00 个字节   例句切分：T | h | e | ␣ | l | i | t | t | l | e | ␣ | g | i | r | l | ␣ | w | a | s | ␣ | h | a | p | p | y | .
-词表   512： 337,651 个 token，平均每个 token 2.35 个字节   例句切分：The | ␣little | ␣girl | ␣was | ␣happy | .
-词表  1024： 257,275 个 token，平均每个 token 3.08 个字节   例句切分：The | ␣little | ␣girl | ␣was | ␣happy | .
-词表  2048： 218,768 个 token，平均每个 token 3.63 个字节   例句切分：The | ␣little | ␣girl | ␣was | ␣happy | .
-词表  4096： 200,638 个 token，平均每个 token 3.95 个字节   例句切分：The | ␣little | ␣girl | ␣was | ␣happy | .</code></pre>
+        <pre class="output"><code>=== 2. Bigger vocabulary, shorter sequences ===
+test text: the first 1000 validation stories (not seen in training), 793,374 bytes
+vocab   256:  793,374 tokens, 1.00 bytes per token   example: T | h | e | ␣ | l | i | t | t | l | e | ␣ | g | i | r | l | ␣ | w | a | s | ␣ | h | a | p | p | y | .
+vocab   512:  337,651 tokens, 2.35 bytes per token   example: The | ␣little | ␣girl | ␣was | ␣happy | .
+vocab  1024:  257,275 tokens, 3.08 bytes per token   example: The | ␣little | ␣girl | ␣was | ␣happy | .
+vocab  2048:  218,768 tokens, 3.63 bytes per token   example: The | ␣little | ␣girl | ␣was | ␣happy | .
+vocab  4096:  200,638 tokens, 3.95 bytes per token   example: The | ␣little | ␣girl | ␣was | ␣happy | .</code></pre>
         <ul>
             <li>词表 256 就是只有字节、一条规则都没有：一个字节一个 token，"The little girl was happy."要 26 个 token。</li>
             <li>只加 256 条规则（词表 512），token 数就减少了一半多，每个 token 平均 2.35 个字节。最常见的词（the、little、was）在最早的规则里就合成了。</li>
@@ -347,7 +350,7 @@ ID:   [427, 438, 258, 393, 44, 258, 395, 1137, 489, 1380, 589, 258, 957, 2058, 4
 
     <section>
         <h2>八、几个奇怪的切分</h2>
-        <pre class="output"><code>=== 3. 切分的怪现象 ===
+        <pre class="output"><code>=== 3. Odd splits ===
 &#x27;strawberry&#x27;       -&gt; st | ra | w | berry
 &#x27; strawberry&#x27;      -&gt; ␣straw | berry
 &#x27; Strawberry&#x27;      -&gt; ␣St | ra | w | berry
@@ -370,35 +373,34 @@ ID:   [427, 438, 258, 393, 44, 258, 395, 1137, 489, 1380, 589, 258, 957, 2058, 4
         <p>
             最后拿两句意思相同的中英文，用三个分词器比一比：本练习只在英文故事上训练的分词器，GPT-2 的分词器（2019 年，词表 5 万，训练数据以英文网页为主），GPT-4o 的分词器（2024 年，词表约 20 万，OpenAI 发布时说明它对很多非英语语言的压缩比以前好）。后两个通过 OpenAI 公开的 tiktoken 库调用。
         </p>
-        <pre class="code"><code>pairs = [(&quot;The little cat is playing in the garden.&quot;, &quot;小猫在花园里玩。&quot;),
-         (&quot;Thank you very much for your help today.&quot;, &quot;非常感谢你今天的帮助。&quot;)]
-encs = {&quot;本练习的分词器（只在英文故事上训练，词表 4096）&quot;: tok.encode,
-        &quot;GPT-2 的分词器（词表 50257）&quot;: tiktoken.get_encoding(&quot;gpt2&quot;).encode,
-        &quot;GPT-4o 的分词器（词表约 20 万）&quot;: tiktoken.get_encoding(&quot;o200k_base&quot;).encode}
+        <pre class="code"><code>pairs = SAMPLES[&quot;translation_pairs&quot;]          # (English, Chinese) sentences with the same meaning
+encs = {&quot;this lab&#x27;s tokenizer (English stories only, vocab 4096)&quot;: tok.encode,
+        &quot;GPT-2 tokenizer (vocab 50,257)&quot;: tiktoken.get_encoding(&quot;gpt2&quot;).encode,
+        &quot;GPT-4o tokenizer (vocab about 200,000)&quot;: tiktoken.get_encoding(&quot;o200k_base&quot;).encode}
 for en, zh in pairs:
-    print(f&quot;\n英文：{en}\n中文：{zh}&quot;)
+    print(f&quot;\nEnglish: {en}\nChinese: {zh}&quot;)
     for name, enc in encs.items():
-        print(f&quot;  {name}：英文 {len(enc(en))} 个 token，中文 {len(enc(zh))} 个 token&quot;)
-print(&quot;\n本练习的分词器怎样切中文：&quot;, show(tok, &quot;小猫在花园里玩。&quot;))
+        print(f&quot;  {name}: English {len(enc(en))} tokens, Chinese {len(enc(zh))} tokens&quot;)
+print(&quot;\nhow this lab&#x27;s tokenizer splits the Chinese sentence:&quot;, show(tok, pairs[0][1]))
 g4 = tiktoken.get_encoding(&quot;o200k_base&quot;)
-print(&quot;GPT-4o 的分词器怎样切中文：&quot;, &quot; | &quot;.join(vis(g4.decode_single_token_bytes(i)) for i in g4.encode(&quot;小猫在花园里玩。&quot;)))</code></pre>
+print(&quot;how the GPT-4o tokenizer splits it:                 &quot;, &quot; | &quot;.join(vis(g4.decode_single_token_bytes(i)) for i in g4.encode(pairs[0][1])))</code></pre>
         <p class="label">运行输出：</p>
-        <pre class="output"><code>=== 4. 同样的意思，中文和英文要多少 token ===
+        <pre class="output"><code>=== 4. The same meaning in English and Chinese: how many tokens? ===
 
-英文：The little cat is playing in the garden.
-中文：小猫在花园里玩。
-  本练习的分词器（只在英文故事上训练，词表 4096）：英文 9 个 token，中文 24 个 token
-  GPT-2 的分词器（词表 50257）：英文 9 个 token，中文 17 个 token
-  GPT-4o 的分词器（词表约 20 万）：英文 9 个 token，中文 8 个 token
+English: The little cat is playing in the garden.
+Chinese: 小猫在花园里玩。
+  this lab&#x27;s tokenizer (English stories only, vocab 4096): English 9 tokens, Chinese 24 tokens
+  GPT-2 tokenizer (vocab 50,257): English 9 tokens, Chinese 17 tokens
+  GPT-4o tokenizer (vocab about 200,000): English 9 tokens, Chinese 8 tokens
 
-英文：Thank you very much for your help today.
-中文：非常感谢你今天的帮助。
-  本练习的分词器（只在英文故事上训练，词表 4096）：英文 9 个 token，中文 33 个 token
-  GPT-2 的分词器（词表 50257）：英文 9 个 token，中文 21 个 token
-  GPT-4o 的分词器（词表约 20 万）：英文 9 个 token，中文 7 个 token
+English: Thank you very much for your help today.
+Chinese: 非常感谢你今天的帮助。
+  this lab&#x27;s tokenizer (English stories only, vocab 4096): English 9 tokens, Chinese 33 tokens
+  GPT-2 tokenizer (vocab 50,257): English 9 tokens, Chinese 21 tokens
+  GPT-4o tokenizer (vocab about 200,000): English 9 tokens, Chinese 7 tokens
 
-本练习的分词器怎样切中文： &lt;e5&gt; | &lt;b0&gt; | &lt;8f&gt; | &lt;e7&gt; | &lt;8c&gt; | &lt;ab&gt; | &lt;e5&gt; | &lt;9c&gt; | &lt;a8&gt; | &lt;e8&gt; | &lt;8a&gt; | &lt;b1&gt; | &lt;e5&gt; | &lt;9b&gt; | &lt;ad&gt; | &lt;e9&gt; | &lt;87&gt; | &lt;8c&gt; | &lt;e7&gt; | &lt;8e&gt; | &lt;a9&gt; | &lt;e3&gt; | &lt;80&gt; | &lt;82&gt;
-GPT-4o 的分词器怎样切中文： 小 | 猫 | 在 | 花 | 园 | 里 | 玩 | 。</code></pre>
+how this lab&#x27;s tokenizer splits the Chinese sentence: &lt;e5&gt; | &lt;b0&gt; | &lt;8f&gt; | &lt;e7&gt; | &lt;8c&gt; | &lt;ab&gt; | &lt;e5&gt; | &lt;9c&gt; | &lt;a8&gt; | &lt;e8&gt; | &lt;8a&gt; | &lt;b1&gt; | &lt;e5&gt; | &lt;9b&gt; | &lt;ad&gt; | &lt;e9&gt; | &lt;87&gt; | &lt;8c&gt; | &lt;e7&gt; | &lt;8e&gt; | &lt;a9&gt; | &lt;e3&gt; | &lt;80&gt; | &lt;82&gt;
+how the GPT-4o tokenizer splits it:                  小 | 猫 | 在 | 花 | 园 | 里 | 玩 | 。</code></pre>
         <ul>
             <li>本练习的分词器从没在训练数据里见过中文，所以没有任何关于中文的合并规则。"小猫在花园里玩。"8 个字，每个字 3 个字节，就成了 24 个 token，每个 token 只是半个字都不到的一个字节（输出里的 &lt;e5&gt; 是字节的十六进制写法，单个字节没法显示成字）。</li>
             <li>GPT-2 的分词器见过一些中文，合并了一部分，但还是要 17 个 token，几乎是英文的两倍；第二句是 21 对 9。</li>

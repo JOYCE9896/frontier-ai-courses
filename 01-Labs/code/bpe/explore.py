@@ -1,53 +1,53 @@
-"""用训练好的分词器做实验：编码解码、词表大小与压缩率、切分的怪现象、中英文对比。"""
-import os, pickle
+"""Experiments with the trained tokenizer: encode/decode, vocabulary size vs. compression, odd splits, Chinese vs. English."""
+import json, os, pickle
 import pyarrow.parquet as pq
 import tiktoken
 from bpe import Tokenizer
 
+SAMPLES = json.load(open(os.path.join(os.path.dirname(__file__), "samples.json"), encoding="utf-8"))
 merges = pickle.load(open(os.path.expanduser("~/.labs_data/bpe_merges.pkl"), "rb"))
 tok = Tokenizer(merges)
 def vis(b):
-    """把一个 token 显示出来：空格显示成 ␣；如果它只是半个汉字的字节，没法单独显示，就写成 <e5> 这样的十六进制。"""
+    """Show one token: spaces as ␣; a lone byte of a multi-byte character cannot be shown, so print it in hex like <e5>."""
     try:
         return b.decode("utf-8").replace(" ", "␣")
     except UnicodeDecodeError:
         return "".join(f"<{x:02x}>" for x in b)
 show = lambda t, s: " | ".join(vis(p) for p in t.pieces(s))
 
-print("=== 1. 编码与解码 ===")
+print("=== 1. Encoding and decoding ===")
 s = "Once upon a time, a little rabbit named Benny found a shiny key."
 ids = tok.encode(s)
-print("原文:", s)
-print("切分:", show(tok, s))
-print("ID:  ", ids)
-print("解码:", tok.decode(ids))
-print("解码后和原文一样吗？", tok.decode(ids) == s)
+print("text:   ", s)
+print("pieces: ", show(tok, s))
+print("IDs:    ", ids)
+print("decoded:", tok.decode(ids))
+print("identical to the original?", tok.decode(ids) == s)
 
-print("\n=== 2. 词表越大，序列越短 ===")
+print("\n=== 2. Bigger vocabulary, shorter sequences ===")
 DATA = os.path.expanduser("~/.labs_data/tinystories")
 f = [x for x in os.listdir(DATA) if x.startswith("validation")][0]
 val = "\n".join(pq.read_table(os.path.join(DATA, f)).column("text").to_pylist()[:1000])
 nbytes = len(val.encode("utf-8"))
-print(f"测试文本：验证集前 1000 篇故事（训练时没见过），共 {nbytes:,} 个字节")
+print(f"test text: the first 1000 validation stories (not seen in training), {nbytes:,} bytes")
 for v in [256, 512, 1024, 2048, 4096]:
     t = tok.truncated(v)
     n = len(t.encode(val))
-    print(f"词表 {v:5d}：{n:8,} 个 token，平均每个 token {nbytes/n:.2f} 个字节   例句切分：{show(t, 'The little girl was happy.')}")
+    print(f"vocab {v:5d}: {n:8,} tokens, {nbytes/n:.2f} bytes per token   example: {show(t, 'The little girl was happy.')}")
 
-print("\n=== 3. 切分的怪现象 ===")
+print("\n=== 3. Odd splits ===")
 for w in ["strawberry", " strawberry", " Strawberry", " strawbery", " hippopotamus", " 2026", " 12345", " Kallini"]:
     print(f"{w!r:18} -> {show(tok, w)}")
 
-print("\n=== 4. 同样的意思，中文和英文要多少 token ===")
-pairs = [("The little cat is playing in the garden.", "小猫在花园里玩。"),
-         ("Thank you very much for your help today.", "非常感谢你今天的帮助。")]
-encs = {"本练习的分词器（只在英文故事上训练，词表 4096）": tok.encode,
-        "GPT-2 的分词器（词表 50257）": tiktoken.get_encoding("gpt2").encode,
-        "GPT-4o 的分词器（词表约 20 万）": tiktoken.get_encoding("o200k_base").encode}
+print("\n=== 4. The same meaning in English and Chinese: how many tokens? ===")
+pairs = SAMPLES["translation_pairs"]          # (English, Chinese) sentences with the same meaning
+encs = {"this lab's tokenizer (English stories only, vocab 4096)": tok.encode,
+        "GPT-2 tokenizer (vocab 50,257)": tiktoken.get_encoding("gpt2").encode,
+        "GPT-4o tokenizer (vocab about 200,000)": tiktoken.get_encoding("o200k_base").encode}
 for en, zh in pairs:
-    print(f"\n英文：{en}\n中文：{zh}")
+    print(f"\nEnglish: {en}\nChinese: {zh}")
     for name, enc in encs.items():
-        print(f"  {name}：英文 {len(enc(en))} 个 token，中文 {len(enc(zh))} 个 token")
-print("\n本练习的分词器怎样切中文：", show(tok, "小猫在花园里玩。"))
+        print(f"  {name}: English {len(enc(en))} tokens, Chinese {len(enc(zh))} tokens")
+print("\nhow this lab's tokenizer splits the Chinese sentence:", show(tok, pairs[0][1]))
 g4 = tiktoken.get_encoding("o200k_base")
-print("GPT-4o 的分词器怎样切中文：", " | ".join(vis(g4.decode_single_token_bytes(i)) for i in g4.encode("小猫在花园里玩。")))
+print("how the GPT-4o tokenizer splits it:                 ", " | ".join(vis(g4.decode_single_token_bytes(i)) for i in g4.encode(pairs[0][1])))
