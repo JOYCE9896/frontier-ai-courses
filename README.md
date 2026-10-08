@@ -16,7 +16,7 @@ Stanford 和 CMU 2025–2026 学年 AI 课程的中文笔记，附一套给零�
 
 **零基础** → AI 基础 → CS224N → 11-711 → CS336 → 11-664 → CS329A / 11-768
 
-非技术类课程（MS&E 435、CS153、CS283、EE392B）不需要数学基础，可以直接读。
+非技术类课程（MS&E 435、CS153、CS283）不需要数学基础，可以直接读。
 
 ## 课程
 
@@ -46,7 +46,6 @@ Stanford 和 CMU 2025–2026 学年 AI 课程的中文笔记，附一套给零�
 | [Stanford MS&E 435](https://joyce9896.github.io/frontier-ai-courses/MSE435-Economics-of-the-AI-Supercycle/) | AI 产业经济：钱流向哪里 |
 | [Stanford CS153](https://joyce9896.github.io/frontier-ai-courses/CS153-Frontier-Systems/) | 前沿系统：能源、算力、模型公司与创业 |
 | [Stanford CS283](https://joyce9896.github.io/frontier-ai-courses/CS283-Governing-AI/) | AI 治理与政策 |
-| [Stanford EE392B](https://joyce9896.github.io/frontier-ai-courses/EE392B-Industrial-AI/) | 工业 AI 落地 |
 
 ## 资料来源
 
