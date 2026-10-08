@@ -16,7 +16,7 @@ Stanford 和 CMU 2025–2026 学年 AI 课程的中文笔记，附一套给零�
 
 **零基础** → AI 基础 → CS224N → 11-711 → CS336 → 11-664 → CS329A / 11-768
 
-非技术类课程（MS&E 435、CS153、CS283）不需要数学基础，可以直接读。
+非技术类课程（MS&E 435、CS153）不需要数学基础，可以直接读。
 
 ## 课程
 
@@ -39,13 +39,12 @@ Stanford 和 CMU 2025–2026 学年 AI 课程的中文笔记，附一套给零�
 | [Stanford CS25](https://joyce9896.github.io/frontier-ai-courses/CS25-Transformers-United/) | Transformer 前沿研讨 |
 | [Stanford CME296](https://joyce9896.github.io/frontier-ai-courses/CME296-Diffusion-and-Large-Vision-Models/) | 扩散模型与视觉生成 |
 
-### 产业与治理
+### 产业与系统
 
 | 课程 | 内容 |
 | :-- | :-- |
 | [Stanford MS&E 435](https://joyce9896.github.io/frontier-ai-courses/MSE435-Economics-of-the-AI-Supercycle/) | AI 产业经济：钱流向哪里 |
 | [Stanford CS153](https://joyce9896.github.io/frontier-ai-courses/CS153-Frontier-Systems/) | 前沿系统：能源、算力、模型公司与创业 |
-| [Stanford CS283](https://joyce9896.github.io/frontier-ai-courses/CS283-Governing-AI/) | AI 治理与政策 |
 
 ## 资料来源
 
