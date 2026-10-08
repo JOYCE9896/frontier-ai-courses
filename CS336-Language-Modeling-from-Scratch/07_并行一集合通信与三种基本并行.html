@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第七讲：并行（一）：集合通信与三种基本并行 | Stanford CS336 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="06_内核Triton与性能剖析.html">&larr; 上一讲</a>
+    <span>Stanford CS336: Lecture 7</span>
+    <a href="08_并行二大规模训练的并行策略.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第七讲：并行（一）：集合通信与三种基本并行</h1>
+        <p class="subtitle">为什么要用多块 GPU，集合通信原语（广播、分散、收集、归约、all-gather、reduce-scatter、all-reduce、all-to-all），GPU 之间怎样连接（NVLink、InfiniBand、RDMA），用 torch.distributed 写集合通信并测有效带宽，以及数据并行、张量并行、流水线并行的最简实现</p>
+        <div class="author-meta">
+            主讲：Percy Liang<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=SzpOcwdIL0Y" target="_blank">课堂录像</a>（Stanford Online 公开，2026 年春季，本文依据录像字幕整理）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、从一块 GPU 到很多块</h2>
+        <p>
+            上周讲了怎样写内核让单块 GPU 变快；这周讲怎样利用多块 GPU，可能是 4 块，也可能是上千块。放大看两种情况是一样的：计算单元（算术逻辑单元、张量核心）离数据很远，单块 GPU 时远在 HBM，多块时数据可能在另一块 GPU 上，要想办法搬过来。原则也一样：编排计算，避开数据传输瓶颈。用很多 GPU 很容易，用好很难。
+        </p>
+        <p>
+            推广的层级：最近处是单节点单 GPU 内的 L1 缓存和共享内存，最快；然后是 HBM，上周还嫌它慢，这一讲它算快的；然后是单节点多 GPU，通过 NVLink 和 NVSwitch 相连；最后是多节点多 GPU，要用 InfiniBand 或以太网。上周的技巧是融合和分块（读进共享内存，尽量多做，再写回）；这周是通过合理地复制和切分来减少 GPU 之间的通信。
+        </p>
+        <p>
+            为什么要多 GPU？一是参数、激活、梯度、优化器状态放不进一块 GPU 的 HBM，B200 有 192 GB，训练一万亿参数的模型放不下；二是即使放得下，也想用更多 GPU 分摊工作、训练得更快。有时要权衡：都放在少数 GPU 上计算核心少，分散开又要付通信带宽。他提醒，这一讲的可执行讲义原本用多进程运行，讲课时为了单步执行切换成了单进程模式。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、集合通信</h2>
+        <p>
+            集合通信是分布式编程的原语，可以追溯到 80 年代，并行编程不是为训练大模型发明的，但至今仍在用这些原语。"集合"指的是你指定一种跨多个设备的通用通信模式，而不是管理两两之间的点对点通信，系统可以替你做很多工作。术语：每个设备叫一个 rank（这里就是一块 GPU，也可以是 TPU），设备总数叫 world size。
+        </p>
+        <ul>
+            <li>广播（broadcast）：rank 0 有一个张量，发给所有 rank，最后每个 rank 都有同一个张量。不在训练的核心路径上，通常用于初始化，比如加载初始检查点后分发。</li>
+            <li>分散（scatter）：rank 0 的张量按 world size 切成几份，第 $i$ 份给 rank $i$。本身不直接用，是理解 reduce-scatter 的铺垫。</li>
+            <li>收集（gather）：分散的逆操作，各 rank 上的片段拼接到 rank 0 上。是理解 all-gather 的铺垫。</li>
+            <li>归约（reduce）：和函数式编程里的 reduce 一样，各 rank 上的数据用某种运算（比如求和）合并，放到 rank 0。收集可以看作以拼接为运算的归约。</li>
+            <li>all-gather：对所有 rank 都做收集，每个 rank 最后都得到完整拼接的结果。后面会看到，每个 rank 只持有一部分参数，前向时要 all-gather 得到完整参数。训练中会反复出现"先收集做点事，再分散，再收集"。</li>
+            <li>reduce-scatter：对张量的每个分量做归约，再把结果分散到不同 rank。比如四个设备各有一个向量，第一个分量求和得 6 放到 rank 0，第二个分量求和得 10 放到 rank 1，依此类推。反向传播后，各 GPU 处理不同数据，要把各分片的梯度求和再重新分布存储，就用它。</li>
+            <li>all-reduce：先 reduce-scatter 再 all-gather，结果是所有 rank 都有完整的归约结果。在某种意义上最好理解：一堆张量求和，复制到所有节点。数据并行里求梯度和就用它。后面 ZeRO、FSDP 这些更高级的做法，会把 all-reduce 拆成 reduce-scatter 和 all-gather，以便在中间插手。</li>
+            <li>all-to-all：最一般的，指定每个 rank 给每个其他 rank 发什么。位置表示目标 rank：rank 1 把第 0 个元素发给 rank 0，第 1 个发给 rank 1……于是 rank 0 收到所有 rank 的第 0 列。对 MoE 很重要：每个 rank 既有一部分数据又有一部分专家，路由是动态的，要看数据才知道激活该送去哪个专家。如果完全均衡（每个 rank 给每个其他 rank 发同样多的字节），all-to-all 就相当于矩阵转置；它也能处理不均衡的切分，但最好尽量均衡，这就是 Tatsu 那讲负载均衡的意义。</li>
+        </ul>
+        <p>
+            记忆方法：reduce 对满足结合律、交换律的运算（求和、最大、最小）进行；scatter 是 gather 的逆，一个分发、一个集中；all 表示目标是所有设备。学生问归约的目标 rank 是否固定，他说在调用时指定，不必提前决定。这些在代码里都有实现，马上会看到。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、硬件：GPU 之间怎样连接</h2>
+        <p>
+            经典的计算机：服务器上有 CPU，PCIe 总线连接鼠标键盘之类的设备，也挂着几块 GPU，内存，再通过以太网连到另一台计算机。同一节点的 GPU 通过 PCIe 通信，不同节点要走以太网。如果你买了游戏显卡、和朋友连起来训练大模型，就是这样。认真训练时的典型配置：
+        </p>
+        <ul>
+            <li>每个节点通常 8 块 GPU，通过 NVIDIA 的 NVLink 连到 NVSwitch。NVLink 5 的总带宽约 1.8 TB/s，而 B200 的 HBM 是 8 TB/s，大约慢 4 倍，但对设备之间来说已经很快了。从编程角度看，任何 GPU 都可以和任何其他 GPU 相连，交换机负责路由。</li>
+            <li>GPU 数量增多，NVSwitch 撑不下，就要把节点组成 pod，用 InfiniBand 连接。这时 GPU 不能直接连到另一块 GPU，要经过 PCIe 和专门的 InfiniBand 线缆，速度低得多。</li>
+            <li>InfiniBand 也不够时，pod 之间用以太网，要经过 PCIe 和 CPU，更慢。就像内存层级，节点越多越慢，不可能用一个 NVSwitch 连十万块 GPU。</li>
+        </ul>
+        <p>
+            传统以太网中，GPU 要让 CPU 把数据拷到内核的套接字缓冲区（这里的"内核"是操作系统内核，不是 GPU 内核），构造网络包，拷到网卡，再发出去，延迟很高。远程直接内存访问（RDMA）让一块 GPU 直接读写另一块 GPU 的内存，不经过 CPU。NVLink、NVSwitch 自然支持，InfiniBand 也支持，标准以太网不支持。两个进展：NVIDIA 为 B200、B300 推出了 NVL72，每个托盘 8 块 GPU，一共 9 个托盘，72 块 GPU 都在同一个 NVLink 域里，普通人只有 8 块 GPU 互联很快，有钱的话可以 72 块都很快；以太网方面有 RoCE（基于融合以太网的 RDMA），绕过 CPU，是对 InfiniBand 的回应，InfiniBand 很贵，Meta 有论文在探索 RoCE，他说 Llama 可能用的就是它。学生问 RDMA 和 InfiniBand 的区别，他说 RDMA 是操作层面的（一块 GPU 读写另一块的内存），可以通过 NVLink/NVSwitch、InfiniBand 或 RoCE 实现，后者是硬件。学生问机架和托盘是什么，他说他不是硬件专家，机架就是数据中心里那种架子，GB 里的 G 是 Grace（CPU），每个托盘两个 CPU，每个 CPU 连四块 GPU，托盘叠起来都连到 NVSwitch。如果有 9 块 GPU，第 9 块通常在另一个节点上，没有 NVLink 相连会很糟，它提供的算力不多，通信却很贵。
+        </p>
+        <p>
+            最底层是 NVIDIA 集合通信库 NCCL：你说"all-reduce"，它弄清硬件拓扑和 GPU 之间的路径，然后启动 GPU 内核收发数据，GPU 上运行的一切都是内核，通信也有通信内核。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、用 torch.distributed 写集合通信</h2>
+        <p>
+            PyTorch 的 <code>torch.distributed</code> 提供了集合操作的简洁接口，不用直接碰 NCCL，而且支持不同后端：GPU 用 NCCL 后端，CPU 用 Gloo（并行处理早在 GPU 之前就有，CPU 上也能做集合操作）。它还支持 FSDP 等更高层的算法，但这门课从零构建，不用它们。
+        </p>
+        <ul>
+            <li>用 <code>torch.multiprocessing.spawn</code> 启动 world size 个进程，每个进程运行同一个函数，知道自己的 rank。先做设置：配置主节点地址和端口，这只用于元数据和协调，数据走 NCCL，否则会很慢；有 CUDA 用 NCCL 后端，他在笔记本上用 Gloo。</li>
+            <li><code>dist.barrier()</code> 是同步屏障：所有进程都到达这里才继续。进程是异步运行的，想保证某段代码在另一段之前执行，就加屏障；代价是可能不必要地等待。</li>
+            <li>all-reduce：每个 rank 创建不同的张量（rank 0 是 0 1 2 3，rank 1 是 1 2 3 4……），打印的顺序随机，因为是异步的。调用 <code>dist.all_reduce(tensor, op=SUM, async_op=False)</code>，它会启动通信内核，原地写入，结果是每一列的和复制到所有 rank。设成异步可以先返回，去做别的事（比如加载下一步的数据），需要时再等待，这就是计算与通信重叠，这门课不展开。</li>
+            <li>reduce-scatter：输入张量不变，输出张量里写入各分量的归约结果。</li>
+            <li>all-gather：把 reduce-scatter 的输出作为输入，收集到所有 rank。这就"举例证明"了 all-reduce 等于 reduce-scatter 加 all-gather。最后做清理。</li>
+        </ul>
+
+        <h3>测有效带宽</h3>
+        <p>
+            对 1 亿个元素做 all-reduce：先预热，再调用 CUDA 同步和屏障（有两种异步：CUDA 内核和不同进程，要确保之前的都完成），计时，执行，再同步和屏障，停止计时。每个 rank 都会报告自己的时间，可以取平均。类似 MFU，可以计算有效带宽：
+        </p>
+        <p>
+            $$\text{带宽} = \frac{\text{数据字节数}\times 2\times(w-1)}{w\times \text{耗时}}$$
+        </p>
+        <p>
+            其中 $w$ 是 world size：求 $w$ 个 rank 的和要做 $w-1$ 次加法；乘 2 是因为既要发送又要归约；乘上每个 rank 等待的总时间。例子中约 400 GB/s。$w$ 增大时 $(w-1)/w$ 趋于 1，有效带宽约为 $2\times$ 字节数除以时间，与 GPU 数量无关，这很好；也与拓扑无关（环形还是树形由 NCCL 决定）。reduce-scatter 的计算类似，但没有那个 2 倍；all-reduce 是 reduce-scatter 加 all-gather，搬运两倍的数据、花两倍的时间，有效带宽差不多，也在四百多 GB/s。学生问为什么还要 CUDA 同步，他说每个进程仍在做 CUDA 操作，默认是异步的；先屏障后同步的话，CUDA 可能还没跑完，屏障就立即通过了，等于没同步。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、三种基本并行</h2>
+        <p>
+            用最简的多层感知机（MLP）来演示，因为 MLP 是 Transformer 的主要计算瓶颈，有代表性。批大小 128，维度 1024。
+        </p>
+
+        <h3>数据并行</h3>
+        <p>
+            把数据按行切成 world size 份（每份 32 个样本），每个 rank 处理一份（实际中应该让每个 rank 自己加载数据，而不是从一处分发）。每个 rank 都有全部参数：每层一个 $D\times D$ 的矩阵，随机初始化，交给优化器。训练循环：在自己的那份数据上前向，反向；然后是关键的一步，对每个参数的梯度做 all-reduce 取平均，之后每个 rank 的梯度完全相同；再更新参数。他说这很优雅：就是标准训练，只是在反向之后插入一行 all-reduce，每个 rank 都像拥有全部数据那样更新参数，实际只处理一部分。各 rank 的损失不同，梯度一开始不同，all-reduce 后相同，所以参数在各 rank 上始终相同。这就是 DDP（分布式数据并行）。学生问批大小是否要大于 1、是否要是 world size 的倍数，他说至少要有 world size 那么大，通常大得多，最好是倍数，不是的话可以补零；用于 Transformer 时完全一样，DDP 只是平均梯度，不在乎前向长什么样。
+        </p>
+        <p>
+            局限是每个 rank 都要存全部参数，放不下时就要更聪明，下一讲 Tatsu 讲 FSDP 和 ZeRO。
+        </p>
+
+        <h3>张量并行</h3>
+        <p>
+            不切数据，而是切每一层：每个 rank 拿到每层的一部分，通常要传输多得多的数据。为简单起见每个 rank 都有全部数据；每个 rank 只负责一部分维度：参数矩阵是 $D\times(D/w)$，按列切分（也叫列张量并行，也可以按行切，这里不讲）。前向时，对每一层用自己那部分参数相乘，非线性是逐元素的，可以直接做；然后要通信激活：每个 rank 只有一部分维度的激活，要用 all-gather 收集到所有 rank，拼成完整的批大小乘 $D$ 的激活，再进入下一层。每一层都要这样做。和数据并行把模型当作整体不同，这里要动模型内部，利用的是一次大矩阵乘法可以拆成若干小矩阵乘法、在不同 rank 上计算再收集结果。反向时要对梯度做 reduce-scatter，all-gather 和 reduce-scatter 有一种对偶：前向 all-gather，反向就 reduce-scatter。学生问 autograd 会不会自动做，他说直接 <code>.backward()</code> 不会，因为里面没有并行；这里是显式管理的，反向要自己调用 reduce-scatter，这是课程有意为之，实际中有工具自动处理。
+        </p>
+
+        <h3>流水线并行</h3>
+        <p>
+            按层切：每个 rank 拿到一部分层，每层的全部维度。数据要依次流过各个 rank。此外把批切成若干微批：rank 0 拿到数据、切成微批；对每个微批，从上一个 rank 接收（<code>dist.recv</code>，这是点对点操作），只在分配给自己的层上前向，再发给下一个 rank（<code>dist.send</code>）。为什么要微批？流水线并行中一个 rank 处理完自己的层，交给下一块 GPU，再交给下一块，划分很自然，但会出现"流水线气泡"：等待别人处理时自己闲着，效率很低；切成小批可以更快地处理完、交出去，减少气泡。这个朴素版本没有做的是计算与通信的重叠，这对流水线并行非常重要：在调用前加上异步版本，计算时同时收发数据，减少等待。
+        </p>
+
+        <h3>没讲到的</h3>
+        <ul>
+            <li>计算与通信重叠：数据并行中，聪明的做法是反向时某个梯度一算完就开始发送，而不是等全部反向结束再 all-reduce，作业二会做。</li>
+            <li>更一般的模型：MLP 已经给出了大部分基础，更大的模型只是记账更复杂。</li>
+            <li>其他并行：序列并行把整个序列切开，可以并行注意力计算；专家并行把 MoE 的专家分开，这时就用到 all-to-all；以及各种并行的组合，作业里会涉及。</li>
+        </ul>
+        <p>
+            选择哪种并行很依赖硬件：张量并行每层都要发送很大的激活，通信很多，所以一般在节点内的 NVLink 域里做；流水线并行能容忍慢得多的互联，一些去中心化训练用流水线并行，节点可能远在半个地球之外，那种情况绝不会用张量并行。常见组合是节点内张量并行，然后数据并行或 FSDP，必要时再加流水线并行。数据并行可以扩展很多，但会碰到"临界批大小"：批再增大也没有帮助，只是浪费算力，这时不如用张量并行。
+        </p>
+        <p>
+            关于 TPU：课程有意用 PyTorch，并以很原始的方式使用集合操作，以便看清机制；在 JAX 和 TPU 那边，可以只定义模型和切分策略（数据要在哪里），由编译器决定需要哪些通信操作，很诱人，但就失去了从零构建的乐趣。
+        </p>
+        <p>
+            小结：可以按数据、张量、专家、流水线、序列来切分；这一讲只讲了 DDP，下一讲讲 FSDP 和 ZeRO；张量并行需要非常快的互联，流水线并行要求低一些，但要努力减少气泡。高层上反复出现一个模式：重算还是存储，比如激活检查点；这里推广为可以存在另一块 GPU 上。从这个角度看数据并行是在做冗余工作，每个 rank 都更新、保存全部参数，好处是不用搬运优化器状态。硬件在变快，但我们总想要更大的模型，所以层级结构会一直存在。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS336: Language Modeling from Scratch &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="06_内核Triton与性能剖析.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="08_并行二大规模训练的并行策略.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
