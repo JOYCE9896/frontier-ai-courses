@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第七讲：后训练：指令微调、RLHF 与 DPO | Stanford CS224N 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="06_预训练.html">&larr; 上一讲</a>
+    <span>Stanford CS224N: Lecture 7</span>
+    <a href="08_高效适配提示与参数高效微调.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第七讲：后训练：指令微调、RLHF 与 DPO</h1>
+        <p class="subtitle">语言建模不等于帮助用户，指令微调与多任务基准，指令微调的局限，用策略梯度和 PPO 优化人类偏好，奖励模型与 RLHF，InstructGPT 和 ChatGPT，奖励被钻空子，从 RLHF 中去掉 RL 的 DPO，以及偏好数据从哪里来</p>
+        <div class="author-meta">
+            主讲：Diyi Yang<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs224n/slides_w26/cs224n-2026-lecture08-posttraining.pdf" target="_blank">课件</a>（Stanford 课程网站公开，2026 年冬季；课堂录像只对选课学生开放，本文依据课件整理）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、语言建模不等于帮助用户</h2>
+        <p>
+            语言模型越来越大，训练时见过的 token 越来越多（课件引用了《经济学人》的模型规模图和 BabyLM 的数据量对比），它们开始像世界模型、多任务助手：能解 SAT 数学题、写代码（GitHub Copilot），Microsoft Bing、OpenAI 的 ChatGPT、Anthropic 的 Claude 都是这样的产品。怎样从"斯坦福大学位于______"这种语言模型，走到能帮人做事的助手？
+        </p>
+        <p>
+            语言模型并不和用户意图对齐（Ouyang 等 2022）。课件的例子：让模型"用几句话向一个 6 岁的孩子解释登月"，预训练的语言模型可能只是接着写一串类似的提示；人写的回答是："一艘巨大的火箭从地球发射，载着宇航员去月球。宇航员把飞船降落在月球上，四处走动探索月面。然后他们安全返回地球，带回月球岩石给大家看。"解决办法是微调。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、指令微调</h2>
+        <p>
+            回顾预训练/微调范式：先在语言建模上预训练，用大量文本学一般性的东西；再在任务上微调。把微调扩大到许多任务：在很多任务上收集（指令，输出）对，微调语言模型，然后在没见过的任务上评估（FLAN-T5，Chung 等 2022）。和往常一样，数据和模型的规模是关键：Super-NaturalInstructions 数据集有 1600 多个任务、300 多万个样本，包括分类、序列标注、改写、翻译、问答等（Wang 等 2022）。
+        </p>
+        <p>
+            怎样评估这样的模型？出现了新的多任务基准：MMLU（Hendrycks 等 2021），在 57 个多样的知识密集型任务上衡量语言模型表现，模型在这类有挑战的基准上进步迅速；BIG-Bench（Srivastava 等 2022），200 多个任务。
+        </p>
+        <p>
+            指令微调带来的提升：回顾 T5 编码器-解码器模型（在片段破坏任务上预训练），Flan-T5 是在额外 1800 个任务上微调的 T5，在 BIG-bench 加 MMLU 上，模型越大提升越大。课件对比了指令微调前后对同一问题的回答，并建议到 Hugging Face 上试用 flan-t5-xxl 感受它的能力。
+        </p>
+        <p>
+            LLaMA 发布后，开源社区出现了大量尝试"制造"指令微调数据的数据集。学到了什么？可以用语言模型生成指令、输入和输出（Wang 等 2022）；Alpaca 在 5.2 万条指令遵循样本上微调 LLaMA 7B；指令微调并不需要很多样本（比如 Zhou 等 2023 年的《LIMA: Less Is More for Alignment》）。
+        </p>
+        <p>
+            指令微调的局限：一个明显的局限是为任务收集真实答案很贵。还有更微妙的局限：
+        </p>
+        <ul>
+            <li>开放式创意生成这类任务没有正确答案，比如"给我写一个关于一只狗和她的宠物蚱蜢的故事"。</li>
+            <li>语言建模对所有 token 级的错误一视同仁地惩罚，但有些错误比别的更严重。比如"Avatar is a fantasy TV show"，把 fantasy 错成 adventure 不太要紧，错成 musical 就严重得多。</li>
+        </ul>
+        <p>
+            即使做了指令微调，语言模型的目标和"满足人类偏好"的目标之间仍不匹配。能否显式地去满足人类偏好？
+        </p>
+    </section>
+
+    <section>
+        <h2>三、优化人类偏好：RLHF</h2>
+        <p>
+            假设在训练语言模型做某个任务（比如摘要），对每个样本 $s$，假设有办法得到人对这个摘要的奖励 $R(s)\in\mathbb{R}$，越高越好。比如一篇关于旧金山 4.2 级地震的 CNN 报道，摘要 $s_1$"旧金山发生了地震，有轻微财产损失，无人受伤"得 8.0 分，$s_2$"湾区天气好，但容易发生地震和山火"得 1.2 分。我们想最大化模型样本的期望奖励 $\mathbb{E}_{\hat s\sim p_\theta(s)}[R(\hat s)]$（为了简单只写一个提示，实际要对很多提示取平均）。
+        </p>
+        <p>
+            强化学习领域研究这类问题已经很多年（Williams 1992；Sutton 和 Barto 1998）；2013 年左右，深度学习、游戏中的强化学习重新受到关注（Mnih 等 2013）；把 RL 用于现代语言模型更新（Ziegler 等 2019；Stiennon 等 2020；Ouyang 等 2022）。为什么？RL 与语言模型的结合一直被认为很难做对（现在仍然如此）；适用于大型神经模型（包括语言模型）的 RL 算法有了新进展，比如 PPO（Schulman 等 2017）。
+        </p>
+        <p>
+            怎样改变参数 $\theta$ 来最大化期望奖励？试试梯度上升：$\theta_{t+1} := \theta_t + \alpha\nabla_{\theta_t}\mathbb{E}_{\hat s\sim p_{\theta_t}(s)}[R(\hat s)]$。问题是奖励函数可能不可微，期望怎样估计？强化学习中的策略梯度方法（比如 REINFORCE，Williams 1992）提供了工具。课件只给最简单的策略梯度估计的高层数学概述，完整的 RL 不在本课范围（推荐 CS234）。
+        </p>
+        <p>
+            推导：$\nabla_\theta\mathbb{E}_{\hat s\sim p_\theta(s)}[R(\hat s)] = \nabla_\theta\sum_s R(s)p_\theta(s) = \sum_s R(s)\nabla_\theta p_\theta(s)$（期望的定义，梯度的线性）。用对数导数技巧：由链式法则 $\nabla_\theta\log p_\theta(s) = \frac{1}{p_\theta(s)}\nabla_\theta p_\theta(s)$，所以 $\nabla_\theta p_\theta(s) = p_\theta(s)\nabla_\theta\log p_\theta(s)$。代回去：
+        </p>
+        <p>
+            $$\nabla_\theta\mathbb{E}_{\hat s\sim p_\theta}[R(\hat s)] = \mathbb{E}_{\hat s\sim p_\theta}\left[R(\hat s)\nabla_\theta\log p_\theta(\hat s)\right]\approx\frac{1}{m}\sum_{i=1}^{m}R(s_i)\nabla_\theta\log p_\theta(s_i)$$
+        </p>
+        <p>
+            梯度到了期望"里面"，就可以用蒙特卡洛样本近似。更新规则 $\theta_{t+1} := \theta_t + \alpha\frac{1}{m}\sum_i R(s_i)\nabla_{\theta_t}\log p_{\theta_t}(s_i)$：如果 $R$ 很高，就朝提高 $p_\theta(s_i)$ 的方向走；如果 $R$ 很低，就朝降低它的方向走。这就是叫"强化学习"的原因：强化好的行为，让它更可能再次发生。课件说这是大大简化的版本，用 RL 训练语言模型还需要更多东西。
+        </p>
+        <p>
+            朴素 REINFORCE 的问题：梯度估计方差高；训练不稳定；样本效率低。PPO（近端策略优化）的关键思想是限制每次更新中策略能改变多少，裁剪目标为
+        </p>
+        <p>
+            $$L^{CLIP}(\theta) = \mathbb{E}_{s_i\sim p_{\theta_{old}}}\left[\min\left(r_t(\theta)A(s_i),\ \mathrm{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)A(s_i)\right)\right]$$
+        </p>
+        <p>
+            $r_t(\theta) = p_\theta(s_i)/p_{\theta_{old}}(s_i)$ 是概率比；$A(s_i)$ 是优势，即比预期好多少；$\epsilon$ 是裁剪范围，比如 0.2。
+        </p>
+
+        <h3>建模人类偏好</h3>
+        <p>
+            现在对任意不可微的奖励函数 $R(s)$，都能训练语言模型最大化期望奖励。但没那么快：
+        </p>
+        <ul>
+            <li>问题一：让人一直在回路里很贵。解决：不直接问人，而是把人的偏好建模成一个单独的（NLP）问题（Knox 和 Stone 2009），在标注数据集上训练一个语言模型 $RM_\phi(s)$ 预测人的偏好，然后优化 $RM_\phi$。</li>
+            <li>问题二：人的判断有噪声、校准不好，比如第三个摘要"旧金山发生 4.2 级地震，造成巨大损失"该打 4.1、6.6 还是 3.2 分？解决：不要求直接打分，而是要求两两比较，这更可靠（Phelps 等 2015；Clark 等 2018）。用 Bradley-Terry（1952）配对比较模型训练奖励模型，"胜出"样本 $s_w$ 应该比"落败"样本 $s_l$ 得分高：
+                <p>$$J_{RM}(\phi) = -\mathbb{E}_{(s_w, s_l)\sim D}\log\sigma\left(RM_\phi(s_w) - RM_\phi(s_l)\right)$$</p>
+            </li>
+        </ul>
+        <p>
+            先确认奖励模型有效：在预测留出的人类判断上评估奖励模型（Stiennon 等 2020），足够大的奖励模型在足够多的数据上训练，接近单个人的水平。
+        </p>
+        <p>
+            把一切放在一起（Christiano 等 2017；Stiennon 等 2020）：有一个预训练（可能经过指令微调）的语言模型 $p^{PT}(s)$；一个在人类比较数据上训练、给语言模型输出打标量分的奖励模型 $RM_\phi(s)$；一个朝任意奖励函数优化语言模型参数的方法。RLHF 的做法：复制一份模型 $p_\theta^{RL}(s)$，参数 $\theta$ 是要优化的；用 RL 优化下面的奖励：
+        </p>
+        <p>
+            $$R(s) = RM_\phi(s) - \beta\log\frac{p_\theta^{RL}(s)}{p^{PT}(s)}$$
+        </p>
+        <p>
+            第二项是惩罚，防止偏离预训练模型太远，$p_\theta^{RL}(s) &gt; p^{PT}(s)$ 时要付出代价；它在期望上就是 $p_\theta^{RL}$ 与 $p^{PT}$ 之间的 KL 散度。高层的 RLHF 流程：第一步指令微调，第二、三步最大化奖励。Stiennon 等 2020 年的结果显示，RLHF 比预训练加微调更好。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、InstructGPT 与 ChatGPT</h2>
+        <p>
+            InstructGPT（Ouyang 等 2022）把 RLHF 扩展到数万个任务（3 万个），任务由标注者收集。ChatGPT 是用于对话 Agent 的指令微调加 RLHF。课件注明，OpenAI 等公司对 ChatGPT 训练的更多细节（包括数据、训练参数、模型大小）保密，也许是为了保持竞争优势。
+        </p>
+        <p>
+            受控比较 RLHF 类算法：很多工作用 GPT-4 反馈（模拟）代替人类反馈来研究 RLHF 的行为。InstructGPT 用的 PPO 确实有效，简单的基线（Best-of-n）效果也不错（Dubois 等 2023）。RLHF 带来明显的风格变化：回答详细得多，格式更漂亮、更清晰，多用列表。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、RL 与奖励建模的局限</h2>
+        <ul>
+            <li>人类偏好不可靠。</li>
+            <li>"奖励被钻空子"是 RL 中的常见问题（课件引用了 OpenAI 关于错误奖励函数的博客）。聊天机器人因为给出看起来权威、有帮助的回答而得到奖励，不管是否真实，这会导致编造事实和幻觉（课件引用了 Google 聊天机器人 Bard 出错等新闻）。</li>
+            <li>人类偏好的模型更不可靠：奖励模型会被过度优化（Stiennon 等 2020）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>六、DPO：从 RLHF 中去掉 RL</h2>
+        <p>
+            RL（PPO）可能很复杂：RL 优化计算昂贵、很棘手，要拟合价值函数，在线采样很慢，性能对超参数敏感（课件引用了《Secrets of RLHF》中的 PPO 流程，Zheng 等 2023；以及 Shao 等 2024）。
+        </p>
+        <p>
+            回顾 RLHF 要最大化的目标：
+        </p>
+        <p>
+            $$\mathbb{E}_{\hat y\sim p_\theta^{RL}(\hat y\mid x)}\left[RM_\phi(x,\hat y) - \beta\log\frac{p_\theta^{RL}(\hat y\mid x)}{p^{PT}(\hat y\mid x)}\right]$$
+        </p>
+        <p>
+            它有闭式解：$p^*(\hat y\mid x) = \frac{1}{Z(x)}p^{PT}(\hat y\mid x)\exp\left(\frac{1}{\beta}RM(x,\hat y)\right)$。取对数重新整理：$RM(x,\hat y) = \beta\log\frac{p^*(\hat y\mid x)}{p^{PT}(\hat y\mid x)} + \beta\log Z(x)$。这对任意语言模型都成立，所以可以定义由语言模型导出的奖励 $RM_\theta(x,\hat y) = \beta\log\frac{p_\theta^{RL}(\hat y\mid x)}{p^{PT}(\hat y\mid x)} + \beta\log Z(x)$。代入人类偏好的 Bradley-Terry 模型，得到最终的 DPO 损失（Rafailov 等 2023）：
+        </p>
+        <p>
+            $$J_{DPO}(\theta) = -\mathbb{E}_{(x, y_w, y_l)\sim D}\log\sigma\left(\beta\log\frac{p_\theta^{RL}(y_w\mid x)}{p^{PT}(y_w\mid x)} - \beta\log\frac{p_\theta^{RL}(y_l\mid x)}{p^{PT}(y_l\mid x)}\right)$$
+        </p>
+        <p>
+            前一项是胜出样本的奖励，后一项是落败样本的奖励；$\log Z(x)$ 项相互抵消，因为损失只衡量奖励的差。复杂的 RL 部分可以换成一个很简单的加权最大似然目标；KTO、IPO 等其他变体也在出现。在 TL;DR 摘要上以 GPT-4 为评判、对人写摘要的胜率，DPO 胜过之前的方法。课件说开源的 RLHF 现在大多不是 RL 了，开源大语言模型现在几乎都只用 DPO，效果很好。另一方面也有人在改进 RLHF 中的"RL"，比如 DeepSeekMath 提出的 GRPO（Shao 等 2024）。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、偏好数据从哪里来</h2>
+        <ul>
+            <li>RLHF 的标签往往来自海外的低薪工人。</li>
+            <li>要小心标注者的偏见渗入语言模型：Santurkar 等 2023 年的 OpinionQA 比较了"基座"语言模型与经过对齐的模型的观点分布。</li>
+            <li>偏好微调可能有意想不到的影响：Ryan 等 2024 年用 Starling 7B 奖励模型测试"用户：你来自哪里？AI 助手：我来自{国家}"这类回答，奖励模型对不同国家的打分不同。</li>
+        </ul>
+        <p>
+            接下来：RLHF 仍是探索不足、变化很快的领域。RLHF 比指令微调走得更远，但（仍然）很费数据。近期工作想减轻数据需求：来自 AI 反馈的强化学习（Bai 等 2022）；在模型自己的输出上微调（Huang 等 2022；Zelikman 等 2022）。但大语言模型还有很多局限（规模、幻觉），可能不是 RLHF 能解决的。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224N: Natural Language Processing with Deep Learning &copy; Winter 2026</p>
+        <nav class="footer-nav">
+            <a href="06_预训练.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="08_高效适配提示与参数高效微调.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

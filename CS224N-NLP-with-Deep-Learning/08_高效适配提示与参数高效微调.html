@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第八讲：高效适配：提示与参数高效微调 | Stanford CS224N 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="07_后训练指令微调RLHF与DPO.html">&larr; 上一讲</a>
+    <span>Stanford CS224N: Lecture 8</span>
+    <a href="09_检索增强生成与语言Agent.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第八讲：高效适配：提示与参数高效微调</h1>
+        <p class="subtitle">GPT 系列中涌现的零样本和少样本能力，思维链提示及其零样本版本，提示的敏感性和局限，为什么要参数高效微调，剪枝与彩票假说，LoRA 与 QLoRA，前缀微调与提示微调，适配器，以及这些方法的统一视角</p>
+        <div class="author-meta">
+            主讲：Diyi Yang<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs224n/slides_w26/cs224n-2026-lecture09-peft.pdf" target="_blank">课件</a>（Stanford 课程网站公开，2026 年冬季；课堂录像只对选课学生开放，本文依据课件整理）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、开头：DPO 与偏好数据</h2>
+        <p>
+            这一讲开头先讲完上一讲留下的 DPO 和人类偏好数据部分（从 RLHF 目标的闭式解推出 DPO 损失；开源模型现在大多用 DPO；GRPO；偏好标签来自低薪工人、标注者偏见、偏好微调的意外影响），内容和课件第七讲的后半部分相同，见第七讲，这里不重复。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、大语言模型的涌现能力</h2>
+        <ul>
+            <li>GPT（2018，1.17 亿参数，Radford 等）：12 层 Transformer 解码器，在 BooksCorpus（7000 多本书，4.6GB 文本）上训练，显示大规模语言建模能作为自然语言推理等下游任务的有效预训练。</li>
+            <li>GPT-2（2019，15 亿参数）：架构和 GPT 相同，只是更大（1.17 亿到 15 亿），训练数据多得多，从 4GB 到 40GB 的互联网文本（WebText，抓取 Reddit 上至少 3 个赞的帖子中的链接，作为人类判断质量的粗略代理）。</li>
+            <li>GPT-3（2020，1750 亿参数，Brown 等）：规模（15 亿到 1750 亿）和数据（40GB 到 600GB 以上）再次增长。</li>
+        </ul>
+        <p>
+            GPT-2 的一个关键涌现能力是零样本学习：不需要示例、不更新梯度，就能做很多任务，办法是：指定合适的序列预测问题，比如问答，"Passage: Tom Brady... Q: Where was Tom Brady born? A: ..."；或比较序列的概率，比如 Winograd 模式挑战（Levesque 2011）："The cat couldn't fit into the hat because it was too big. it 指的是猫还是帽子？"等价于比较 P("...because the cat was too big") 是否大于等于 P("...because the hat was too big")。只要在指定任务的方式上够有创意，就能得到有意思的零样本行为：在 CNN/DailyMail 摘要数据集上，在文章后加"TL;DR:"（"太长不看"），GPT-2 的 ROUGE 分数可以和一些有监督方法比较。GPT-2 不做任何针对任务的微调，就在语言建模基准上胜过最好的结果。
+        </p>
+        <p>
+            GPT-3 涌现出少样本学习：只要在样例前加上几个任务示例来指定任务，也叫上下文学习，强调学新任务时不做梯度更新（另有一类文献研究带梯度更新的少样本学习）。课件对比了零样本、单样本、少样本的提示。少样本学习是模型规模的涌现性质：在合成的"解乱词"任务上（100 个示例），比如循环字母"pleap -&gt; apple"、随机插入"a.p!p/l!e -&gt; apple"、倒序"elppa -&gt; apple"，只有大模型做得好。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、提示</h2>
+        <p>
+            传统微调与零样本、少样本提示相对。对更难的任务，提示的局限是什么？有些任务对大模型来说也很难只靠提示学会，尤其是需要更丰富的多步推理的任务（人做这些也费劲），比如"19583 + 29534 = 49117，98394 + 49384 = 147778，29382 + 12347 = 41729，93847 + 39299 = ?"。解决办法：改提示。
+        </p>
+        <ul>
+            <li>思维链提示（Wei 等 2022；另见 Nye 等 2021）：示例中给出推理过程。它是模型规模的涌现性质，在初中数学应用题上，只有大模型从中获益。</li>
+            <li>零样本思维链（Kojima 等 2022）：真的需要推理示例吗？能不能直接让模型一步步推理？比如问"一个杂耍演员能抛 16 个球，一半是高尔夫球，高尔夫球中一半是蓝色的，有几个蓝色高尔夫球？"，在答案前加"A: Let's think step by step."，模型会写出"总共 16 个球，一半是高尔夫球，所以有 8 个高尔夫球；一半的高尔夫球是蓝色的，所以有 4 个蓝色高尔夫球"。它远好于普通零样本，但人工写的思维链示例仍然更好。也可以让语言模型自己设计这类提示语（Zhou 等 2022）。</li>
+        </ul>
+        <p>
+            提示的敏感性和不一致：分类和多选题中，示例的标签随机也有效（Min 等 2022）；输出不一致（Moore 等 2024）。"提示工程"是新的黑魔法吗？课件的例子：加上 Google 的代码文件头，让模型生成更"专业"的代码；让模型推理有时反而有害，Shaikh 等 2023 年的《On Second Thought, Let's Not Think Step by Step! Bias and Toxicity in Zero-Shot Reasoning》；"越狱"语言模型。
+        </p>
+        <p>
+            基于提示的学习的缺点：
+        </p>
+        <ol>
+            <li>低效：模型每次预测都要处理一遍提示。</li>
+            <li>表现差：提示通常不如微调（Brown 等 2020）。</li>
+            <li>对提示的措辞敏感（Webson 和 Pavlick 2022），对示例顺序敏感（Zhao 等 2021；Lu 等 2022）等。</li>
+            <li>不清楚模型到底从提示中学到了什么，连随机标签都行（Zhang 等 2022；Min 等 2022）。</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>四、为什么要参数高效微调</h2>
+        <p>
+            全量微调更新所有模型参数；参数高效微调（PEFT）只更新一小部分参数。为什么？对大模型来说，微调所有参数不现实；最先进的模型严重过参数化，所以参数高效微调能达到全量微调的表现。
+        </p>
+        <p>
+            为什么需要高效适配？当前 AI 范式重准确率轻效率：从顶级 AI 会议中抽 60 篇论文，大部分以准确率为目标，而不是效率（Green AI）；训练（和微调）大语言模型有隐藏的环境成本；训练成本上升，AI 开发就集中到资金雄厚的机构，尤其是业界。课件还引用了一个和课堂有关的例子：Stanford 一门强化学习课（CS234）的 200 多名学生要实现常见算法，其中两个算法效果一样好，但一个耗电多得多；如果所有学生都用更高效的那个，估计能共同减少 880 千瓦时用电，约等于美国一个普通家庭一个月的用电量。（这部分课件注明来自 Benji Xie 和 Regina Wang。）
+        </p>
+        <p>
+            思考 PEFT 的三个视角：参数、输入、函数（部分例子改编自 Ruder、Pfeiffer 和 Vulić 在 EMNLP 2022 上的教程《Modular and Parameter-Efficient Fine-Tuning for NLP Models》）。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、参数视角</h2>
+        <h3>稀疏子网络</h3>
+        <p>
+            模块参数常见的归纳偏置是稀疏，最常见的稀疏方法是剪枝。剪枝可以看作施加一个二值掩码 $b\in\{0,1\}^{|\theta|}$，选择性地保留或去掉模型中的每个连接，得到一个子网络。最常见的剪枝标准是权重大小（Han 等 2017）：剪掉一部分绝对值最小的权重，重新训练未被剪掉的权重；更常见的是多轮迭代剪枝（Frankle 和 Carbin 2019），而不是一次性剪枝。
+        </p>
+        <p>
+            也可以把剪枝看作在已有模型 $f_\theta$ 的参数上加一个任务专属向量 $\phi$：$f'_\theta = f_{\theta+\phi}$，当 $b_i = 0$ 时 $\phi_i = 0$。如果最终模型要稀疏，可以把现有权重乘以二值掩码，把被剪的权重设为 0：$f'_\theta = f_{\theta\circ b+\phi}$（$\circ$ 是逐元素乘积），这些权重值本来也在趋向 0（Zhou 等 2019）。差分剪枝（diff pruning）只根据模块参数 $\phi$ 的大小剪枝，而不是根据更新后的 $\theta+\phi$（Guo 等 2021）。
+        </p>
+        <p>
+            彩票假说（Frankle 和 Carbin 2019）：稠密的随机初始化模型中包含一些子网络（"中奖彩票"），单独训练时能在相近的迭代次数内达到和原网络相当的测试准确率。这在强化学习和 NLP（Yu 等 2020）以及计算机视觉中更大的模型上（Frankle 等 2020）也得到验证；之前的工作（Chen 等 2020；Prasanna 等 2020）在 BERT 这样的预训练模型中也找到了中奖彩票，稀疏率从 40%（SQuAD）到 90%（QQP 和 WNLI）；在掩码语言建模这种一般任务上训练的子网络迁移得最好。
+        </p>
+
+        <h3>低秩组合：LoRA</h3>
+        <p>
+            回顾全量微调：有一个预训练的自回归语言模型 $P_\phi(y\mid x)$（比如基于 Transformer 的 GPT），要适配到下游任务（比如摘要、问答），训练集是上下文和目标的对 $\{(x_i, y_i)\}_{i=1,\dots,N}$。全量微调时，沿着梯度把 $\phi_0$ 更新为 $\phi_0 + \Delta\phi$，最大化条件语言建模目标 $\max_\phi\sum_{(x,y)}\sum_{t=1}^{|y|}\log P_\phi(y_t\mid x, y_{&lt;t})$。
+        </p>
+        <p>
+            LoRA（低秩适配，Hu 等 2021）：每个下游任务都学一组不同的 $\Delta\phi$，而 $|\Delta\phi| = |\phi_0|$，GPT-3 的 $|\phi_0|$ 是 1750 亿，存储和部署很多独立实例又贵又难。关键想法：用一组小得多的参数 $\Theta$ 编码任务专属的参数增量 $\Delta\phi = \Delta\phi(\Theta)$，$|\Theta|\ll|\phi_0|$，找 $\Delta\phi$ 就变成对 $\Theta$ 的优化：$\max_\Theta\sum_{(x,y)}\sum_t\log P_{\phi_0+\Delta\phi(\Theta)}(y_t\mid x, y_{&lt;t})$。
+        </p>
+        <p>
+            适配过程中权重的更新有很低的"内在秩"（Aghajanyan 等 2020）。设 $W_0\in\mathbb{R}^{d\times k}$ 是预训练权重矩阵，用低秩分解约束它的更新：
+        </p>
+        <p>
+            $$W_0 + \Delta W = W_0 + \alpha BA,\quad B\in\mathbb{R}^{d\times r},\ A\in\mathbb{R}^{r\times k},\ r\ll\min(d, k)$$
+        </p>
+        <p>
+            $\alpha$ 在预训练"知识"和任务专属"知识"之间权衡，只有 $A$ 和 $B$ 是可训练参数。可训练参数越多，训练 LoRA 就越接近训练原模型；没有额外的推理延迟：换任务时减去 $BA$、加上另一组 $B'A'$ 就能恢复 $W_0$；LoRA 通常用在自注意力模块的权重矩阵上。课件附了 Lightning AI 的一段实现示例。把 LoRA 扩展到 GPT-3 1750 亿参数，在三个数据集上都达到或超过微调基线，扩展性和任务表现都更好。
+        </p>
+        <p>
+            从 LoRA 到 QLoRA（Dettmers、Pagnoni、Holtzman 和 Zettlemoyer 2023）：把 Transformer 模型量化到 4 位精度，用分页优化器处理内存，改进了 LoRA；提出 4 位 NormalFloat（NF4）这种新数据类型，对正态分布的权重在信息论意义上是最优的。另外，Thinking Machines 的博客显示，在强化学习中，LoRA 即使秩低到 1 也能匹配全量微调：用 Qwen3-8B 基座在 DeepMath 上，不同秩和全量微调的学习曲线显示，LoRA 有更宽的可用学习率范围，并达到和全量微调相同的峰值表现。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、输入视角：前缀微调与提示微调</h2>
+        <ul>
+            <li>前缀微调（Li 和 Liang 2021）：加一段前缀参数，冻结所有预训练参数。前缀是一串连续的任务专属向量，模型像处理真实的词一样处理它们，即"虚拟 token"。优点是推理时一个批次中的每个元素可以运行一个不同的微调模型。</li>
+            <li>提示微调（Lester 等 2021）：学习"软提示"，让冻结的语言模型完成下游任务，在输入前加虚拟 token，只学这些特殊 token 的嵌入。提示微调只在大规模下效果好：标准的模型微调表现强，但每个任务都要存一份单独的模型副本；随着模型变大，提示微调能达到模型微调的质量。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>七、函数视角：适配器</h2>
+        <p>
+            函数组合给模型的功能加上新的任务专属函数，最常用于多任务学习中组合不同任务的模块。适配器（Houlsby 等 2019）：在预训练模型的层之间插入新函数 $f_\phi$ 来适配下游任务。Transformer 层中的适配器包括一个前馈下投影 $W_D\in\mathbb{R}^{k\times d}$ 和一个前馈上投影 $W_U\in\mathbb{R}^{d\times k}$：$f_\phi(x) = W_U(\sigma(W_Dx))$，外加残差连接。适配器通常放在多头注意力之后和/或前馈层之后，大多数方法用这种带线性层的瓶颈设计。准确率和任务专属训练参数数量的权衡：在 GLUE 基准的九个任务上，适配器微调用少两个数量级的训练参数，达到和全量微调相近的表现。
+        </p>
+        <p>
+            语言适配器：任务知识近似于语言知识。适配器学的是让底层模型更适合某个任务或某种语言的变换，用掩码语言建模可以学到特定语言的变换，比如英语和克丘亚语。也可以用适配器做英语方言适配：把在标准美式英语上训练的大语言模型适配到不同的英语方言，组合任务适配器和方言适配器（Held 等 2023；Liu 等 2023）。
+        </p>
+        <p>
+            统一视角：He 等（2022）显示 LoRA、前缀微调和适配器可以写成相似的函数形式，都可以表示为修改模型的隐藏表示 $h$；稀疏、结构、低秩近似、重新缩放等性质也可以在很多设置中应用和组合。性能比较：提示微调因容量有限表现较差；适配器表现更好，但参数更多。
+        </p>
+        <p>
+            其他（高效）适配的变体：知识蒸馏得到更小的模型（一般的教师-学生框架，Shridhar 等 2023）；还可以看 Gist tokens、ReFT 等（Wu 等 2024）。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224N: Natural Language Processing with Deep Learning &copy; Winter 2026</p>
+        <nav class="footer-nav">
+            <a href="07_后训练指令微调RLHF与DPO.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="09_检索增强生成与语言Agent.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

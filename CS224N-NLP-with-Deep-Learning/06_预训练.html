@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第六讲：预训练 | Stanford CS224N 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="05_注意力与Transformer.html">&larr; 上一讲</a>
+    <span>Stanford CS224N: Lecture 6</span>
+    <a href="07_后训练指令微调RLHF与DPO.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第六讲：预训练</h1>
+        <p class="subtitle">预训练为什么带来革命，子词建模与字节对编码，从词嵌入到预训练整个模型，编码器（BERT 及其变体）、编码器-解码器（T5）、解码器（GPT）三种预训练方式，GPT-3 与上下文学习，缩放规律，以及预训练到底教了模型什么</p>
+        <div class="author-meta">
+            主讲：Diyi Yang<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs224n/slides_w26/cs224n-2026-lecture07-pretraining.pdf" target="_blank">课件</a>（Stanford 课程网站公开，2026 年冬季；课堂录像只对选课学生开放，本文依据课件整理）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、预训练革命</h2>
+        <p>
+            预训练对 NLP 系统的效果产生了重大而切实的影响。预训练就是在互联网上扩展无监督学习，关键思想有三点：确保模型能处理大规模、多样的数据集；不用标注数据，否则无法扩展；按算力规划规模。（课程网站上这一讲是第 7 讲，课件标题页写的是 Lecture 6。）
+        </p>
+    </section>
+
+    <section>
+        <h2>二、子词建模</h2>
+        <p>
+            回顾对词表的假设：假设有一个从训练集构建的、几万个词的固定词表，测试时见到的所有新词都映射到同一个 UNK。常见词没问题，比如 hat、learn 都有自己的索引和嵌入；但变体（taaaaasty）、拼写错误（laern）、新词（Transformerify）都会变成 UNK。
+        </p>
+        <p>
+            NLP 中的子词建模包括很多在词以下的层级（词的部分、字符、字节）推理结构的方法。现代的主流范式是学一个由词的部分（子词 token）组成的词表，训练和测试时把每个词切成一串已知的子词。字节对编码（BPE）是定义子词词表的简单有效的策略：
+        </p>
+        <ol>
+            <li>从只包含字符和一个"词尾"符号的词表开始。</li>
+            <li>在文本语料中找最常见的相邻字符对"a, b"，把"ab"作为一个子词加入词表。</li>
+            <li>把这个字符对的所有出现替换成新子词，重复，直到达到想要的词表大小。</li>
+        </ol>
+        <p>
+            它最初在 NLP 中用于机器翻译（Sennrich 等 2016），现在预训练模型中用的是类似的方法 WordPiece（Wu 等 2016）。结果是常见词成为子词词表的一部分，较少见的词被切成若干部分，有时切得直观，有时不直观；最坏情况下，一个词被切成和字符数一样多的子词。例如 hat 和 learn 保持不变；taaaaasty 变成 taa## aaa## sty；laern 变成 la## ern##；Transformerify 变成 Transformer## ify。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、从词嵌入到预训练整个模型</h2>
+        <p>
+            课程开头讲过"观其伴而知其词"（Firth 1957），这是分布语义的概括，也是 word2vec 的动机。但 Firth 在 1935 年也写过："一个词的完整意义总是依赖上下文的，脱离完整上下文的意义研究都不能当真。"比如"I record the record"中两个 record 意思不同。（课件注明这句 1935 年的引文是 Yoav Goldberg 在推特上指出的。）
+        </p>
+        <p>
+            约 2017 年的做法：从预训练的词嵌入开始（没有上下文，"movie"不管出现在什么句子里都是同一个嵌入），在任务上训练时学习怎样用 LSTM 或 Transformer 融入上下文。问题：下游任务（比如问答）的训练数据必须足以教会语言的所有上下文方面；网络的大部分参数是随机初始化的。
+        </p>
+        <p>
+            现代 NLP 的做法：NLP 网络中所有（或几乎所有）参数都通过预训练初始化。预训练方法把输入的一部分藏起来，训练模型重建这些部分。这在构建以下东西上特别有效：语言的表示；强 NLP 模型的参数初始化；可以从中采样的语言概率分布。模型通过预训练学会了怎样表示整个句子。
+        </p>
+        <p>
+            从重建输入能学到什么？课件用了第四讲的那组例子：斯坦福大学位于加州哪里（常识）、"I put ___ fork down on the table"（句法）、过马路时看"___ shoulder"（指代）、海洋里的鱼、海龟、海豹和"_____"（词汇语义）、电影评价（情感）、斐波那契数列（基本算术）。
+        </p>
+        <p>
+            通过语言建模做预训练（Dai 和 Le 2015）：回顾语言建模任务，建模 $p_\theta(w_t\mid w_{1:t-1})$，即给定过去的上下文时词的概率分布，这方面数据很多（英语）。在大量文本上训练神经网络做语言建模，保存网络参数。预训练/微调范式：第一步在语言建模上预训练，用大量文本学一般性的东西；第二步在你的任务上微调，标签不多，适配任务。预训练作为参数初始化来改进 NLP 应用。
+        </p>
+        <p>
+            数据从哪里来？BERT 用 BookCorpus 和英文维基百科；GPT-1 用 BookCorpus；GPT-3 用 CommonCrawl、WebText、英文维基百科和两个书籍数据库（"Books 1"和"Books 2"）；GPT-3.5 及以后没有公开。BookCorpus 是从网上抓取的电子书，争议很大，课件还提到合理使用等问题。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、三种架构的预训练</h2>
+        <p>
+            神经架构影响预训练的方式和自然的用法：
+        </p>
+        <ul>
+            <li>解码器：就是语言模型，便于生成，但不能以未来的词为条件。最大的预训练模型都是解码器。</li>
+            <li>编码器：有双向上下文，能以未来为条件，怎样训练它们构建强的表示？</li>
+            <li>编码器-解码器：兼有两者的优点？怎样预训练最好？</li>
+        </ul>
+
+        <h3>编码器：BERT</h3>
+        <p>
+            编码器有双向上下文，所以不能做语言建模。想法：把输入中一部分词替换成特殊的 [MASK] token，预测这些词。$h_1,\dots,h_T = \mathrm{Encoder}(w_1,\dots,w_T)$，$y_i\sim Aw_i + b$，只对被遮住的词加损失项。如果 $\tilde x$ 是 $x$ 被遮盖后的版本，学的就是 $p_\theta(x\mid\tilde x)$，这叫掩码语言模型（Masked LM），比如"I [M] to the [M]"预测"went"和"store"。
+        </p>
+        <p>
+            Devlin 等 2018 年提出掩码语言模型目标，并发布了预训练 Transformer 的权重，叫 BERT（Bidirectional Encoder Representations from Transformers）。细节：随机预测 15% 的（子）词 token；其中 80% 替换成 [MASK]，10% 替换成随机 token，10% 保持不变（但仍要预测）。为什么？不让模型偷懒、不为未遮盖的词构建强表示（微调时看不到 mask）。BERT 预训练的输入是两段连续的文本，训练它预测一段是否紧跟着另一段，还是随机采样的；后来的工作认为这个"下一句预测"没有必要（Liu 等 2019）。
+        </p>
+        <p>
+            发布了两个模型：BERT-base，12 层，768 维隐藏状态，12 个注意力头，1.1 亿参数；BERT-large，24 层，1024 维，16 个头，3.4 亿参数。训练数据是 BooksCorpus（8 亿词）和英文维基百科（25 亿词）。预训练很贵，单卡做不了，BERT 用 64 块 TPU 芯片共训练 4 天（TPU 是专门加速张量运算的硬件）；微调在单卡上可行，很常见，"预训练一次，微调多次"。BERT 非常流行、用途广泛，微调后在大量任务上取得新的最好结果：QQP（Quora 问题对，判断是否是同义问题）、QNLI（问答数据上的自然语言推理）、SST-2（情感分析）、CoLA（判断句子是否合乎语法）、STS-B（语义文本相似度）、MRPC（微软同义句语料）、RTE（一个小的自然语言推理语料）等。
+        </p>
+        <p>
+            预训练编码器的局限：结果看起来很好，为什么不什么都用预训练编码器？如果任务要生成序列，考虑用预训练解码器；BERT 等预训练编码器不能自然地引出好的自回归（一次一个词）生成方法，比如编码器只能在"Iroh goes to [MASK] tasty tea"中填出 make、brew、craft，解码器则能一路生成"goes to make tasty tea END"。
+        </p>
+        <p>
+            BERT 有很多变体，比如 RoBERTa、SpanBERT。一些公认的改进：RoBERTa 主要是把 BERT 训练得更久，去掉下一句预测；SpanBERT 遮盖连续的词片段，让预训练任务更难、更有用（Liu 等 2019；Joshi 等 2020）。RoBERTa 论文的一个结论：即使不改变底层的 Transformer 编码器，更多算力和更多数据也能改善预训练。
+        </p>
+
+        <h3>编码器-解码器：T5</h3>
+        <p>
+            对编码器-解码器，可以做类似语言建模的事，但每个输入的前缀交给编码器、不做预测：$h_1,\dots,h_T = \mathrm{Encoder}(w_1,\dots,w_T)$，$h_{T+1},\dots,h_{2T} = \mathrm{Decoder}(w_1,\dots,w_T, h_1,\dots,h_T)$，$y_i\sim Ah_i + b$（$i &gt; T$）。编码器部分受益于双向上下文，解码器部分通过语言建模训练整个模型。
+        </p>
+        <p>
+            Raffel 等（2018）发现最好的是片段破坏（span corruption），他们的模型叫 T5：把输入中不同长度的片段替换成唯一的占位符，解码出被删除的片段。这在文本预处理中实现，在解码器一侧看起来仍像语言建模的目标。他们发现在他们的任务上编码器-解码器比解码器好，片段破坏（去噪）比语言建模好。T5 一个很有意思的性质：它可以微调来回答各种问题，从参数中检索知识，在开放域版本的 Natural Questions、WebQuestions、TriviaQA 上，模型从 2.2 亿、7.7 亿、30 亿到 110 亿参数，表现随规模提升。
+        </p>
+
+        <h3>解码器：GPT</h3>
+        <p>
+            用语言模型预训练的解码器，可以忽略它被训练来建模 $p(w_t\mid w_{1:t-1})$ 这一点，在最后一个词的隐藏状态上训练分类器来微调：$h_1,\dots,h_T = \mathrm{Decoder}(w_1,\dots,w_T)$，$y\sim Ah_T + b$，$A$ 和 $b$ 随机初始化，由下游任务决定，梯度反向传播到整个网络。注意这个线性层没有预训练，要从零学。
+        </p>
+        <p>
+            更自然的是把解码器预训练成语言模型，再当作生成器用，微调它的 $p_\theta(w_t\mid w_{1:t-1})$：$w_t\sim Ah_{t-1} + b$，$A, b$ 在语言模型中预训练过。这对输出是序列、而且词表和预训练时相似的任务有帮助，比如对话（上下文是对话历史）、摘要（上下文是文档）。
+        </p>
+        <p>
+            2018 年的 GPT（Radford 等）是预训练解码器的一大成功：12 层 Transformer 解码器，1.17 亿参数，768 维隐藏状态，3072 维前馈隐藏层；字节对编码，40000 次合并；在 BooksCorpus 上训练，超过 7000 本不同的书，包含很长的连续文本，可以学到长距离依赖。"GPT"这个缩写在原论文中从没出现过，可以理解为"Generative PreTraining"或"Generative Pretrained Transformer"。微调时怎样格式化解码器的输入？以自然语言推理为例（给句子对打蕴含、矛盾、中立的标签），前提"The man is in the doorway"，假设"The person is near the door"，格式化成"[START] The man is in the doorway [DELIM] The person is near the door [EXTRACT]"，在 [EXTRACT] token 的表示上应用线性分类器，输出"蕴含"。GPT-2 是更大的版本（15 亿参数），在更多数据上训练，能生成相对令人信服的自然语言样本。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、GPT-3、上下文学习与缩放</h2>
+        <p>
+            到目前为止，我们和预训练模型交互的方式有两种：从它们定义的分布中采样（也许给一个提示）；在关心的任务上微调，用它们的预测。超大语言模型似乎不需要梯度更新，只从上下文中给出的示例就能进行某种学习，GPT-3 是典型例子。最大的 T5 模型有 110 亿参数，GPT-3 有 1750 亿。上下文中的示例似乎指定了要完成的任务，条件分布在一定程度上模仿完成这个任务。比如在一个 Transformer 解码器的上下文中输入前缀"thanks -&gt; merci, hello -&gt; bonjour, mint -&gt; menthe, otter -&gt;"，输出"loutre"。
+        </p>
+        <p>
+            为什么要扩大规模？缩放规律：经验观察是扩大模型能可靠地降低困惑度。缩放能帮助确定模型大小与数据量的权衡，现代的观察是训练一个没有完全收敛的大模型。缩放规律也可以用于很多其他有意思的架构决策，可预测的缩放帮助我们明智地做架构等方面的决定。怎样最好地使用算力？GPT-3 有 1750 亿参数，在 3000 亿 token 上训练；大致上训练大 Transformer 的成本随"参数量乘 token 数"增长。OpenAI 选对了参数和 token 的比例吗？没有，课件展示了一个 700 亿参数的模型比大得多的其他模型更好（即 Chinchilla 的结果）。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、预训练教会了模型什么</h2>
+        <p>
+            越来越多的证据表明，预训练模型学到了语言统计性质方面的很多东西。回到开头的例子：常识（斯坦福大学的位置）、句法、指代、词汇语义或主题、情感、一些推理（Zuko 离开了哪里，更难）、一些基本算术（课件注明：它们学不会斐波那契数列）。模型也会学到、甚至加剧种族主义、性别歧视等各种不好的偏见。有时它还会记住受版权保护的材料；有时学到我们不想要的东西：成员推断攻击能恢复部分训练数据，这些训练数据有时是网上的半私密材料（住址、邮箱）。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224N: Natural Language Processing with Deep Learning &copy; Winter 2026</p>
+        <nav class="footer-nav">
+            <a href="05_注意力与Transformer.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="07_后训练指令微调RLHF与DPO.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

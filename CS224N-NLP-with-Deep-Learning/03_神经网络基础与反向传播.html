@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第三讲：神经网络基础与反向传播 | Stanford CS224N 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="02_词向量.html">&larr; 上一讲</a>
+    <span>Stanford CS224N: Lecture 3</span>
+    <a href="04_语言模型与循环神经网络.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第三讲：神经网络基础与反向传播</h1>
+        <p class="subtitle">用窗口分类做命名实体识别，神经分类器与非线性函数（从 sigmoid、ReLU 到 GELU、SwiGLU），交叉熵损失，矩阵微积分与雅可比矩阵，手算梯度，形状约定，以及计算图上的反向传播和自动微分</p>
+        <div class="author-meta">
+            主讲：Diyi Yang<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs224n/slides_w26/cs224n-2026-lecture03-neuralnets.pdf" target="_blank">课件</a>（Stanford 课程网站公开，2026 年冬季；课堂录像只对选课学生开放，本文依据课件整理）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、本讲目标</h2>
+        <p>
+            这一讲的目标是：神经网络怎样用反向传播训练的数学原理和实际实现。作业二的重点是确保真正理解神经网络的数学，之后再交给软件去做；它也介绍依存句法分析。课件提醒这一周对有些人会比较难，需要帮助就去答疑时间、读教学大纲上的辅导材料，周五有 PyTorch 入门课。开头先复习了上一讲词向量评估的内容（内在与外在评估、类比、WordSim353、命名实体识别），见第二讲。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、从命名实体识别引入神经网络</h2>
+        <p>
+            命名实体识别（NER）的任务是在文本中找出名字并分类，给词 token 打标签。例如"Last night, Paris Hilton wowed in a sequin gown."中 Paris Hilton 是人名（PER）；"Samuel Quinn was arrested in the Hilton Hotel in Paris in April 1989."中 Samuel Quinn 是人名，Hilton Hotel 和 Paris 是地点（LOC），April 1989 是日期（DATE）。用途：跟踪文档中对特定实体的提及；问答中的答案通常是命名实体；把情感分析和讨论的实体联系起来；之后常接实体链接，链接到 Wikidata 这样的知识库。
+        </p>
+        <p>
+            简单的做法是窗口分类：在每个词的上下文窗口中对它分类。在人工标注的数据上训练逻辑回归分类器，基于窗口内词向量的拼接，对每个类别判断中心词是或否（实际通常用多类 softmax，这里为了简单）。比如判断"the museums in Paris are amazing to see."中的 Paris 是否是地点，窗口长度为 2：$x_{\text{window}} = [x_{\text{museums}}, x_{\text{in}}, x_{\text{Paris}}, x_{\text{are}}, x_{\text{amazing}}]^\top \in \mathbb{R}^{5d}$。要给所有词分类，就对每个类别、以每个词为中心的向量运行分类器。
+        </p>
+        <p>
+            记号：监督学习有训练集 $\{x_i, y_i\}_{i=1}^{N}$，$x_i$ 是输入（词的索引或向量、句子、文档等），维度为 $d$；$y_i$ 是要预测的标签，属于 $C$ 个类别之一，比如情感正负、命名实体、买卖决策，也可以是别的词，后面还会是多词序列。
+        </p>
+        <p>
+            典型的机器学习或统计 softmax 分类器中，学到的参数 $\theta$ 只是 $W$ 的元素，不包括输入表示 $x$（它是稀疏的符号特征），分类器给出线性决策边界，这可能有局限。神经网络分类器的不同在于：同时学习 $W$ 和（分布式的）词表示；词向量对独热向量做重新表示，把它们在中间层的向量空间中移动，便于用（线性）softmax 分类器分类，概念上有一个嵌入层 $x = Le$；用更深的网络（更多层），对数据做多次重新表示和组合，得到非线性分类器，但它通常相对于最后一层之前的表示是线性的。
+        </p>
+        <p>
+            对"中心词是否是地点"做二分类：希望是地点时得分高。计算 $h = f(Wx + b)$，得分 $s = u^\top h$，预测概率 $J_t(\theta) = \sigma(s) = 1/(1+e^{-s})$。$f$ 是某种逐元素的非线性函数，比如 logistic、tanh、ReLU。
+        </p>
+
+        <h3>非线性函数</h3>
+        <ul>
+            <li>logistic（sigmoid）和 tanh：tanh 只是缩放和平移后的 sigmoid，陡两倍，取值在 $[-1, 1]$，$\tanh(z) = 2\,\mathrm{logistic}(2z) - 1$。它们仍在使用（比如用 logistic 得到概率）。</li>
+            <li>ReLU：$\mathrm{ReLU}(z) = \max(z, 0)$。对深层网络通常先试 ReLU，训练快、表现好，因为梯度回传得好。它有一个负的"死区"，最近的一些方案（Leaky ReLU、Parametric ReLU）在缓解这个问题。</li>
+            <li>GELU（高斯误差线性单元），常用于 Transformer：$\mathrm{GELU}(x) = x\cdot P(X\le x),\ X\sim N(0,1) \approx x\cdot\mathrm{logistic}(1.702x)$。</li>
+            <li>SiLU（sigmoid 线性单元）：$\mathrm{SiLU}(x) = x\cdot\sigma(x)$；Swish：$\mathrm{Swish}(x) = x\cdot\sigma(\beta x)$。</li>
+            <li>GLU（门控线性单元）用一个门或开关：$\mathrm{GLU}(x) = (xV + v)\otimes\sigma(xW + b)$；SwiGLU：$\mathrm{SwiGLU}(x) = (xV + c)\otimes\mathrm{Swish}_\beta(xW + b)$，用得很多，比如 Llama 3、Qwen3。课件推荐论文《GLU Variants Improve Transformer》。</li>
+        </ul>
+        <p>
+            为什么需要非线性？神经网络做函数逼近（回归或分类）。没有非线性，深层网络只能做线性变换，多加的层可以合并成一个线性变换：$W_1W_2x = Wx$。有了带非线性的更多层，就能逼近任何复杂函数。
+        </p>
+
+        <h3>交叉熵损失</h3>
+        <p>
+            到目前为止，目标是最大化正确类别 $y$ 的概率，或者等价地最小化该类别的负对数概率。用信息论中的交叉熵来重新表述：设真实概率分布为 $p$，模型算出的概率为 $q$，交叉熵为 $H(p, q) = -\sum_{c=1}^{C} p(c)\log q(c)$。假设真实（金标准、目标）分布在正确类别上为 1、其余为 0，即 $p = [0,\dots,0,1,0,\dots,0]$，由于 $p$ 是独热的，只剩下真实类别的负对数概率 $-\log p(y_i\mid x_i)$。PyTorch 中用的就是它。
+        </p>
+        <p>
+            随机梯度下降的更新：对每个参数 $\theta_j^{\text{new}} = \theta_j^{\text{old}} - \alpha\,\partial J(\theta)/\partial\theta_j^{\text{old}}$。在深度学习中，$\theta$ 也包括数据表示（比如词向量）。怎样计算 $\nabla_\theta J(\theta)$？一是手算，二是用算法，即反向传播。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、手算梯度：矩阵微积分</h2>
+        <p>
+            完全向量化的梯度："如果用矩阵，多元微积分就和一元微积分一样"。它比非向量化的梯度快得多、有用得多，但非向量化的梯度有助于建立直觉（第二讲有例子）。讲义和矩阵微积分笔记更详细，也可以复习 Stanford Math 51 的在线教材。
+        </p>
+        <ul>
+            <li>一个输入一个输出的函数 $f(x) = x^3$，梯度（斜率）就是导数 $df/dx = 3x^2$，意思是"稍微改变输入，输出会改变多少"：在 $x = 1$ 处约改变 3 倍，$1.01^3 = 1.03$；在 $x = 4$ 处约改变 48 倍，$4.01^3 = 64.48$。</li>
+            <li>一个输出、$n$ 个输入的函数，梯度是对每个输入的偏导数组成的向量。</li>
+            <li>$m$ 个输出、$n$ 个输入的函数，雅可比矩阵是 $m\times n$ 的偏导数矩阵，是梯度的推广。</li>
+            <li>链式法则：一元函数的复合，导数相乘；多元函数的复合，雅可比矩阵相乘。</li>
+            <li>逐元素激活函数 $h = f(z)$ 有 $n$ 个输出、$n$ 个输入，雅可比矩阵是 $n\times n$ 的，只在对角线上非零：$\partial h/\partial z = \mathrm{diag}(f'(z))$。</li>
+            <li>课件让大家回家练习另外几个雅可比矩阵，用讲义核对答案：$\partial(Wx+b)/\partial x = W$，$\partial(Wx+b)/\partial b = I$，$\partial(u^\top h)/\partial u = h^\top$（课件注明这是正确的雅可比，后面用"形状约定"时答案写成 $h$）。</li>
+        </ul>
+
+        <h3>回到神经网络</h3>
+        <p>
+            网络是 $s = u^\top h$，$h = f(z)$，$z = Wx + b$，$x$ 是窗口词向量的拼接。真正关心的是损失 $J$ 的梯度，为了简单先算得分 $s$ 的梯度，比如 $\partial s/\partial b$。做法：
+        </p>
+        <ol>
+            <li>把方程拆成简单的部分，仔细定义变量并跟踪它们的维度。</li>
+            <li>应用链式法则：$\dfrac{\partial s}{\partial b} = \dfrac{\partial s}{\partial h}\dfrac{\partial h}{\partial z}\dfrac{\partial z}{\partial b}$。</li>
+            <li>写出雅可比矩阵：$\dfrac{\partial s}{\partial b} = u^\top\,\mathrm{diag}(f'(z))\,I = u^\top\odot f'(z)$，$\odot$ 是哈达玛积，即两个向量逐元素相乘得到一个向量。</li>
+        </ol>
+        <p>
+            重用计算：再求 $\partial s/\partial W = \dfrac{\partial s}{\partial h}\dfrac{\partial h}{\partial z}\dfrac{\partial z}{\partial W}$，前两项和上面一样，为了避免重复计算，定义 $\delta = \dfrac{\partial s}{\partial h}\dfrac{\partial h}{\partial z} = u^\top\odot f'(z)$，它是上游梯度（"误差信号"）。
+        </p>
+        <p>
+            对矩阵求导，输出是什么形状？一个输出、$nm$ 个输入，按纯数学是 $1\times nm$ 的雅可比矩阵，这样做更新很不方便。于是离开纯数学，采用"形状约定"：梯度的形状和参数的形状一样，所以 $\partial s/\partial W$ 是 $n\times m$ 的。答案是
+        </p>
+        <p>
+            $$\frac{\partial s}{\partial W} = \delta^\top x^\top$$
+        </p>
+        <p>
+            $\delta$ 是 $z$ 处的上游梯度，$x$ 是局部的输入信号。为什么有转置？一个取巧的答案是这样维度才对得上，这也是检查结果的有用技巧（完整解释见讲义）；每个输入连到每个输出，所以要的是外积。推导局部输入梯度：考虑单个权重 $W_{ij}$，它只影响 $z_i$，比如 $W_{23}$ 只用于计算 $z_2$，不用于 $z_1$；$\partial z_i/\partial W_{ij} = \partial(W_{i\cdot}x + b_i)/\partial W_{ij} = \partial\big(\sum_{k=1}^{d}W_{ik}x_k\big)/\partial W_{ij} = x_j$。
+        </p>
+        <p>
+            导数应该是什么形状？类似地，$\partial s/\partial b = u^\top\odot f'(z)$ 是行向量，但形状约定说梯度应是列向量，因为 $b$ 是列向量。雅可比形式（让链式法则好算）和形状约定（让实现 SGD 方便）之间有分歧。作业的答案要遵循形状约定，但雅可比形式对计算答案有用。两种做法：尽量用雅可比形式，最后按形状约定变形（刚才就是这样，最后把 $\delta$ 转置成列向量）；或者始终遵循形状约定，看维度决定何时转置、怎样重排，到达隐藏层的误差信号 $\delta$ 和那个隐藏层的维度相同。课件的建议是：用雅可比计算，用形状约定排版。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、反向传播</h2>
+        <p>
+            前面几乎已经展示了反向传播：求导，并使用（推广的、多元的、矩阵的）链式法则；另一个技巧是计算低层的导数时重用高层已经算出的导数，以减少计算。
+        </p>
+        <p>
+            软件把神经网络的方程表示成计算图：源节点是输入，内部节点是运算，边传递运算结果，这是"前向传播"。然后沿边反向走，传递梯度。单个节点收到"上游梯度"，目标是传出正确的"下游梯度"；每个节点有局部梯度，即它的输出对输入的梯度，由链式法则：
+        </p>
+        <p>
+            $$[\text{下游梯度}] = [\text{上游梯度}] \times [\text{局部梯度}]$$
+        </p>
+        <p>
+            有多个输入的节点有多个局部梯度；一个节点的输出流向多个分支时，梯度在这些分支处相加。几种节点的直觉：加法"分配"上游梯度给每个加数；max"路由"上游梯度；乘法"切换"上游梯度。
+        </p>
+        <p>
+            效率：一次算出所有梯度。错误的做法是先算一个参数的梯度，再独立地算另一个，有重复计算；正确的做法是一次算出所有梯度，类似手算时用 $\delta$。一般计算图上的反向传播：
+        </p>
+        <ol>
+            <li>前向：按拓扑排序访问节点，根据前驱计算每个节点的值。</li>
+            <li>反向：把输出梯度初始化为 1，按相反顺序访问节点，用对后继节点的梯度计算对每个节点的梯度。</li>
+        </ol>
+        <p>
+            做对的话，前向和反向的大 O 复杂度相同。一般网络有规则的层结构，可以用矩阵和雅可比。
+        </p>
+        <p>
+            自动微分：梯度计算可以从前向的符号表达式中自动推出，每种节点类型要知道怎样计算输出，以及给定对输出的梯度时怎样计算对输入的梯度。现代深度学习框架（TensorFlow、PyTorch 等）替你做反向传播，但主要还是由写层或节点的人手算局部导数。
+        </p>
+        <p>
+            手动梯度检查（数值梯度）：对很小的 $h$（约 $10^{-4}$），$f'(x)\approx\dfrac{f(x+h) - f(x-h)}{2h}$。容易实现正确，但近似且很慢，模型的每个参数都要重算 $f$。它对检查实现有用；以前一切都手写，到处做数值检查是关键的测试，现在需要得少多了，可以用它检查层是否实现正确。
+        </p>
+        <p>
+            总结：反向传播就是沿计算图递归地（因而高效地）应用链式法则，下游梯度等于上游梯度乘局部梯度；前向计算运算结果并保存中间值，反向应用链式法则计算梯度。
+        </p>
+        <p>
+            既然现代框架会替你算梯度，为什么还要学这些细节？就像编译器或系统都有现成实现，还是要上相关的课：理解底层发生了什么是有用的；反向传播并不总是开箱即用，理解原因对调试和改进模型很有用。课件推荐 Karpathy 的文章《Yes you should understand backprop》，并预告后面会讲梯度爆炸和梯度消失的例子。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224N: Natural Language Processing with Deep Learning &copy; Winter 2026</p>
+        <nav class="footer-nav">
+            <a href="02_词向量.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="04_语言模型与循环神经网络.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

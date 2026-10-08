@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十五讲：（小）语言模型的人工推理之道 | Stanford CS224N 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="14_AI对人类的影响.html">&larr; 上一讲</a>
+    <span>Stanford CS224N: Lecture 15</span>
+    <a href="index.html">课程目录 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十五讲：（小）语言模型的人工推理之道</h1>
+        <p class="subtitle">突破扩展定律、让生成式 AI 普及的目标，从蛮力扩展到聪明扩展，长时间强化学习 ProRL，基于梯度的数据多样化 Prismatic Synthesis，把强化学习当作预训练目标的 RLP，在预训练中前置推理数据，OpenThoughts 的协作，以及关于智能的开放问题</p>
+        <div class="author-meta">
+            主讲：Yejin Choi（Stanford 与 NVIDIA）<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs224n/slides_w26/cs224n-2026-lecture19-open-questions.pdf" target="_blank">课件</a>（Stanford 课程网站公开，2026 年冬季；课堂录像只对选课学生开放，本文依据课件整理）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、大卫对歌利亚</h2>
+        <p>
+            课件把目标称为"不可能的任务"：突破扩展定律，让生成式 AI 普及，因为（现有的）扩展定律需要只有少数人负担得起的极大规模计算。这不是不可能吗？一个例子：2023 年前后，Rajan Anandan 问"印度创业公司怎样为印度造基础模型"，Sam Altman 回答和 OpenAI 竞争是没有希望的。
+        </p>
+        <p>
+            但开源生态的现状（课件引用 aiworld.eu 的报道）：小模型需求很大，热门仓库的日下载量达到几千万；中国对开源生态的贡献飙升，阿里巴巴现在超过了 Hugging Face；NVIDIA 在开源贡献上成了新星。
+        </p>
+        <p>
+            在极大规模神经模型的时代扩展智能，有三个可以创新的部分：非常规的数据、非常规的算法、非常规的协作。
+        </p>
+        <p>
+            Ilya Sutskever 在 NeurIPS 2024 时间检验奖演讲中说，蛮力扩展的时代结束了，聪明扩展的时代开始。应对数据饱和有三大方向：用有限的数据学得更好更快（替代架构、替代训练配方）；合成新数据（生成互联网数据之外空间的算法）；超越数据中已有的内容去推理（测试时推理算法、测试时训练算法）。这样"智能"的扩展还会继续。这一讲讲三项工作：ProRL（长时间强化学习）、Prismatic Synthesis、RLP（把强化学习当作预训练），主题是"更小但更好"和"算法取胜"。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、ProRL：长时间强化学习</h2>
+        <p>
+            论文：《Prolonged Reinforcement Learning Expands Reasoning Boundaries in Large Language Models》（NeurIPS 2025）。2025 年是大型推理模型（LRM，相对于 LLM）兴起的一年：长思考（思维链），强化学习的威力，从模仿学习转向探索学习。
+        </p>
+        <p>
+            有一些反对 RL 的惊人发现：和基座模型相比，经过可验证奖励强化学习（RLVR）后 Pass@1 更好，但 Pass@K 更差。课件的回应：基座模型和 RL 之间的"化学反应"很重要；从轻松的 RL 得出的结论不等于从费力的 RL 得出的结论。
+        </p>
+        <p>
+            "罗马不是一天建成的"：如果用小模型（1.5B）跑耐力赛，而不是用大模型冲刺呢？ProRL 建立在 RL 最佳实践之一 DAPO（解耦裁剪和动态采样策略优化，GRPO 的一个变体）之上：动态采样瞄准中等难度的样本，保持多样的学习信号；解耦裁剪的"提高上限"提升低概率 token，鼓励更广的探索，即 $\mathrm{clip}(r_\theta(\tau), 1-\epsilon_{low}, 1+\epsilon_{high})$。
+        </p>
+        <ul>
+            <li>教训一：通过裁剪比率保持可持续的熵，平衡探索与利用。用默认裁剪比率 $\epsilon_{low} = \epsilon_{high} = 0.2$，熵坍缩让训练无法长时间进行，表现先上升，熵坍缩后停滞，可能是探索不足。减小 $\epsilon_{low}$、增大 $\epsilon_{high}$ 能在训练中保持可持续的熵，但表现没有提高，可能是利用不足（比如对负优势动作的抑制不够）。保持 $\epsilon_{low} = 0.2$、增大 $\epsilon_{high}$，熵可持续，表现一直上升。实践中根据训练中的熵趋势动态调整 $\epsilon_{high}$ 来保持稳定。</li>
+            <li>教训三：动态调整超参数，让一次"英雄运行"一直活下去。KL 损失高时定期重置参考策略；动态调整 $\epsilon_{high}$ 保持可持续的熵；为训练效率把回答长度控制在 8k 以内，最后一轮再扩展上下文长度。</li>
+        </ul>
+        <p>
+            结果：在数学、代码、STEM、Reasoning Gym 和指令遵循等不同领域评估，ProRL 相对基座模型 Distill-R1-1.5B 在所有情况下都有显著提升，在基座模型吃力的领域外任务和 Reasoning Gym 上提升尤其大；Pass@1 和 Pass@16 都呈对数线性提升。经过 ProRL 的 Nemotron-Reasoning-1.5B 达到或超过了大 4.5 倍的 DeepSeek-R1-7B。
+        </p>
+        <p>
+            结论：从轻松的 RL 得出的结论不等于从费力的 RL 得出的结论；在 1.5B 模型上做费力、超长时间的 RL 能走得非常远；ProRL 显示熵的动态控制很关键。课件也留了一个存疑的问题：费力的 RL 能在比如 GPT-2 上成功吗？
+        </p>
+        <p>
+            同样，从轻松的 SFT 得出的结论也不等于从费力的 SFT 得出的结论。为什么 Qwen 和 RL 的化学反应这么好？因为预训练中做了 SFT 或 SFT 式的"中期训练"。那么 SFT 不能泛化吗？要看情况。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、Prismatic Synthesis：基于梯度的数据多样化</h2>
+        <p>
+            论文：《Prismatic Synthesis: Gradient-based Data Diversification Boosts Generalization in LLM Reasoning》（NeurIPS 2025）。合成数据来救场：它已经用于中期训练和后训练，有时甚至用于大语言模型训练的全部。常见的做法和假设是依赖最大最强的教师模型。明显的担忧是模态坍缩；同样，从轻松的合成数据得出的结论不等于从费力的合成数据得出的结论。
+        </p>
+        <p>
+            把梯度作为数据表示：输入 $x$ 是"Bill 向南走 0.5 英里，再向东走 0.75 英里，最后向南走 0.5 英里，他离起点的直线距离是多少英里？"，输出 $y$ 是"Bill 总共向南走了 0.5 + 0.5 = 1.0 英里，向东走了 0.75 英里，所以用勾股定理……答案是 1.25 英里"。用一个小的参考模型计算 $\nabla_\theta P(y\mid x)$，再用 Rademacher 投影降维成 1024 维的表示。梯度编码了从 x 到 y 的映射，天然地表示了输入和输出之间的"推理"。在梯度上计算的 G-Vendi 分数能预测泛化（分布外泛化）。
+        </p>
+        <p>
+            流程：用 R1-32B 过量生成数据，经过两道过滤（基于梯度的多样性过滤器；质量过滤器，根据多数投票丢弃样本）得到过滤后的数据，流程中还用 R1-7B 采样数据。在 MATH-500、AIME24、AIME25、AMC23、MATH²、OlympiadBench、GSM8k-Platinum 等数学推理和分布外任务上，PrismMath-7B 胜过 OpenThinker-7B、OpenThinker2-7B、R1-distill-7B 等基线，而且用的数据生成器 R1-32B 小 20 倍，完全不依赖人工标注的答案，数据全由模型生成。
+        </p>
+        <p>
+            小结：推理需要超越互联网数据的数据；合成数据来救场；RL 可以看作通过探索（隐式地）生成合成数据；不管是不是 RL，现有方法常常缺乏对整体多样性的鸟瞰；系统地多样化（加质量检查）能产生很大差别，甚至能弥补 R1 教师模型 20 倍的大小差距。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、RLP：把强化学习当作预训练目标</h2>
+        <p>
+            论文：《RLP: Reinforcement as a Pretraining Objective》（ICLR 2026）。Sutskever 说，越来越多预训练的时代要结束了：扩大计算已经不是瓶颈；高质量数据有限，而且越来越耗尽；时代从扩大数据转向从每个 token 中榨取更多价值。
+        </p>
+        <p>
+            标准大语言模型训练的问题是推理是事后才加的：预训练收集世界知识；SFT 模仿推理格式（模仿学习）；RLHF/RLVR 把推理作为附加物（探索学习）。问题一：推理能不能在预训练时更早地融入，而不只是事后添加？问题二：早期接触推理带来的收益能否在后训练中保持，还是会被冲掉？
+        </p>
+        <p>
+            普通预训练与 RLP 对比：上下文是"光合作用是植物、藻类和一些细菌利用____制造自己食物的过程"。普通预训练直接算 P(下一个 token | 上下文)，是模式补全；RLP 先产生一段推理"&lt;think&gt;光合作用依赖太阳能，所以下一个 token 应该是 sunlight。&lt;/think&gt;"，再算 P(下一个 token | 上下文, 思考)，是推理驱动的预测。关键区别是 RLP 在预测 token 前产生明确的推理轨迹，让"为什么"可见、可训练。
+        </p>
+        <p>
+            RLP 怎样工作：在预测下一个 token 之前采样一段思考；比较有思考和没有思考时的似然；不需要验证器，每一步都有按位置的信用。奖励是信息增益：
+        </p>
+        <p>
+            $$r(c_t) = \log p_\theta(x_t\mid x_{&lt;t}, c_t) - \log\bar p_\phi(x_t\mid x_{&lt;t})$$
+        </p>
+        <p>
+            把思维链当作一个动作，按信息增益给奖励，只更新思考 token。训练配方：一个网络同时充当策略和带推理的预测器；"不思考"的教师是滞后较慢的指数移动平均，$\phi\leftarrow\tau\phi + (1-\tau)\theta$，$\tau = 0.999$；组相对优势，带包含均值的修正，$\bar r = \frac{1}{G}\sum_j r(c_t^{(j)})$，$A^{(i)} = \frac{G}{G-1}(r(c_t^{(i)}) - \bar r)$；只在思考 token 上用裁剪的逐 token 替代目标（GRPO 式），带逐 token 的重要性比率。
+        </p>
+        <p>
+            RLP 的核心想法是把思维链当作预训练中的探索动作。奖励 = log P(下一个 token | 上下文 + 思考) − log P(下一个 token | 只有上下文)。不需要验证器，不需要外部评判，奖励信号直接来自对下一个 token 的信息增益，适用于任何普通的预训练文本；奖励稠密，在推理有帮助的每个 token 上按位置分配信用，不像后训练的奖励那样稀疏；可扩展，用的是标准训练所用的同样大规模预训练语料，不需要专门的数据集，推理从普通文本中涌现。
+        </p>
+        <p>
+            实验：
+        </p>
+        <ul>
+            <li>Qwen3-1.7B-Base（最终检查点），10 亿 token 预算，数据是一般预训练语料（Nemotron-Pretraining-Dataset），和基座模型以及 token 数相同的、基于下一个 token 预测的继续预训练（CPT）比较。在数学和科学基准上平均，RLP 比基座高 19%，比 CPT 高 17%。经过相同的 SFT 加 RLVR 后，RLP 的优势继续累积：相对 BASE+Post 高 8%，相对 CPT+Post 高 7%。在计算量相同的比较中（token 匹配 1.7 亿、FLOP 匹配 60 亿，数据是 Nemotron-CrossThink），即使 CPT 见了 35 倍的数据，RLP 平均仍高 14%。</li>
+            <li>NVIDIA-Nemotron-Nano-12B-v2-Base，用训练到 19.8T token 的检查点，2.5 亿 token 预算，和训练到 20T token 的完整基座模型比较（FLOP 匹配）。RLP 少用约 2000 亿 token，平均提升 35%，科学上提升最大（绝对值 +23%），说明跨领域的好处在大规模上也稳健。经过相同的后训练，RLP 仍比预训练多见了约 2000 亿 token 的基座模型高 2 个百分点。RLP 的好处在更大的模型和不同架构上保持甚至放大。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>五、前置推理数据</h2>
+        <p>
+            论文：《Front-Loading Reasoning: The Synergy between Pretraining and Post-Training Data》（ICLR 2026）。FLR 在训练的不同阶段（预训练、SFT、RL）系统地加入推理风格的数据，同时改变它的多样性、数量和质量。
+        </p>
+        <ul>
+            <li>问题：预训练中加入推理数据对基座模型有益吗？答案是非常有益，而且收益随多样性和数量增长，带来数学、科学和代码上的提升；比不用推理数据的基线平均绝对提高 16%。</li>
+            <li>问题：预训练没用推理数据的模型，多给 SFT 计算能"追上"吗？不能。早期推理打下了 SFT 无法复制的基础：给基线加倍 SFT 数据，表现提高 4.09%，但仍比最弱的用推理数据预训练的模型低 3.32%。</li>
+            <li>问题：在大量 RLVR 之后，这个收益还重要吗？重要。RL 之后，用推理数据预训练的模型平均领先 19%；在最难的竞赛数学题（AIME）上，优势扩大到 39.3%。</li>
+        </ul>
+        <p>
+            结论：在预训练中前置推理数据，带来持久、累积的优势；高质量的预训练数据可能有潜在效果，要靠 SFT 释放；最优的数据策略是不对称的，预训练重多样性，SFT 重质量。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、非常规的协作</h2>
+        <p>
+            非常规的协作包括隐式的开放科学和开源社区，以及显式的跨机构、跨国界合作。例子是 OpenThoughts 团队，成员来自多家机构（包括 Tatsunori Hashimoto、Yejin Choi、Ludwig Schmidt 等）。OpenThoughts3-1M 是最先进的推理数据集配方；超级费力的 SFT 可以胜过费力的 RL，非常规的协作取胜。
+        </p>
+        <p>
+            结语：生活中没有容易的事；不劳无获；但只要努力，一切都做得到；协作的力量；自负是敌人。基座模型和 RL 之间的化学反应很重要；从轻松的 RL/SFT 得出的结论不等于从费力的 RL/SFT 得出的结论。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、数据的宇宙与开放问题</h2>
+        <p>
+            大语言模型入门：香肠是怎么做出来的。预训练用互联网数据；SFT 和 RL 用精心整理的考试式数据，SFT 是模仿学习，RL 是探索学习。归根结底都是数据：用上整个互联网的数据；互联网数据不够，就请人写考试式数据；还不够，就让 AI 合成数据，通过蛮力数据合成把分布外数据变成分布内数据。
+        </p>
+        <p>
+            知识的宇宙就是合成数据的宇宙：互联网数据中的知识、人类/专家标注中的知识、（常规）蒸馏中的知识，之外还有极端扩展推理中的知识和非常规模拟中的知识。合成数据飞轮更强的一方会赢，它会越来越依赖推理和计算，而且往往不开放。很多现实用例需要填补这个数据缺口的能力；发现新知识是科学家的行为，即使目标领域本身不是科学领域。
+        </p>
+        <p>
+            AI 和人类智能的相似之处：推理常常是记住的知识；探索和利用的权衡；多样的例子和经验促进学习。不同之处：AI 有更多数据、计算和记忆；更少抽象和概念化；训练和测试截然分开。香肠是怎么做出来的：人类的互联网数据，即人类智能的产物；人类砸下巨资的胆量；人类为对齐做的大规模标注；人类在大量工程细节上的直觉和洞见。
+        </p>
+        <p>
+            开放研究问题：新的智能理论？新的知识和推理理论？人类没有 100 万 token 的上下文窗口，这是局限还是幸事？
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224N: Natural Language Processing with Deep Learning &copy; Winter 2026</p>
+        <nav class="footer-nav">
+            <a href="14_AI对人类的影响.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="index.html">课程目录 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

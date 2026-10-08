@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第二讲：词向量 | Stanford CS224N 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="01_课程介绍与NLP的历史.html">&larr; 上一讲</a>
+    <span>Stanford CS224N: Lecture 2</span>
+    <a href="03_神经网络基础与反向传播.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第二讲：词向量</h1>
+        <p class="subtitle">怎样在计算机里表示词义：WordNet 和独热向量的问题，分布语义，word2vec 的 skip-gram 目标与 softmax，梯度下降与随机梯度下降，负采样，基于共现矩阵的方法与 GloVe，以及怎样评估词向量</p>
+        <div class="author-meta">
+            主讲：Diyi Yang<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs224n/slides_w26/cs224n-2026-lecture02-wordvecs.pdf" target="_blank">课件</a>（Stanford 课程网站公开，2026 年冬季；课堂录像只对选课学生开放，本文依据课件整理）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、怎样表示一个词的意义</h2>
+        <p>
+            这一讲的目标是理解：词义可以用一个由实数组成的高维向量表示，并在课后能读懂词嵌入方面的论文。
+        </p>
+        <p>
+            韦氏词典对"意义"的定义有三条：由词、短语等表示的观念；一个人想用词、符号等表达的观念；一件作品表达的观念。语言学中最常见的看法是"能指（符号）对应所指（观念或事物）"，也就是指称语义学，比如"tree"这个符号对应世界上各种各样的树。
+        </p>
+        <p>
+            以前 NLP 最常见的做法是用 WordNet 这样的词库，里面有同义词集合和上位词（"是一种"关系）。比如包含"good"的同义词集合有名词"good, goodness""commodity, trade_good, good"，形容词"estimable, good, honorable, respectable""beneficial, good""good, just, upright"，副词"well, good""thoroughly, soundly, good"等；"panda"的上位词一路是浣熊科、食肉目、有胎盘类、哺乳动物、脊椎动物……直到"entity"。课件给出了用 NLTK 查询的代码。WordNet 有用，但有问题：
+        </p>
+        <ul>
+            <li>缺少细微差别：比如"proficient"被列为"good"的同义词，这只在某些语境下成立。</li>
+            <li>一些同义词集合里列着冒犯性的同义词，却完全没有说明词的含义色彩和是否得体。</li>
+            <li>缺少词的新义，比如 wicked、badass、nifty、wizard、genius、ninja，不可能及时更新。</li>
+            <li>主观；需要人工创建和维护。</li>
+            <li>无法用来准确计算词的相似度。</li>
+        </ul>
+        <p>
+            传统 NLP 把词看作离散的符号，比如 hotel、conference、motel，是一种"局部"表示，可以用独热向量表示：motel 是在某一位上为 1、其余为 0 的向量，hotel 是在另一位上为 1 的向量，维度等于词表大小（比如 50 万以上）。问题在于：网页搜索中用户搜"Seattle motel"，我们希望也能匹配包含"Seattle hotel"的文档，但这两个独热向量是正交的，独热向量没有天然的相似度概念。可以依赖 WordNet 的同义词表来得到相似度，但众所周知效果很差（不完整等）。更好的办法是让向量本身编码相似度。
+        </p>
+        <p>
+            分布语义：一个词的意义由经常出现在它附近的词给出。"观其伴而知其词"（J. R. Firth 1957），这是现代统计 NLP 最成功的思想之一。词 $w$ 出现在文本中时，它的上下文就是附近（固定大小的窗口内）出现的词，用 $w$ 的许多上下文来构建它的表示。比如"…government debt problems turning into banking crises as happened in 2009…""…saying that Europe needs unified banking regulation to replace the hodgepodge…""…India has just given its banking system a shot in the arm…"，这些上下文词就表示"banking"。
+        </p>
+        <p>
+            我们为每个词构建一个稠密向量，使它和出现在相似上下文中的词的向量相似，用向量点积衡量相似度。词向量也叫词嵌入或（神经）词表示，是一种分布式表示。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、word2vec</h2>
+        <p>
+            word2vec 是学习词向量的框架（Mikolov 等 2013）。思路：有一个很大的文本语料（一长串词）；固定词表中的每个词用一个向量表示；遍历文本中每个位置 $t$，那里有一个中心词 $c$ 和上下文（"外部"）词 $o$；用 $c$ 和 $o$ 的词向量的相似度计算给定 $c$ 时 $o$ 的概率（或反过来）；不断调整词向量来最大化这个概率。这是 skip-gram 模型。比如"…problems turning into banking crises as…"，以"into"为中心词，窗口大小为 2，要计算 $P(w_{t-2}\mid w_t)$、$P(w_{t-1}\mid w_t)$、$P(w_{t+1}\mid w_t)$、$P(w_{t+2}\mid w_t)$。
+        </p>
+        <p>
+            对每个位置 $t = 1,\dots,T$，给定中心词 $w_t$，预测固定窗口 $m$ 内的上下文词。数据似然为
+        </p>
+        <p>
+            $$L(\theta) = \prod_{t=1}^{T}\prod_{\substack{-m\le j\le m\\ j\ne 0}} P(w_{t+j}\mid w_t;\theta)$$
+        </p>
+        <p>
+            $\theta$ 是所有要优化的变量。目标函数 $J(\theta)$（也叫代价函数或损失函数）是平均负对数似然：
+        </p>
+        <p>
+            $$J(\theta) = -\frac{1}{T}\log L(\theta) = -\frac{1}{T}\sum_{t=1}^{T}\sum_{\substack{-m\le j\le m\\ j\ne 0}}\log P(w_{t+j}\mid w_t;\theta)$$
+        </p>
+        <p>
+            最小化目标函数等价于最大化预测准确率。怎样计算 $P(w_{t+j}\mid w_t;\theta)$？每个词 $w$ 用两个向量：作为中心词时用 $v_w$，作为上下文词时用 $u_w$。对中心词 $c$ 和上下文词 $o$：
+        </p>
+        <p>
+            $$P(o\mid c) = \frac{\exp(u_o^\top v_c)}{\sum_{w\in V}\exp(u_w^\top v_c)}$$
+        </p>
+        <p>
+            三步：点积比较 $o$ 和 $c$ 的相似度，点积越大概率越大；取指数让一切变成正数；在整个词表上归一化，得到概率分布。这是 softmax 函数的一个例子：$\mathrm{softmax}(x_i) = \exp(x_i)/\sum_{j}\exp(x_j) = p_i$，把任意值映射成概率分布。"max"是因为它放大最大的 $x_i$ 的概率，"soft"是因为仍给较小的 $x_i$ 一些概率；课件也说这个名字有点怪，因为它返回的是一个分布。深度学习中很常用。
+        </p>
+        <p>
+            训练模型就是逐步调整参数来最小化损失。$\theta$ 把所有参数排成一个长向量：$d$ 维向量、$V$ 个词、每个词两个向量，所以 $\theta\in\mathbb{R}^{2dV}$。沿梯度下坡来优化，要计算所有向量的梯度（课上这部分是互动推导，课件只给了似然和概率的公式）。
+        </p>
+
+        <h3>梯度下降与随机梯度下降</h3>
+        <p>
+            梯度下降是最小化 $J(\theta)$ 的算法：在当前的 $\theta$ 计算 $J(\theta)$ 的梯度，朝负梯度方向走一小步，重复。课件提醒目标函数可能不像示意图那样是凸的，但结果还好。更新公式为 $\theta^{\text{new}} = \theta^{\text{old}} - \alpha\nabla_\theta J(\theta)$，$\alpha$ 是步长或学习率。问题在于 $J(\theta)$ 是语料中所有窗口的函数，可能有几十亿个，计算 $\nabla_\theta J(\theta)$ 非常昂贵，要等很久才能做一次更新，对几乎所有神经网络都是坏主意。解决办法是随机梯度下降（SGD）：反复采样窗口，每个窗口（或每个小批量）后就更新。
+        </p>
+        <p>
+            参数和计算：上下文向量矩阵 $U$ 和中心词向量矩阵 $V$，对中心词 $v_4$ 计算 $U v_4^\top$ 的点积，再取 softmax 得到概率。模型在每个位置做同样的预测，我们希望它给所有在上下文中出现的词（至少是经常出现的词）一个相当高的概率，所以这是"词袋"模型。word2vec 通过把相似的词放在空间中相近的位置来最大化目标函数。
+        </p>
+
+        <h3>更多细节</h3>
+        <ul>
+            <li>为什么每个词两个向量？更容易优化，最后把两个向量取平均。也可以每个词只用一个向量实现，课件说这样还有一点帮助。</li>
+            <li>两个变体：skip-gram（SG），给定中心词预测上下文词（与位置无关），这一讲讲的就是它；连续词袋（CBOW），由上下文词袋预测中心词。</li>
+            <li>训练用的损失：朴素 softmax（简单但在输出类别很多时很贵），层次 softmax 等优化变体，以及负采样。前面讲的是朴素 softmax。</li>
+        </ul>
+        <p>
+            负采样：归一化项（对整个词表求和）在类别很多时计算很贵，所以标准的 word2vec 实现的是带负采样的 skip-gram。主要思想是训练二元逻辑回归，区分真实的词对（中心词和它窗口中的一个词）与若干"噪声"词对（中心词和一个随机词）。取 $k$ 个负样本，最大化真实上下文词出现的概率，最小化随机词出现在中心词周围的概率，最小化
+        </p>
+        <p>
+            $$J_{\text{neg-sample}}(u_o, v_c, U) = -\log\sigma(u_o^\top v_c) - \sum_{k\in K}\log\sigma(-u_k^\top v_c)$$
+        </p>
+        <p>
+            用 sigmoid 函数 $\sigma(x) = 1/(1+e^{-x})$ 而不是 softmax（课件说"我们很快会和它成为好朋友"）。负样本按 $P(w) = U(w)^{3/4}/Z$ 采样，即一元分布取 3/4 次方，这让低频词被采样得更多一些。
+        </p>
+        <p>
+            每个窗口最多只有 $2m+1$ 个词，加上负采样的 $2km$ 个负样本词，所以随机梯度 $\nabla_\theta J_t(\theta)$ 非常稀疏，可能只需要更新实际出现的词向量。要么用稀疏矩阵更新操作只更新完整嵌入矩阵 $U$ 和 $V$ 的某些行，要么为词向量维护一个哈希表；如果有几百万个词向量、做分布式计算，避免到处传送巨大的更新很重要。课件提醒，实际的深度学习库中词向量是按行存放的，而不是按列。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、为什么不直接统计共现</h2>
+        <p>
+            把整个语料遍历一遍（甚至很多遍）有点怪，为什么不直接累计哪些词出现在彼此附近的统计？构建共现矩阵 $X$ 有两种选择：
+        </p>
+        <ul>
+            <li>窗口：和 word2vec 类似，在每个词周围取窗口，捕捉一些句法和语义信息（"词空间"）。</li>
+            <li>词与文档的共现矩阵：给出一般的主题（所有体育词汇有相似的条目），由此产生"潜在语义分析"（"文档空间"）。</li>
+        </ul>
+        <p>
+            例子：窗口长度为 1（更常见的是 5 到 10），对称（不区分左右），语料是"I like deep learning""I like NLP""I enjoy flying"，统计 I、like、enjoy、deep、learning、NLP、flying、"." 之间的共现次数。
+        </p>
+        <p>
+            简单的计数共现向量随词表增大，维度很高，需要很多存储（虽然稀疏），后续分类模型有稀疏性问题，不够稳健。想法是把"大部分"重要信息存在固定的少数几个维度里，得到稠密向量，通常 25 到 1000 维，和 word2vec 类似。怎样降维？经典方法（作业一会做）是对共现矩阵做奇异值分解：$X = U\Sigma V^\top$，$U$ 和 $V$ 是正交矩阵，只保留 $k$ 个奇异值以便泛化，$\hat X$ 在最小二乘意义上是 $X$ 的最佳秩 $k$ 近似，这是经典的线性代数结论，但大矩阵算起来很贵。
+        </p>
+        <p>
+            直接对原始计数做 SVD 效果不好，缩放各单元的计数会有很大帮助。问题是功能词（the、he、has）太频繁，句法的影响太大。一些修正：取频率的对数；$\min(X, t)$，$t\approx 100$；忽略功能词；用"斜坡"窗口，距离近的词计数更多；用相关系数代替计数，再把负值设为 0；等等。缩放后的向量会出现有意思的语义模式，课件引用了 Rohde 等人 2005 年的 COALS 模型。
+        </p>
+        <p>
+            GloVe（Pennington、Socher 和 Manning，EMNLP 2014）要回答的问题是：怎样把共现概率之比作为线性的意义成分，表示在词向量空间中？答案是用向量差的对数双线性模型。课件列出的优点是训练快，可扩展到巨大的语料。（损失函数的具体形式在课件的图片中，这里从略。）
+        </p>
+    </section>
+
+    <section>
+        <h2>四、怎样评估词向量</h2>
+        <p>
+            和 NLP 中的一般评估一样，分内在评估和外在评估：
+        </p>
+        <ul>
+            <li>内在评估：在某个具体的中间子任务上评估，计算快，有助于理解这个系统，但除非确立了和真实任务的相关性，否则不清楚是否有用。</li>
+            <li>外在评估：在真实任务上评估，计算准确率可能很久，不清楚问题出在这个子系统本身，还是它和其他子系统的交互；如果只把一个子系统换成另一个就提高了准确率，那就赢了。</li>
+        </ul>
+        <p>
+            内在评估一：词向量类比，"man:woman :: king:?"，即 $a:b :: c:?$，看词向量相加后用余弦距离能多好地回答直觉上的语义和句法类比问题，搜索时要排除输入的词。问题是：如果信息在那里但不是线性的呢？课件展示了 GloVe 的可视化。
+        </p>
+        <p>
+            内在评估二：意义相似度，看词向量距离和人的判断的相关性，比如 WordSim353 数据集，里面有 tiger 与 cat、book 与 paper、computer 与 internet、plane 与 car、professor 与 doctor、stock 与 phone、stock 与 CD、stock 与 jaguar 等词对，以及人给出的平均相似度分数。
+        </p>
+        <p>
+            外在评估的一个例子：好的词向量应该直接有助于命名实体识别，即找出对人、组织或地点的指称，比如"Chris Manning lives in Palo Alto"。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224N: Natural Language Processing with Deep Learning &copy; Winter 2026</p>
+        <nav class="footer-nav">
+            <a href="01_课程介绍与NLP的历史.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="03_神经网络基础与反向传播.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

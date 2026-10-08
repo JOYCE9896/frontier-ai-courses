@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第五讲：注意力与 Transformer | Stanford CS224N 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="04_语言模型与循环神经网络.html">&larr; 上一讲</a>
+    <span>Stanford CS224N: Lecture 5</span>
+    <a href="06_预训练.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第五讲：注意力与 Transformer</h1>
+        <p class="subtitle">从 RNN 的瓶颈问题到注意力，带注意力的序列到序列模型，自注意力的查询、键、值，位置表示、前馈非线性和未来遮盖，多头注意力与缩放点积，残差连接和层归一化，Transformer 解码器、编码器与编码器-解码器，以及 Transformer 的成果和待改进之处</p>
+        <div class="author-meta">
+            主讲：Diyi Yang<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs224n/slides_w26/cs224n-2026-lecture05-transformers.pdf" target="_blank">课件</a>（Stanford 课程网站公开，2026 年冬季；课堂录像只对选课学生开放，本文依据课件整理）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、从瓶颈问题说起</h2>
+        <p>
+            这一讲开头复习了上一讲的梯度消失与梯度爆炸、梯度裁剪，以及神经机器翻译和序列到序列模型（见第四讲）。上一讲最后留下的问题是 RNN 的瓶颈：源句子的全部信息都要压进编码器最后的那一个隐藏状态，再交给解码器。
+        </p>
+        <p>
+            注意力为瓶颈问题提供了解决办法。核心思想：解码器的每一步，都通过直接连接到编码器，聚焦源序列的某一部分。
+        </p>
+        <p>
+            起点是对 RNN 做平均池化：从编码器传递信息的一个很基础的办法是取平均。比如情感分类，对"overall I enjoyed the movie a lot"的所有隐藏状态取逐元素的最大值或平均值作为句子编码，通常比只用最后一个状态好。注意力就是加权平均，如果权重是学出来的，就很强大，它让你能做"查找"：查找表中有一张键到值的表，查询匹配其中一个键，返回它的值；注意力中，查询"软"地匹配所有键，得到 0 到 1 之间的权重，键对应的值乘以权重再相加。
+        </p>
+
+        <h3>带注意力的序列到序列模型</h3>
+        <p>
+            以把法语"il a m'entarté"译成"he hit me with a pie"为例：
+        </p>
+        <ol>
+            <li>解码器当前的隐藏状态和每个编码器隐藏状态做点积，得到注意力分数。</li>
+            <li>对分数取 softmax，变成概率分布，即注意力分布。在第一步，它主要关注第一个编码器隐藏状态（对应"he"）。</li>
+            <li>用注意力分布对编码器隐藏状态加权求和，得到注意力输出，它主要包含受到高注意力的那些隐藏状态的信息。</li>
+            <li>把注意力输出和解码器隐藏状态拼接，再像以前一样计算 $\hat y_1$，得到"he"。</li>
+        </ol>
+        <p>
+            有时也把上一步的注意力输出连同通常的解码器输入一起送进解码器。之后各步依次生成 hit、me、with、a、pie。
+        </p>
+        <p>
+            注意力的好处：
+        </p>
+        <ul>
+            <li>显著提高 NMT 的性能，让解码器聚焦源句子的某些部分很有用。</li>
+            <li>更像人做翻译的方式：翻译时可以回头看源句子，而不需要把它全记住。</li>
+            <li>解决瓶颈问题：解码器可以直接看源句子，绕过瓶颈。</li>
+            <li>缓解梯度消失：提供通往远处状态的捷径。</li>
+            <li>提供一些可解释性：查看注意力分布就能知道解码器在关注什么，免费得到（软）对齐，网络自己学会了对齐。</li>
+            <li>一个问题：注意力的计算量随序列长度平方增长。</li>
+        </ul>
+        <p>
+            注意力是通用的深度学习技术，不只用于序列到序列模型和机器翻译。更一般的定义：给定一组值向量和一个查询向量，注意力是根据查询计算这些值的加权和的技术，我们说查询"关注"这些值。比如在 seq2seq 加注意力的模型中，每个解码器隐藏状态（查询）关注所有编码器隐藏状态（值）。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、还需要循环吗：自注意力</h2>
+        <p>
+            抽象地说，注意力是把信息从一个序列 $x$ 传到神经网络输入 $h_t$ 的方式，RNN 做的也是这件事。能不能完全去掉 RNN？也许注意力就是更好的传递信息的方式。课件的时间线是：2014 到 2017 年左右用循环，经过大量试错，再到别的东西。
+        </p>
+        <p>
+            前面讲的是交叉注意力：为了生成 $y_t$，关注输入 $x$。需要的是自注意力：为了生成 $y_t$，要关注 $y_{&lt;t}$。在自注意力中，键、查询、值来自同一个序列。设 $w_{1:n}$ 是词表 $V$ 中的一串词，比如"Zuko made his uncle tea"。对每个 $w_i$，令 $x_i = Ew_i$，$E\in\mathbb{R}^{d\times|V|}$ 是嵌入矩阵。
+        </p>
+        <ol>
+            <li>用权重矩阵 $Q, K, V\in\mathbb{R}^{d\times d}$ 变换每个词嵌入：$q_i = Qx_i$（查询），$k_i = Kx_i$（键），$v_i = Vx_i$（值）。</li>
+            <li>计算键和查询的两两相似度，用 softmax 归一化：$e_{ij} = q_i^\top k_j$，$\alpha_{ij} = \exp(e_{ij})/\sum_{j'}\exp(e_{ij'})$。</li>
+            <li>每个词的输出是值的加权和：$o_i = \sum_j\alpha_{ij}v_j$。</li>
+        </ol>
+        <p>
+            把自注意力作为构建块有几个障碍，各有解决办法：
+        </p>
+        <ul>
+            <li>没有内在的顺序概念。解决：给输入加位置表示。把每个序列位置表示成向量 $p_i\in\mathbb{R}^d$，$i\in\{1,\dots,n\}$，带位置的嵌入是 $\tilde x_i = x_i + p_i$，在深层自注意力网络中在第一层这样做；也可以拼接，但大家大多直接相加。位置向量的两种做法：
+                <ul>
+                    <li>正弦位置表示：把不同周期的正弦和余弦函数拼起来，$p_i = [\sin(i/10000^{2\cdot1/d}), \cos(i/10000^{2\cdot1/d}), \dots, \sin(i/10000^{2\cdot\frac{d}{2}/d}), \cos(i/10000^{2\cdot\frac{d}{2}/d})]$。优点：周期性说明"绝对位置"也许没那么重要；周期会重新开始，也许能外推到更长的序列。缺点：不可学习；外推实际上也不太行。</li>
+                    <li>从零学习的绝对位置表示：让所有 $p_i$ 都是可学习的参数，学一个矩阵 $p\in\mathbb{R}^{d\times n}$，每个 $p_i$ 是它的一列。优点：灵活，每个位置都可以学成适合数据的样子。缺点：肯定无法外推到 $1,\dots,n$ 之外的位置。大多数系统用这种。有时也尝试更灵活的位置表示：相对线性位置注意力（Shaw 等 2018），基于依存句法的位置（Wang 等 2019）。</li>
+                </ul>
+            </li>
+            <li>没有深度学习所需的非线性，全是加权平均：自注意力里没有逐元素的非线性，堆叠更多自注意力层只是对值向量重新平均（讲义里有解释）。简单的修正：加一个前馈网络对每个输出向量做后处理，$m_i = \mathrm{MLP}(\text{output}_i) = W_2\,\mathrm{ReLU}(W_1\,\text{output}_i + b_1) + b_2$。直觉是前馈网络处理注意力的结果，对每个位置的自注意力输出应用同一个前馈网络。</li>
+            <li>预测序列时要保证不"偷看未来"，比如机器翻译或语言建模。可以在每个时间步把键和查询的集合改成只包含过去的词，但这样低效。为了能并行，把对未来词的注意力分数设为 $-\infty$ 来遮盖：$e_{ij} = q_i^\top k_j$（$j\le i$），$e_{ij} = -\infty$（$j &gt; i$）。</li>
+        </ul>
+        <p>
+            自注意力构建块需要的东西：自注意力本身，方法的基础；位置表示，指明序列顺序，因为自注意力对输入是无序的函数；非线性，放在自注意力块的输出处，通常实现为简单的前馈网络；遮盖，在不看未来的前提下并行运算，防止未来的信息"泄漏"到过去。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、Transformer</h2>
+        <h3>Transformer 解码器</h3>
+        <p>
+            Transformer 解码器是构建语言模型这类系统的方式，很像上面的最小自注意力架构，只是多了几个组件。嵌入和位置嵌入相同，接下来把自注意力换成多头自注意力。
+        </p>
+        <p>
+            先看矩阵形式的注意力。令 $X = [x_1;\dots;x_n]\in\mathbb{R}^{n\times d}$ 是输入向量的拼接，$XK, XQ, XV\in\mathbb{R}^{n\times d}$，输出为
+        </p>
+        <p>
+            $$\text{output} = \mathrm{softmax}\!\left(XQ(XK)^\top\right)XV\in\mathbb{R}^{n\times d}$$
+        </p>
+        <p>
+            先用一次矩阵乘法算出所有查询和键的点积 $XQK^\top X^\top\in\mathbb{R}^{n\times n}$（所有两两注意力分数），再取 softmax，用另一次矩阵乘法计算加权平均。
+        </p>
+        <p>
+            多头注意力：如果想同时看句子中的多个地方呢？对词 $i$，自注意力"看"的是 $x_i^\top Q^\top Kx_j$ 高的地方，但也许出于不同的原因想关注不同的 $j$。于是用多组 $Q, K, V$ 定义多个注意力"头"：$Q_\ell, K_\ell, V_\ell\in\mathbb{R}^{d\times\frac{d}{h}}$，$h$ 是头数，$\ell$ 从 1 到 $h$。每个头独立做注意力：$\text{output}_\ell = \mathrm{softmax}(XQ_\ell K_\ell^\top X^\top)XV_\ell\in\mathbb{R}^{n\times d/h}$，再把所有头的输出合并：$\text{output} = [\text{output}_1;\dots;\text{output}_h]Y$，$Y\in\mathbb{R}^{d\times d}$。每个头可以"看"不同的东西，以不同方式构造值向量。
+        </p>
+        <p>
+            多头自注意力计算上很高效：虽然算 $h$ 个头，代价并没有更高。算出 $XQ\in\mathbb{R}^{n\times d}$ 后变形为 $\mathbb{R}^{n\times h\times d/h}$（$XK$、$XV$ 同理），再转置成 $\mathbb{R}^{h\times n\times d/h}$，头这个维度就像批维度，其他几乎都一样，矩阵大小也相同，得到 $h$ 组两两注意力分数。
+        </p>
+        <p>
+            缩放点积（Vaswani 等 2017）有助于训练：维度 $d$ 变大时，向量之间的点积往往变大，softmax 的输入就会很大，梯度变小。所以把注意力分数除以 $\sqrt{d/h}$（维度除以头数），防止分数仅仅因为维度大而变大：
+        </p>
+        <p>
+            $$\text{output}_\ell = \mathrm{softmax}\!\left(\frac{XQ_\ell K_\ell^\top X^\top}{\sqrt{d/h}}\right)XV_\ell$$
+        </p>
+        <p>
+            另外两个优化技巧在大多数 Transformer 图中合写为"Add &amp; Norm"：
+        </p>
+        <ul>
+            <li>残差连接（He 等 2016）：帮助模型训练得更好。不用 $X^{(i)} = \mathrm{Layer}(X^{(i-1)})$，而用 $X^{(i)} = X^{(i-1)} + \mathrm{Layer}(X^{(i-1)})$，只需要学相对上一层的"残差"。经过残差连接的梯度很好，是 1；偏向恒等函数。课件附了 Li 等 2018 年对 ResNet 损失地形的可视化（有无残差的对比）。</li>
+            <li>层归一化（Ba 等 2016）：帮助模型训练得更快。思路是在每一层内把隐藏向量归一化到均值为 0、标准差为 1，减少无信息的变化；它的成功可能来自对梯度的归一化（Xu 等 2019）。对模型中单个（词）向量 $x\in\mathbb{R}^d$，均值 $\mu = \frac{1}{d}\sum_{j}x_j$，方差 $\sigma^2 = \frac{1}{d}\sum_j(x_j-\mu)^2$，$\gamma, \beta\in\mathbb{R}^d$ 是学到的"增益"和"偏置"参数（可以省略），层归一化计算 $\text{output} = \dfrac{x-\mu}{\sigma+\epsilon}\odot\gamma + \beta$：先用标量的均值和方差归一化，再用学到的逐元素增益和偏置调制。</li>
+        </ul>
+        <p>
+            Transformer 解码器是一堆 Transformer 解码器块的堆叠，每个块包括：自注意力（带遮盖的多头注意力）、Add &amp; Norm、前馈、Add &amp; Norm。这就是全部。
+        </p>
+
+        <h3>编码器与编码器-解码器</h3>
+        <p>
+            Transformer 解码器把上下文限制为单向的，适合语言模型。想要双向上下文（像双向 RNN）呢？这就是 Transformer 编码器，唯一的区别是去掉自注意力中的遮盖。
+        </p>
+        <p>
+            机器翻译中，用双向模型处理源句子，用单向模型生成目标句子。对这种 seq2seq 格式，常用 Transformer 编码器-解码器：编码器是普通的 Transformer 编码器；解码器改成对编码器的输出做交叉注意力。交叉注意力的细节：自注意力是键、查询、值来自同一来源；解码器中的注意力更像上周讲的。令 $h_1,\dots,h_n$ 是 Transformer 编码器的输出向量，$z_1,\dots,z_n$ 是 Transformer 解码器的输入向量，那么键和值取自编码器（像一个记忆）：$k_i = Kh_i$，$v_i = Vh_i$；查询取自解码器：$q_i = Qz_i$。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、成果与待改进之处</h2>
+        <p>
+            Transformer 原论文（Vaswani 等 2017）在 WMT 2014 英德、英法翻译上，BLEU 更高，训练也更高效。在文档生成上（Liu 等 2018，WikiSum 数据集），Transformer 也胜过旧的标准方法，课件的说法是"一路都是 Transformer"。
+        </p>
+        <p>
+            想改进 Transformer 的哪些地方？
+        </p>
+        <ul>
+            <li>自注意力的平方计算量：计算所有两两交互，计算量随序列长度平方增长。如果序列长度 $n\ge 50{,}000$ 呢？比如处理长文档。</li>
+            <li>位置表示：简单的绝对位置索引是最好的办法吗？有相对线性位置注意力、基于依存句法的位置等。</li>
+        </ul>
+        <p>
+            真的需要去掉注意力的平方代价吗？随着 Transformer 越来越大，越来越多的计算在自注意力之外，尽管它是平方代价。实践中，几乎没有大型 Transformer 语言模型用这里讲的平方注意力以外的东西，更便宜的方法在大规模上往往效果不好。那么设计更便宜的自注意力替代方案是不是就没意义了？还是说如果做对了，能解锁上下文长得多（超过 10 万 token）的好得多的模型？课件以这个问题结束。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224N: Natural Language Processing with Deep Learning &copy; Winter 2026</p>
+        <nav class="footer-nav">
+            <a href="04_语言模型与循环神经网络.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="06_预训练.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

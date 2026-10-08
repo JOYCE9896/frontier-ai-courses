@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十三讲：分词与多语言（客座讲座） | Stanford CS224N 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="12_推理下推测解码在策略蒸馏长上下文与测试时扩展.html">&larr; 上一讲</a>
+    <span>Stanford CS224N: Lecture 13</span>
+    <a href="14_AI对人类的影响.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十三讲：分词与多语言（客座讲座）</h1>
+        <p class="subtitle">什么是词，语言模型怎样看文本，词级、字符/字节级与子词分词，BPE 训练算法的完整演示，SentencePiece 与 SuperBPE，拼写和故障 token 两个案例，世界上的语言与多语言语言模型，跨语言迁移与多语言的诅咒，分词带来的语言间不公平，以及重新审视字节级模型</p>
+        <div class="author-meta">
+            主讲：Julie Kallini（客座）<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs224n/slides_w26/cs224n-2026-lecture14-guest-julie-tokenization-multilinguality.pdf" target="_blank">课件</a>（Stanford 课程网站公开，2026 年冬季；课堂录像只对选课学生开放，本文依据课件整理）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、什么是词</h2>
+        <p>
+            第二讲的 skip-gram word2vec 目标是给定中心词预测上下文词；第四讲的语言建模是预测下一个词。可是怎样把文本切成词？怎样决定语言模型的词表？
+        </p>
+        <p>
+            这句话有几个词？"We'd sat back on the grass, and time flew by as we looked at the Milky Way." 按空格切是 17 个词加 2 个标点。但 We'd = we + had，算 1 个还是 2 个？looked = look + -ed，这个切分似乎重要；Milky = milk + -y，似乎也重要。
+        </p>
+        <p>
+            语素是语言中有意义或有语法功能的最小单位。We'd 是 2 个语素，Milky 是 2 个，looked 是 2 个；sat = sit + 过去时，flew = fly + 过去时，还算一个语素吗？Milky Way 是一个实体，还算三个语素吗？切分文本有很多有用的方式：字符、语素、词、短语。对语言模型来说哪种最好？
+        </p>
+    </section>
+
+    <section>
+        <h2>二、语言模型怎样看文本</h2>
+        <p>
+            对语言模型来说，语言的基本单位是 token；分词是把文本切成 token 的过程；分词器在文本和语言模型学习的 token 序列之间转换；词表 $V$ 是已知 token 的集合。比如 "We looked at the Milky Way." 编码成 [2167, 10802, 540, 290, 10282, 5781, 0]，词表中 0 是"."，290 是" the"，540 是" at"，10802 是" looked"。
+        </p>
+        <p>
+            为什么需要分词？模型不能直接读原始文本，需要从字符串到嵌入序列的映射。模型拿到 token ID 后在嵌入矩阵中查找对应的嵌入，输出时再反嵌入、解码回文本。分词通常是预处理步骤，不是语言模型核心的一部分，但它在模型训练之前就影响模型怎样学习和处理文本；它也影响语言模型的效率，包括序列长度和参数量（输入嵌入矩阵的大小取决于词表）。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、三种分词方式</h2>
+        <h3>词级分词</h3>
+        <p>
+            假设 token 是按空格分开的词加标点，词表截取语料中最常见的 $|V|$ 个词。优点：语义上有意义的语言单位，一个嵌入大致对应一个可解释的意义。缺点（Jurafsky 和 Martin 第 2 章）：词太多，词表可能很大；不常见的词有长尾，齐普夫定律说一个词的频率和它的频率排名成反比；语言一直在变，《韦氏大学词典》第 12 版新增了 5000 个词（包括 rizz）。怎样处理未知词，也就是词表外（OOV）问题？办法一：用正则表达式或其他规则预处理文本，比如修正拼写错误 importaNt → important，规范拼写 ESPRESSSOOO → ESPRESSO；办法二：所有未知词用一个 UNK token（见 Sutskever 等 2014 和 2015），但很多词常常会被映射成 UNK，比如 "Zipf's law is importaNt in NLP." 变成 "UNK law is UNK in NLP."。
+        </p>
+
+        <h3>字符/字节级分词</h3>
+        <p>
+            也叫"无分词器"（课件附注：该不该这么叫，见 Arnett 的博客）。token 是文本中的单个字节或字符；字节和字符的区别有时要紧，😀 是 1 个字符 4 个字节，"地"是 1 个字符 3 个字节，但字节级和字符级模型常被归为一类。词表就是字母（加空格、标点、数字等）。这类模型有 CharBERT、CANINE、Charformer、ByT5。优点：词表小；完整覆盖输入，没有 OOV；直接看到拼写。缺点：序列非常长；可能更难构建高层表示（有争议）。
+        </p>
+
+        <h3>子词分词</h3>
+        <p>
+            怎样兼得词级分词的效率和字符级分词的覆盖？子词分词：token 是词或词的一部分。直觉是用数据和算法决定词表应该是什么，算法利用语料中相邻文本片段的频率统计来构建词表。有时得到直观的切分（比如 We'd），但大多数时候切分和语言学不对齐（比如 " Milky"、" looked"）。常见的子词分词算法：
+        </p>
+        <ul>
+            <li>字节对编码 BPE（Sennrich 等 2016）：从单个字节开始，反复合并频率最高的相邻 token，直到达到目标词表大小。</li>
+            <li>WordPiece（Wu 等 2016）：和 BPE 类似，但合并的是使合并后数据似然最大的相邻 token。</li>
+            <li>一元语言模型 ULM（Kudo 2018）：从很大的词表（所有子词串）开始，不断丢弃 token，直到达到目标词表大小。</li>
+        </ul>
+        <p>
+            这一讲重点讲 BPE，因为所有流行的前沿语言模型都用它。BPE 为什么这么普及？它因 GPT-2 流行起来，OpenAI 确立了语言模型训练的标准；BPE 简单、容易实现、高效、确定。课件列了各模型的词表大小：Gemini 2.x/Gemma 3 是 262k，Gemini 1.x/Gemma 2 是 256k，Llama 4 是 201k，GPT-4o/GPT-5/o1/o3 是 200k，Kimi K2 是 163k，Qwen2.5/Qwen3/GLM-4 是 151k，Grok 2 和 Longcat Flash Chat 是 131k，Llama 3/混元 T1/TurboS/Large 和 DeepSeek V3/R1 是 128k，DeepSeek V2.5 是 100k，全都是 BPE。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、BPE 算法演示</h2>
+        <p>
+            训练算法，需要训练语料 $D$ 和目标词表大小 $N$：
+        </p>
+        <ol>
+            <li>按空格预切分。</li>
+            <li>用 $D$ 中的字节初始化 $V$。</li>
+            <li>把 $D$ 转成 token（即字节）序列。</li>
+            <li>当 $|V| &lt; N$ 时：统计 $D$ 中所有相邻二元组的次数；把最常见的一对 $(v_i, v_j)$ 合并成新 token $v_n = v_iv_j$，$n = |V| + 1$；把 $D$ 中所有 $v_iv_j$ 替换成 $v_n$。</li>
+        </ol>
+        <p>
+            课件用的训练语料是绕口令 "Peter Piper picked a peck of pickled peppers"。先按空格预切分成 Peter, _Piper, _picked, _a, _peck, _of, _pickled, _peppers（_ 表示前面的空格）；初始词表是其中的单个字节 {_, a, c, d, e, f, i, k, l, o, p, P, r, s, t}；把语料变成字节序列，建立字节对频率表和空的合并列表。然后反复取最常见的一对，合并成新 token，更新语料、词表和合并列表，再更新频率表（因为语料变了）。依次得到的合并是：
+        </p>
+        <ol>
+            <li>_ + p → _p</li>
+            <li>c + k → ck</li>
+            <li>e + r → er</li>
+            <li>_p + e → _pe</li>
+            <li>_p + i → _pi</li>
+            <li>_pi + ck → _pick</li>
+        </ol>
+        <p>
+            这时语料变成 "P e t er, _ P i p er, _pick e d, _ a, _pe ck, _ o f, _pick l e d, _pe p p er s"，一直继续到达到目标词表大小。
+        </p>
+        <p>
+            测试时对新文本分词：把它拆成字节，按顺序应用合并规则。比如输入词 " pier"，字节是 _ p i e r；规则 1 得到 _p i e r；规则 3 得到 _p i er；规则 5 得到 _pi er。可以在 tiktokenizer.vercel.app 上看常见分词器怎样切分文本。
+        </p>
+
+        <h3>超越子词</h3>
+        <p>
+            按空格预切分总是合理吗？有的语言不用空格分词（中文、日文、泰文）；还有多词表达（比如 "on the other hand"、"depend on"）。SentencePiece（Kudo 和 Richardson 2018）是一个分词器库（不是算法），实现了 BPE 和一元语言模型，把空格当作词表中的基本符号，T5、Llama 2、XLM-R、Gemma 和很多多语言模型都用它。SuperBPE（Liu 等 2025）是一种预切分课程：先学子词，再去掉空格的限制，学跨词的"超词" token，词表更小，推理计算更少。
+        </p>
+        <p>
+            BPE 子词分词是今天事实上的标准：它是简单有效的压缩算法；一切都能用词表表示，没有 OOV；有一些共享的表示（比如 picked、picking）。但问题没有全部解决，还有很多工作要做。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、案例：拼写与故障 token</h2>
+        <h3>拼写</h3>
+        <p>
+            模型看到的是子词块，不是单个字符。GPT-2 把 strawberry 切成 ["str", "aw", "berry"]；GPT-4o 把整个 strawberry 当作一个不透明的 token。两种切分都不能让模型直接数出有几个 r。更广泛地说，子词模型在这些任务上有困难：把词拼出来，要把 token 分解成模型从没训练过的字符；倒转字符串，需要分词器没有提供的字符级访问（Huang 等 2023）；对拼写错误的鲁棒性，改一个字符就可能移动所有 BPE 合并边界，产生完全不同的 token 序列。字符相关的语言模型基准见 CUTE（Edman 等 2024）和 Huang 等 2023。模型的语言原子是子词，不是字符，任何字符级任务都迫使模型反推 token 中没有明确包含的信息。
+        </p>
+
+        <h3>故障 token</h3>
+        <p>
+            分词器和模型的训练数据可能不一致：BPE 分词器在一个语料上训练，语言模型在另一个（可能不同的）语料上训练；有些 token 进了词表，却在语言模型的训练数据中很少见或不出现，最后嵌入是随机初始化的或训练得很差，行为无法预料。有名的例子是 SolidGoldMagikarp，一个在分词器训练数据中出现过多的 Reddit 用户名；让 GPT-3 重复或解释这个 token 时，它会幻觉出关于 "distribute" 这个词的内容、回避问题或无法重复这个 token。《Fishing for Magikarp》（Land 和 Bartolo 2024）开发了自动检测方法，发现故障 token 在很多模型中都普遍存在（GPT-2、LLaMA 2/3、OLMo、Qwen 等）。这不只是奇闻：浪费了词表位置，还是对抗攻击的入口。更一般地说，不要用和分词器不同的数据训练模型（见 Arnett 的另一篇博客）。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、多语言</h2>
+        <p>
+            把 ChatGPT 的分词器用在英语以外的语言上会怎样？课件对比了英语、法语、索马里语、泰语同一句话的 token 数和字符数。在回答"分词为什么对多语言语言建模这么重要"之前，先讲多语言本身。
+        </p>
+        <h3>为什么多语言重要</h3>
+        <p>
+            世界上有记录的语言超过 7000 种。世界人口中约 20% 说英语，但只有约 5% 以英语为母语。现实需求是多语言的：翻译、跨语言信息检索、语码转换。如果 NLP 工具只在英语上好用，我们就是在造把世界大多数人排除在外的技术。尽管语言如此多样，Common Crawl 中 40% 到 45% 是英语数据。高资源语言有丰富的数字文本和标注数据集/工具，可以训练和评估 NLP 系统；低资源语言这些都稀缺，训练和评估都难。很多低资源语言（比如他加禄语、阿姆哈拉语、约鲁巴语）在 Common Crawl 中占不到 0.01%。想了解世界上的语言，可以看《世界语言结构地图集》（WALS，2700 种语言的语言特征数据库）和 Ethnologue（语言人口统计数据库）。
+        </p>
+
+        <h3>多语言语言模型</h3>
+        <p>
+            多语言语言模型在架构上和任何语言模型都一样，同样的 Transformer，同样的训练目标；唯一的区别是分词器和语言模型都用多种语言的训练数据：收集多语言文本，在多语言语料上训练 BPE 分词器，用标准目标（MLM 或 CLM）训练语言模型。例子有 mBERT、XLM-R（编码器），mT5（编码器-解码器），BLOOM（解码器），以及 2023 年以后的 GPT-4、Llama 等（隐式多语言的解码器）。以前并非总是这样：XLM（2019）用翻译语言建模（TLM），把两种语言的平行句子拼在一起，跨两边做掩码语言建模。
+        </p>
+        <p>
+            跨语言迁移：在多种语言语料混合上训练的多语言模型，即使不用翻译语言建模，也表现出很强的跨语言迁移能力，即在一种语言（比如英语）的标注数据上微调后，能在从没微调过的另一种语言上完成任务。课件的例子：第一阶段，XLM-R 在 100 种语言、2.5TB 的 CommonCrawl 数据上做掩码语言建模；第二阶段，加分类头，只用英语标注数据做有监督训练（比如情感分析）；第三阶段，零样本部署到任何预训练过的语言，共享的表示空间让模型在没有目标语言标注的情况下做出预测，比如法语"Film magnifique !"判为正面，德语"Schrecklicher Service"判为负面，中文"非常好的体验"判为正面。
+        </p>
+        <p>
+            词表大小和重叠的影响：词表重叠有助于跨语言迁移（Limisiewicz 等 2023；Kallini 等 2025a）。有重叠的词表胜过不相交的，重叠越多，迁移通常越好；即使"假朋友"（形同义异的共享 token）也有助于形成有用的跨语言嵌入；好处可能因任务而异。但每种语言仍需要足够的词表份额：XLM-V 把词表扩到 100 万 token（XLM-R 的 4 倍），覆盖更好，但效率代价显著。
+        </p>
+        <p>
+            多语言的诅咒：跨语言迁移看似能解决高低资源语言之间的差距，只要在英语上微调，再把多语言模型用到新语言上就行（并不完全是这样）。加更多语言对跨语言迁移有帮助，但只到某个程度为止（也是 XLM-R 论文提出的）：模型容量固定时，XLM-R 在跨语言自然语言推理（XNLI）上的准确率从 71.8%（7 种语言）降到 67.7%（100 种语言）。为什么？模型参数有限；语言越多，每种语言分到的"份额"越小；加语言时，高资源语言（英语、法语）的表现下降；低资源语言起初从迁移中受益，最终也会受损。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、多语言分词</h2>
+        <p>
+            分词带来语言之间的不公平，问题在模型训练之前、在分词器那里就开始了。分词的影响可以和预训练数据集大小一样大（Rust 等 2021）；对等价的文本，不同语言的分词长度最多相差 15 倍（Petrov 等 2023）。商业语言模型 API 向非英语用户多收费（Ahia 等 2023）：系统分析 OpenAI API 在 22 种类型多样的语言上的情况，很多语言的用户每单位意义付费更多，得到的结果更差，而且往往来自 API 本来就不那么负担得起的地区。子词繁殖率是每个词平均产生的子词 token 数，它和下游表现强负相关。
+        </p>
+        <p>
+            多语言可能是重新审视字符/字节级分词的另一个理由。CANINE 是 Google 对应 mBERT 的字符级模型，因为覆盖完整的 Unicode 字母表，它能处理从没见过的语言。字符/字节级模型也可以变得更高效，处理长序列，这是做有创意的架构工作的好机会。MrT5（Kallini 等 2025b）教 ByT5 在大部分处理中只用一部分字节，用一个可学习的删除门动态缩短序列，并学到因语言而异的压缩。还有很多字节级建模的新架构：H-Nets（Hwang 等 2025）、Byte Latent Transformer（Pagnoni 等 2025）、分层自回归 Transformer（Neitemeier 等 2025），另见 Bolmo（Minixhofer 等 2025）、EvaByte（Zheng 等 2025）。
+        </p>
+        <p>
+            字符/字节级分词也解决了子词分词的其他问题：没有故障 token，每个字符/字节都在训练数据中出现过；对字符级的操纵或噪声更鲁棒；能直接看到词的字符组成。潜在分词：字节/字符级模型把学习相关的意义单位作为架构的一部分。它们能不能让我们同时捕捉字符、语素、词、短语这些层次？
+        </p>
+        <p>
+            课件致谢 Dan Jurafsky、Alisa Liu、Yejin Choi/Taylor Sorensen、Christopher Potts 分享示例幻灯片，Tolúlọpẹ́ Ògúnrẹ̀mí 和 Catherine Arnett 提供论文和参考，以及 Jurafsky 实验室成员对讲座的早期反馈。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224N: Natural Language Processing with Deep Learning &copy; Winter 2026</p>
+        <nav class="footer-nav">
+            <a href="12_推理下推测解码在策略蒸馏长上下文与测试时扩展.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="14_AI对人类的影响.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

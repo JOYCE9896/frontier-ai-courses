@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第九讲：检索增强生成与语言 Agent | Stanford CS224N 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="08_高效适配提示与参数高效微调.html">&larr; 上一讲</a>
+    <span>Stanford CS224N: Lecture 9</span>
+    <a href="10_评估.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第九讲：检索增强生成与语言 Agent</h1>
+        <p class="subtitle">阅读理解与开放域问答，检索器-阅读器框架与 RAG，各种检索器及其训练，长上下文中模型用不好文档，引用与幻觉，语言 Agent 的组成，推理与行动（ReAct、自洽性、Reflexion、多 Agent 辩论），记忆，工具使用，Agent 的应用、数据与评估，以及动手写一个编程 Agent</p>
+        <div class="author-meta">
+            主讲：Diyi Yang<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs224n/slides_w26/cs224n-2026-lecture10-rag-agents.pdf" target="_blank">课件</a>（Stanford 课程网站公开，2026 年冬季；课堂录像只对选课学生开放，本文依据课件整理）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、开头：适配器</h2>
+        <p>
+            这一讲开头先讲完上一讲的函数视角（适配器、语言适配器、各方法的性能比较、知识蒸馏等其他适配方法），内容见第八讲第七节。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、问答与检索增强生成</h2>
+        <h3>阅读理解与开放域问答</h3>
+        <p>
+            阅读理解的代表数据集是 SQuAD（Rajpurkar 等 2016，10 万多个问题）。传统方法基于特征：生成候选答案列表 $(a_1, \dots, a_M)$，定义特征向量 $\phi(p, q, a_i)\in\mathbb{R}^d$（词和二元组特征、句法树匹配），再用多类逻辑回归。神经方法的问题表述：输入是段落 $C = (c_1, \dots, c_N)$ 和问题 $Q = (q_1, \dots, q_M)$，输出是 $1\le\text{start}\le\text{end}\le N$，即答案在段落中的起止位置，一般 $N$ 约 100，$M$ 约 15。
+        </p>
+        <p>
+            开放域问答和阅读理解不同，不假设给定一段文章，只能访问一大批文档（比如维基百科），不知道答案在哪里，目标是对任意开放域问题返回答案。这难得多，也更实用。它和处理特定领域（医疗、技术支持）问题的封闭域系统相对。Chen 等 2017 年的 DrQA（《Reading Wikipedia to Answer Open-domain Questions》）由文档检索器和文档阅读器组成，例子是"1933 年华沙有多少居民说波兰语？"，答案 833,500。
+        </p>
+
+        <h3>用检索弥补语言模型的不足</h3>
+        <p>
+            与其让语言模型记住一切，能不能在需要的时候把相关、有用的内容提供给它？检索/搜索是找这类信息的常见机制。它是动态的：很容易更新或往检索系统里加文档；它可解释：语言模型可以生成指向检索文档的引用，方便人核实生成内容。
+        </p>
+        <p>
+            检索器-阅读器框架：输入是一大批文档 $\mathcal{D} = \{D_1, \dots, D_N\}$ 和问题 $Q$，输出是答案字符串 $A$。检索器 $f(\mathcal{D}, Q)\to P_1, \dots, P_K$，$K$ 预先设定（比如 100）；阅读器 $g(Q, \{P_1, \dots, P_K\})\to A$，这就是一个阅读理解问题。检索器可以是标准的 TF-IDF 稀疏信息检索模型（固定模块）；阅读器是神经阅读理解模型，可以在 SQuAD 和其他远程监督的问答数据集上训练，也可以是零样本的大语言模型（ChatGPT 等）。检索增强生成（RAG，Lewis 等 2021）很强大，另见 REALM、DPR、ORQA 等工作。
+        </p>
+
+        <h3>检索器</h3>
+        <p>
+            检索相关段落的方式：词重叠（BM25）；向量检索（DPR、句向量）；其他神经系统（ColBERT）。最快的是在预先算好的向量上算相似度（或词重叠），最慢的是用语言模型算相似度，还有预先计算"文档索引"的混合方式，比如 ColBERT。
+        </p>
+        <p>
+            检索器可以训练。阅读器和检索器联合训练（Lee 等 2019）：每个段落用 BERT 编码成向量，检索得分是问题表示和段落表示的点积；但段落数量巨大（英文维基百科有 2100 万段），不容易建模。稠密段落检索 DPR（Karpukhin 等 2020）：也可以只用问答对训练检索器，基于 BERT 的可训练检索器大幅超过传统信息检索模型。深度检索加生成模型：近期工作显示生成答案比抽取答案更好，比如 Fusion-in-Decoder（FiD = DPR + T5，Izacard 和 Grave 2020）。
+        </p>
+
+        <h3>能用多少文档</h3>
+        <p>
+            检索器很关键：如果只能用一篇文档，就必须选对。为什么不取很多文档都交给语言模型？长上下文的问题会出现：语言模型不能很好地关注它的上下文。Liu 等 2023 年的设置是一篇相关文档、其余都无关：GPT-3.5-Turbo 不给文档的闭卷表现约 56%，只给相关文档的表现约 88.5%。实践中语言模型用不了很多文档：检索器的召回率缓慢上升到 90%，RAG 的表现在 10 到 20 篇文档后很快饱和。
+        </p>
+
+        <h3>联网搜索与引用</h3>
+        <p>
+            还有带网络搜索、能引用网页的大语言模型系统。RARR（Guo 等 2023）用大语言模型研究和修订大语言模型说的话：用问答检查来源和回答的一致性，用语言模型为每一项返回引用；检测文本和引用的不一致，必要时运行编辑模型修订文本；挑选证据片段形成归因报告。
+        </p>
+        <p>
+            RAG 独有的好处是引用来源，但引用本身也是大语言模型生成的，所以也可能是幻觉。这种情况有多常见？课件给出的结果：输出容易读，评分者（1 到 5 分）觉得有用，但引用的精确率和召回率都很低。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、语言 Agent：从文字到行动</h2>
+        <p>
+            大语言模型对给定输入预测文本输出；Agent 根据从环境/世界得到的观察执行动作。什么算 Agent、什么不算，什么叫 "agentic"，争论很多；这里只关注由大语言模型驱动的系统，即语言 Agent 的关键组成。（很多页来自 Yu Su、Diyi Yang、Shunyu Yao、Tao Yu 在 EMNLP 2024 的教程《Language Agents: Foundations, Prospects, and Risks》。）
+        </p>
+        <p>
+            关键组成：大语言模型核心；规划与推理（ReAct、思维链、Reflexion 等）；记忆（情景、语义、程序等）；工具（检索、计算器、代码、搜索、读写记忆等）。Agent 的动作包括调用工具、交互、回应用户；环境（外部世界）可以是桌面操作系统、浏览器、手机应用、游戏、机器人、数据库等，Agent 在其中行动、观察。课件注明这张图只用于说明，不是 Agent 开发的确切流程。另见 Lilian Weng 的博客和认知语言 Agent（Sumers 和 Yao 2024）中的其他组成方式。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、推理</h2>
+        <p>
+            对人来说，推理是各种心理过程；对大语言模型来说，是模仿人类各种（不是全部）心理过程的中间生成；对 Agent 来说，是内部动作（课件提到 Kahneman 2003 年的双过程理论，也注明这个概念受到质疑，比如 Mercier 和 Sperber 2017）。
+        </p>
+        <p>
+            推理为什么对 Agent 有用？从观察到动作的映射可能很难。例子：在做菜，看到盐用完了，看到一个柜子和一张桌子；推理"这道菜要咸的，盐用完了，应该找酱油，它在我右边的柜子里"，于是右转、打开柜子。推理带来泛化和对齐。
+        </p>
+        <p>
+            只推理不行动：问题是"除了 Apple Remote，还有什么设备能控制 Apple Remote 最初设计用来交互的程序？"直接回答得到 iPod；只推理的思维链认为 Apple Remote 最初为 Apple TV 设计，答 iPhone、iPad、iPod Touch，都错了。ReAct（推理加行动）交替进行思考、动作和观察：先搜索 Apple Remote，发现它最初设计用来控制 Front Row 媒体中心程序；搜索 Front Row 没找到，改搜 Front Row (software)；得知它可以用 Apple Remote 或键盘功能键控制，答"键盘功能键"，正确。
+        </p>
+        <p>
+            ReAct 和思维链、自洽性比较：ReAct 一直胜过只行动的 Act；幻觉是思维链的严重问题，ReAct 能在一定程度上缓解。
+        </p>
+        <ul>
+            <li>自洽性（Wang 等 2023）：用思维链提示语言模型，生成一组多样的推理路径，在最终答案集合中选出现最多的答案。</li>
+            <li>Reflexion：Agent 用语言反思任务反馈信号，保存自己的反思文本，以做出更好的决策。它比 ReAct 表现更好，通过自我反思把长而失败的轨迹提炼成相关经验，将来作为"自我提示"，减少错误。</li>
+            <li>多 Agent 辩论改进推理（Du 等 2023）。</li>
+            <li>用编排者协调多个 Agent：课件引用了 Microsoft 的 Magentic-One，一个解决复杂任务的通用多 Agent 系统。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>五、记忆</h2>
+        <p>
+            按记忆内容分类（受人类长期记忆系统启发）：
+        </p>
+        <ul>
+            <li>情景记忆，存经验。例子是生成式 Agent（Park 等 2023）。写：只追加的事件流；读：根据启发式分数检索。</li>
+            <li>语义记忆，存知识。写：大语言模型对事件做推理；读：检索。</li>
+            <li>程序记忆，存技能。例子是 Voyager（Wang 等 2023）。写：基于代码的技能；读：嵌入检索。</li>
+        </ul>
+        <p>
+            生成式 Agent 为什么需要记忆：上下文窗口不可能装下所有事件流；即使装得下，也可能难以关注相关事件或消化它们。
+        </p>
+        <p>
+            MemGPT（Packer 等 2024）：受操作系统启发、做虚拟上下文管理的大语言模型系统，通过函数调用，Agent 可以读写外部数据源、修改自己的上下文，并选择何时回应用户。在深度记忆检索（DMR）任务上，MemGPT 的表现不受上下文长度增加的影响。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、工具使用</h2>
+        <ul>
+            <li>ToolkenGPT（Hao 等 2024）：把每个工具表示成一个 token（"toolken"），学习它的嵌入，像生成普通词一样调用工具；触发某个 toolken 后，提示语言模型补全工具的参数再执行。</li>
+            <li>Toolformer：语言模型自己学会使用工具，训练模型决定调用哪个 API、何时调用、传什么参数、怎样最好地利用结果。用自监督学习，每个 API 只需几个示范；工具包括计算器、问答系统、搜索引擎、翻译系统、日历。做法：对输入 $x$ 采样一个位置 $i$ 和对应的 API 调用候选 $c_i^1, \dots, c_i^k$；执行这些调用，过滤掉不能降低后续 token 损失 $L_i$ 的调用；把剩下的调用和原文交织，得到新文本 $x^*$。</li>
+            <li>Gorilla（Patil 等 2023）：连接海量 API 的大语言模型，用 self-instruct 生成（指令，API）对，在上面微调 LLaMA。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>七、Agent 的应用、数据与评估</h2>
+        <p>
+            按环境和领域分，数字世界有编程 Agent、游戏 Agent、手机 Agent、网页/应用 Agent、计算机 Agent，物理世界有机器人。
+        </p>
+        <ul>
+            <li>编程 Agent：环境是项目代码库、文件系统、IDE 等；观察空间包括代码文件、运行输出、文档、报错、提交历史等；动作空间包括编辑代码、搜索/查看文件、更新测试等。基准如 SWE-bench（Jimenez 和 Yang 2023）。</li>
+            <li>网页/应用 Agent：环境是浏览器或应用；观察空间包括截图、DOM 树、HTML、历史动作等；动作空间是浏览器/应用控制（点击、输入、滚动、拖拽、悬停等）。基准如 Mind2Web（Deng 等 2023）、WebArena（Zhou 等 2023）。</li>
+            <li>计算机使用 Agent：环境是桌面操作系统；观察空间包括桌面截图、无障碍树、历史动作等；动作空间是键盘/鼠标控制（点击、输入、拖拽、快捷键）。例子有 OpenAI Universe（2016）、OSWorld（Xie 等 2024）。</li>
+        </ul>
+        <p>
+            扩大 Agent 数据：人类示范需要昂贵复杂的基础设施，花专家的时间和钱，任务覆盖也有限；合成/模拟，比如把网上的教程转换成直接的训练示范（Synatra）；互联网规模的数据，网上有大量视频和数据展示人怎样完成（Agent）任务，但没有落地的轨迹。
+        </p>
+        <p>
+            案例 SWE-smith（Yang 等 2025）：一个工具包，能为任何（Python）GitHub 仓库创建执行环境，并合成成百上千个任务实例。训练技术是拒绝采样微调，专家模型是 Claude 3.5/3.7 和 GPT-4o，学生模型是 Qwen 2.5 Coder Instruct，Agent 系统是 SWE-agent。
+        </p>
+        <p>
+            Agent 评估的难点：真实环境搭建复杂；任务覆盖；成功标准开放；有多条合理的解决路径；评估指标写不成脚本，需要人来判断；评估不只看任务是否成功。评估方式包括基准、用大语言模型/视觉语言模型评、众包，详见"基准与评估"那一讲。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、附：一步步写一个编程 Agent</h2>
+        <p>
+            最简单的 AI 编程 Agent 就是一个大循环（这部分课件署名 John Yang）。给定任务，比如"给我做一个网页应用"，启动循环：1. 语言模型提出一个动作；2. 在代码环境（bash 终端、docker 容器、Python 解释器等）中执行这个动作；3. 把输出告诉语言模型；然后重复。要实现三个函数：query_lm，输入消息，输出语言模型的回应；parse_action，输入语言模型的回应，输出 bash 动作；execute_action，输入 bash 动作，输出标准输出。完整教程见 <a href="https://minimal-agent.com/" target="_blank">minimal-agent.com</a>。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224N: Natural Language Processing with Deep Learning &copy; Winter 2026</p>
+        <nav class="footer-nav">
+            <a href="08_高效适配提示与参数高效微调.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="10_评估.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
