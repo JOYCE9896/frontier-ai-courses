@@ -25,6 +25,7 @@ Stanford 和 CMU 2025–2026 学年 AI 课程的中文笔记，附一套给零�
 | | 内容 |
 | :-- | :-- |
 | [AI 基础](https://joyce9896.github.io/frontier-ai-courses/00-Foundations/) | 向量、概率、导数、神经网络、Transformer、训练与解码，每篇用具体数字算一遍 |
+| [动手练习](https://joyce9896.github.io/frontier-ai-courses/01-Labs/) | 能跑的小程序，代码和实际运行结果原样贴出：从零训练一个小 LLaMA 等 |
 
 ### 技术
 

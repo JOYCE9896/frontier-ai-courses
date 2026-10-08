@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>从零写一个小 LLaMA | 动手练习</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+    <style>
+        pre.code code, pre.output code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.82rem; line-height: 1.5; white-space: pre; }
+        pre.output { border-left: 4px solid #7a5c2e; }
+        .label { font-size: 0.85rem; color: #888; margin-bottom: -1rem; }
+        img.figure { max-width: 100%; height: auto; display: block; margin: 1.5rem 0; }
+    </style>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="index.html">&larr; 练习目录</a>
+    <span>动手练习 01</span>
+    <a href="index.html">练习目录 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>练习 01：从零写一个小 LLaMA</h1>
+        <p class="subtitle">用大约 200 行 PyTorch 写一个 1200 万参数的语言模型，在儿童故事上训练 40 分钟，看它怎样从胡言乱语学会讲故事</p>
+        <div class="author-meta">
+            对应作业：Stanford CS336 作业 1（Basics），CMU 11-711 作业 1（Build Your Own LLaMa）。这里的代码另外写过，不是作业答案。<br>
+            零基础读前预备：<a href="../00-Foundations/09_分词.html">分词</a>、<a href="../00-Foundations/11_语言模型.html">语言模型</a>、<a href="../00-Foundations/06_softmax与交叉熵.html">softmax 与交叉熵</a>、<a href="../00-Foundations/07_梯度下降与反向传播.html">梯度下降与反向传播</a>、<a href="../00-Foundations/12_注意力与Transformer.html">注意力与 Transformer</a><br>
+            完整代码：<code>01-Labs/code/tinyllama/</code>（prepare.py、model.py、check.py、train.py、generate.py、plot.py）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、要做的是什么</h2>
+        <p>
+            语言模型只做一件事：给它一段文字，它猜下一个词是什么。它给出的不是一个词，而是词表里每个词的概率，比如"Once upon a"后面接"time"的概率是 95%，接"day"是 2%，等等。从这个分布里挑一个词接上去，再让它猜下一个，反复做，就生成了一段话。ChatGPT 也是这样一个词一个词生成的，只是大得多。
+        </p>
+        <p>
+            模型一开始什么都不会，它的参数（几百万个数字）是随机的，猜出来的是乱码。训练就是给它看大量真实文本，每猜错一次就把参数往"猜得更准"的方向调一点点。调几千次之后，它就学会了语法、常见的情节、人物的名字。
+        </p>
+        <p>
+            这次练习分四步，每一步对应一个文件：
+        </p>
+        <ol>
+            <li>准备数据（prepare.py）：下载故事，把文字切成模型能处理的小单位，换成数字。</li>
+            <li>写模型（model.py）：按 LLaMA 的结构搭一个小 Transformer。</li>
+            <li>训练前检查（check.py）：确认模型的形状、初始状态都对，量一下速度。</li>
+            <li>训练和生成（train.py、generate.py）：训练 4000 步，每隔一段时间让它写一个故事，看它的进步。</li>
+        </ol>
+        <p>
+            为什么叫"小 LLaMA"？LLaMA 是 Meta 发布的一系列开源大模型，后来很多开源模型（Qwen、DeepSeek 等）沿用了它的结构。这里的模型和 LLaMA 的零件完全一样，只是尺寸小得多：LLaMA 3 的 8B 版本有 80 亿参数，这里只有 1200 万，小了六百多倍，所以在一台笔记本上 40 分钟就能训练完。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、准备数据</h2>
+        <h3>数据：TinyStories</h3>
+        <p>
+            TinyStories 是微软研究院 2023 年发布的数据集，里面是用 GPT-3.5 和 GPT-4 生成的几百万篇儿童故事，只用三四岁小孩认识的词。作者想看看：如果语言足够简单，很小的模型能不能学会写通顺的故事。答案是能，所以它很适合做这种练习。这里只用了其中四分之一，约 53 万篇。一篇故事长这样：
+        </p>
+        <blockquote>
+            One day, a little girl named Lily found a needle in her room. She knew it was difficult to play with it because it was sharp. Lily wanted to share the needle with her mom, so she could sew a button on her shirt. ……
+        </blockquote>
+
+        <h3>分词：把文字变成数字</h3>
+        <p>
+            模型只能处理数字，所以先要把文字切成小块（叫 token），每个 token 对应一个编号。切法有很多种：按字母切，序列会很长；按整词切，词表会很大，还会遇到没见过的词。现在的模型都用折中的办法，叫 BPE（字节对编码）：先把文字拆成单个字符，然后统计哪两个相邻的块一起出现得最多，就把它们合并成一个新块，反复合并，直到块的种类达到设定的数目。这样常见的词（the、little）会变成一个 token，少见的词会被拆成几块。
+        </p>
+        <p>
+            这里把词表大小设成 4096，也就是一共有 4096 种 token。BPE 的合并过程在后面的练习 02 里会一步步手写，这里先用现成的 tokenizers 库，8 秒就能训练好。下面是 prepare.py 中训练分词器和编码数据的部分：
+        </p>
+        <pre class="code"><code># 1. 训练字节级 BPE 分词器（BPE 算法本身在练习 2 里手写，这里用现成库加快速度）
+t0 = time.time()
+tok = Tokenizer(models.BPE())
+tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+tok.decoder = decoders.ByteLevel()
+trainer = trainers.BpeTrainer(vocab_size=VOCAB_SIZE, special_tokens=[&quot;&lt;|endoftext|&gt;&quot;],
+                              initial_alphabet=pre_tokenizers.ByteLevel.alphabet())
+tok.train_from_iterator(train_texts, trainer=trainer)
+tok.save(os.path.join(OUT, &quot;tokenizer.json&quot;))
+print(f&quot;分词器训练完成，词表大小 {tok.get_vocab_size()}，用时 {time.time()-t0:.0f} 秒&quot;)
+
+example = &quot;Once upon a time, there was a little dog named Max.&quot;
+enc = tok.encode(example)
+print(&quot;示例句子:&quot;, example)
+print(&quot;切成的 token:&quot;, enc.tokens)
+print(&quot;token ID:&quot;, enc.ids)
+
+# 2. 编码全部故事，故事之间用 &lt;|endoftext|&gt; 隔开
+eot = tok.token_to_id(&quot;&lt;|endoftext|&gt;&quot;)
+def encode_all(texts, path):
+    ids = []
+    for batch_start in range(0, len(texts), 10000):
+        for e in tok.encode_batch(texts[batch_start:batch_start+10000]):
+            ids.extend(e.ids); ids.append(eot)
+    arr = np.array(ids, dtype=np.uint16)
+    arr.tofile(path)
+    return len(arr)
+
+t0 = time.time()
+n_train = encode_all(train_texts, os.path.join(OUT, &quot;train.bin&quot;))
+n_val = encode_all(val_texts, os.path.join(OUT, &quot;val.bin&quot;))
+print(f&quot;编码完成：训练集 {n_train:,} 个 token，验证集 {n_val:,} 个 token，用时 {time.time()-t0:.0f} 秒&quot;)
+print(f&quot;平均每篇故事 {n_train/len(train_texts):.0f} 个 token&quot;)</code></pre>
+        <p class="label">运行输出：</p>
+        <pre class="output"><code>
+
+
+训练集 529,930 篇故事，验证集 21,990 篇
+分词器训练完成，词表大小 4096，用时 8 秒
+示例句子: Once upon a time, there was a little dog named Max.
+切成的 token: [&#x27;Once&#x27;, &#x27;Ġupon&#x27;, &#x27;Ġa&#x27;, &#x27;Ġtime&#x27;, &#x27;,&#x27;, &#x27;Ġthere&#x27;, &#x27;Ġwas&#x27;, &#x27;Ġa&#x27;, &#x27;Ġlittle&#x27;, &#x27;Ġdog&#x27;, &#x27;Ġnamed&#x27;, &#x27;ĠMax&#x27;, &#x27;.&#x27;]
+token ID: [432, 448, 259, 396, 12, 402, 282, 259, 398, 629, 501, 706, 14]
+编码完成：训练集 122,021,518 个 token，验证集 4,883,843 个 token，用时 18 秒
+平均每篇故事 230 个 token</code></pre>
+        <p>
+            怎样读这段输出：
+        </p>
+        <ul>
+            <li>"Once upon a time, there was a little dog named Max." 被切成 13 个 token，这里每个词正好都是一个 token，因为它们在故事里都很常见。前面带 Ġ 的表示"这个词前面有一个空格"，空格也是文字的一部分，模型要学会在哪里加空格。</li>
+            <li>每个 token 对应一个编号，比如 "Ġa" 是 259，在句子里出现了两次，两次都是 259。从这里开始，模型看到的只有这串数字。</li>
+            <li>53 万篇故事一共变成了约 1.22 亿个 token，平均每篇 230 个。所有故事首尾相接存成一个长长的数字数组，故事之间插一个特殊 token &lt;|endoftext|&gt; 表示"一篇结束了"。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>三、模型的结构</h2>
+        <p>
+            先看整体。一串 token 编号进入模型后，依次经过：
+        </p>
+        <ol>
+            <li>词嵌入：把每个编号换成一个 384 维的向量（384 个数字）。可以把它理解成一张 4096 行的表，第 259 行就是 token "Ġa" 的向量。这些数字一开始是随机的，训练中会慢慢调成有意义的样子，意思相近的词向量也相近。</li>
+            <li>6 个 Transformer 块：每个块让每个位置的向量"看一看"前面的 token，把上下文的信息混进来，再各自做一番加工。经过 6 层，"bank"这个位置的向量就会带上"这是河岸还是银行"的信息。</li>
+            <li>输出层：把最后一个位置的 384 维向量变成 4096 个分数，每个 token 一个，分数越高表示越可能是下一个 token。再用 softmax 把分数变成概率。</li>
+        </ol>
+        <p>
+            每个 Transformer 块里有两个主要部件：注意力（让各位置交换信息）和前馈层（每个位置单独加工）。另外还有归一化和残差连接两个辅助设计，让很多层叠在一起时还能稳定训练。下面一个一个看。
+        </p>
+
+        <h3>1. 模型的尺寸</h3>
+        <pre class="code"><code>@dataclass
+class Config:
+    vocab_size: int = 4096
+    dim: int = 384          # 每个 token 的向量长度
+    n_layers: int = 6       # Transformer 块的层数
+    n_heads: int = 6        # 注意力头数，每个头 384/6 = 64 维
+    hidden_dim: int = 1024  # SwiGLU 前馈层的中间维度
+    max_seq_len: int = 256  # 一次最多看多少个 token</code></pre>
+        <p>
+            这几个数决定了模型有多大。dim 是每个 token 向量的长度；n_heads = 6 表示注意力分成 6 个"头"，每个头处理 64 维，可以各自关注不同的东西（比如一个头关注"主语是谁"，另一个关注"刚才说到哪"）；max_seq_len = 256 表示模型一次最多看 256 个 token，再往前的它看不到。
+        </p>
+
+        <h3>2. RMSNorm：把向量的大小拉回正常范围</h3>
+        <p>
+            向量经过一层层计算，里面的数字可能越来越大或越来越小，训练就会出问题。归一化的作用是在每次计算前，把向量缩放到一个标准的大小。RMSNorm 的做法很简单：算出向量中所有数字平方的平均值再开根号（均方根，RMS），然后每个数字都除以它。
+        </p>
+        <p>
+            举个例子：向量 [3, 4]，平方是 9 和 16，平均 12.5，开根号约 3.54，除完得到 [0.85, 1.13]。不管原来的向量是 [3, 4] 还是 [300, 400]，除完都一样，大小被拉回了 1 附近，方向不变。最后再乘一组可学习的权重 weight，让模型自己决定每一维该放大还是缩小。
+        </p>
+        <pre class="code"><code>class RMSNorm(nn.Module):
+    &quot;&quot;&quot;把向量除以它的均方根，再乘一个可学习的缩放。比 LayerNorm 少了减均值这一步。&quot;&quot;&quot;
+    def __init__(self, dim, eps=1e-5):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        rms = torch.sqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return x / rms * self.weight</code></pre>
+        <p>
+            eps 是一个很小的数（0.00001），防止向量全是 0 时除以 0。原版 Transformer 用的是 LayerNorm，多了一步"先减去平均值"；LLaMA 发现去掉这一步效果差不多，还更快。
+        </p>
+
+        <h3>3. 注意力：让每个位置看前面的内容</h3>
+        <p>
+            这是 Transformer 最核心的部分。考虑句子"Lily found a needle. She gave it to her mom."，处理"it"时，模型需要知道它指的是 needle。注意力的做法是：
+        </p>
+        <ol>
+            <li>每个位置的向量分别乘三个矩阵，得到三个新向量：query（我在找什么）、key（我能提供什么）、value（我的内容是什么）。</li>
+            <li>"it"的 query 和前面每个位置的 key 做点积（对应位置相乘再相加），得到一个分数。分数越高，说明越相关。"needle"的 key 和"it"的 query 匹配得好，分数就高。</li>
+            <li>分数除以 $\sqrt{64} = 8$（防止数值太大），再用 softmax 变成加起来等于 1 的权重。</li>
+            <li>用这些权重把各位置的 value 加权平均，结果就是"it"这个位置从上下文中收集到的信息，其中 needle 的成分最多。</li>
+        </ol>
+        <p>
+            还有一个重要限制：生成时，模型写到第 5 个词时还不知道第 6 个词是什么，所以训练时也不能让它偷看后面的词。做法是把"后面位置"的分数都设成负无穷，softmax 之后它们的权重就是 0。这叫因果遮盖（causal mask）。代码里的 mask 是一个下三角矩阵，第 i 行只有前 i 个位置是 True。
+        </p>
+        <pre class="code"><code>class Attention(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.n_heads = cfg.n_heads
+        self.head_dim = cfg.dim // cfg.n_heads
+        self.wq = nn.Linear(cfg.dim, cfg.dim, bias=False)
+        self.wk = nn.Linear(cfg.dim, cfg.dim, bias=False)
+        self.wv = nn.Linear(cfg.dim, cfg.dim, bias=False)
+        self.wo = nn.Linear(cfg.dim, cfg.dim, bias=False)
+        # 因果遮盖：位置 i 只能看位置 &lt;= i
+        mask = torch.tril(torch.ones(cfg.max_seq_len, cfg.max_seq_len, dtype=torch.bool))
+        self.register_buffer(&quot;mask&quot;, mask, persistent=False)
+
+    def forward(self, x, cos, sin):
+        B, T, D = x.shape
+        # 1. 算 query、key、value，并拆成多个头: (B, heads, T, head_dim)
+        q = self.wq(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.wk(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.wv(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        # 2. 只对 q 和 k 加旋转位置编码
+        q, k = apply_rope(q, cos, sin), apply_rope(k, cos, sin)
+        # 3. 缩放点积注意力：每个位置对之前所有位置打分，softmax 后对 value 加权平均
+        scores = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)  # (B, heads, T, T)
+        scores = scores.masked_fill(~self.mask[:T, :T], float(&quot;-inf&quot;))
+        weights = F.softmax(scores, dim=-1)
+        out = weights @ v                                             # (B, heads, T, head_dim)
+        # 4. 把各个头拼回去，再做一次线性变换
+        out = out.transpose(1, 2).contiguous().view(B, T, D)
+        return self.wo(out)</code></pre>
+        <p>
+            代码里的 view 和 transpose 只是在重新排列数字的形状：把 384 维切成 6 个头、每个 64 维，让 6 个头同时独立计算，最后再拼回 384 维。B 是一批里有几段文本（batch），T 是每段有几个 token。注释里的 (B, heads, T, T) 表示分数矩阵：每个头里，每个位置对每个位置都有一个分数。
+        </p>
+
+        <h3>4. RoPE：告诉模型每个词在第几个位置</h3>
+        <p>
+            注意力本身不知道词的顺序："dog bites man"和"man bites dog"在它看来是同一堆词。所以要把位置信息加进去。LLaMA 用的方法叫 RoPE（旋转位置编码）：把 query 和 key 的 64 个数字两两配成 32 对，每一对看成平面上的一个点，然后按照这个 token 所在的位置把这个点旋转一个角度，位置越靠后转得越多。32 对的转速各不相同，有的转得快，有的转得慢，就像钟表上的秒针、分针、时针。
+        </p>
+        <p>
+            为什么用旋转？两个向量都旋转之后再做点积，结果只取决于两者旋转角度的差，也就是两个 token 之间隔了多远，和它们的绝对位置无关。这样"相邻的两个词"不管出现在开头还是第 200 个位置，模型看到的关系都一样。后面的检查会用实际数字验证这一点。
+        </p>
+        <pre class="code"><code>def rope_tables(head_dim, max_seq_len, base=10000.0):
+    &quot;&quot;&quot;预先算好每个位置、每对维度的旋转角的 cos 和 sin。&quot;&quot;&quot;
+    freqs = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))  # (head_dim/2,)
+    pos = torch.arange(max_seq_len).float()                                   # (T,)
+    angles = torch.outer(pos, freqs)                                          # (T, head_dim/2)
+    return angles.cos(), angles.sin()</code></pre>
+        <pre class="code"><code>def apply_rope(x, cos, sin):
+    &quot;&quot;&quot;把 x 的维度两两配对，每一对在二维平面上按位置旋转。x: (B, heads, T, head_dim)&quot;&quot;&quot;
+    x1, x2 = x[..., 0::2], x[..., 1::2]
+    T = x.shape[-2]
+    cos, sin = cos[:T], sin[:T]
+    out1 = x1 * cos - x2 * sin
+    out2 = x1 * sin + x2 * cos
+    return torch.stack([out1, out2], dim=-1).flatten(-2)</code></pre>
+        <p>
+            第一个函数预先算好每个位置、每一对数字该转的角度（存成 cos 和 sin）。第二个函数做旋转：平面上点 $(x_1, x_2)$ 转过角度 $\theta$ 后变成 $(x_1\cos\theta - x_2\sin\theta,\ x_1\sin\theta + x_2\cos\theta)$，这是中学学过的旋转公式。
+        </p>
+
+        <h3>5. SwiGLU 前馈层：每个位置单独加工</h3>
+        <p>
+            注意力负责在位置之间搬运信息，前馈层负责对每个位置收集到的信息做加工。它把 384 维向量放大到 1024 维，经过一个非线性函数，再压回 384 维。研究者普遍认为模型学到的很多"知识"（比如"小狗会叫"）存在这些层里。
+        </p>
+        <p>
+            SwiGLU 是 LLaMA 用的版本：同时算两路，一路经过 silu 函数（一种平滑版的"负数变成接近 0、正数基本不变"），另一路不变，两路逐个数字相乘。相乘的作用像一个阀门，一路决定另一路的每个数字放行多少。
+        </p>
+        <pre class="code"><code>class SwiGLU(nn.Module):
+    &quot;&quot;&quot;前馈层：silu(x W1) 逐元素乘以 (x W3)，再乘 W2 投影回去。&quot;&quot;&quot;
+    def __init__(self, cfg):
+        super().__init__()
+        self.w1 = nn.Linear(cfg.dim, cfg.hidden_dim, bias=False)
+        self.w3 = nn.Linear(cfg.dim, cfg.hidden_dim, bias=False)
+        self.w2 = nn.Linear(cfg.hidden_dim, cfg.dim, bias=False)
+
+    def forward(self, x):
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))</code></pre>
+
+        <h3>6. 把零件组装成一个块</h3>
+        <pre class="code"><code>class Block(nn.Module):
+    &quot;&quot;&quot;一个 Transformer 块：先归一化再注意力，加残差；先归一化再前馈，加残差。&quot;&quot;&quot;
+    def __init__(self, cfg):
+        super().__init__()
+        self.attn_norm = RMSNorm(cfg.dim)
+        self.attn = Attention(cfg)
+        self.ffn_norm = RMSNorm(cfg.dim)
+        self.ffn = SwiGLU(cfg)
+
+    def forward(self, x, cos, sin):
+        x = x + self.attn(self.attn_norm(x), cos, sin)
+        x = x + self.ffn(self.ffn_norm(x))
+        return x</code></pre>
+        <p>
+            注意 x = x + ... 这种写法，叫残差连接：每一层不是把输入替换掉，而是在输入上加一点修改。这样即使某一层还没学好，信息也能原样传下去；反向传播时，梯度也能沿着这条"直通的路"顺利传回最前面的层。没有残差连接，深层网络很难训练。
+        </p>
+
+        <h3>7. 整个模型</h3>
+        <pre class="code"><code>class TinyLlama(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.dim)
+        self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layers)])
+        self.norm = RMSNorm(cfg.dim)
+        self.lm_head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
+        self.lm_head.weight = self.tok_emb.weight  # 输入嵌入和输出层共用一个矩阵
+        cos, sin = rope_tables(cfg.dim // cfg.n_heads, cfg.max_seq_len)
+        self.register_buffer(&quot;cos&quot;, cos, persistent=False)
+        self.register_buffer(&quot;sin&quot;, sin, persistent=False)
+        self.apply(self._init)
+
+    def _init(self, m):
+        if isinstance(m, (nn.Linear, nn.Embedding)):
+            nn.init.normal_(m.weight, mean=0.0, std=0.02)
+
+    def forward(self, idx, targets=None):
+        x = self.tok_emb(idx)                     # (B, T) -&gt; (B, T, dim)
+        for block in self.blocks:
+            x = block(x, self.cos, self.sin)
+        logits = self.lm_head(self.norm(x))       # (B, T, vocab)
+        loss = None
+        if targets is not None:
+            # 每个位置都在预测下一个 token，用交叉熵衡量预测得多准
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        return logits, loss
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, eot_id=None):
+        for _ in range(max_new_tokens):
+            idx_cond = idx[:, -self.cfg.max_seq_len:]
+            logits, _ = self(idx_cond)
+            logits = logits[:, -1, :]
+            if temperature == 0:
+                nxt = logits.argmax(-1, keepdim=True)          # 贪心
+            else:
+                logits = logits / temperature
+                if top_k is not None:
+                    v, _ = torch.topk(logits, top_k)
+                    logits[logits &lt; v[:, [-1]]] = float(&quot;-inf&quot;)
+                probs = F.softmax(logits, dim=-1)
+                nxt = torch.multinomial(probs, 1)              # 按概率抽一个
+            idx = torch.cat([idx, nxt], dim=1)
+            if eot_id is not None and nxt.item() == eot_id:
+                break
+        return idx</code></pre>
+        <p>
+            几个要点：
+        </p>
+        <ul>
+            <li>输出层和词嵌入共用一个矩阵（self.lm_head.weight = self.tok_emb.weight）。输入时用它把编号查成向量，输出时用它把向量和每个 token 的向量比较打分。这样省掉 157 万个参数，效果通常也更好。</li>
+            <li>参数初始化成均值 0、标准差 0.02 的随机数，也就是一堆很小的随机数。</li>
+            <li>forward 里，模型对每个位置都同时预测下一个 token：输入 256 个 token，就同时得到 256 个预测。损失用交叉熵：模型给正确答案的概率越高，损失越小。如果给正确的下一个 token 的概率是 $p$，这一个位置的损失就是 $-\ln p$。</li>
+            <li>generate 是写故事的函数：每次取最后一个位置的分数，除以温度 temperature（小于 1 让模型更保守，大于 1 更放飞），只保留分数最高的 50 个（top_k），按概率抽一个接上去，直到写满或者写出"故事结束"的 token。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>四、训练前先检查</h2>
+        <p>
+            模型写完不要急着训练。训练一次要半小时，如果代码有错，可能半小时后才发现。先用几个简单的测试确认它没问题：
+        </p>
+        <pre class="code"><code>torch.manual_seed(0)
+cfg = Config()
+model = TinyLlama(cfg)
+n = sum(p.numel() for p in model.parameters())
+print(f&quot;参数总量: {n:,}（约 {n/1e6:.1f}M）&quot;)
+print(f&quot;  其中词嵌入（与输出层共用）: {model.tok_emb.weight.numel():,}&quot;)
+print(f&quot;  每个 Transformer 块: {sum(p.numel() for p in model.blocks[0].parameters()):,}&quot;)
+
+idx = torch.randint(0, cfg.vocab_size, (2, 16))
+logits, loss = model(idx, idx)
+print(f&quot;\n输入形状 {tuple(idx.shape)} -&gt; 输出 logits 形状 {tuple(logits.shape)}&quot;)
+print(f&quot;随机初始化时的损失: {loss.item():.3f}，理论值 ln(4096) = {math.log(4096):.3f}&quot;)</code></pre>
+        <p class="label">运行输出：</p>
+        <pre class="output"><code>参数总量: 12,194,688（约 12.2M）
+  其中词嵌入（与输出层共用）: 1,572,864
+  每个 Transformer 块: 1,770,240
+
+输入形状 (2, 16) -&gt; 输出 logits 形状 (2, 16, 4096)
+随机初始化时的损失: 8.076，理论值 ln(4096) = 8.318
+
+RoPE 检查：位置 (10, 11) 的打分 -14.0072，位置 (100, 101) 的打分 -14.0073
+           位置 (10, 13) 的打分 -6.5523，位置 (200, 203) 的打分 -6.5523
+
+在 Apple M5 GPU (MPS) 上：每步 32×256 = 8192 个 token，用时 419 毫秒，约 19,548 token/秒</code></pre>
+        <p>
+            逐项看：
+        </p>
+        <ul>
+            <li>参数量：每个块 177 万（注意力 4 个 384×384 的矩阵约 59 万，前馈层 3 个 384×1024 的矩阵约 118 万，两个 RMSNorm 各 384），6 个块共 1062 万，加上词嵌入 157 万，总共约 1220 万。</li>
+            <li>形状：输入 2 段、每段 16 个 token，输出是 (2, 16, 4096)，即每段的每个位置都给出了 4096 个分数。对得上。</li>
+            <li>初始损失：随机初始化的模型什么都不懂，最合理的状态是对 4096 个 token 一视同仁，每个的概率都是 1/4096，损失就是 $-\ln(1/4096) = \ln 4096 \approx 8.32$。实际是 8.08，很接近，说明初始化没问题。如果这里出来 30 或 100，就说明初始的参数太大，模型一开始就在"自信地猜错"，训练会很困难。</li>
+            <li>RoPE：同样一对 query 和 key，放在位置 (10, 11) 和 (100, 101) 时，打分都是 -14.007；放在 (10, 13) 和 (200, 203) 时，打分都是 -6.552。只要距离相同，打分就相同，和绝对位置无关，说明旋转实现对了。</li>
+            <li>速度：每步处理 8192 个 token，用时约 0.42 秒，每秒约 2 万个 token。训练 4000 步、约 3300 万个 token，大约要半小时。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>五、训练</h2>
+        <h3>每一步在做什么</h3>
+        <p>
+            训练的每一步：
+        </p>
+        <ol>
+            <li>从 1.22 亿个 token 的长数组里随机挑 32 个起点，每个起点往后取 257 个 token。前 256 个是输入，往后错一位的 256 个是答案。比如输入是 [Once, upon, a, time]，答案就是 [upon, a, time, ,]：每个位置的答案都是它的下一个 token。</li>
+            <li>把输入送进模型，得到每个位置的预测，和答案比较，算出平均损失。</li>
+            <li>反向传播：算出每个参数该往哪个方向调、调多少能让损失变小（梯度）。</li>
+            <li>用优化器 AdamW 按梯度更新所有参数。</li>
+        </ol>
+        <pre class="code"><code>def get_batch(data, gen):
+    # 随机选 BATCH 个起点，每个取 SEQ+1 个 token；输入是前 SEQ 个，目标是往后错一位的 SEQ 个
+    ix = torch.randint(len(data) - SEQ - 1, (BATCH,), generator=gen)
+    x = torch.stack([torch.from_numpy(data[i:i+SEQ].astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy(data[i+1:i+1+SEQ].astype(np.int64)) for i in ix])
+    return x.to(dev), y.to(dev)</code></pre>
+
+        <h3>学习率：每一步调多大</h3>
+        <p>
+            学习率决定每一步参数改动的幅度。太大会来回震荡甚至发散，太小学得太慢。常见做法是：开头 200 步从几乎为 0 慢慢升到 0.001（预热，因为一开始参数是随机的，梯度方向不太靠谱，步子要小），然后沿一条余弦曲线慢慢降到 0.0001（后期已经接近好的位置，要小步微调）。
+        </p>
+        <pre class="code"><code>def lr_at(step):
+    # 先线性升温，再按余弦曲线从 LR_MAX 降到 LR_MIN
+    if step &lt; WARMUP:
+        return LR_MAX * (step + 1) / WARMUP
+    p = (step - WARMUP) / (STEPS - WARMUP)
+    return LR_MIN + 0.5 * (LR_MAX - LR_MIN) * (1 + math.cos(math.pi * p))</code></pre>
+
+        <h3>主循环</h3>
+        <pre class="code"><code>model = TinyLlama(Config()).to(dev)
+# 权重衰减只加在矩阵上，不加在归一化层的缩放上
+decay = [p for p in model.parameters() if p.dim() &gt;= 2]
+no_decay = [p for p in model.parameters() if p.dim() &lt; 2]
+opt = torch.optim.AdamW([{&quot;params&quot;: decay, &quot;weight_decay&quot;: 0.1},
+                         {&quot;params&quot;: no_decay, &quot;weight_decay&quot;: 0.0}],
+                        lr=LR_MAX, betas=(0.9, 0.95))
+
+log = {&quot;train&quot;: [], &quot;val&quot;: [], &quot;samples&quot;: {}}
+train_gen = torch.Generator().manual_seed(1)
+t0 = time.time()
+for step in range(STEPS + 1):
+    if step % EVAL_EVERY == 0 or step == STEPS:
+        v = evaluate(model)
+        log[&quot;val&quot;].append([step, v])
+        print(f&quot;step {step:5d} | 验证损失 {v:.3f} | 已用 {(time.time()-t0)/60:.1f} 分钟&quot;, flush=True)
+    if step in SAMPLE_AT:
+        s = sample(model)
+        log[&quot;samples&quot;][step] = s
+        print(f&quot;--- 第 {step} 步的生成 ---\n{s}\n&quot;, flush=True)
+    if step == STEPS:
+        break
+    for g in opt.param_groups:
+        g[&quot;lr&quot;] = lr_at(step)
+    x, y = get_batch(train_data, train_gen)
+    _, loss = model(x, y)
+    opt.zero_grad(set_to_none=True)
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # 梯度裁剪，防止某一步更新过猛
+    opt.step()
+    log[&quot;train&quot;].append([step, loss.item()])</code></pre>
+        <p>
+            两个细节：
+        </p>
+        <ul>
+            <li>权重衰减（weight_decay=0.1）：每一步都把矩阵参数往 0 拉一点点，防止某些参数变得特别大，让模型更不容易死记训练数据。</li>
+            <li>梯度裁剪（clip_grad_norm_）：如果某一步算出的梯度特别大（比如碰到一段奇怪的文本），就把它按比例缩小到长度为 1，避免一步把模型改坏。</li>
+        </ul>
+        <p>
+            另外每 250 步在验证集上算一次损失。验证集是模型训练时从没见过的故事，用来检查它学到的是一般规律，而不是死记了训练用的故事。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、训练结果</h2>
+        <h3>损失曲线</h3>
+        <p>
+            训练一共跑了 4000 步，看过 3277 万个 token，在这台笔记本上用了 41 分钟。训练前估计的约半小时只测了 10 步、没算中间评估和生成故事的时间，实际慢了一些。每 250 步记录的验证损失：
+        </p>
+        <pre class="output"><code>step     0 | 验证损失 8.393 | 已用 0.0 分钟
+step   250 | 验证损失 3.264 | 已用 2.0 分钟
+step   500 | 验证损失 2.715 | 已用 4.3 分钟
+step   750 | 验证损失 2.489 | 已用 6.6 分钟
+step  1000 | 验证损失 2.352 | 已用 9.0 分钟
+step  1250 | 验证损失 2.257 | 已用 11.5 分钟
+step  1500 | 验证损失 2.179 | 已用 14.2 分钟
+step  1750 | 验证损失 2.118 | 已用 16.8 分钟
+step  2000 | 验证损失 2.067 | 已用 19.5 分钟
+step  2250 | 验证损失 2.018 | 已用 22.2 分钟
+step  2500 | 验证损失 1.975 | 已用 25.0 分钟
+step  2750 | 验证损失 1.937 | 已用 27.7 分钟
+step  3000 | 验证损失 1.907 | 已用 30.4 分钟
+step  3250 | 验证损失 1.879 | 已用 33.1 分钟
+step  3500 | 验证损失 1.859 | 已用 35.9 分钟
+step  3750 | 验证损失 1.845 | 已用 38.6 分钟
+step  4000 | 验证损失 1.834 | 已用 41.3 分钟
+训练结束：共 4000 步，见过 32,768,000 个 token，用时 41.3 分钟</code></pre>
+        <img class="figure" src="img/tinyllama_loss.png" alt="训练损失和验证损失随训练步数下降的曲线">
+        <p>
+            怎样读这张图：
+        </p>
+        <ul>
+            <li>损失从 8.39 开始，前 250 步掉得最快，降到 3.26：模型先学会了最容易的东西，比如哪些词最常见、句号后面接大写字母。之后下降越来越慢，到第 4000 步是 1.83。</li>
+            <li>损失可以换算成更直观的数：$e^{\text{损失}}$ 叫困惑度，意思是"模型平均在几个选项之间犹豫"。一开始 $e^{8.39} \approx 4400$，相当于在全部 4096 个 token 里瞎猜；训练后 $e^{1.83} \approx 6.3$，相当于每一步只在六七个合理的候选里挑。</li>
+            <li>灰色的细线是每一步的训练损失，上下抖动，因为每一步随机抽到的文本难度不同；棕色线是 50 步的平均。蓝色的验证损失和训练损失几乎重合，说明模型学到的是一般规律，对没见过的故事也一样有效，没有死记训练数据。这也和训练量有关：3277 万个 token 不到数据总量的三分之一，大部分文本它只见过一次或者根本没见过。</li>
+            <li>到最后曲线还在缓慢下降（最后三次评估是 1.859、1.845、1.834），继续训练还能再好一点。</li>
+        </ul>
+
+        <h3>它写的故事怎样变化</h3>
+        <p>
+            训练中在第 0、100、300、1000、2000、4000 步，各让模型以"Once upon a time"开头写一段（温度 0.8，只在概率最高的 50 个 token 里抽；每次用同一个随机种子）。下面是原样输出。
+        </p>
+        <p class="label">第 0 步（还没训练，损失 8.39）：</p>
+        <pre class="output"><code>Once upon a time shone gone pick impressed gone caterpillar At At worm forever door Give swim pi GiveD change suggested Daisy impressed slidOkay calm pick store collar exper dugote into and Daisy deskited calm pile exper savehed played stay stay unusual dizzy friendly redl calm change drank watched worm desk cricketsel@ sick mixed tail understood later store taill drank calm calm cra birthday worked board dranksel bl cra puppyimed Everyone mummy store swim birthday upon tightown puppyimed birthday store path Daisy save@l dug and Everyonel and scream calm ruined change birthdaymed succeed ord birthday tail earthMummy post fire bl bl path into dug circles</code></pre>
+        <p>
+            每个词都是词表里真实存在的 token，但完全随机拼在一起，没有语法，有些甚至只是半个词（"dugote""cra"）。
+        </p>
+        <p class="label">第 100 步：</p>
+        <pre class="output"><code>Once upon a time, there wanted to take to make a small of the tree. The little boy ran to go to the little girl named it. She said, &quot; Lily&#x27;s go to eat it. The family! Lily was so very happy about it in his friends. The room, Tom was happy to his mom wanted to the little girl the bird. The good mom they were happy and to be with it. 
+
+
+The little girl came to make a time to the little boy named Lily. They were so happy and made him. He had not excited it back to
+
+The boy were so happy</code></pre>
+        <p>
+            才训练 100 步（约 1 分钟），已经学会了很多：常见的词和标点、人名 Lily 和 Tom、"The little boy"这种搭配、引号表示对话。但句子还是断的，"there wanted to take to make a small of the tree"读不通。
+        </p>
+        <p class="label">第 300 步：</p>
+        <pre class="output"><code>Once upon a time, there was a little girl named Lily. She loved to play with her favorite toy car. One day, her mom came to the park.
+
+Lily went to eat the park. She saw Lily&#x27;s head. It was a toy box, a red car, the box. Lily was sad and wanted to see what was inside.
+
+Her friend came and said, &quot;I found a toy. It fell. It is so delicious. Do you want to play?&quot;
+
+Lily nodded and said, &quot;Of course, Lily. I&#x27;ll help you play with the yard. I told</code></pre>
+        <p>
+            开头"there was a little girl named Lily. She loved to play with her favorite toy car"已经是标准的 TinyStories 开头，分段、对话都对了。问题在意思上："Lily went to eat the park"（去吃公园），说玩具"It is so delicious"（很好吃）。语法学得比语义快。
+        </p>
+        <p class="label">第 1000 步：</p>
+        <pre class="output"><code>Once upon a time, there was an old tree. In the tree was a tall tree, and a little bird went up to him. The bird smiled and watched with the tree and said, &quot;Hi, I am Lily. I&#x27;m always here to help you!&quot;
+
+The bird replied, &quot;I&#x27;m flying with you! I&#x27;m the bird and I&#x27;m safe.&quot;
+
+The bird said, &quot;Thank you, little bird. I&#x27;m so happy to meet you.&quot;
+
+The bird replied, &quot;You are welcome, little bird. I have to be independent soaky as they were. Do</code></pre>
+        <p>
+            对话的来回格式很熟练了，但谁在说话搞混了：小鸟自称"I am Lily"，又对自己说"Thank you, little bird"，结尾还冒出一个不存在的词"soaky"。
+        </p>
+        <p class="label">第 2000 步：</p>
+        <pre class="output"><code>Once upon a time, there was a little girl named Lily. She loved to play with her blocks and make beautiful pictures. One day, she was playing with her blocks on the floor when her mom called her for lunch. 
+
+Lily&#x27;s mom came in and said, &quot;Lily, let&#x27;s have a snack!&quot; Lily was curious and asked, &quot;What&#x27;s a yummy snack?&quot; 
+
+Her mom said, &quot;Let&#x27;s get a bit of milk and make new friends.&quot; 
+
+Lily was so happy and said, &quot;Thank you, Mommy!&quot; 
+
+Her mom said, &quot;I&#x27;m proud of you too</code></pre>
+        <p>
+            一个完整、连贯的小场景：Lily 在玩积木，妈妈叫她吃午饭，两人对话。只有"喝点牛奶，交些新朋友"这一句有点莫名其妙。
+        </p>
+        <p class="label">第 4000 步（训练结束，损失 1.83）：</p>
+        <pre class="output"><code>Once upon a time, there was a little girl named Lily. She had a colorful purse that she loved very much. Every day, she would go to her neighbor&#x27;s house to carry her purse everywhere. 
+
+One day, Lily&#x27;s mom told her that they were going to the library to buy some yummy treats for Lily. Lily was so happy and excited to go to the library and play with her friends. 
+
+When they arrived at Lily&#x27;s house, they started to gather all the treats. Lily loved them so much that she asked her mom to give her the treats.
+
+At the library, they</code></pre>
+        <p>
+            句子都通顺，也有了情节。剩下的错误是常识和前后一致性：去图书馆买好吃的，到了图书馆又说"到了 Lily 家"。这类错误需要更大的模型或更长的训练才能减少。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、用训练好的模型玩一玩</h2>
+        <p>
+            generate.py 加载训练好的模型，做两件事：看模型对下一个 token 的概率分布，以及换不同的开头和温度写故事。
+        </p>
+        <pre class="code"><code># 1. 模型对下一个 token 的猜测：取概率最高的 5 个
+print(&quot;=== 下一个 token 概率最高的 5 个 ===&quot;)
+for text in [&quot;Once upon a&quot;, &quot;Lily went to the park with her&quot;, &quot;The cat was very&quot;, &quot;Tom was sad because he lost his&quot;]:
+    ids = torch.tensor([tok.encode(text).ids], device=dev)
+    with torch.no_grad():
+        probs = F.softmax(model(ids)[0][0, -1], dim=-1)
+    top = torch.topk(probs, 5)
+    guesses = &quot;，&quot;.join(f&quot;{tok.decode([i])!r} {p:.1%}&quot; for p, i in zip(top.values.tolist(), top.indices.tolist()))
+    print(f&quot;{text} ___  -&gt;  {guesses}&quot;)</code></pre>
+
+        <h3>模型在想什么：下一个 token 的概率</h3>
+        <pre class="output"><code>=== 下一个 token 概率最高的 5 个 ===
+Once upon a ___  -&gt;  &#x27; time&#x27; 99.7%，&#x27; day&#x27; 0.0%，&#x27; long&#x27; 0.0%，&#x27; little&#x27; 0.0%，&#x27; moment&#x27; 0.0%
+Lily went to the park with her ___  -&gt;  &#x27; mom&#x27; 52.1%，&#x27; mommy&#x27; 31.0%，&#x27; friends&#x27; 5.6%，&#x27; friend&#x27; 2.3%，&#x27; family&#x27; 1.9%
+The cat was very ___  -&gt;  &#x27; happy&#x27; 21.9%，&#x27; scared&#x27; 11.2%，&#x27; sad&#x27; 9.4%，&#x27; excited&#x27; 8.0%，&#x27; surprised&#x27; 3.2%
+Tom was sad because he lost his ___  -&gt;  &#x27; toy&#x27; 34.3%，&#x27; favorite&#x27; 13.7%，&#x27; ball&#x27; 7.6%，&#x27; friend&#x27; 4.3%，&#x27; new&#x27; 1.9%</code></pre>
+        <p>
+            这是语言模型最直接的样子：它对每个可能的下一个词都给出一个概率。"Once upon a"后面接 time 的概率是 99.7%，几乎确定；"和她的___去公园"，mom 和 mommy 加起来超过 80%，因为在这些故事里小孩多半和妈妈出门；"猫非常___"，答案就分散得多，happy、scared、sad、excited 都有可能，这时模型就有了发挥的空间。（注意 token 前面的空格，比如 ' time'，它是带空格的那个 token。）
+        </p>
+
+        <h3>换个开头</h3>
+        <p class="label">开头：Once upon a time, there was a little robot</p>
+        <pre class="output"><code>=== 开头：Once upon a time, there was a little robot（温度 0.8）===
+Once upon a time, there was a little robot named Bob. Bob loved to play with his friends. One day, he saw a big, shiny truck on the ground. The truck was not good for Bob. Bob wanted to play with his truck, but his friend, a dog named Sam, was wrong. Sam said, &quot;Bob, let me play with this truck. It is very noisy.&quot;
+
+Bob said, &quot;But it is also fun. I like to play with it and beat things to do.&quot; Sam agreed, and they played with the truck together. They had a lot of fun. When it was time to go home, Bob said, &quot;Thank you for playing with me. I learned how to play with my truck.&quot;
+
+Sam and Sam played with the truck together and had a great day.</code></pre>
+        <p>
+            给机器人起名 Bob、找了个叫 Sam 的狗朋友，情节完整，有起因、冲突、和好。错误在细节上：最后一句"Sam and Sam played"把名字写错了，机器人的行为和普通小孩没有区别。
+        </p>
+        <p class="label">开头：Sara and her dog went to the beach.</p>
+        <pre class="output"><code>=== 开头：Sara and her dog went to the beach.（温度 0.8）===
+Sara and her dog went to the beach. Sara was cold and cold. She had no friends. She felt wet and cold. Her mom said, &quot;Don&#x27;t worry, Sara. We will find a band-aid for you.&quot;
+
+Sara and her mom went to the park. Sara saw a big dog. She wanted to pet the dog. She ran to her mom and hugged her. She said, &quot;Hi, dog. Do you want to pet the dog?&quot;
+
+The dog looked at Sara&#x27;s mom. He barked and growled. Sara was scared. She ran away from the dog. She ran to the dog. She barked and ran back to her mom. She said, &quot;Mom, the dog bit me. I hurt you. Can we be friends?&quot;
+
+Her mom hugged her and said, &quot;That&#x27;s okay, Sara. We can talk. The dog is friendly. He won&#x27;t hurt you. He likes you more. Maybe he will feel better.&quot;
+
+Sara nodded and said, &quot;I</code></pre>
+        <p>
+            这一段的问题多一些：明明在海滩，下一段就"went to the park"；"She ran away from the dog. She ran to the dog. She barked"，谁在跑、谁在叫已经乱了。模型只看前面的 token 决定下一个，没有一个"整体情节"的计划，长一点的故事就容易前后矛盾。
+        </p>
+        <p class="label">开头：The old tree in the forest</p>
+        <pre class="output"><code>=== 开头：The old tree in the forest（温度 0.8）===
+The old tree in the forest, and the old man stayed there. He was so scared that he started to laugh.
+
+The old tree had a big smile on its face. It said hello and asked the old man, &quot;What&#x27;s wrong here?&quot; The old man replied, &quot;My voice has come from me and I think your voice was calling me. I&#x27;m here to take you away from me&quot;. The old man said, &quot;My little voice is coming from here. I belong to a hidden place and now I can&#x27;t find you.&quot;
+
+The old man was so kind. He said, &quot;It&#x27;s only a strange place, and I can find you again.&quot;
+
+The old man and the old man walked around the world and had lots of fun. They soon became the best of friends. The old man was reminded of his magical friend.</code></pre>
+
+        <h3>温度的影响</h3>
+        <p>
+            同一个开头"One day, Ben found a box"，同一个随机种子，只改温度。温度 0 表示不抽签，每次都选概率最高的那个 token（贪心解码）；温度越高，概率低的 token 越有机会被选中。
+        </p>
+        <pre class="output"><code>=== 同一个开头，不同温度 ===
+
+--- 温度 0（贪心：每次都选概率最高的） ---
+One day, Ben found a box of crayons. He wanted to draw a picture of a big sun. He took the crayons and started to draw. He drew a sun, a sun, and a sun. He was very happy with his drawing.
+
+But then, he heard a loud noise. He looked up and saw a big dog. The dog was barking and growling. It was a dog. The dog was angry. It barked at Ben and his mom. It wanted to bite Ben.
+
+Ben was scared. He ran to the dog. He said, &quot;Mom, mom, there is a dog. He is not a dog. He is a dog. He is not a dog. He is a dog. He is not a dog. He is a dog. He is a bad dog. He is not a bad dog. He is a bad dog. He is a bad dog. He is a bad dog. He is a bad dog. He is a bad dog. He is a bad
+
+--- 温度 0.5 ---
+One day, Ben found a box in the park. It was a big box with a bow on it. Ben wanted to see what was inside. He opened the box and saw a shiny thing. It was a coin. Ben was very happy. He took the coin and put it in his pocket. He wanted to show it to his friend, Lily.
+
+&quot;Look, Lily, I found a coin!&quot; he said. &quot;It is very pretty. Do you want to keep it?&quot;
+
+Lily looked at the coin. She liked it. She wanted to keep it. She looked at the coin. She saw it was not a toy. It was a toy. It was a gift from her grandma. It was a gift from her grandma. It had a pretty dress and a pretty dress.
+
+&quot;Can I keep it, mom?&quot; Ben asked. &quot;Can I keep it?&quot;
+
+&quot;No, Ben, you can&#x27;t keep it. It is not your toy. It belongs to someone else
+
+--- 温度 1.0 ---
+One day, Ben found a box in the park. It was a big box with a red bow. Ben thought it was fun to roll on the box. He ran to get it, but it was dark and hard. He tried to pull it off, but it was too hard.
+
+&quot;Where can I go first?&quot; he asked his mom. &quot;Mommy, can we go for a ride?&quot;
+
+His mom looked in the box and saw a big teddy bear on the shelf. She knew Tom had been trying to catch him.
+
+&quot;I&#x27;ll be better in there. It&#x27;s more fun,&quot; she said. She lifted the teddy bear and gave him a blue ribbon.
+
+&quot;Wow, it&#x27;s so cool. Maybe you can see it again tomorrow. Maybe you can try again later, if you like.&quot;
+
+She took the teddy bear to the floor and gave it to him. She threw it on the teddy bear and took the teddy bear. She turned the box and watched it go
+
+--- 温度 1.5 ---
+One day, Ben found a box that belonged to Sara&#x27;s daddy when he returned. They had lots of toys, or candy and candy in them. However, the box made a very sick, the most people were very sick and couldn&#x27;t talk. Ben was sad. Then suddenly, a kind man came by and saw Ben crying. 
+
+He asked the lady, &quot;What&#x27;s wrong, little guy? I lost my favorite toy, and now I cannot find a gift for you.&quot; The lady explained that his toy. Ben decided to give it back to Ben and Ben in a bag. It had heavy things inside. Ben said, &quot;Now it&#x27;s not yours, okay!&quot; Ben and Ben hugged them and went back to the lap and played with the magic guy. They never met each other again, but they never went for a play or anything she still liked!</code></pre>
+        <p>
+            四种温度的差别很清楚：
+        </p>
+        <ul>
+            <li>温度 0（贪心）：开头最稳，但写到后面陷入了循环，"He is not a dog. He is a dog."反复出现，停不下来。这正是 <a href="../CS224N-NLP-with-Deep-Learning/11_推理上解码DeepSeek-R1与GRPO.html">CS224N 第十一讲</a>说的现象：概率最高的序列往往重复，而且重复越多，模型越觉得继续重复概率高。</li>
+            <li>温度 0.5：通顺，但还有些重复（"It was a gift from her grandma."连写两次，"a pretty dress and a pretty dress"）。</li>
+            <li>温度 1.0：用词更多样，但情节开始跳，突然冒出一个前面没出现过的 Tom。</li>
+            <li>温度 1.5：概率很低的 token 也频繁被选中，句子开始不通："the box made a very sick, the most people were very sick"。</li>
+        </ul>
+        <p>
+            这就是为什么实际使用时温度通常设在 0.7 到 1.0 之间：既避免贪心的重复，又不至于胡言乱语。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、和课程内容的对照</h2>
+        <ul>
+            <li>注意力、多头、残差连接、因果遮盖：<a href="../CS224N-NLP-with-Deep-Learning/05_注意力与Transformer.html">CS224N 第五讲</a>。</li>
+            <li>RoPE：<a href="../CS224N-NLP-with-Deep-Learning/12_推理下推测解码在策略蒸馏长上下文与测试时扩展.html">CS224N 第十二讲</a>的长上下文部分，那里用 "Taylor Swift" 在位置 (10, 11) 和 (100, 101) 的例子讲了同一个性质，这里用数字验证了它。</li>
+            <li>BPE 分词：<a href="../CS224N-NLP-with-Deep-Learning/13_分词与多语言.html">CS224N 第十三讲</a>。</li>
+            <li>预训练、交叉熵、温度和 top-k 采样：<a href="../CS224N-NLP-with-Deep-Learning/06_预训练.html">CS224N 第六讲</a>，<a href="../CS224N-NLP-with-Deep-Learning/11_推理上解码DeepSeek-R1与GRPO.html">CS224N 第十一讲</a>的解码部分。</li>
+            <li>Stanford CS336 的前几讲从分词、架构、训练细节讲起，这个练习基本对应它第一份作业的内容；完整版本的作业还要求手写 BPE、AdamW 和交叉熵，而不是调用 PyTorch 的现成函数。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>动手练习 · Notes curated by Joyce</p>
+        <nav class="footer-nav">
+            <a href="index.html">&larr; 练习目录</a>
+            <a href="../index.html">返回主目录</a>
+            <a href="index.html">练习目录 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
