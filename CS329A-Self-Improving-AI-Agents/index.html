@@ -19,113 +19,58 @@
 <article>
     <header>
         <h1>CS329A: Self-Improving AI Agents</h1>
-        <p class="subtitle">大语言模型的自我演进、强化学习与测试期推理算力分配</p>
+        <p class="subtitle">Stanford 2025 年秋季学期：怎样让大模型和 Agent 用推理时算力、验证器、环境反馈和强化学习不断改进自己</p>
         <div class="author-meta">
-            主讲：Aakanksha Chowdhery（Google PaLM 共同一作）、Azalia Mirhoseini（AlphaChip 共同一作，Stanford 助理教授）<br>
+            主讲：Aakanksha Chowdhery（Stanford 兼职教授，Reflection AI）、Azalia Mirhoseini（Stanford 计算机系助理教授）<br>
             整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）
         </div>
     </header>
 
     <section>
-        <h2>核心概念说明</h2>
+        <h2>这门课讲什么</h2>
         <p>
-            本课程探讨语言模型如何超越单次前向预测，通过强化学习、测试期搜索与环境交互实现自我迭代。阅读本课程常涉及以下概念：
-        </p>
-
-        <h3>1. Pre-training 与 Post-training</h3>
-        <p>
-            Pre-training（预训练）让模型在海量网页和图书文本上做 Next-token prediction，习得通识语言表征与广泛常识。但这一阶段模型缺乏多步逻辑验证与任务拆解能力，且公开高质量自然文本在 2024-2025 年前后基本已被主流实验室用尽。
+            这是两位老师第二次开这门课。主线是一个循环：让模型多次尝试（推理时扩展），用验证器或环境反馈判断哪些尝试是对的，再把好的结果拿回去训练模型（训练时扩展、强化学习），模型变强后再进入下一轮。课程沿着这个循环依次讲推理时扩展、验证器、工具和代码反馈、规划与多步推理、强化学习、搜索与深度研究 Agent、Agent 评估，最后一讲回顾并讨论未来方向。每讲基本是精读三四篇论文，并穿插课堂讨论。
         </p>
         <p>
-            Post-training（后训练）包括监督微调（SFT）和强化学习（RL）。Anthropic 的 Claude 系列在代码生成与长逻辑推理上表现优异，核心在于其后训练设计：采用 Constitutional AI（宪法自对齐），依靠模型根据预设原则进行自检自修，大幅降低对外包人工标注的依赖；同时接入代码沙盒运行环境做执行反馈强化学习（RLEF），根据真实报错信息定位并修正代码。
+            需要一些机器学习基础，比如知道什么是语言模型、微调和强化学习。没有基础的话，可以先读本站的 <a href="../00-Foundations/index.html">AI 基础</a>。
         </p>
-
-        <h3>2. 常见 Benchmark 的测试重点</h3>
         <p>
-            评估模型能力的 Benchmark 在过去几年经历了明显的变迁：
-        </p>
-        <ul>
-            <li><strong>MMLU</strong>：包含 57 个学科的四选一单选题，主要考察知识储备。由于选项有限且存在训练集污染风险，高分难以直接对应复杂的实际问题解决能力。</li>
-            <li><strong>GSM8K</strong>：基础小学数学应用题，前沿模型大多已达到 95% 以上，辨识度逐步饱和。</li>
-            <li><strong>HumanEval / MBPP</strong>：短 Python 函数的代码生成测试，主要检验语法与基础算法。</li>
-            <li><strong>SWE-bench / SWE-bench Verified</strong>：直接从真实 GitHub 开源项目提取的 Issue，要求 Agent 在大型工程仓库中定位 Bug、编写补丁并通过单元测试，是目前衡量工程级代码能力的行业基准。</li>
-            <li><strong>GAIA</strong>：要求结合网页浏览、文件读取、计算等多步工具调用，考察解决复杂综合任务的稳定性。</li>
-            <li><strong>GDPVal</strong>：评估模型在金融建模、芯片硬件描述语言等高门槛工作场景下的完成质量与算力成本。</li>
-        </ul>
-
-        <h3>3. Test-time compute 与自演进机制</h3>
-        <p>
-            传统的推理方式是用户发送请求后模型单向生成固定长度回复。Test-time compute（测试期算力）允许模型在输出最终答案前分配更多计算资源，例如生成多条候选解（反复采样）、引入树搜索（MCTS）进行剪枝、或在沙盒中反复执行校验。通过将验证机制引入模型迭代循环，模型能够在较少依赖人工新标注的情况下持续提升。
+            笔记依据 Stanford Online 公开的九段课堂录像字幕整理，每篇开头有录像链接。课上还有一讲讲开放式探索（AlphaEvolve 等）和几场嘉宾讲座，没有公开录像，这里没有收录。
         </p>
     </section>
 
     <section>
-        <h2>背景与问题定义</h2>
-        <p>
-            固定权重的模型在部署后不再更新。面对单轮事实问答尚可应付，但面对多步骤的长程任务时，自回归生成的误差会随步数累积：若单步成功率为 <i>p</i>，连续 <i>T</i> 步无纠错决策的全局成功率为 <i>P</i> = <i>p</i><sup><i>T</i></sup>，即使每步成功率高达 0.98，连续 50 步后成功率也会降到约 36.4%。
-        </p>
-        <p>
-            因此，构建具有自主演进能力的 Agent 需要三大支撑：测试期算力的高效分配、独立可靠的过程验证器（PRM）、以及模型基于环境真实反馈（如代码编译器报错）的强化学习闭环。
-        </p>
-    </section>
+        <h2>笔记目录（9 讲）</h2>
 
-    <section>
-        <h2>课程目录（10 讲笔记）</h2>
+        <h3><a href="01_课程概览从大模型到Agent.html">01. 课程概览：从大语言模型到 Agent</a></h3>
+        <p>缩放规律和涌现能力，指令微调和 RLHF，反复采样，推理模型，Agent 和 Agent 工作流的组成部分，课程安排。</p>
 
-        <h3><a href="01_自演进闭环与静态模型终结.html">01. 自演进闭环与静态模型终结</a></h3>
-        <p>
-            讨论预训练数据的存量边界、自回归序列的累积误差机制，以及从静态概率预测向状态机决策转移的系统架构。
-        </p>
+        <h3><a href="02_推理时扩展.html">02. 推理时扩展</a></h3>
+        <p>反复采样的覆盖率为什么符合幂律，生成—验证差距，并行采样与串行修改，ORM 和 PRM，用架构搜索组合推理时技术的 Archon。</p>
 
-        <h3><a href="02_测试期算力缩放与反复采样极限.html">02. 测试期算力缩放与反复采样极限</a></h3>
-        <p>
-            分析测试期采样算力分配规律、Pass@k 的覆盖率变化，以及 Majority Voting（多数投票）在长尾逻辑题中的局限性。
-        </p>
+        <h3><a href="03_验证器.html">03. 验证器</a></h3>
+        <p>GSM8K 与训练验证器，逐步验证与 PRM800K，不用人工标注的 Math-Shepherd，用弱验证器集成的 Weaver。</p>
 
-        <h3><a href="03_鲁棒验证机制与生成验证剪刀差.html">03. 鲁棒验证机制与生成验证剪刀差</a></h3>
-        <p>
-            对比 ORM（结果奖励）与 PRM（过程奖励）的优劣，探讨弱验证器加权集成（WEAVER）在算力约束下的判决精度。
-        </p>
+        <h3><a href="04_从工具代码和反馈中学习.html">04. 从工具、代码和反馈中学习</a></h3>
+        <p>ReAct 交替推理和行动，RLEF 用代码执行结果做强化学习，Constitutional AI 让模型按原则批评自己。</p>
 
-        <h3><a href="04_工具代码反馈与执行强化学习.html">04. 工具代码反馈与执行强化学习</a></h3>
-        <p>
-            梳理代码执行沙盒作为客观环境反馈源的价值，解析 RLEF 训练框架与 Anthropic Constitutional AI 自对齐流程。
-        </p>
+        <h3><a href="05_规划与多步推理.html">05. 规划与多步推理</a></h3>
+        <p>LATS 的蒙特卡洛树搜索，SPRINT 让推理模型并行思考，SWiRL 用离线合成数据做逐步强化学习。</p>
 
-        <h3><a href="05_多步规划树搜索与自适应分枝.html">05. 多步规划树搜索与自适应分枝</a></h3>
-        <p>
-            分析顺序 CoT 在分支任务下的容错短板，介绍结合树搜索（LATS）与并行探索（SPRINT）的多步规划算法。
-        </p>
+        <h3><a href="06_训练时扩展与强化学习.html">06. 训练时扩展与强化学习</a></h3>
+        <p>STaR 用自我解释自举推理，DeepSeekMath 的数据和 GRPO，DAPO 让长推理链上的强化学习稳定。</p>
 
-        <h3><a href="06_训练期算力扩展与强化学习熵崩溃.html">06. 训练期算力扩展与强化学习熵崩溃</a></h3>
-        <p>
-            探讨 DeepSeek GRPO 算法省去 Critic 网络的显存机制，以及强化学习中应对策略熵快速衰减的裁剪防御策略。
-        </p>
+        <h3><a href="07_搜索竞赛编程与深度研究Agent.html">07. 搜索：竞赛编程与深度研究 Agent</a></h3>
+        <p>AlphaCode 的大规模采样、过滤和聚类，AlphaCode 2 的打分模型，Search-o1 在推理中按需检索并提炼文档。</p>
 
-        <h3><a href="07_开放式演进与AI科学家全自动研发.html">07. 开放式演进与AI科学家全自动研发</a></h3>
-        <p>
-            以 Sakana AI 的 The AI Scientist 与 AlphaEvolve 为案例，讨论全自动科研与代码变异演进的工程流程及安全边界。
-        </p>
+        <h3><a href="08_Agent评估与长周期任务.html">08. Agent 评估与长周期任务</a></h3>
+        <p>METR 的时间跨度，GDPval 在真实工作上和专家比，DeepScholar-Bench 写相关工作综述。</p>
 
-        <h3><a href="08_深度研究Agent与搜索增强推理.html">08. 深度研究Agent与搜索增强推理</a></h3>
-        <p>
-            分析 AlphaCode 2 的聚类过滤策略、CoT 内部交织搜索逻辑（Search-o1），以及 GAIA 对综合办公任务的考察方式。
-        </p>
+        <h3><a href="09_未来的研究方向.html">09. 未来的研究方向</a></h3>
+        <p>多 Agent 微调、DeepSeekMath-V2 的元验证、Absolute Zero 让模型自己出题，每瓦智能与本地推理，持续学习等开放问题。</p>
 
-        <h3><a href="09_长周期任务评估与真实经济价值陷阱.html">09. 长周期任务评估与真实经济价值陷阱</a></h3>
-        <p>
-            梳理主流 Benchmark 演进历程，分析 LLM-as-a-Judge 存在的自洽性偏差，介绍基于实际专业产出的 GDPVal 评估方案。
-        </p>
-
-        <h3><a href="10_未来研究范式与顶尖嘉宾思想总汇.html">10. 未来研究范式与顶尖嘉宾思想总汇</a></h3>
-        <p>
-            整理 Denny Zhou 关于思维链本质的观点、Thang Luong 团队在 Lean 4 形式化数学验证（AlphaProof）中的实践，以及分布式 KV Cache 内存优化。
-        </p>
-
-        <h3><a href="podcasts_guest_interviews.html">特辑：嘉宾访谈选录</a></h3>
-        <p>
-            收录 TWIML AI、No Priors、The MAD Podcast 等 12 场针对主讲导师及研究者的访谈纪要，提供音频来源与核心观点梳理。
-        </p>
+        <h3><a href="podcasts_guest_interviews.html">延伸收听</a></h3>
+        <p>两位老师课外的公开访谈和演讲，链接都已核对。</p>
     </section>
 
     <footer class="document-footer">
