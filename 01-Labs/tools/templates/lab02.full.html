@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>手写一个 BPE 分词器 | 动手练习</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+    <style>
+        pre.code code, pre.output code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.82rem; line-height: 1.5; white-space: pre; }
+        pre.output { border-left: 4px solid #7a5c2e; }
+        .label { font-size: 0.85rem; color: #888; margin-bottom: -1rem; }
+        img.figure { max-width: 100%; height: auto; display: block; margin: 1.5rem 0; }
+    </style>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="01_从零写一个小LLaMA.html">&larr; 上一篇</a>
+    <span>动手练习 02</span>
+    <a href="03_对比几种解码方法.html">下一篇 &rarr;</a>
+</nav>
+
+
+<article>
+    <header>
+        <h1>练习 02：手写一个 BPE 分词器</h1>
+        <p class="subtitle">不用任何现成的库，一百行 Python 写出字节级 BPE：看它怎样一步步学会合并规则，词表大小怎样影响序列长度，以及为什么同一句话中文比英文贵</p>
+        <div class="author-meta">
+            对应作业：Stanford CS336 作业 1（Basics）的 BPE 分词器部分。这里的代码另外写过，不是作业答案；作业版本还要求更快的训练算法。<br>
+            零基础读前预备：<a href="../00-Foundations/09_分词.html">分词</a>；最好先读完<a href="01_从零写一个小LLaMA.html">练习 01</a> 的"准备数据"一节<br>
+            完整代码：<code>01-Labs/code/bpe/</code>（bpe.py、demo_small.py、train_tinystories.py、explore.py）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、要做的是什么</h2>
+        <p>
+            练习 01 里，模型看到的不是文字，而是一串编号：先把文字切成 token，再把每个 token 换成编号。当时切分用的是现成的 tokenizers 库，8 秒就训练好了，但它内部怎样决定"little 算一个 token、hippopotamus 要拆成几块"，我们没有看到。
+        </p>
+        <p>
+            这一篇自己从头写这个分词器，用的算法叫 BPE（Byte Pair Encoding，字节对编码）。GPT、LLaMA、Qwen、DeepSeek 这些模型用的都是它或它的变体。整个算法的思想只有一句话：从单个字节开始，反复把最常一起出现的两个相邻块合并成一个新块。
+        </p>
+        <p>
+            分四步：
+        </p>
+        <ol>
+            <li>看看文字在计算机里是什么样子（字节）。</li>
+            <li>在一句绕口令上手动跟一遍 BPE，看清每一次合并。</li>
+            <li>在 2 万篇 TinyStories 上训练一个 4096 词表的分词器。</li>
+            <li>用它做实验：编码解码、词表大小的影响、几个奇怪的切分，以及中英文的对比。</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>二、文字在计算机里是字节</h2>
+        <p>
+            计算机存文字，最终存的是一串 0 到 255 之间的整数，每个整数叫一个字节。把字符变成字节的规则叫编码，现在几乎都用 UTF-8：英文字母和常用符号各占 1 个字节，带重音的拉丁字母占 2 个，汉字一般占 3 个，emoji 占 4 个。
+        </p>
+        {{file:bpe/demo_small.py:print("=== 1.:个字节:}}
+        <p class="label">运行输出：</p>
+        {{out:bpes1}}
+        <p>
+            为什么要从字节开始，而不是从"字符"开始？因为世界上的字符有十几万种，而字节只有 256 种。以 256 个字节作为最初的词表，任何文字（中文、阿拉伯文、emoji、乱码）都能表示出来，不会出现"不认识的字"。这叫字节级 BPE。代价是：一个汉字一开始要拆成 3 个 token，要靠后面的合并才能变回一个。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、预切分</h2>
+        <p>
+            在合并之前，先把文本粗略切成"词"，规定 BPE 只能在一个词的内部合并，不能跨词。否则模型可能学到"the cat"中间带空格的这种 token，或者把"dog."和"dog!"当成两个不相干的东西。这里用一个正则表达式（一种描述文字模式的写法）来切：一串英文字母（前面可以带一个空格）算一个词，一串数字算一个词，一串其他符号算一个词，空白单独算。
+        </p>
+        {{file:bpe/bpe.py:# 预切分：:return PRETOKEN.findall}}
+        <p class="label">运行输出（空格显示成 ␣）：</p>
+        {{out:bpes2}}
+        <p>
+            注意空格是粘在后一个词的前面的："␣upon"而不是"upon"。这样"upon"出现在句首和句中时是两个不同的 token，模型也就知道了这里有没有空格，解码时能一字不差地还原。中文没有空格，"␣她很开心。"整个被当成了一个词，这个简单的规则对中文并不合适，第九节会看到它的后果。GPT-2、GPT-4 用的正则表达式更复杂一些，比如会把 's、'll 这类缩写单独切出来，但思路一样。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、BPE 训练算法</h2>
+        <p>
+            训练过程：
+        </p>
+        <ol>
+            <li>预切分，统计每个词出现了几次。"the"出现 10 万次，不必处理 10 万遍，处理一遍再乘以 10 万就行。</li>
+            <li>把每个词拆成单个字节。</li>
+            <li>数一数所有相邻的两个块一起出现了多少次。</li>
+            <li>挑出现次数最多的那一对，合并成一个新块，记下这条合并规则。</li>
+            <li>在所有词里执行这次合并，回到第 3 步，直到词表达到想要的大小。</li>
+        </ol>
+        <p>
+            词表大小 = 256 个字节 + 学到的合并规则条数。要 4096 的词表，就学 3840 条规则。
+        </p>
+        {{code:bpe/bpe.py:merge_pair}}
+        {{code:bpe/bpe.py:train}}
+        <p>
+            代码里的 Counter 是 Python 自带的计数器，pairs[(a, b)] += 次数 就是"这一对又见到了这么多次"。max(...) 那一行挑次数最多的一对；如果有几对次数一样，就按字典序挑，这样每次运行结果都一样。
+        </p>
+
+        <h3>在一句绕口令上跟一遍</h3>
+        <p>
+            先用一句很短的绕口令"Peter Piper picked a peck of pickled peppers"训练，只学 8 条规则，把每一步合并之前各个词的切分状态都打印出来：
+        </p>
+        <p class="label">运行输出（␣ 表示空格，| 隔开不同的词）：</p>
+        {{out:bpes3}}
+        <p>
+            一步步看：
+        </p>
+        <ul>
+            <li>第 1 次，p 和 e 挨在一起出现了 4 次（Piper 里 1 次，peck 里 1 次，peppers 里 2 次），合并成 pe。</li>
+            <li>第 3 次合并的是 pe + r，左边的 pe 是第 1 次合并的产物。新块还能继续参与合并，所以块会越来越长：第 5 次 pi + ck 得到 pick，第 7 次 ␣ + pick 得到 ␣pick。</li>
+            <li>每次合并后，各词的切分都变短了一点。8 次合并后，"␣picked"从 7 块变成了 2 块（␣pick | ed）。</li>
+            <li>第 1 次其实有平局："␣ + p"也出现了 4 次（picked、peck、pickled、peppers 前面的空格）。这里按字典序挑了 p + e。规则换一下，合并顺序就不一样，CS224N 第十三讲的课件用同一句绕口令演示时，第一步合并的就是"_ + p"。结果略有差别，但道理相同。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>五、在 TinyStories 上训练</h2>
+        <p>
+            现在换成真实数据：2 万篇 TinyStories，约 1800 万个字节，学 3840 条规则，得到 4096 的词表（和练习 01 一样大）。
+        </p>
+        {{file:bpe/train_tinystories.py:text = "\n".join:merges = train(text, 4096, log=log)}}
+        <p class="label">运行输出：</p>
+        {{out:bpe_train}}
+        <p>
+            怎样读这段输出：
+        </p>
+        <ul>
+            <li>440 万个词里，不同的词只有 1.4 万个。按"不同的词"来处理，每一轮只要扫 1.4 万个词，所以整个训练只用了 43 秒。如果逐个字节扫 1800 万个字节，会慢上百倍。</li>
+            <li>第 1 条规则是 h + e，出现了 52 万次（the、he、she、her 里都有）。紧接着是 ␣t、␣a、␣s、␣w：英文里最常见的是"空格 + 某个字母开头"。第 7 条 ␣t + he 就拼出了最常见的词 ␣the，第 9 条拼出 ␣and，第 26 条拼出 ␣was。</li>
+            <li>越往后，合并的对出现得越少：第 1000 条只出现 1150 次，第 3840 条只有 108 次。后面学到的是 ␣colorful、␣reminded、␣pebble 这样完整的长词，以及 lephone（telephone 的一部分）这样的长片段。</li>
+            <li>这个实现每一轮都把所有词重新数一遍，简单但慢。实际的分词器（以及 CS336 作业要求的版本）只更新受这次合并影响的那些对的次数，在几十亿字节上也能训练。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>六、编码与解码</h2>
+        <p>
+            训练得到的是一张有先后顺序的合并规则表。拿到一段新文字时怎样切？先预切分、每个词拆成字节，然后在当前所有相邻对中，找训练时最早学到的那条规则，执行它；重复，直到没有任何一对能合并。为什么按训练顺序？因为训练时就是按这个顺序合并的，后面的规则是建立在前面的结果之上的（比如要先有 pi 和 ck，才能有 pick）。
+        </p>
+        <p>
+            解码更简单：每个编号查出对应的字节，拼起来，再按 UTF-8 变回文字。
+        </p>
+        {{code:bpe/bpe.py:Tokenizer}}
+        <p class="label">运行输出：</p>
+        {{out:bpee1}}
+        <p>
+            这句话里每个词都成了一个 token，包括 rabbit、Benny、shiny。解码后和原文完全一样：BPE 是无损的，切开再拼回去，一个字节都不会丢。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、词表该多大</h2>
+        <p>
+            BPE 的规则是一条条按顺序学的，所以只取前 k 条规则，就得到一个更小词表的分词器，不用重新训练。下面用同一个分词器的前 0、256、768、1792、3840 条规则，切同样 1000 篇训练时没见过的故事：
+        </p>
+        {{file:bpe/explore.py:for v in [256, 512:平均每个 token}}
+        <p class="label">运行输出：</p>
+        {{out:bpee2}}
+        <ul>
+            <li>词表 256 就是只有字节、一条规则都没有：一个字节一个 token，"The little girl was happy."要 26 个 token。</li>
+            <li>只加 256 条规则（词表 512），token 数就减少了一半多，每个 token 平均 2.35 个字节。最常见的词（the、little、was）在最早的规则里就合成了。</li>
+            <li>之后收益越来越小：词表从 2048 翻倍到 4096，token 数只少了 8%。后面学到的规则都是少见的词，用得少，省得也少。</li>
+        </ul>
+        <p>
+            词表不是越大越好。序列短，模型每次能看的内容就多，计算也省；但词表越大，嵌入矩阵越大（练习 01 里它占了 157 万参数），少见的 token 在训练中出现得少，它们的向量也就学得差。现在的大模型在两者之间取折中，词表一般在 10 万到 26 万之间（CS224N 第十三讲列了各家模型的数字），因为它们要覆盖几十种语言和代码；TinyStories 只有简单英文，4096 就够了。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、几个奇怪的切分</h2>
+        {{out:bpee3}}
+        <ul>
+            <li>同一个词，切法取决于前面有没有空格、是不是大写："␣strawberry"是 ␣straw | berry 两块，句首没有空格的"strawberry"变成 st | ra | w | berry 四块，大写的"␣Strawberry"又是另一种。对模型来说这是几串完全不同的编号，它得从数据里自己学会它们是同一个词。</li>
+            <li>这也是常被提到的"大模型数不清 strawberry 里有几个 r"的原因之一：模型看到的是 ␣straw 和 berry 两个编号，看不到里面的字母，要回答就只能靠记忆。</li>
+            <li>拼错一个字母（strawbery），切分就变了：berry 变成了 ber | y。</li>
+            <li>在儿童故事里，数字和 hippopotamus 这种长词很少出现，所以没学到相应的规则："␣2026"被拆成 ␣ | 2 | 0 | 2 | 6，河马被拆成六块。分词器只学会了它训练数据里常见的东西。</li>
+            <li>CS224N 第十三讲的客座讲者 Julie Kallini 的姓"␣Kallini"被拆成 ␣K | all | in | i，是用常见的片段拼出来的。BPE 不会遇到"不认识的词"，最差也能退回到单个字节。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>九、同一句话，中文比英文贵多少</h2>
+        <p>
+            最后拿两句意思相同的中英文，用三个分词器比一比：本练习只在英文故事上训练的分词器，GPT-2 的分词器（2019 年，词表 5 万，训练数据以英文网页为主），GPT-4o 的分词器（2024 年，词表约 20 万，OpenAI 发布时说明它对很多非英语语言的压缩比以前好）。后两个通过 OpenAI 公开的 tiktoken 库调用。
+        </p>
+        {{file:bpe/explore.py:pairs = [("The little cat:GPT-4o 的分词器怎样切中文}}
+        <p class="label">运行输出：</p>
+        {{out:bpee4}}
+        <ul>
+            <li>本练习的分词器从没在训练数据里见过中文，所以没有任何关于中文的合并规则。"小猫在花园里玩。"8 个字，每个字 3 个字节，就成了 24 个 token，每个 token 只是半个字都不到的一个字节（输出里的 &lt;e5&gt; 是字节的十六进制写法，单个字节没法显示成字）。</li>
+            <li>GPT-2 的分词器见过一些中文，合并了一部分，但还是要 17 个 token，几乎是英文的两倍；第二句是 21 对 9。</li>
+            <li>GPT-4o 的分词器每个汉字都是一个完整的 token，中文（8、7 个）和英文（9 个）差不多。</li>
+        </ul>
+        <p>
+            这件事不只是技术细节。按 token 收费的 API，同样的意思用 GPT-2 那样的分词器写中文，要付大约两倍的钱；上下文窗口按 token 算，中文能放进去的内容也少一半；模型对每个字要预测好几步，也更难学好。CS224N 第十三讲讲的"分词带来语言间的不公平"（Petrov 等 2023 发现同样的内容在不同语言间 token 数最多差 15 倍）说的就是这个。解决办法就是这一篇看到的：让分词器的训练数据里有足够多的各种语言。
+        </p>
+    </section>
+
+    <section>
+        <h2>十、和课程内容的对照</h2>
+        <ul>
+            <li>BPE 算法、绕口令的例子、strawberry 和故障 token、多语言公平性：<a href="../CS224N-NLP-with-Deep-Learning/13_分词与多语言.html">CS224N 第十三讲</a>。</li>
+            <li>子词与字节对编码在预训练中的位置：<a href="../CS224N-NLP-with-Deep-Learning/06_预训练.html">CS224N 第六讲</a>。</li>
+            <li>分词的基本概念：<a href="../00-Foundations/09_分词.html">AI 基础：分词</a>。</li>
+            <li>CS336 第一份作业要求从零实现字节级 BPE，并在 TinyStories 和更大的 OpenWebText 上训练，还要做到足够快；这一篇是它的简化版。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>动手练习 · Notes curated by Joyce</p>
+        <nav class="footer-nav">
+            <a href="01_从零写一个小LLaMA.html">&larr; 上一篇</a>
+            <a href="../index.html">返回主目录</a>
+            <a href="03_对比几种解码方法.html">下一篇 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

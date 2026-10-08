@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LoRA 微调 | 动手练习</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+    <style>
+        pre.code code, pre.output code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.82rem; line-height: 1.5; white-space: pre; }
+        pre.output { border-left: 4px solid #7a5c2e; }
+        .label { font-size: 0.85rem; color: #888; margin-bottom: -1rem; }
+        img.figure { max-width: 100%; height: auto; display: block; margin: 1.5rem 0; }
+    </style>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="03_对比几种解码方法.html">&larr; 上一篇</a>
+    <span>动手练习 04</span>
+    <a href="index.html">练习目录 &rarr;</a>
+</nav>
+
+
+<article>
+    <header>
+        <h1>练习 04：LoRA 微调</h1>
+        <p class="subtitle">把练习 01 的小模型改造成爱讲龙的故事的模型：一种做法改动全部 1200 万个参数，另一种只训练 4 万个。比一比两者学到多少、忘掉多少、要存多大的文件，以及学习率怎样左右结果</p>
+        <div class="author-meta">
+            对应课程内容：<a href="../CS224N-NLP-with-Deep-Learning/08_高效适配提示与参数高效微调.html">CS224N 第八讲（参数高效微调、LoRA）</a>，<a href="../11-711-Advanced-NLP/08_微调与蒸馏.html">CMU 11-711 第八讲（微调与蒸馏）</a>。<br>
+            零基础读前预备：<a href="../00-Foundations/13_预训练微调与对齐.html">预训练、微调与对齐</a>；需要先读<a href="01_从零写一个小LLaMA.html">练习 01</a>，这里在它训练好的模型上继续训练<br>
+            完整代码：<code>01-Labs/code/lora/</code>（lora.py、check.py、finetune.py、lr_check.py、size.py、plot.py）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、要做的是什么</h2>
+        <p>
+            练习 01 的模型是在各种儿童故事上训练的，是个"通才"。假如我们想要一个专门讲龙的故事的模型，最直接的办法是拿一批龙的故事接着训练它，这叫微调。微调时，模型的参数会从"通才"的状态出发，往"龙故事专家"的方向调。
+        </p>
+        <p>
+            问题在于，普通的微调（全量微调）会改动模型的每一个参数。我们这个模型只有 1200 万参数，无所谓；但一个 700 亿参数的模型，每微调一个用途，就要多存一份 700 亿参数的副本，训练时还要为每个参数存梯度和优化器状态，需要的显存是模型本身的好几倍。
+        </p>
+        <p>
+            LoRA（Low-Rank Adaptation，低秩适配，Hu 等 2021）的办法是：原来的参数全部冻住不动，在每个权重矩阵旁边加两个很小的矩阵，只训练这两个小矩阵。这一篇要回答三个问题：
+        </p>
+        <ol>
+            <li>只训练这么少的参数，模型能学会讲龙的故事吗？</li>
+            <li>微调会不会让模型忘掉原来的本事（讲普通故事）？LoRA 和全量微调谁忘得多？</li>
+            <li>省了多少：要训练多少参数，存多大的文件？</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>二、LoRA 是怎样做的</h2>
+        <p>
+            模型里的线性层做的事是 $y = Wx$：输入向量 $x$ 乘以权重矩阵 $W$。比如注意力里的 $W_q$ 是 384×384，有 147,456 个数。微调相当于把 $W$ 改成 $W + \Delta W$，全量微调就是让 $\Delta W$ 的 147,456 个数都自由变化。
+        </p>
+        <p>
+            LoRA 规定 $\Delta W$ 必须是两个细长矩阵的乘积：$\Delta W = BA$，其中 $A$ 是 $r \times 384$，$B$ 是 $384 \times r$，$r$ 叫秩，是一个很小的数，比如 4。这样 $\Delta W$ 虽然还是 384×384，但它只由 $384 \times 4 + 4 \times 384 = 3072$ 个数决定，是原来的 2%。
+        </p>
+        <p>
+            直观地说，$A$ 把 384 维的输入压缩成 4 个数，$B$ 再把这 4 个数展开回 384 维。所以 $\Delta W$ 只能在 4 个"方向"上改动模型的行为。这为什么够用？Aghajanyan 等（2020）发现，微调时权重的变化本身就集中在很少几个方向上（CS224N 第八讲称之为"内在秩很低"）：让一个会讲故事的模型多讲龙，不需要重新学语言，只需要在少数几个方向上推一推。
+        </p>
+        <p>
+            两个细节：
+        </p>
+        <ul>
+            <li>$B$ 初始化为全 0，所以刚加上 LoRA 时 $BA = 0$，模型和原来一模一样，微调从原模型出发。$A$ 用小的随机数初始化。</li>
+            <li>输出要乘一个缩放系数 $\alpha / r$，这里取 $\alpha = 2r$，即系数固定为 2。</li>
+        </ul>
+        <pre class="code"><code>class LoRALinear(nn.Module):
+    &quot;&quot;&quot;输出 = W x + (alpha / r) * B (A x)。W 冻结不动；A 是 r×输入维度，B 是输出维度×r。&quot;&quot;&quot;
+    def __init__(self, base: nn.Linear, r: int, alpha: float):
+        super().__init__()
+        self.base = base
+        self.base.weight.requires_grad = False          # 原权重冻结
+        self.scale = alpha / r
+        self.A = nn.Parameter(torch.randn(r, base.in_features) / base.in_features ** 0.5)
+        self.B = nn.Parameter(torch.zeros(base.out_features, r))   # B 从 0 开始：刚加上时模型和原来完全一样
+
+    def forward(self, x):
+        return self.base(x) + self.scale * (x @ self.A.T) @ self.B.T
+
+    def merged_weight(self):
+        &quot;&quot;&quot;训练完可以把 B A 直接加进 W，推理时就和普通线性层一样快。&quot;&quot;&quot;
+        return self.base.weight + self.scale * self.B @ self.A</code></pre>
+        <p>
+            然后把模型每个 Transformer 块里的 7 个线性层（注意力的 q、k、v、o，前馈层的 w1、w2、w3）都换成 LoRA 版本，其他所有参数（词嵌入、归一化层）冻结：
+        </p>
+        <pre class="code"><code>def apply_lora(model, r, alpha=None):
+    &quot;&quot;&quot;把每个 Transformer 块里的 7 个线性层（注意力的 q、k、v、o，前馈的 w1、w2、w3）换成 LoRA 版本，
+    其余参数（词嵌入、归一化）全部冻结。&quot;&quot;&quot;
+    alpha = alpha if alpha is not None else 2 * r
+    for p in model.parameters():
+        p.requires_grad = False
+    for block in model.blocks:
+        for parent, names in [(block.attn, [&quot;wq&quot;, &quot;wk&quot;, &quot;wv&quot;, &quot;wo&quot;]), (block.ffn, [&quot;w1&quot;, &quot;w2&quot;, &quot;w3&quot;])]:
+            for n in names:
+                setattr(parent, n, LoRALinear(getattr(parent, n), r, alpha))
+    return model</code></pre>
+        <p class="label">检查：加上 LoRA 后，要训练多少参数？输出变了没有？（check.py 的输出）</p>
+        <pre class="output"><code>原模型参数总量：12,194,688
+一个 384×384 的注意力矩阵 W：147,456 个数
+r=1   每个 384×384 矩阵旁边的 A、B 共    768 个数；全模型要训练    43,776 个参数（原来的 0.36%）；加上 LoRA 后输出不变：True
+r=4   每个 384×384 矩阵旁边的 A、B 共  3,072 个数；全模型要训练   175,104 个参数（原来的 1.44%）；加上 LoRA 后输出不变：True
+r=16  每个 384×384 矩阵旁边的 A、B 共 12,288 个数；全模型要训练   700,416 个参数（原来的 5.74%）；加上 LoRA 后输出不变：True
+r=64  每个 384×384 矩阵旁边的 A、B 共 49,152 个数；全模型要训练 2,801,664 个参数（原来的 22.97%）；加上 LoRA 后输出不变：True</code></pre>
+        <p>
+            r = 1 时只训练 43,776 个参数，是原模型的 0.36%；r = 64 时是 23%。四种秩加上 LoRA 后，输出都和原模型完全一样，说明 $B = 0$ 的初始化起了作用。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、实验怎样设计</h2>
+        <ul>
+            <li>微调数据：练习 01 用过的那 53 万篇训练故事里，所有提到 dragon 的，共 4166 篇、约 125 万个 token。原模型训练时其实也见过这些故事，只是它们只占不到 1%。</li>
+            <li>评估"学会了没有"：验证集里提到龙的 160 篇故事（训练时没见过），看模型在上面的损失。损失越低，说明模型越能预测龙的故事里的下一个词。</li>
+            <li>评估"忘掉了没有"：验证集里不提龙的普通故事，看模型在上面的损失有没有变差。</li>
+            <li>看行为：让模型以"Once upon a time"开头写 40 个故事，数有几个提到了龙。</li>
+            <li>每种做法都训练 600 步，每步 16 段、每段 256 个 token，一共约 246 万个 token，相当于把龙的故事过两遍。全量微调用学习率 3e-4，LoRA 都用 2e-3（LoRA 通常需要比全量微调大得多的学习率，后面第五节会专门看学习率的影响）。</li>
+        </ul>
+        <pre class="code"><code>    runs = [(&quot;全量微调&quot;, None, 3e-4), (&quot;LoRA r=1&quot;, 1, 2e-3), (&quot;LoRA r=4&quot;, 4, 2e-3), (&quot;LoRA r=16&quot;, 16, 2e-3), (&quot;LoRA r=64&quot;, 64, 2e-3)]
+    for name, r, lr in runs:
+        torch.manual_seed(0)
+        model = fresh()
+        if r is not None:
+            apply_lora(model, r).to(dev)   # 新加的 A、B 矩阵也要搬到 GPU 上
+        params = [p for p in model.parameters() if p.requires_grad]
+        n_train = sum(p.numel() for p in params)
+        opt = torch.optim.AdamW(params, lr=lr, weight_decay=0.0)
+        g = torch.Generator().manual_seed(1); t0 = time.time(); curve = []
+        for step in range(STEPS + 1):
+            if step % 100 == 0:
+                curve.append([step, evaluate(model, dragon_val), evaluate(model, general_val)])
+                print(f&quot;  {name} step {step:3d}  龙故事损失 {curve[-1][1]:.3f}  普通故事损失 {curve[-1][2]:.3f}&quot;, flush=True)
+            if step == STEPS: break
+            _, loss = model(*batch(dragon_train, g))
+            opt.zero_grad(); loss.backward(); opt.step()</code></pre>
+    </section>
+
+    <section>
+        <h2>四、结果</h2>
+        <p class="label">finetune.py 的输出（原模型那一行是直接打印的字典：dragon 是龙故事损失，general 是普通故事损失，rate 是写到龙的比例）：</p>
+        <pre class="output"><code>微调数据：1,246,091 个 token（训练集中提到 dragon 的故事）
+评估数据：龙故事 47,665 个 token，普通故事 626,114 个 token（都来自验证集，训练时没见过）
+原模型： {&#x27;trainable&#x27;: 0, &#x27;dragon&#x27;: 1.8473869880040488, &#x27;general&#x27;: 1.8517088095347087, &#x27;rate&#x27;: 0.025, &#x27;minutes&#x27;: 0}
+全量微调: 可训练参数 12,194,688，龙故事损失 1.875，普通故事损失 2.129，写到龙的比例 80%，用时 2.8 分钟
+LoRA r=1: 可训练参数 43,776，龙故事损失 1.806，普通故事损失 1.889，写到龙的比例 75%，用时 2.9 分钟
+LoRA r=4: 可训练参数 175,104，龙故事损失 1.811，普通故事损失 1.921，写到龙的比例 82%，用时 2.8 分钟
+LoRA r=16: 可训练参数 700,416，龙故事损失 1.845，普通故事损失 1.999，写到龙的比例 72%，用时 3.5 分钟
+LoRA r=64: 可训练参数 2,801,664，龙故事损失 1.939，普通故事损失 2.140，写到龙的比例 88%，用时 3.2 分钟</code></pre>
+        <img class="figure" src="img/lora_curves.png" alt="微调过程中龙故事损失和普通故事损失随步数变化的曲线">
+        <p>
+            先看行为：原模型写 40 个故事只有 1 个提到龙（2.5%），微调之后，所有做法都到了 72% 到 88%。只训练 4 万个参数的 LoRA r = 1 也做到了 75%，模型的"兴趣"被成功改变了。
+        </p>
+        <p>
+            再看两条损失曲线（灰色虚线是原模型）：
+        </p>
+        <ul>
+            <li>左图，龙故事上的损失：LoRA r = 1 和 r = 4 降得最多，从 1.847 降到约 1.81，并且一直保持。全量微调先降到 1.837，200 步之后反而回升，最后 1.875，比原模型还差。这是过拟合：微调数据只有 125 万个 token，全量微调有 1200 万个参数可以调，过第二遍时开始记住训练用的那几千篇故事的细节，对没见过的龙故事反而预测得更差。</li>
+            <li>右图，普通故事上的损失：所有做法都变差了，这就是"遗忘"。但差别很大：r = 1 只从 1.852 升到 1.889，全量微调升到 2.129。秩越大，可调的东西越多，遗忘也越多，r = 1、4、16、64 依次排开。</li>
+            <li>r = 64 两边都最差，比全量微调还差。它有 280 万个可训练参数，又用了和 r = 1 一样大的学习率 2e-3，每一步的改动太猛。下一节会看到，这主要是学习率的问题。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>五、补充实验：学习率很关键</h2>
+        <p>
+            上面的比较有个不公平的地方：所有 LoRA 用了同一个学习率，全量微调只试了一个学习率。如果学习率不合适，结论可能是错的。所以又补了三组：全量微调和 r = 64 换成更小的学习率，r = 1 换成更大的学习率。
+        </p>
+        <pre class="code"><code>for name, r, lr in [(&quot;全量微调，学习率 5e-5&quot;, None, 5e-5), (&quot;LoRA r=64，学习率 3e-4&quot;, 64, 3e-4), (&quot;LoRA r=1，学习率 5e-3&quot;, 1, 5e-3)]:
+    torch.manual_seed(0)
+    model = fresh()
+    if r is not None:
+        apply_lora(model, r).to(dev)
+    params = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(params, lr=lr, weight_decay=0.0)
+    g = torch.Generator().manual_seed(1)
+    for step in range(STEPS):
+        _, loss = model(*batch(dragon_train, g))
+        opt.zero_grad(); loss.backward(); opt.step()</code></pre>
+        <p class="label">运行输出：</p>
+        <pre class="output"><code>全量微调，学习率 5e-5: 龙故事损失 1.763，普通故事损失 1.907，写到龙的比例 75%
+LoRA r=64，学习率 3e-4: 龙故事损失 1.796，普通故事损失 1.951，写到龙的比例 72%
+LoRA r=1，学习率 5e-3: 龙故事损失 1.818，普通故事损失 1.896，写到龙的比例 62%</code></pre>
+        <p>
+            结果改变了上一节的一部分结论：
+        </p>
+        <ul>
+            <li>全量微调把学习率从 3e-4 降到 5e-5 之后，龙故事损失降到 1.763，是所有实验里最好的，普通故事损失 1.907，遗忘也小了很多。上一节全量微调表现差，主要是学习率太大，不是全量微调本身不行。</li>
+            <li>r = 64 降到 3e-4 后也正常了：龙故事 1.796，普通故事 1.951。</li>
+            <li>r = 1 把学习率提高到 5e-3，反而比 2e-3 时略差（1.818 对 1.806）。</li>
+        </ul>
+        <p>
+            把各自较好的那组放在一起看：全量微调（5e-5）在龙故事上学得最好（1.763），但忘得比 r = 1 多（1.907 对 1.889）；LoRA r = 1（2e-3）学得少一点（1.806），忘得最少，而且只训练了 0.36% 的参数。这和研究文献里的说法一致：LoRA 学得少一些，也忘得少一些。另外，LoRA 合适的学习率比全量微调大得多，这里大约是 40 倍（2e-3 对 5e-5）；Thinking Machines 的博客《LoRA Without Regret》也报告 LoRA 的最佳学习率大约是全量微调的 10 倍。
+        </p>
+        <p>
+            需要说明：每种做法这里只试了两个学习率，不是完整的调参，数字之间零点零几的差别不一定可靠，但大的趋势是清楚的。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、它们写出来的故事</h2>
+        <p>
+            下面是每个模型以"Once upon a time"开头写的 40 个故事里的第一个（随机种子相同）。
+        </p>
+        <p class="label">原模型：</p>
+        <pre class="output"><code>Once upon a time, there was a little girl named Lily. She loved to play outside in the sunshine. One day, she found a shiny rock and decided to keep it under her pillow. She thought it was a perfect place to keep it.
+
+Lily&#x27;s friend, Tommy, saw her playing with the rock. &quot;Wow, that&#x27;s a cool rock! Can I keep it?&quot; asked Lily. &quot;No, I can&#x27;t,&quot; said Tommy. &quot;You have your own special rock.&quot;
+
+Lily felt sad for Tommy. She didn&#x27;t want to share her own rock by the river. &quot;Why don&#x27;t you keep the rock and share it with your friends?&quot; asked Lily. &quot;I think you should share it with me,&quot; said Tommy.</code></pre>
+        <p class="label">全量微调（学习率 3e-4）：</p>
+        <pre class="output"><code>Once upon a time, there was a little boy named Timmy. Timmy loved to play outside in the forest. One day, he found a shiny crown on the ground. It was shiny and had a strange cover on it. Timmy was very happy and asked his mom to keep it for a little while.
+
+His mom said, &quot;No, Timmy. It&#x27;s my hat! I&#x27;m being careless and it bit you. It&#x27;s not nice to try to break things.&quot;
+
+Timmy felt sad and he wanted to make his mom happy again. He said to his mom, &quot;I&#x27;m sorry, Mommy. I can&#x27;t do it again. Can we play together?&quot;
+
+Their mom smiled and said, &quot;Of course, Timmy. We can play together</code></pre>
+        <p class="label">LoRA r = 1：</p>
+        <pre class="output"><code>Once upon a time, there was a little girl who loved to play in the park. She would run around and make lots of noise.
+
+One day, the little girl was playing in the park. She saw a dragon and he was sad. She stopped and looked at the dragon.
+
+The dragon said, &quot;Why are you sad?&quot;
+
+The little girl said nothing back. She was confused.
+
+The dragon said, &quot;I am sorry. I should have been more sad. Why don&#x27;t you come out and play with me?&quot;
+
+The little girl thought about it for a moment. Then she said, &quot;It&#x27;s ok if you understand it - it is okay.&quot;
+
+The dragon smiled and said, &quot;My name is</code></pre>
+        <p class="label">LoRA r = 64（学习率 2e-3）：</p>
+        <pre class="output"><code>Once upon a time, there was a little girl named Lily. She loved to read books. One day, she went on an adventure in her backyard. She saw a long green dragon in the bushes. It was huge and scary. Lily was scared, but she wanted to move closer to the dragon.
+
+As she sat on her porch, the dragon started to tremble. Lily was scared, but she knew she had to follow the dragon. She looked around and saw a big, scary dragon. The dragon was sleeping under a tree, in the tree.
+
+Lily was scared, but the dragon said it was just a dream. They had a fun time together and read a little song. Lily had a lot, and they had a</code></pre>
+        <p>
+            原模型写的是 Lily 和一块石头，没有龙。LoRA r = 1 和 r = 64 写的都是女孩遇到龙。全量微调这一个故事里没出现龙（它 40 个里有 32 个提到龙，这个恰好不是），但能看出龙故事的痕迹：闪亮的王冠，还有一句不太通的"it bit you"。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、省了多少</h2>
+        <p>
+            LoRA 训练完，只需要保存 A 和 B 这些小矩阵；原模型不变，可以被很多个 LoRA 共用。比如一个原模型配十个 LoRA：一个讲龙、一个讲海盗、一个讲太空，切换用途时只换小矩阵。部署时还可以把 $BA$ 直接加进 $W$，合并成一个普通的线性层，推理速度和原模型一样。
+        </p>
+        <pre class="code"><code>full = nbytes(m.state_dict())
+print(f&quot;完整模型存成文件：{full/1e6:.1f} MB&quot;)
+for r in [1, 4, 16, 64]:
+    m = apply_lora(TinyLlama(Config()), r)
+    lora_only = {k: v for k, v in m.state_dict().items() if k.endswith(&quot;.A&quot;) or k.endswith(&quot;.B&quot;)}
+    print(f&quot;LoRA r={r:&lt;3} 只需要存 A 和 B：{nbytes(lora_only)/1e6:6.2f} MB（完整模型的 {nbytes(lora_only)/full:.1%}）&quot;)</code></pre>
+        <p class="label">size.py 的输出：</p>
+        <pre class="output"><code>完整模型存成文件：48.8 MB
+LoRA r=1   只需要存 A 和 B：  0.20 MB（完整模型的 0.4%）
+LoRA r=4   只需要存 A 和 B：  0.73 MB（完整模型的 1.5%）
+LoRA r=16  只需要存 A 和 B：  2.83 MB（完整模型的 5.8%）
+LoRA r=64  只需要存 A 和 B： 11.23 MB（完整模型的 23.0%）
+
+合并前后输出的最大差别：2.47e-06（只是浮点舍入误差）</code></pre>
+        <p>
+            r = 1 的 LoRA 文件只有 0.2 MB，是完整模型（48.8 MB）的 0.4%。合并之后，模型输出和合并前只差百万分之几，那是计算机浮点数运算的舍入误差，等于没有区别。
+        </p>
+        <p>
+            对大模型来说，省得更多：训练时，冻住的参数不需要梯度和优化器状态，AdamW 要为每个可训练参数额外存两个数，所以显存能省下一大截。QLoRA（Dettmers 等 2023）进一步把冻住的原模型压缩到 4 位精度，让 650 亿参数的模型能在单张 48GB 的显卡上微调。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、小结</h2>
+        <ul>
+            <li>只训练 0.36% 的参数（LoRA r = 1），模型讲龙的比例就从 2.5% 涨到 75%，没见过的龙故事上的损失也明显下降。</li>
+            <li>微调都会让模型忘掉一些原来的本事。LoRA 秩越小，遗忘越少；全量微调学得最多，也更容易忘、更容易过拟合。</li>
+            <li>学习率对结果影响很大：同样是全量微调，学习率差 6 倍，结论就从"比原模型还差"变成"学得最好"。LoRA 需要的学习率比全量微调大得多。</li>
+            <li>LoRA 存一个用途只要很小的文件，还能合并进原模型，不增加推理时间。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>九、和课程内容的对照</h2>
+        <ul>
+            <li>LoRA 的公式、内在秩、QLoRA、LoRA 在 RL 中秩为 1 也够用的发现：<a href="../CS224N-NLP-with-Deep-Learning/08_高效适配提示与参数高效微调.html">CS224N 第八讲</a>。</li>
+            <li>全量微调、灾难性遗忘与参数高效方法：<a href="../11-711-Advanced-NLP/08_微调与蒸馏.html">CMU 11-711 第八讲</a>。</li>
+            <li>John Schulman 在 CS224N 的客座讲座讲了 Tinker 和《LoRA Without Regret》，那一讲没有公开课件，所以本站没有笔记。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>动手练习 · Notes curated by Joyce</p>
+        <nav class="footer-nav">
+            <a href="03_对比几种解码方法.html">&larr; 上一篇</a>
+            <a href="../index.html">返回主目录</a>
+            <a href="index.html">练习目录 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
