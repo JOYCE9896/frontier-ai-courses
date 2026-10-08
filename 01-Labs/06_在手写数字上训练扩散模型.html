@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>在手写数字上训练扩散模型 | 动手练习</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+    <style>
+        pre.code code, pre.output code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.82rem; line-height: 1.5; white-space: pre; }
+        pre.output { border-left: 4px solid #7a5c2e; }
+        .label { font-size: 0.85rem; color: #888; margin-bottom: -1rem; }
+        img.figure { max-width: 100%; height: auto; display: block; margin: 1.5rem 0; }
+    </style>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="05_用GRPO和DPO教模型做加法.html">&larr; 上一篇</a>
+    <span>动手练习 06</span>
+    <a href="index.html">练习目录 &rarr;</a>
+</nav>
+
+
+
+
+<article>
+    <header>
+        <h1>练习 06：在手写数字上训练扩散模型</h1>
+        <p class="subtitle">Stable Diffusion、Midjourney 这类图像生成模型的核心是扩散模型：学会一点点去掉噪声，就能从一张纯噪声图里"洗"出一张图来。这一篇在 MNIST 手写数字上从头训练一个 390 万参数的扩散模型，看加噪和去噪的每一步，比较 DDPM 和 DDIM，试一试无分类器引导</p>
+        <div class="author-meta">
+            对应课程内容：<a href="../CME296-Diffusion-and-Large-Vision-Models/01_扩散模型DDPM与DDIM.html">Stanford CME296 第一讲（DDPM 与 DDIM）</a>、<a href="../CME296-Diffusion-and-Large-Vision-Models/04_潜空间与引导生成.html">第四讲（引导生成）</a>，<a href="../11-711-Advanced-NLP/15_扩散与流.html">CMU 11-711 第十五讲（扩散与流）</a>。<br>
+            零基础读前预备：<a href="../00-Foundations/05_神经网络.html">神经网络</a>、<a href="../00-Foundations/07_梯度下降与反向传播.html">梯度下降与反向传播</a>；不需要读前面的练习，这一篇和语言模型无关<br>
+            完整代码：<code>01-Labs/code/diffusion/</code>（data.py、unet.py、diffusion.py、forward_demo.py、train.py、classifier.py、ddim_bug.py、sample.py、common.py）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、要做的是什么</h2>
+        <p>
+            前面几篇的语言模型是一个词一个词地写。图像生成的主流做法完全不同：扩散模型。它的想法分两半：
+        </p>
+        <ul>
+            <li>加噪（前向过程）：拿一张真实图片，一步步往上加随机噪声，加 1000 步之后，图片就变成了一片完全随机的雪花点。这一半不需要学，用公式就能算。</li>
+            <li>去噪（反向过程）：训练一个神经网络，看到一张带噪声的图，猜出里面的噪声是什么。猜出来减掉一点，图就干净一点。从一片纯噪声出发，反复去噪 1000 次，就得到一张"新的"图。</li>
+        </ul>
+        <p>
+            为什么这样能生成新图？因为模型在训练时见过成千上万张手写数字被加噪的样子，它学到的是"手写数字大概长什么样"。从一片随机噪声开始去噪时，它会把噪声往"像手写数字"的方向推，每一片不同的噪声，推出来的都是一个不同的数字。
+        </p>
+        <p>
+            数据是 MNIST：6 万张 28×28 像素的黑白手写数字，机器学习里最经典的数据集。这里在四边各补 2 像素，变成 32×32，方便网络做两次缩小一半；像素值从 0 到 255 换算成 -1 到 1。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、加噪：前向过程</h2>
+        <p>
+            每一步加一点高斯噪声（一种最常见的随机数，大部分落在 0 附近），噪声的量由一张表 $\beta_1, \dots, \beta_{1000}$ 决定，这里从 0.0001 线性增加到 0.02。加了 $t$ 步之后的图可以一步直接算出来，不需要真的一步步加：
+        </p>
+        <p>
+            $$x_t = \sqrt{\bar\alpha_t}\, x_0 + \sqrt{1 - \bar\alpha_t}\, \epsilon$$
+        </p>
+        <p>
+            $x_0$ 是原图，$\epsilon$ 是一张和原图同样大小的随机噪声，$\bar\alpha_t$ 是一个随 $t$ 从 1 降到接近 0 的数（$\bar\alpha_t = \prod_{s \le t}(1-\beta_s)$）。也就是说，$x_t$ 是原图和噪声的混合，$t$ 越大，原图的成分越少。
+        </p>
+        <pre class="code"><code>T = 1000
+betas = torch.linspace(1e-4, 0.02, T)              # how much noise is added at each step
+alphas = 1 - betas
+alpha_bar = torch.cumprod(alphas, 0)               # fraction of the original image&#x27;s &quot;signal&quot; left after t steps
+NULL = 10                                          # label index meaning &quot;no label&quot; (used for guidance)
+
+
+def add_noise(x0, t, noise):
+    &quot;&quot;&quot;Jump straight to step t: x_t = sqrt(alpha_bar_t) * x0 + sqrt(1 - alpha_bar_t) * noise.&quot;&quot;&quot;
+    ab = alpha_bar.to(x0.device)[t].view(-1, 1, 1, 1)
+    return ab.sqrt() * x0 + (1 - ab).sqrt() * noise</code></pre>
+        <p class="label">forward_demo.py 把 6 张训练图分别加噪到不同步数：</p>
+        <pre class="output"><code>t=   0: x_t = 1.000 * image + 0.010 * noise
+t=  50: x_t = 0.985 * image + 0.173 * noise
+t= 100: x_t = 0.946 * image + 0.324 * noise
+t= 200: x_t = 0.810 * image + 0.586 * noise
+t= 400: x_t = 0.440 * image + 0.898 * noise
+t= 600: x_t = 0.160 * image + 0.987 * noise
+t= 800: x_t = 0.039 * image + 0.999 * noise
+t= 999: x_t = 0.006 * image + 1.000 * noise</code></pre>
+        <img class="figure" src="img/diffusion_forward.png" alt="6 个手写数字在 t=0 到 999 不同加噪程度下的样子">
+        <p>
+            t = 200 时原图还占 0.81，数字清楚可见；t = 400 时原图只占 0.44、噪声占 0.90，已经很难认出来；t = 800 以后基本就是纯噪声了。去噪的模型要做的，就是从右往左把这个过程倒回去。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、去噪的网络：U-Net</h2>
+        <p>
+            去噪网络的输入是三样东西：带噪声的图 $x_t$，现在是第几步 $t$（噪声有多重），以及想要哪个数字（标签，可以不给）。输出是一张和输入一样大的图：它猜的噪声 $\hat\epsilon$。
+        </p>
+        <p>
+            图像生成里最常用的结构是 U-Net（CME296 第五讲讲了它和后来的 DiT）。它先把图一层层缩小（32×32 到 16×16 再到 8×8），让网络在小图上看清整体形状；再一层层放大回 32×32，同时把缩小前对应大小的特征直接接过来（跳跃连接），保留细节。整体画出来像一个字母 U，因此得名。
+        </p>
+        <p>
+            时间步 $t$ 和标签怎样告诉网络？$t$ 用和 Transformer 位置编码一样的正弦函数变成一个 256 维向量；数字标签查一张表也变成 256 维向量，两个加在一起，再加到每一层的每个像素上。标签一共 11 种：0 到 9 加一个"没有标签"，后面的无分类器引导要用到它。
+        </p>
+        <pre class="code"><code>class ResBlock(nn.Module):
+    &quot;&quot;&quot;Two 3x3 convolutions with a residual connection; the time/label embedding is added in between.&quot;&quot;&quot;
+    def __init__(self, cin, cout, emb_dim):
+        super().__init__()
+        self.norm1 = nn.GroupNorm(8, cin)
+        self.conv1 = nn.Conv2d(cin, cout, 3, padding=1)
+        self.emb = nn.Linear(emb_dim, cout)
+        self.norm2 = nn.GroupNorm(8, cout)
+        self.conv2 = nn.Conv2d(cout, cout, 3, padding=1)
+        self.skip = nn.Conv2d(cin, cout, 1) if cin != cout else nn.Identity()
+
+    def forward(self, x, emb):
+        h = self.conv1(F.silu(self.norm1(x)))
+        h = h + self.emb(emb)[:, :, None, None]       # tell every pixel which time step / digit this is
+        h = self.conv2(F.silu(self.norm2(h)))
+        return h + self.skip(x)</code></pre>
+        <pre class="code"><code>class UNet(nn.Module):
+    &quot;&quot;&quot;32x32 -&gt; 16x16 -&gt; 8x8 and back up, with skip connections between matching resolutions.&quot;&quot;&quot;
+    def __init__(self, ch=(64, 128, 256), emb_dim=256, n_classes=10):
+        super().__init__()
+        self.emb_dim = emb_dim
+        self.time_mlp = nn.Sequential(nn.Linear(emb_dim, emb_dim), nn.SiLU(), nn.Linear(emb_dim, emb_dim))
+        self.label_emb = nn.Embedding(n_classes + 1, emb_dim)   # the extra label (index 10) means &quot;no label&quot;
+        self.inp = nn.Conv2d(1, ch[0], 3, padding=1)
+        self.down1 = ResBlock(ch[0], ch[0], emb_dim)
+        self.down2 = ResBlock(ch[0], ch[1], emb_dim)
+        self.down3 = ResBlock(ch[1], ch[2], emb_dim)
+        self.mid = ResBlock(ch[2], ch[2], emb_dim)
+        self.up3 = ResBlock(ch[2] + ch[2], ch[1], emb_dim)
+        self.up2 = ResBlock(ch[1] + ch[1], ch[0], emb_dim)
+        self.up1 = ResBlock(ch[0] + ch[0], ch[0], emb_dim)
+        self.out = nn.Sequential(nn.GroupNorm(8, ch[0]), nn.SiLU(), nn.Conv2d(ch[0], 1, 3, padding=1))
+
+    def forward(self, x, t, y):
+        emb = self.time_mlp(time_embedding(t, self.emb_dim)) + self.label_emb(y)
+        h0 = self.inp(x)
+        h1 = self.down1(h0, emb)                          # 32x32
+        h2 = self.down2(F.avg_pool2d(h1, 2), emb)         # 16x16
+        h3 = self.down3(F.avg_pool2d(h2, 2), emb)         # 8x8
+        m = self.mid(h3, emb)
+        u3 = self.up3(torch.cat([m, h3], 1), emb)                                  # 8x8
+        u2 = self.up2(torch.cat([F.interpolate(u3, scale_factor=2), h2], 1), emb)  # 16x16
+        u1 = self.up1(torch.cat([F.interpolate(u2, scale_factor=2), h1], 1), emb)  # 32x32
+        return self.out(u1)</code></pre>
+        <p>
+            整个网络有 391 万个参数，和练习 01 的语言模型（1220 万）同一个量级。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、训练</h2>
+        <p>
+            训练的每一步：随机取 128 张图，每张随机选一个时间步 $t$，随机生成噪声 $\epsilon$，按上面的公式算出 $x_t$，让网络猜噪声，损失是猜的噪声和真实噪声之差的平方的平均值（MSE）。就这么简单：网络从来不需要"生成"，它只学一件事，看一张噪声图，说出里面的噪声。
+        </p>
+        <p>
+            两个细节：
+        </p>
+        <ul>
+            <li>10% 的样本把标签换成"没有标签"。这样同一个模型既学会了"画一个 3"，也学会了"随便画一个数字"，后面的无分类器引导需要这两种预测。</li>
+            <li>EMA（指数移动平均）：另外保存一份权重，每一步只往当前权重挪 0.1%，相当于最近一千来步权重的平均。生成图片时用这份平均过的权重，结果更稳定。</li>
+        </ul>
+        <pre class="code"><code>for step in range(1, STEPS + 1):
+    idx = torch.randint(len(x_all), (BATCH,), generator=gen)
+    x0, y = x_all[idx].to(dev), y_all[idx].to(dev)
+    y = torch.where(torch.rand(BATCH, device=dev) &lt; P_DROP, torch.full_like(y, NULL), y)   # hide some labels
+    t = torch.randint(0, T, (BATCH,), device=dev)        # a random time step for each image
+    noise = torch.randn_like(x0)
+    xt = add_noise(x0, t, noise)
+    loss = F.mse_loss(model(xt, t, y), noise)           # how far the predicted noise is from the real noise
+    opt.zero_grad(); loss.backward(); opt.step()
+    with torch.no_grad():
+        for pe, pm in zip(ema.parameters(), model.parameters()):
+            pe.mul_(EMA).add_(pm, alpha=1 - EMA)</code></pre>
+        <p class="label">运行输出：</p>
+        <pre class="output"><code>U-Net parameters: 3,912,321
+step   500  loss 0.0507  (2.2 min)
+step  1000  loss 0.0256  (4.1 min)
+step  1500  loss 0.0226  (6.1 min)
+step  2000  loss 0.0200  (8.2 min)
+step  2500  loss 0.0208  (10.2 min)
+step  3000  loss 0.0210  (12.3 min)
+step  3500  loss 0.0192  (14.5 min)
+step  4000  loss 0.0182  (16.5 min)
+step  4500  loss 0.0185  (18.9 min)
+step  5000  loss 0.0192  (21.3 min)
+step  5500  loss 0.0190  (23.7 min)
+step  6000  loss 0.0180  (25.8 min)
+done: 6000 steps in 25.8 min</code></pre>
+        <p>
+            6000 步、每步 128 张图，相当于把 6 万张训练图过了 13 遍左右，用时 26 分钟。损失从第 500 步的 0.05 降到 0.018 左右，之后就基本不动了：每一步随机选的 $t$ 不同，$t$ 很小时噪声很弱、很难猜准，所以损失降不到 0。
+        </p>
+        <p>
+            训练中在第 250、1000、2500、6000 步各让模型画一遍 0 到 9（用后面会讲的 DDIM 和引导，随机种子固定）：
+        </p>
+        <img class="figure" src="img/diffusion_progress.png" alt="训练第 250、1000、2500、6000 步时生成的 0 到 9">
+        <p>
+            第 250 步还是一片噪点；第 1000 步隐约能看到 1、2、7 的笔画；第 2500 步大部分数字已经能认出来，但 4、8、9 还歪歪扭扭；第 6000 步十个数字都清楚了。注意这里画图用的是 EMA 权重，它是最近一千来步的平均，所以比当前权重"慢半拍"，前期看起来会比实际学到的差一些。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、去噪：DDPM 采样</h2>
+        <p>
+            生成一张图的过程（DDPM，Ho 等 2020）：从一张纯随机噪声 $x_{1000}$ 开始，对 $t = 999, 998, \dots, 0$ 依次做：让网络猜出噪声 $\hat\epsilon$，按公式减掉这一步对应的那一小部分噪声，再加回一点点新的随机噪声（最后一步不加）。为什么还要加回一点噪声？这一步的数学推导（见 CME296 第一讲）表明，每一步去噪后的结果不是一个确定的值，而是一个以"减掉噪声后的图"为中心的小范围分布，所以要从这个分布里抽一个。
+        </p>
+        <pre class="code"><code>@torch.no_grad()
+def ddpm_sample(model, y, guidance=0.0, gen=None, keep_every=None):
+    &quot;&quot;&quot;DDPM: start from pure noise and take all 1000 small denoising steps. Optionally keep snapshots.&quot;&quot;&quot;
+    dev = y.device
+    x = torch.randn(len(y), 1, 32, 32, generator=gen).to(dev)
+    snaps = []
+    for t in reversed(range(T)):
+        eps = predict_noise(model, x, t, y, guidance)
+        a, ab, b = alphas[t].item(), alpha_bar[t].item(), betas[t].item()
+        mean = (x - b / (1 - ab) ** 0.5 * eps) / a ** 0.5      # remove the predicted noise for this step
+        if t &gt; 0:
+            x = mean + b ** 0.5 * torch.randn(x.shape, generator=gen).to(dev)   # plus a little fresh noise
+        else:
+            x = mean
+        if keep_every and (t % keep_every == 0 or t == T - 1):
+            snaps.append((t, x.clamp(-1, 1).cpu()))
+    return x.clamp(-1, 1), snaps</code></pre>
+        <p>
+            先不给标签（用"没有标签"），看 8 张图从噪声里浮现的过程，每 100 步截一张：
+        </p>
+        <img class="figure" src="img/diffusion_reverse.png" alt="8 张图从 t=999 的纯噪声逐步去噪到 t=0 的过程">
+        <p>
+            前 500 步几乎看不出变化，图还是一片噪声。到 t = 400 左右开始隐约出现轮廓，t = 300 时已经能猜出是什么数字，t = 200 到 0 主要是在把背景擦干净、把笔画描清楚。这和加噪那张图正好对应：加噪时 t = 400 以后数字就看不见了，所以去噪时数字也是在 t = 400 前后才"定下来"的。大的结构先确定，细节最后补，这是扩散模型生成过程的一个典型特点。
+        </p>
+        <p>
+            再不给标签生成 100 张，用分类器看看它们是什么数字：
+        </p>
+        <pre class="output"><code>=== 2. 100 samples without a label ===
+100 images with DDPM (1000 steps): 51.1s
+how the classifier reads them: {0: 13, 1: 3, 2: 13, 3: 7, 4: 9, 5: 4, 6: 6, 7: 9, 8: 20, 9: 16}</code></pre>
+        <img class="figure" src="img/diffusion_uncond.png" alt="不给标签生成的 100 个手写数字">
+        <p>
+            10 种数字都画得出来，大部分看得出是什么数，也有一些四不像。分布并不均匀：真实数据里每种数字大约各占 10%，这里分类器认出 20 个 8、16 个 9，只有 3 个 1。一个可能的原因是不给标签的情况只占训练的 10%，模型在这种模式下练得少；另外有些四不像被分类器硬归到了某一类。（分类器是 classifier.py 里另外训练的一个小网络，在真实测试图上的准确率是 98.2%，这里只拿它当"评委"。）
+        </p>
+        <p>
+            这 100 张图用 DDPM 的 1000 步生成，花了 51 秒。每一步都要把网络算一遍，1000 步就是 1000 遍，这是 DDPM 最大的缺点：慢。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、DDIM：少走几步</h2>
+        <p>
+            DDIM（Song 等 2020）用的是同一个训练好的网络，只改采样的方法。每一步，它先用猜出的噪声算出"模型眼中的干净图" $\hat x_0$，然后直接跳到下一个时间步：
+        </p>
+        <p>
+            $$\hat x_0 = \frac{x_t - \sqrt{1-\bar\alpha_t}\,\hat\epsilon}{\sqrt{\bar\alpha_t}}, \qquad x_{t'} = \sqrt{\bar\alpha_{t'}}\,\hat x_0 + \sqrt{1-\bar\alpha_{t'}}\,\hat\epsilon$$
+        </p>
+        <p>
+            第二个式子和加噪公式长得一样：把猜出的干净图和猜出的噪声按 $t'$ 时刻的比例重新混合。它不加新的随机噪声，所以同一个起点永远得到同一张图；而且 $t'$ 不必是 $t - 1$，可以一次跳很多步。这样 1000 步可以缩成 50 步甚至 5 步。
+        </p>
+        <pre class="code"><code>@torch.no_grad()
+def ddim_sample(model, y, steps=50, guidance=0.0, gen=None):
+    &quot;&quot;&quot;DDIM: same trained model, but jump through only `steps` time steps and add no fresh noise.&quot;&quot;&quot;
+    dev = y.device
+    x = torch.randn(len(y), 1, 32, 32, generator=gen).to(dev)
+    ts = torch.linspace(T - 1, 0, steps).long().tolist()
+    for i, t in enumerate(ts):
+        eps = predict_noise(model, x, t, y, guidance)
+        ab = alpha_bar[t].item()
+        x0 = (x - (1 - ab) ** 0.5 * eps) / ab ** 0.5            # the model&#x27;s current guess of the clean image
+        x0 = x0.clamp(-1, 1)                                     # pixel values must stay in [-1, 1]
+        eps = (x - ab ** 0.5 * x0) / (1 - ab) ** 0.5             # recompute the noise so it matches the clipped image
+        ab_next = alpha_bar[ts[i + 1]].item() if i + 1 &lt; len(ts) else 1.0
+        x = ab_next ** 0.5 * x0 + (1 - ab_next) ** 0.5 * eps     # move to the next (less noisy) time step
+    return x.clamp(-1, 1)</code></pre>
+
+        <h3>一个写代码时踩到的坑</h3>
+        <p>
+            上面代码里有一行"recompute the noise"，第一版没有它，结果很奇怪：DDIM 走的步数越多，画得反而越差。按道理步数越多应该越精细才对，所以这一定是代码有问题，而不是方法本身。
+        </p>
+        <p>
+            原因是：每一步算出的 $\hat x_0$ 要裁剪到 -1 到 1 之间（像素值不能超出范围），但裁剪之后，$\hat\epsilon$ 还是裁剪前的那个，两者不再配套。下一步按第二个式子混合时，就带进了一点误差。步数少时误差没机会累积；步数多了，误差一步步叠加，图就走样了。引导强度越大，网络猜出的值越极端，被裁剪得越多，问题越明显。修正办法是裁剪之后，用裁剪后的 $\hat x_0$ 反过来重新算一遍 $\hat\epsilon$。ddim_bug.py 把三种写法放在一起比（每种数字生成 20 张，看分类器认得对不对）：
+        </p>
+        <pre class="output"><code>version                            10 steps, w=1     10 steps, w=2     50 steps, w=1     50 steps, w=2
+clip only (buggy)                          95.0%             97.0%             91.5%             34.5%
+no clipping                                96.5%            100.0%             94.5%            100.0%
+clip, then recompute noise                 95.0%            100.0%             93.5%             99.5%</code></pre>
+        <p>
+            第一行是有 bug 的版本：50 步、引导强度 2 时只有 34.5% 画对。不裁剪，或者裁剪后重算噪声，都能到 99.5% 以上。下面所有结果用的都是修正后的版本。这个坑说明了一件事：看到"更多计算反而更差"这种违反常理的结果时，先怀疑代码。
+        </p>
+
+        <h3>步数和速度</h3>
+        <p>
+            同样给标签、同样的引导强度 2，对比 DDIM 走 5、10、25、50 步和 DDPM 走 1000 步，每种数字各生成 50 张：
+        </p>
+        <pre class="output"><code>=== 3. DDPM vs DDIM with fewer steps (guidance 2, 50 images per digit) ===
+DDIM 5 steps        0.7s for 500 images   classifier agrees with the label: 100.0%
+DDIM 10 steps       3.2s for 500 images   classifier agrees with the label: 100.0%
+DDIM 25 steps      10.8s for 500 images   classifier agrees with the label: 99.8%
+DDIM 50 steps      23.3s for 500 images   classifier agrees with the label: 99.8%
+DDPM 1000 steps   505.8s for 500 images   classifier agrees with the label: 100.0%</code></pre>
+        <img class="figure" src="img/diffusion_steps.png" alt="DDIM 5、10、25、50 步和 DDPM 1000 步生成的 0 到 9">
+        <ul>
+            <li>DDIM 只走 5 步，画出来的 0 到 9 就和 1000 步的 DDPM 一样能认出来，分类器全部认对。时间是 0.7 秒对 506 秒，快了 700 多倍。</li>
+            <li>DDIM 不同步数画出来的图很像（同一个起始噪声，路线相近），只是细节略有差别，5 步的笔画稍微糊一点。DDPM 那一行和它们不一样，因为 DDPM 每一步都加新的随机噪声，走的是另一条路。</li>
+            <li>手写数字很简单，所以 5 步就够了。对于复杂的大图，步数太少会明显变糊，Stable Diffusion 这类模型通常用 20 到 50 步。CME296 第六讲讲的蒸馏方法，就是为了让模型在一两步内画出好图。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>七、无分类器引导：让模型更听话</h2>
+        <p>
+            给了标签"3"，模型就一定画 3 吗？不一定，标签只是一个参考。无分类器引导（classifier-free guidance，Ho 和 Salimans 2022）可以调节"听话的程度"：每一步让网络算两次，一次带标签，一次不带，然后按下式组合：
+        </p>
+        <p>
+            $$\hat\epsilon = \hat\epsilon_{\text{无标签}} + w\,(\hat\epsilon_{\text{有标签}} - \hat\epsilon_{\text{无标签}})$$
+        </p>
+        <p>
+            两次预测之差，可以理解为"标签 3 让模型想往哪个方向改"。$w = 0$ 就是完全不看标签；$w = 1$ 就是普通的带标签生成；$w &gt; 1$ 是把这个方向放大，比"画一个 3"更进一步，变成"画一个非常像 3 的 3"。这就是训练时随机去掉 10% 标签的原因：同一个网络要会做这两种预测。（不同论文对 $w$ 的写法不同，有的写成 $w+1$，CME296 第四讲提到过这一点。）
+        </p>
+        <pre class="code"><code>def predict_noise(model, x, t, y, guidance):
+    &quot;&quot;&quot;Classifier-free guidance: eps = eps_uncond + w * (eps_cond - eps_uncond). w = 0 ignores the label.&quot;&quot;&quot;
+    tt = torch.full((x.shape[0],), t, device=x.device, dtype=torch.long)
+    if guidance == 0:
+        return model(x, tt, torch.full_like(y, NULL))
+    eps_c = model(x, tt, y)
+    eps_u = model(x, tt, torch.full_like(y, NULL))
+    return eps_u + guidance * (eps_c - eps_u)</code></pre>
+        <p>
+            要求画 0 到 9 每种 50 张（DDIM 50 步），换不同的 $w$，看分类器认对的比例，以及同一种数字的 50 张图彼此平均差多远（像素距离，越大说明画得越多样）：
+        </p>
+        <pre class="output"><code>=== 4. classifier-free guidance (DDIM 50 steps, 50 images per digit) ===
+guidance w=0.0  classifier agrees with the label:   9.4%   diversity (avg distance between same-digit images): 19.90
+guidance w=1.0  classifier agrees with the label:  93.4%   diversity (avg distance between same-digit images): 17.71
+guidance w=2.0  classifier agrees with the label:  99.8%   diversity (avg distance between same-digit images): 16.87
+guidance w=4.0  classifier agrees with the label: 100.0%   diversity (avg distance between same-digit images): 16.39
+guidance w=8.0  classifier agrees with the label: 100.0%   diversity (avg distance between same-digit images): 16.40</code></pre>
+        <img class="figure" src="img/diffusion_guidance.png" alt="不同引导强度下要求画 3 时生成的 10 张图">
+        <p>
+            上图每一行都是要求画"3"的 10 张图：
+        </p>
+        <ul>
+            <li>$w = 0$：完全不看标签，画出来什么数字都有，分类器认对的比例 9.4%，和瞎猜（10%）差不多。</li>
+            <li>$w = 1$：普通的带标签生成，93.4% 画对。从图上看，每个 3 的写法各不相同，有的歪、有的细，也有几个写得不太像。</li>
+            <li>$w = 2$：99.8%；$w = 4$ 和 $w = 8$：100%。图上的 3 越来越粗、越来越端正，彼此也越来越像。</li>
+            <li>代价是多样性：同一种数字的图之间的平均距离从 19.9 降到 16.4。引导越强，模型越倾向于画"最标准"的那种写法。$w = 8$ 的有些笔画已经粗得有点变形。</li>
+        </ul>
+        <p>
+            这就是文生图模型里那个"引导强度"（guidance scale）参数在做的事：调高，图更贴合提示词，但更单调、有时过度饱和；调低，更多样，但可能不听话。实际常用的值在 3 到 8 之间。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、小结</h2>
+        <ul>
+            <li>扩散模型的训练目标非常简单：看一张加了噪声的图，猜出噪声。生成新图就是从纯噪声出发，反复减去猜出的噪声。</li>
+            <li>去噪时大结构先出现（t = 400 前后），细节最后补上。</li>
+            <li>DDPM 每步都加随机噪声，要走 1000 步；DDIM 用同一个模型，不加噪声、可以跳步，5 步就能画出可认的数字，快 700 多倍。</li>
+            <li>无分类器引导用同一个网络的"有标签"和"无标签"两次预测之差来放大标签的作用：越大越听话，但越单调。</li>
+            <li>写采样代码时一个小小的不一致（裁剪后没重算噪声）就能让结果完全走样；违反常理的结果往往是 bug。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>九、和课程内容的对照</h2>
+        <ul>
+            <li>前向和反向过程、训练目标的推导、DDPM 的采样、为什么慢：<a href="../CME296-Diffusion-and-Large-Vision-Models/01_扩散模型DDPM与DDIM.html">CME296 第一讲</a>。</li>
+            <li>无分类器引导与条件生成：<a href="../CME296-Diffusion-and-Large-Vision-Models/04_潜空间与引导生成.html">CME296 第四讲</a>；U-Net 与 DiT：<a href="../CME296-Diffusion-and-Large-Vision-Models/05_图像生成模型架构.html">第五讲</a>；少步采样与蒸馏：<a href="../CME296-Diffusion-and-Large-Vision-Models/06_模型训练与蒸馏.html">第六讲</a>。</li>
+            <li>扩散模型的另一种看法（分数匹配、流匹配）：<a href="../CME296-Diffusion-and-Large-Vision-Models/02_分数匹配与随机微分方程.html">CME296 第二讲</a>、<a href="../CME296-Diffusion-and-Large-Vision-Models/03_流匹配与整流流.html">第三讲</a>。</li>
+            <li>扩散模型在 NLP 课程里的讲法：<a href="../11-711-Advanced-NLP/15_扩散与流.html">CMU 11-711 第十五讲</a>。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>动手练习 · Notes curated by Joyce</p>
+        <nav class="footer-nav">
+            <a href="05_用GRPO和DPO教模型做加法.html">&larr; 上一篇</a>
+            <a href="../index.html">返回主目录</a>
+            <a href="index.html">练习目录 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
