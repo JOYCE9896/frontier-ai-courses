@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十四讲：OpenHands 框架 | CMU 11-768 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="13_Agent安全.html">&larr; 上一讲</a>
+    <span>CMU 11-768: Lecture 14</span>
+    <a href="index.html">课程目录 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十四讲：OpenHands 框架</h1>
+        <p class="subtitle">从真实用户和开源项目中得到的经验：SDK 的设计、单 Agent 与多 Agent、本地与云端、交互界面，以及从自动化工作流中学习</p>
+        <div class="author-meta">
+            主讲：Graham Neubig · 2026 年 10 月 8 日<br>
+            资料来源：<a href="https://www.cmu-agents.com/slides/lecture-14-openhands.pdf" target="_blank">课程幻灯片</a> · <a href="https://www.youtube.com/watch?v=VAzZkT68h2Q" target="_blank">课堂录像</a>（本文依据录像英文自动字幕整理课堂口述，代码、术语与表格对照幻灯片核实）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、本讲的位置</h2>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 00:00–04:59. -->
+        <p>
+            前几讲分别讲了 Agent 的工具、上下文、训练和安全。这一讲把它们放回一个真实产品里。Graham 一开始就说明，今天不只是介绍技术，还要讲自己做 OpenHands 时遇到的用户问题，以及怎样把这些问题变成研究课题。
+        </p>
+        <p>
+            开场演示分成两种工作。第一种是有人参与的任务：在聊天框里让 Agent 找出自己在 OpenHands 仓库中的未完成 PR，判断今天应该处理什么。第二种是自动化：定期整理待办，检查 PR，分流 issue，监控团队频道，或者修复依赖更新造成的失败。前者由人发起并跟进，后者反复执行相似的流程。
+        </p>
+        <p>
+            演示中还展示了切换模型、配置 MCP 和技能等能力。Graham 强调，OpenHands 希望尽量独立于具体模型，让同一个工作框架能使用不同提供商的模型。这是产品的设计目标；后面的问答也会谈到，不同模型对工具和提示格式的适应并不总是一样。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、从代码补全到实际部署</h2>
+
+        <h3>1. 早期代码生成的边界</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 05:00–06:59. -->
+        <p>
+            Graham 从 2016 年开始研究代码生成，但直到 2023 年，主要形态仍是代码补全和单个函数生成。像 HumanEval 这样的任务，输入函数规格，输出实现，再运行测试。编辑、执行、检查和决定下一步，主要还是人在做。
+        </p>
+        <p>
+            SWE-bench 把问题推进到仓库级别：给一个真实 issue 和当时的代码快照，让系统产出补丁，并用仓库测试检查。Graham 回忆，早期结果非常低。这类评估让“能生成代码”和“能独立处理软件任务”之间的差距变得具体。
+        </p>
+
+        <h3>2. OpenDevin 的起点</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 07:00–10:59. -->
+        <p>
+            2024 年 3 月 Devin 的演示是一个推动点。Graham 说，其中的技术方向自己已经研究过，但把规划、执行和反馈组合成一个直观产品，产生了很强的吸引力。他希望做一个开放的版本；Qwen 团队的 Junyang Lin 和 Binyuan Hui 也发起了相关号召，最初只有 README 的仓库就吸引了大量关注。
+        </p>
+        <p>
+            他回忆自己用 Claude 3 帮忙生成早期界面，再把真正运行的 Agent 接进去。项目最初叫 OpenDevin，后来成为 OpenHands。随后 SWE-agent 和 OpenDevin CodeAct 等开放系统陆续出现，文件搜索、代码修改、命令执行和结果验证开始被组织成可研究的 Agent 与计算机交互接口。
+        </p>
+
+        <h3>3. 演示能运行，不等于产品已经好用</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 10:00–14:59. -->
+        <p>
+            Graham 没有把最初的热度等同于实际能力。他说，早期系统很长一段时间并不好用；后来模型的推理、编辑和工具使用能力改善，Agent 才逐渐可靠起来。按他的经验，2025 年的重要变化是更多模型具备了较强的编程能力，到了 2026 年，工作重点进一步转向部署与界面：长任务、中断、并行、进度展示、凭证和结果检查。
+        </p>
+        <p>
+            框架本身也付出了重写的代价。他直言第一版 Harness 难用、难扩展，团队后来整体重做。下面介绍的 SDK，是把前面一段时间的部署经验重新整理进组件边界后的设计，不是最初那套演示代码自然长大就得到了今天的结构。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、Software Agent SDK：默认可用，也能替换</h2>
+
+        <h3>1. 模型、工具、工作区与会话</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 13:00–16:59; slides 13–15. -->
+        <p>
+            SDK 的原则是提供足够好的默认组件，让用户可以直接使用，同时允许移除和替换。模型、工具、状态和工作区都有现成实现，也可以换模型、加工具、改指令和部署方式。GUI、CLI 和外部集成都建立在这套共同基础上。
+        </p>
+        <p>
+            幻灯片用一个短例子说明 Agent 的配置：先创建 LLM，再提供终端、文件编辑器和任务跟踪器。这里第三个工具是 TaskTrackerTool；它不是字幕中容易误听成的“测试工具”。测试可以通过终端执行。
+        </p>
+        <pre><code>llm = LLM(
+    model=os.getenv("LLM_MODEL", "gpt-5.5"),
+    api_key=os.getenv("LLM_API_KEY"),
+)
+agent = Agent(
+    llm=llm,
+    tools=[
+        Tool(name=TerminalTool.name),
+        Tool(name=FileEditorTool.name),
+        Tool(name=TaskTrackerTool.name),
+    ],
+)</code></pre>
+        <p>
+            这是课堂展示的配置片段，省略了导入等完整程序内容，模型名也是幻灯片当时的示例。Agent 配置可以复用；执行某个任务时，再创建 Conversation，指定 workspace，发送消息并运行：
+        </p>
+        <pre><code>cwd = os.getcwd()
+conversation = Conversation(agent=agent, workspace=cwd)
+conversation.send_message("3 project facts in FACTS.txt")
+conversation.run()</code></pre>
+        <p>
+            工作区决定文件和命令在哪里执行；会话保存任务、动作和观察；run 驱动动作与观察之间的循环。把这几件事拆开，才能在复用同一个 Agent 配置时，为不同任务换工作区和会话状态。
+        </p>
+
+        <h3>2. 为什么直接使用 SDK</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 16:00–18:59; 24:00–27:59. -->
+        <p>
+            学生问，“直接使用代码”和调用 CLI 有什么区别。Graham 解释，从 Python 启动另一个语言写的 Agent，给命令行传参数，是很方便的测试方式；但当研究者想替换内部模块时，会逐渐碰到命令行参数和配置文件的边界。SDK 让研究者进入内部组件，直接修改和组合它们。
+        </p>
+        <p>
+            他把 OpenHands 与很简洁的 mini-SWE-agent 放在一起讨论：前者适合需要持久化、长任务和较完整基础设施的实验，后者适合快速理解、修改一个很小的 Agent 循环。取舍在研究需要什么，而不是功能越多就一定越好。
+        </p>
+        <p>
+            对于为什么选择 Python，Graham 给出的原因首先是团队背景：项目由机器学习研究者发起，他自己也更容易阅读 Python。动态类型可能带来错误，因此需要类型检查等工程约束；不过在他描述的工作负载中，主要时间通常花在等待模型和执行外部程序，Harness 的语言运行速度并不是主要瓶颈。这是特定工作负载下的判断。
+        </p>
+
+        <h3>3. 自定义工具</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 18:00–19:59; slide 16. -->
+        <p>
+            自定义工具分成三部分：Action 定义带类型的输入，Executor 执行操作，Observation 定义返回给模型的结果。幻灯片以 grep 为例，动作里有正则表达式 pattern 和搜索路径 path，观察里有匹配结果列表 matches。执行器接收动作，再返回观察。
+        </p>
+        <p>
+            这与第二讲的工具调用机制对应：模型看到工具描述并生成参数，真正搜索文件的是执行器，结果再以模型能读懂的形式进入下一轮。定义工具接口和执行工具，是两件各自有明确职责的事。
+        </p>
+
+        <h3>4. 会话持久化与上下文压缩</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 19:00–20:59; 27:00–29:59; slides 17–18. -->
+        <p>
+            会话可以用 persistence_dir 和 conversation_id 保存。恢复时使用同一个 ID 和存储位置，读取之前的事件和会话状态。幻灯片另外提醒，工作区是否持久化是独立的问题：保存了会话记录，不代表文件和运行环境也自动保留。
+        </p>
+        <p>
+            OpenHands 把上下文压缩组件称为 condenser：把较旧事件变成摘要，同时保留原始指令和最近工作。Graham 说，团队试过不同方式，包括隐藏单独的动作，最后采用了这种摘要方案。压缩会丢失细节，因此摘要不能替代文件和测试等实际证据。
+        </p>
+        <p>
+            学生问，不同模型的上下文窗口不同，什么时候压缩。Graham 介绍了按步骤数量和按 token 数量两种触发方式，也可以根据模型服务报告的窗口大小设置阈值，并按实际需求调整。他没有把一种固定阈值当成所有模型的通用答案。
+        </p>
+        <p>
+            另一位学生问，模型是否会过度适应某一种 Harness。Graham 回忆，早期模型对工具接口比较敏感，团队曾仔细参考模型熟悉的工具设计；按他的授课时经验，新模型对不同环境的适应有所改善。但模型能否适应仍应实际检验，不能把换了工具格式视为完全没有影响。
+        </p>
+
+        <h3>5. 沙盒与动作确认</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 21:00–23:59; slides 19–20. -->
+        <p>
+            远程执行示例用 DockerWorkspace 创建工作区，再把它交给相同的 Conversation 接口。幻灯片注明 Agent Server 位于 Docker 内部。这不是说一个 Python 的 with 语句能自动隔离任意代码，而是这个工作区对象负责具体的远程执行与生命周期。
+        </p>
+        <p>
+            动作确认则是另一层控制。课堂示例调用 <code>conversation.set_confirmation_policy(AlwaysConfirm())</code>，让待执行动作先暂停，等待人的决定。拒绝后，Agent 可以调整计划；也可以配置安全分析器，在动作执行前判断风险。这与上一讲的区别一致：沙盒限制可访问范围，确认策略决定某次动作能否执行。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、单 Agent 与多 Agent</h2>
+
+        <h3>1. 先建立一个单 Agent 基线</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 30:00–32:59. -->
+        <p>
+            早期一种流行设计，是给经理、复现者、定位者、编辑者和验证者分别安排一个 Agent。课堂用 CodeR 展示这种固定角色流程，Graham 在口述中先提到 MetaGPT，随后当场更正为 CodeR。
+        </p>
+        <p>
+            他的反问是：当模型越来越善于遵循指令时，能否让一个 Agent 按“复现、定位、编辑、测试”的步骤完成任务？同一个 Agent 已经拥有前面工作的上下文，也可以根据新情况调整顺序，不必每一步都向另一个角色交接。固定分工则带来上下文传递和维护成本。
+        </p>
+        <p>
+            这个立场主要来自编程任务，并不表示所有任务都应取消固定流程。Graham 提到，有些面向客户的流程需要更强的限制；他主张的是先知道单 Agent 能做到什么，再为额外 Agent 找到明确用途。
+        </p>
+
+        <h3>2. 通用工具、技能与 MCP</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 32:00–36:59. -->
+        <p>
+            单 Agent 能承担多种工作，需要一组可组合的通用工具：编辑文件、运行命令、浏览网页。代码、配置和文档都能用文件编辑处理；搜索、依赖安装和测试都能通过命令执行完成；浏览器补充网页和视觉信息。
+        </p>
+        <p>
+            但如果把每一种工作规范都塞进系统提示，提示会越来越长。OpenHands 因此把项目约定和重复流程放进按需读取的技能。早期名称 microagents 容易让人以为真的运行了不同 Agent，Graham 认为 skills 更准确：它们是同一个 Agent 可以使用的额外指令。
+        </p>
+        <p>
+            他还区分了两种激活方式：早期实现用关键词触发，另一种做法是由 Agent 选择并读取相关技能。共同目标都是在需要时提供适当上下文。再配合 MCP 提供的外部工具，同一个 Agent 可以在不同任务里使用不同指令和工具，而不必预先固定一组角色。
+        </p>
+        <p>
+            OpenHands-Versa 是这一思路的研究例子：把编程能力与多模态浏览、搜索和文件访问结合，在多类任务上检验通用 Agent。Graham 特别提醒，展示中的数值来自当时的实验，不能直接当成授课时最新模型的性能。
+        </p>
+
+        <h3>3. 什么时候增加 Agent</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 36:00–38:59. -->
+        <p>
+            Graham 给出三个具体理由，而不是因为“多 Agent”本身更先进：
+        </p>
+        <ul>
+            <li>并行工作：有多个相对独立的 PR、issue 或仓库任务，可以同时处理，减少等待。</li>
+            <li>独立检查：让另一个 Agent 检查补丁，不直接继承实现者为自己决定所作的全部解释。</li>
+            <li>控制上下文和成本：把边界清楚的任务交出去，只收回必要结果，也可以让合适的子任务使用较便宜的模型。</li>
+        </ul>
+        <p>
+            关于独立检查，他说明这是自己的经验观察：Agent 检查自己的工作时可能更宽容，另一个没有完整自我解释上下文的检查者往往更严格。他没有声称课堂上已经给出了证明这一点的普遍研究结论。
+        </p>
+
+        <h3>4. 交接成本与失败方式</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 39:00–43:59; 65:00–66:59. -->
+        <p>
+            在长程软件任务中，让经理分配工作给多个工程 Agent 并不容易。每个执行者需要刚好足够的上下文，还要避免重复实现、改动冲突；经理最后把所有改动重新集成进仓库，也是一项困难工作。Graham 说，他们曾花很多力气才让这种安排真正工作。
+        </p>
+        <p>
+            学生问，多 Agent 是否能节省 token。回答是否定的：没有这种保证。Graham 提到自己的某项软件工程实验，多 Agent 的成本反而更高，只是任务完成效果更好。通过摘要和较便宜模型可能省钱，但必须把额外交接、重复阅读和集成成本也计算进去。
+        </p>
+        <p>
+            对于如何追踪多个 Agent 的过程，以及软件长期演化中单 Agent 和多 Agent 谁更好，Graham 都没有给出确定答案。他介绍自己有时让经理 Agent 读取下属轨迹并回答问题，也把长期演化中的比较当作值得研究的问题。这里应保留问题的开放性。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、运行位置与交互界面</h2>
+
+        <h3>1. 本地与云端是部署选择</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 43:00–45:59. -->
+        <p>
+            早期 Devin 面向云端工作区，OpenDevin 则在本地用 Docker 隔离。Graham 回忆，自己起初不确定用户是否会接受 Agent 直接在个人电脑上工作，因为提示注入可能让它接触私人数据和凭证。后来，本地执行在有人参与的编程任务中很受欢迎，因为文件、服务和已有工作上下文都在本地。
+        </p>
+        <p>
+            云端则适合持续运行和后台工作，电脑关闭后任务仍能继续，但需要准备远程仓库、依赖和凭证。Graham 描述的产品经验中，代码审查和其他后台自动化较适合这种方式。这里是围绕任务需要的选择，不是本地或云端有一个对所有人都最好的答案。
+        </p>
+
+        <h3>2. 四种界面</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 45:00–50:59; slides 31–36. -->
+        <p>
+            运行在哪里，与用户通过什么界面交互，是两个独立维度。CLI 可以连接远程工作区，GUI 也可以控制本地执行。课堂比较了四种界面：
+        </p>
+        <table>
+            <tr><th>界面</th><th>课堂强调的用途</th><th>需要解决的问题</th></tr>
+            <tr><td>IDE</td><td>熟悉的文件、差异、测试与调试环境</td><td>当人主要分配任务和审核结果时，传统编辑功能未必仍是中心</td></tr>
+            <tr><td>专用 GUI</td><td>围绕任务、进度、并行运行和结果预览组织工作</td><td>让用户理解过程，并有效检查结果</td></tr>
+            <tr><td>CLI</td><td>本地、服务器和远程终端都容易使用，也便于脚本调用</td><td>视觉预览等需求往往需要其他界面配合</td></tr>
+            <tr><td>已有工具中的集成</td><td>在 GitHub 的 issue、PR 或团队聊天里直接提出请求和接收结果</td><td>把任务上下文、权限和结果检查接入现有工作流程</td></tr>
+        </table>
+        <p>
+            课堂举手调查中，CLI 和 IDE 使用较多，但这是这间教室里的情况。Graham 也提醒，如果换成非程序员，专用 GUI 的使用情况可能很不同。不能把一次课堂投票当成整个用户群体的比例。
+        </p>
+
+        <h3>3. 人的工作量减少后，界面还缺什么</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 48:00–49:59; slide 34. -->
+        <p>
+            Graham 介绍了一项比较 GitHub Copilot 和 OpenHands 的研究。幻灯片注明参与者是 20 位经常使用 copilot 的用户，完成 Python 任务。他在课堂上概括，Agent 降低了用户主动投入的时间，提高了完成任务的效率。
+        </p>
+        <p>
+            但参与者也有两种负面反馈：等待 Agent 工作时很无聊；不知道怎样确认它是否做得好。这意味着自动化并没有消除人的工作，而是把一部分工作转成任务分配、切换和结果审核。界面需要帮助用户管理等待和并行任务，也要提供足够清楚的证据，让人能检查结果。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、软件开发自动化</h2>
+
+        <h3>1. 从触发事件到可检查结果</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 50:00–51:59; slide 39. -->
+        <p>
+            自动化不只是让 Agent 多运行几次。课堂展示的是一个有边界的流程：事件触发，收集任务上下文，在隔离工作区执行，产出补丁、报告或评论，再由人或规则检查。
+        </p>
+        <ol>
+            <li>触发：一个新 issue、一个 PR，或定时任务。</li>
+            <li>上下文：目标仓库、工作指令、允许的权限。</li>
+            <li>执行：在隔离工作区里运行 Agent。</li>
+            <li>产物：可以检查的代码修改、报告或评论。</li>
+            <li>核验：对照原始任务，由维护者或检查规则判断是否完成。</li>
+        </ol>
+        <p>
+            演示中的自动化包括 PR 审查、issue 分流，以及依赖版本更新后测试失败时尝试修复。这些任务有明确的触发条件和反复出现的工作模式，因此也积累了可比较的运行记录。
+        </p>
+
+        <h3>2. Issue 分流先解决“到底要做什么”</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 52:00–54:59. -->
+        <p>
+            Graham 解释，OpenHands 是大型开源项目，收到很多贡献。issue 刚提出，就可能有人用编程 Agent 快速生成 PR。代码质量问题不一定来自模型太弱，也可能因为需求本来就不清楚。
+        </p>
+        <p>
+            Issue 分流 Agent 因此做两类判断：任务描述不足时，列出开发前必须澄清的问题；任务可以执行时，写清完成条件和验收标准。它的价值不只是贴一个标签，而是帮助实现者理解什么结果才算解决了问题。
+        </p>
+
+        <h3>3. 代码审查与交接</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 54:00–56:59; slide 41. -->
+        <p>
+            课堂展示的审查指令，第一步就问：这个 PR 是否符合项目目标，是否应该进入仓库。之后才检查具体实现。一个补丁可以写得合理，却解决了项目并不需要的问题，所以审查不能只看局部代码。
+        </p>
+        <p>
+            Graham 说，团队当前把较多精力放在 issue 分流和审查，因为开放社区会提供大量实现；如果是没有这种贡献来源的私人仓库，就还需要自动化实现环节。幻灯片把整个软件流程分为需求分流、实现、独立审查和合并检查，最后的检查针对当前提交上的测试与批准状态，避免把旧版本通过检查当作新版本也已经通过。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、从历史运行中改进技能：SkillRefiner</h2>
+
+        <h3>1. 延迟反馈怎样成为训练材料</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 56:00–57:59. -->
+        <p>
+            同一种自动化反复执行，就会积累输入、输出以及后续反馈。Graham 用 PR 审查举例：机器人给出 LGTM，认为可以接受，后来真正的维护者却指出严重问题并要求修改。这段后续讨论为前一次审查提供了负面证据。
+        </p>
+        <p>
+            SkillRefiner 利用这类带反馈的成功和失败轨迹，寻找重复出现的模式，再把模式转成指令修改建议。这里的反馈是任务运行后才到来的，不要求在 Agent 每个动作之后立即给奖励。
+        </p>
+
+        <h3>2. 提议修改，还要回到证据</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 57:00–59:59; slides 42–43. -->
+        <p>
+            课堂介绍的流程是：整理带有证据的轨迹，分组比较成功和失败，提出技能修改，再通过证据过滤回看这些建议是否有支撑。可以用新指令重新运行，检查是否产生更好的审查结果，最后合并被接受的修改，得到更新后的技能版本。
+        </p>
+        <p>
+            改的首先是技能与提示，不是模型权重。Graham 认为，模型训练也是另一条可能路线，但需要更严格的评估。不能因为提示文字被改了，就把它描述成模型已经进行了 RL。
+        </p>
+        <p>
+            幻灯片报告了留出任务上的结果。下面摘录 LLM 初始化技能的准确率和人工初始化的 PR 审查 F1；两类指标分开列，不能把 F1 的小数当成准确率百分点。这里是幻灯片的实验结果，不是本笔记重新运行的测试。
+        </p>
+        <table>
+            <tr><th>任务与指标</th><th>模型</th><th>初始技能</th><th>SkillRefiner</th></tr>
+            <tr><td>SpreadsheetBench，准确率 %</td><td>GPT-5.4-mini</td><td>77.5</td><td>84.0</td></tr>
+            <tr><td>SpreadsheetBench，准确率 %</td><td>MiniMax-M2.7</td><td>68.0</td><td>76.0</td></tr>
+            <tr><td>DAPO-Math，准确率 %</td><td>GPT-5.4-mini</td><td>90.0</td><td>91.0</td></tr>
+            <tr><td>DAPO-Math，准确率 %</td><td>MiniMax-M2.7</td><td>53.5</td><td>64.0</td></tr>
+            <tr><td>PR Review，F1</td><td>GPT-5.4-mini</td><td>0.16</td><td>0.18</td></tr>
+            <tr><td>PR Review，F1</td><td>MiniMax-M2.7</td><td>0.11</td><td>0.15</td></tr>
+        </table>
+
+        <h3>3. 怎样从产品问题形成研究问题</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 58:00–60:59. -->
+        <p>
+            Graham 提出，还可以从大量用户轨迹中归纳重复的使用方式，把它们变成自动化，再根据后续运行结果继续改进。这样，自动化流程不只来自开发者事先设计，也可能来自对真实工作的观察。
+        </p>
+        <p>
+            但 issue 分流和代码审查的“好”不像单元测试那样容易判定。是否抓住真正重要的问题，是否误报，是否帮助维护者作出决定，都需要可信的评估。Graham 把这视为明确的研究机会：只有先把效果判断做好，才能可靠地比较改提示、改 Harness 和训练模型这几条路线。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、课堂问答：环境迁移与远程工作</h2>
+
+        <h3>1. 能否在本地和云端之间接着做</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 60:00–63:59. -->
+        <p>
+            学生设想，白天在本地工作，吃饭或晚上把任务移到云端继续，再切回来。Graham 认为这有意义，但关键是迁移什么上下文。他个人主要在云端的临时沙盒工作，每次拉取需要的材料；本地用户则可能依赖未提交文件、服务状态和其他本地信息，迁移时必须考虑这些依赖。
+        </p>
+        <p>
+            对跨设备同步，他介绍自己的方式是把共享材料保存在 GitHub 或其他云端位置，每次读取最新版本，并通过 MCP 访问常用服务。对于只能在本地处理的大数据，不能假定换一台机器就自然拥有同样上下文；要么保持本地执行，要么另行安排可访问的数据存储。
+        </p>
+
+        <h3>2. 一个 Agent 通过 SSH 操作所有机器是否合适</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 63:00–65:59. -->
+        <p>
+            Graham 先指出权限范围：一个 Agent 能进入所有机器，意味着一次被利用可能影响所有这些机器。随后他给出一个实际系统问题：大量 Agent 每执行一条命令就建立、断开 SSH 连接，曾使他们的集群登录节点承受很大压力。
+        </p>
+        <p>
+            他自己的做法是建立 SSH 隧道，让 Agent 在目标机器上持续运行，再通过服务连接交互。重点是避免把每一次工具动作都变成一次新的远程登录，同时按任务收紧访问范围；并不是仅仅因为有一个中央 Agent，就应该给它所有机器的权限。
+        </p>
+
+        <h3>3. 是否需要重新设计软件协作界面</h3>
+        <!-- Classroom source: https://www.youtube.com/watch?v=VAzZkT68h2Q; 67:00–69:16. -->
+        <p>
+            最后的问题是：当 Agent 参与大部分开发工作时，是否还必须沿用 GitHub 式的 PR 和 CI 流程，能否有更高效的界面。Graham 认为可以重新思考结果检查与协作方式，但也提醒，完整平台背后已有大量工程工作，不必为了试一个新想法就全部重写。这同样可以成为研究项目：改变交互和检查方式后，如何仍然确认工作质量。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、参考资料导读</h2>
+        <ul>
+            <li><a href="https://github.com/OpenHands/software-agent-sdk" target="_blank">OpenHands Software Agent SDK</a>：本讲的实现基础，提供模型、工具、会话、工作区和可替换组件。</li>
+            <li><a href="https://github.com/OpenHands/software-agent-sdk/blob/69e26889401fe69157fff536e6a69049e6644cb3/examples/01_standalone_sdk/01_hello_world.py" target="_blank">课堂的 Hello World 示例</a>：幻灯片所链接的固定版本，包含模型与工具配置、创建会话和运行任务。</li>
+            <li><a href="https://github.com/OpenHands/software-agent-sdk/blob/69e26889401fe69157fff536e6a69049e6644cb3/examples/01_standalone_sdk/02_custom_tools.py" target="_blank">自定义工具示例</a>：动作、观察和执行器怎样组成一个工具。同一目录还有持久化、动作确认和上下文压缩示例。</li>
+            <li><a href="https://arxiv.org/abs/2511.03690v1" target="_blank">OpenHands Software Agent SDK 论文</a>：课程用来说明模型与 Agent 系统共同影响表现的资料。</li>
+            <li><a href="https://hub.openhands.dev/blog/dont-sleep-on-single-agent-systems" target="_blank">Don't Sleep on Single-agent Systems</a>：Graham 关于单 Agent、通用工具和灵活流程的设计观点。</li>
+            <li><a href="https://arxiv.org/abs/2506.03011v1" target="_blank">OpenHands-Versa</a>：编程、多模态浏览和其他通用工具能否支持多类问题求解。</li>
+            <li><a href="https://arxiv.org/abs/2507.08149v1" target="_blank">Code with Me or for Me?</a>：课堂介绍的用户研究，关注主动投入、任务表现，以及理解和监督 Agent 的需要。</li>
+            <li>SkillRefiner（Khatry 等）：课堂后半段介绍的离线技能改进工作，用带反馈的历史轨迹提出并筛选指令修改；本讲的过程和结果按录像及幻灯片第 42、43 页整理。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>十、小结</h2>
+        <p>
+            OpenHands 的经验把前面几讲连接起来：SDK 把模型、工具、会话与工作区分开，支持持久化、压缩、沙盒和动作确认；单 Agent 先用通用工具与按需技能完成工作，再为并行、独立检查或成本管理增加其他 Agent；运行位置和交互界面根据任务选择；自动化把重复工作变成可检查的流程，并积累后续反馈。Graham 最后留下的研究问题是，怎样把这些真实反馈变成可靠评估，再用它改进指令、框架或模型。下一讲介绍 LangGraph。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-768: AI Agents · Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="13_Agent安全.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="index.html">课程目录 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
