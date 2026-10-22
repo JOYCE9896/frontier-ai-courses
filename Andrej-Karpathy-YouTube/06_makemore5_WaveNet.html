@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>makemore 5：搭一个 WaveNet | Andrej Karpathy YouTube 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <span><a href="05_makemore4_手写反向传播.html">&larr; 上一篇</a></span>
+    <span>Andrej Karpathy YouTube · 06</span>
+    <span><a href="07_从零构建GPT.html">下一篇 &rarr;</a></span>
+</nav>
+
+<article>
+    <header>
+        <h1>makemore 第 5 集：把 MLP 改成树状的 WaveNet</h1>
+        <p class="subtitle">加长上下文，逐层两两融合信息；顺便把代码改成 torch.nn 风格，并看看真实的深度学习开发过程</p>
+        <div class="author-meta">
+            演讲：Andrej Karpathy · 发布：2022 年 11 月 21 日 · 时长：56 分<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=t3YJ5hKiMQ0" target="_blank">Building makemore Part 5: Building a WaveNet</a>（本文依据公开视频英文字幕和章节整理）<br>
+            论文：<a href="https://arxiv.org/abs/1609.03499" target="_blank">WaveNet（DeepMind, 2016）</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一集要做什么</h2>
+        <p>
+            这一集是在京都的酒店房间里录的。目前的模型是：3 个字符的嵌入拼在一起，送进一个隐藏层，然后预测第 4 个字符。他想做两件事：
+        </p>
+        <ul>
+            <li>看更多字符，不只 3 个。</li>
+            <li>不要把所有字符一次性塞进一个隐藏层（那样“太快压缩了太多信息”），而是建一个更深的模型，逐层融合信息。</li>
+        </ul>
+        <p>
+            这样做下去，结构会很像 DeepMind 2016 年的 WaveNet。WaveNet 预测的是音频序列，但建模方式相同：自回归，根据前面的内容预测下一个。它的特点是树状的层级结构。
+        </p>
+        <p>
+            起始代码来自第 3 集（第 4 集是手写反向传播的练习，算是支线）。数据集约 182,000 个样本，模型是嵌入 → 线性 → BatchNorm → tanh → 输出层，约 12,000 个参数，验证损失 2.10。
+        </p>
+        <p>
+            他先复习了 BatchNorm 为什么“疯狂”：滑动统计量不走反向传播；训练和评估行为不同，忘记切换模式就会出 bug；样本之间被耦合。他说“状态（state）通常是有害的”。
+        </p>
+    </section>
+
+    <section>
+        <h2>一、先修一修损失曲线（6:56–9:16）</h2>
+        <p>
+            batch 只有 32，每一步的损失噪声很大，画出来的曲线很粗。他说这张图“像刀子扎在我眼睛里，我受不了了”。
+        </p>
+        <p>
+            修法用了第 2 集讲过的 <code>view</code>：把 200,000 个损失值变成 200×1000 的张量，每行是连续 1,000 步，再按行求平均，得到 200 个点。新曲线清楚多了，还能看出学习率衰减那一刻损失明显下降，他形容学习率衰减“从系统里抽走了很多能量”，让优化落进局部最小值。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、把代码改成 torch.nn 风格（9:16–17:11）</h2>
+        <p>
+            前向传播里还有特殊处理：嵌入表 C 和 view 操作都不在层列表里。他新写了两个模块：
+        </p>
+        <ul>
+            <li><code>Embedding</code>：权重就是原来的 C，前向就是按下标取行。对应 <code>nn.Embedding</code>。</li>
+            <li><code>Flatten</code>：前向就是 view。对应 <code>nn.Flatten</code>。</li>
+        </ul>
+        <p>
+            然后引入容器（container）的概念，写了一个 <code>Sequential</code>：保存一个层列表，前向时依次调用，参数就是所有子模块的参数。这和 <code>torch.nn.Sequential</code> 一样。之后整个模型就是一个 <code>model</code>，<code>logits = model(Xb)</code>，前向、评估、采样的代码都大大简化。
+        </p>
+        <h3>一个有趣的 bug</h3>
+        <p>
+            改完后采样报错。原因是他改了把层设为评估模式的那个单元格，却忘了运行它，模型还在训练模式。采样时输入只有 1 个样本，BatchNorm 在训练模式下要用这个 batch 算方差，而单个数的方差是 NaN（方差衡量的是离散程度，一个数没有离散程度），NaN 污染了后面所有计算。
+        </p>
+        <p>
+            他提醒：评估损失时同样的问题也存在，只是不报错，结果是错的，因为用的是 batch 统计量而不是滑动统计量。这又是一个“没有维护好训练/评估状态”导致的 bug。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、WaveNet 的思路（17:11–21:36）</h2>
+        <p>
+            训练损失 2.05、验证损失 2.10，差距很小，说明没有过拟合，可以把网络做大。但现在的结构没有好的扩大方式：就算加宽隐藏层、加更多层，所有字符还是在第一步就被压进一层。
+        </p>
+        <p>
+            WaveNet 的做法是逐步融合：先把相邻两个字符融合成“二元组”表示，再把相邻两个二元组融合成四字符的表示，再继续，像一棵树。论文里用的是“扩张因果卷积”（dilated causal convolution），他说听起来吓人，其实只是为了让计算更快的实现细节，核心想法就是这种逐步融合。
+        </p>
+        <h3>先看一个基线</h3>
+        <p>
+            把 block_size 从 3 改成 8，什么结构都不改，第一层线性层变得很大，参数多了约 10,000 个。仅仅这样，验证损失就从 2.10 降到 2.02，生成的名字也明显更好。他开了一个“表现记录”，把每次的结果记下来。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、实现树状结构（21:36–37:41）</h2>
+        <h3>先用小 batch 看形状</h3>
+        <p>
+            他专门开了一块“草稿区”，用 4 个样本跑前向，逐层打印形状：输入 4×8 的整数；嵌入后 4×8×10；Flatten 后 4×80；线性层后 4×200。
+        </p>
+        <h3>矩阵乘法可以有多个 batch 维</h3>
+        <p>
+            他说要展示一件“可能出乎意料”的事：PyTorch 的矩阵乘法不要求输入是二维的。4×5×80 乘以 80×200 得到 4×5×200。乘法只作用在最后一维，前面的维度都被当成 batch 维度，原样保留并行处理。
+        </p>
+        <p>
+            这正好能用上：不想一次把 8 个字符的 80 个数都乘进权重，而是每两个相邻字符（20 个数）一组，4 组并行处理。所以 Flatten 不应该输出 4×80，而应该输出 4×4×20。
+        </p>
+        <h3>FlattenConsecutive</h3>
+        <p>
+            可以显式地取偶数位和奇数位的字符再拼接，但他验证了直接 <code>view(4, 4, 20)</code> 得到的结果完全一样，因为内存里相邻字符本来就挨着。于是写了一个新层：
+        </p>
+<pre><code>class FlattenConsecutive:
+    def __init__(self, n):
+        self.n = n
+    def __call__(self, x):
+        B, T, C = x.shape
+        x = x.view(B, T // self.n, C * self.n)
+        if x.shape[1] == 1:
+            x = x.squeeze(1)
+        self.out = x
+        return x
+    def parameters(self):
+        return []</code></pre>
+        <p>
+            他特意改了名字，因为 PyTorch 的 <code>torch.flatten</code> 参数和行为都不一样，不想让人误以为两者等价。他也说自己不太喜欢用 −1，宁愿写明 <code>T // n</code>，这样形状不符合预期时会报错。最后一层合并完时中间维度会变成 1，用 <code>squeeze(1)</code> 去掉，也是显式指定要压掉哪一维。
+        </p>
+        <p>
+            新结构是三层：每层先 FlattenConsecutive(2)，再线性、BatchNorm、tanh。打印形状：4×8×10 → 4×4×20 → 4×4×200 → 4×2×400 → 4×2×200 → 4×400 → 4×200 → 输出。他说这对应 WaveNet 图里的一部分，图上是 4 层、感受野 16 个字符，这里是 3 层、8 个字符。
+        </p>
+        <p>
+            为了公平比较，他把隐藏单元调成 68，让参数总量和之前一样是约 22,000。结果验证损失 2.029，之前是 2.027，在参数相同的情况下树状结构暂时没带来提升。他列了两个可能：这只是第一次猜的超参数，没认真调；BatchNorm 里可能还有 bug。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、BatchNorm1d 的 bug（38:50–46:07）</h2>
+        <p>
+            代码能跑，但不代表做对了。BatchNorm 是按二维输入（N×D）写的，只在第 0 维上求均值和方差。现在输入是 32×4×68，结果只在 32 个数上求平均，得到 1×4×68 的统计量。检查滑动均值的形状也是 1×4×68。
+        </p>
+        <p>
+            也就是说，它在给 4 个位置分别维护 68 组统计量，共 4×68 组，而我们要的是 68 个通道各一组，把那 4 个位置也当成 batch 维度。因为广播规则一切都能正常运行，所以不报错，只是结果不对。
+        </p>
+        <p>
+            修法：<code>torch.mean</code> 的 dim 参数可以是元组。输入是二维时在 0 维上求，三维时在 (0, 1) 上求，其他情况报错。修完后滑动均值的形状是 1×1×68。
+        </p>
+        <p>
+            他指出这和 PyTorch 的 <code>BatchNorm1d</code> 不一样：PyTorch 要求三维输入是 N×C×L，通道在中间；他这里假设通道在最后（N×L×C）。他说更喜欢自己的写法，所以就这么保留了。
+        </p>
+        <p>
+            重新训练，验证损失从 2.029 到 2.022。他说不确定这是否统计显著，但有理由预期会稍好：每个统计量现在用 32×4 个数估计，而不是 32 个，更稳定。
+        </p>
+        <h3>放大网络</h3>
+        <p>
+            结构不变，嵌入维度改为 24，隐藏单元加大，参数约 76,000。训练久了很多，验证损失 1.993，第一次跌破 2.0。但他也说，实验越来越慢，超参数和学习率都是摸黑设的，缺少一个能系统跑实验的框架。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、总结和后续（46:58–56:00）</h2>
+        <h3>别太在意 2.1 到 1.99 这个数字</h3>
+        <p>
+            他说虽然从 2.1 降到了 1.99，但不想把这当成重点：“我们完全在摸黑”，没有实验框架，只是在猜，“整个过程很糟糕”。真正调参时要同时看训练和验证损失，情况会很不一样。WaveNet 论文里还有门控线性单元、残差连接、跳跃连接，这里都没实现，只实现了树状结构。
+        </p>
+        <h3>和卷积的关系</h3>
+        <p>
+            他用训练集里的名字 DeAndre 举例：7 个字母对应 8 个独立的训练样本。现在要算这 8 个位置的输出，得对模型调用 8 次，相当于一个 Python for 循环。卷积做的事情是把这个 for 循环搬进 CUDA kernel 里，让同一套线性“滤波器”在序列上滑动。
+        </p>
+        <p>
+            卷积更高效有两个原因：循环在 GPU 内部完成；中间节点可以复用。在 WaveNet 的图里，某个节点既是右边节点的左孩子，又是左边节点的右孩子，朴素做法要算两遍，卷积只算一遍。他强调卷积不改变模型，只是效率手段，以后会专门讲。
+        </p>
+        <h3>已经“解锁”了 torch.nn</h3>
+        <p>
+            他们自己实现了 Linear、BatchNorm1d、Tanh、Embedding、Flatten、Sequential，等于在 torch.Tensor 之上重写了一个小的 torch.nn。从此可以认为大家理解了 torch.nn 里大致有什么、模块怎么嵌套，以后直接用它。
+        </p>
+        <h3>真实的开发过程是什么样的</h3>
+        <p>
+            他说这一集也想让观众感受一下搭深度网络的日常：
+        </p>
+        <ol>
+            <li><strong>大量时间在读 PyTorch 文档</strong>：每个层接受什么形状、做什么。他说 PyTorch 的文档不太好，团队花了大量精力做分布式之类的工程，文档却好像没人维护，“它会骗你，会出错，会不完整，会不清楚”，只能尽力而为。</li>
+            <li><strong>大量时间在对付形状</strong>：二维、三维、四维，NCL 还是 NLC，view 来 view 去，很容易乱。</li>
+            <li><strong>在 Jupyter 里做原型，在 VS Code 里跑实验</strong>：先在笔记本里把每一层的形状调对，满意后把代码复制到代码仓库，再从仓库启动训练。</li>
+        </ol>
+        <h3>接下来可以讲的</h3>
+        <ul>
+            <li>真正用扩张因果卷积实现这个网络。</li>
+            <li>残差连接和跳跃连接是什么、为什么有用。</li>
+            <li>搭建实验框架：脚本接收参数，批量启动实验，看大量训练和验证曲线，做超参数搜索。</li>
+            <li>RNN、LSTM、GRU，当然还有 Transformer。</li>
+        </ul>
+        <h3>挑战</h3>
+        <p>
+            结尾他补了一句：来打败 1.993。他说自己没做多少实验，还有很多空间：通道怎么分配、嵌入维度是否合适；也许把原来只有一个隐藏层的网络做得足够大，就能打败这个“花哨的层级网络”，那就有点尴尬了；也可以读 WaveNet 论文实现更多的层，或者调初始化和优化。
+        </p>
+    </section>
+
+    <section>
+        <h2>他是怎么讲的</h2>
+        <ul>
+            <li><strong>先跑一个最懒的基线。</strong>只改 block_size 就从 2.10 到 2.02。有了这个参照，后面每个“聪明的改动”是否真有用才看得出来。</li>
+            <li><strong>控制变量做比较。</strong>树状结构和扁平结构对比时，他把参数量调到相同（约 22,000），结果发现没有提升，并如实说出来。</li>
+            <li><strong>“能跑”和“做对”分开检查。</strong>BatchNorm 的 bug 不报错，是他主动去看滑动均值的形状才发现的。这是在示范一种检查习惯。</li>
+            <li><strong>对自己的结果保持怀疑。</strong>2.029 到 2.022 “不确定是否显著”；2.1 到 1.99 “别把这当重点，我们在摸黑”。他不夸大结果。</li>
+            <li><strong>展示真实的工作方式，包括不体面的部分。</strong>读不靠谱的文档、和形状搏斗、在笔记本和编辑器之间复制代码。这些通常不会出现在教程里，他专门拿出来讲。</li>
+            <li><strong>用一个具体的名字讲卷积。</strong>DeAndre 的 8 个样本、for 循环、节点复用，比直接讲卷积的定义容易理解得多。</li>
+            <li><strong>带一点个人情绪。</strong>“这张图像刀子扎眼睛”“PyTorch 文档会骗你”。观众能感觉到一个真人在做这件事。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Andrej Karpathy YouTube · Building makemore Part 5 · Notes curated by Joyce</p>
+    </footer>
+</article>
+
+</body>
+</html>

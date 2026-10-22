@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>从零实现 GPT 分词器 | Andrej Karpathy YouTube 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <span><a href="07_从零构建GPT.html">&larr; 上一篇</a></span>
+    <span>Andrej Karpathy YouTube · 08</span>
+    <span><a href="09_复现GPT2.html">下一篇 &rarr;</a></span>
+</nav>
+
+<article>
+    <header>
+        <h1>从零实现 GPT 分词器</h1>
+        <p class="subtitle">从 Unicode 和 UTF-8 讲起，手写 byte-level BPE，再用分词解释 LLM 的一串怪现象</p>
+        <div class="author-meta">
+            演讲：Andrej Karpathy · 发布：2024 年 2 月 20 日 · 时长：2 小时 13 分<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=zduSFxRajkE" target="_blank">Let's build the GPT Tokenizer</a>（本文依据公开视频英文字幕和章节整理）<br>
+            代码：<a href="https://github.com/karpathy/minbpe" target="_blank">minbpe</a>（含 <a href="https://github.com/karpathy/minbpe/blob/master/exercise.md" target="_blank">exercise.md</a>）· 工具：<a href="https://tiktokenizer.vercel.app" target="_blank">tiktokenizer</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>开场：一张苦脸（0:00–5:50）</h2>
+        <p>
+            他一开口就说自己“一脸苦相”，因为分词（tokenization）是他做大语言模型时最不喜欢的部分。但必须细致了解它：这部分很麻烦，暗坑很多，LLM 的很多怪异行为都能追溯到分词。
+        </p>
+        <p>
+            上一集《从零构建 GPT》用的是最简单的字符级分词：65 个字符，每个对应一个整数，再去嵌入表里查一行向量送进 Transformer。实际的大模型用的是“块”级别的分词，块由 BPE（字节对编码）这样的算法构造。他指出在 LLM 语境下引入字节级 BPE 的是 GPT-2 论文：词表 50,257 个，上下文 1,024 个 token。token 是 LLM 的基本单位，Llama 2 论文里搜 “token” 有 63 处。
+        </p>
+        <p>
+            开场他列出了一串“都是分词惹的祸”的问题，结尾会逐一解释：
+        </p>
+        <ul>
+            <li>LLM 不擅长拼写和简单的字符串处理。</li>
+            <li>非英语语言表现差。</li>
+            <li>简单算术做不好。</li>
+            <li>GPT-2 写 Python 特别吃力。</li>
+            <li>结尾有空格时 API 会警告。</li>
+            <li>问 GPT “SolidGoldMagikarp 是什么”，它会完全失控。</li>
+            <li>有人建议结构化数据用 YAML 而不是 JSON。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>一、在网页上看分词（5:50–14:56）</h2>
+        <p>
+            他用 tiktokenizer 网页工具实时观察分词，左边输入文本，右边彩色标出每个 token。用 GPT-2 分词器看到的现象：
+        </p>
+        <ul>
+            <li>“tokenization” 被切成两个 token；空格通常和后面的词粘在一起，“ the” 是一个 token。</li>
+            <li>数字切得很随意：127 是一个 token，677 被切成两个；四位数有时一个、有时两个。</li>
+            <li>“Egg” 在句首是两个 token，“ egg”（带空格）是一个，小写“egg”是另一个，全大写又不一样。同一个概念对应好几个完全不同的 ID，模型要从数据里自己学会它们是一回事。</li>
+            <li>韩语句子比对应的英语句子 token 多很多。不只是训练数据里英语多，分词器的训练数据里英语也多，英语被合并成更长的块，其他语言被切得很碎。结果是非英语文本在 Transformer 看来被“拉长”了，更快用完上下文长度。</li>
+            <li>一段 Python 代码里，缩进的每个空格都是单独的 token（220）。这很浪费，GPT-2 写 Python 差，很大程度是这个原因，和模型本身无关。</li>
+        </ul>
+        <p>
+            换成 GPT-4 的分词器 cl100k_base，同一段文字从 300 个 token 降到 185 个，因为词表从约 5 万增加到约 10 万。同样的上下文长度能看到差不多两倍的文本。但词表也不是越大越好：嵌入表变大，输出层的 softmax 也变大，中间有一个合适的点。GPT-4 还专门把连续空格合并成一个 token，Python 代码更紧凑了。他说 GPT-2 到 GPT-4 的编程能力提升，有相当一部分来自分词器的设计。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、字符串、Unicode 和 UTF-8（14:56–23:50）</h2>
+        <p>
+            我们想支持各种语言和 emoji。Python 的字符串是 Unicode 码点（code point）的序列。Unicode 定义了约 15 万个字符，覆盖 161 种文字，标准还在更新（他看的是 2023 年 9 月的 15.1 版）。<code>ord('h')</code> 得到 104，emoji 的码点在 12 万以上。
+        </p>
+        <p>
+            为什么不直接用码点当 token？词表太大（15 万），而且标准一直在变，不是稳定的表示。
+        </p>
+        <p>
+            Unicode 有三种编码：UTF-8、UTF-16、UTF-32，把码点转成字节流。UTF-8 是变长的，每个码点 1 到 4 个字节，是互联网上最常用的，也是唯一兼容 ASCII 的。他推荐了一篇博客和《UTF-8 Everywhere》宣言。用 <code>list("...".encode("utf-8"))</code> 能看到原始字节。UTF-16 和 UTF-32 对英文字符会产生大量 0，很浪费。
+        </p>
+        <p>
+            但直接用 UTF-8 字节也不行：词表只有 256 个，所有文本会变成很长的字节序列，而 Transformer 的上下文长度有限。我们想要可调的、更大的词表，同时保留 UTF-8 编码。答案就是 BPE。
+        </p>
+        <h3>插曲：要是能删掉分词就好了</h3>
+        <p>
+            他说自己最希望的就是把原始字节直接喂给语言模型。有一篇论文提出用层级化的 Transformer 处理原始字节，结论是“无分词的自回归建模在规模上可行”。但他认为还没有被足够多的团队、在足够大的规模上验证过，希望有人能做出来。在那之前，还得用 BPE 压缩。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、BPE 算法（23:50–39:20）</h2>
+        <h3>原理</h3>
+        <p>
+            维基百科上的例子：词表只有 a、b、c、d，序列是 aaabdaaabac。反复做两件事：找出出现最多的相邻对；用一个新符号替换它，加入词表。
+        </p>
+        <ol>
+            <li>aa 最多，记为 Z：ZabdZabac。11 个符号变 9 个，词表从 4 变 5。</li>
+            <li>ab 最多，记为 Y：ZYdZYac。</li>
+            <li>ZY 最多，记为 X：XdXac。最后 5 个符号，词表 7 个。</li>
+        </ol>
+        <p>
+            放到字节上：从 256 个字节开始，不断合并最常见的字节对，生成新 token。最后得到一个压缩后的序列，以及一套可以对任意文本编码和解码的规则。
+        </p>
+        <h3>实现</h3>
+        <p>
+            他拿一篇自己喜欢的关于 Unicode 的博客做训练文本。第一段 533 个码点，UTF-8 编码后 616 个字节（非 ASCII 字符占多个字节）。两个核心函数：
+        </p>
+<pre><code>def get_stats(ids):
+    counts = {}
+    for pair in zip(ids, ids[1:]):
+        counts[pair] = counts.get(pair, 0) + 1
+    return counts
+
+def merge(ids, pair, idx):
+    newids, i = [], 0
+    while i < len(ids):
+        if i < len(ids) - 1 and (ids[i], ids[i+1]) == pair:
+            newids.append(idx); i += 2
+        else:
+            newids.append(ids[i]); i += 1
+    return newids</code></pre>
+        <p>
+            最常见的对是 (101, 32)，也就是 “e ”（e 加空格），出现 20 次，说明很多英文单词以 e 结尾。合并成 256 后序列从 616 降到 596，正好少 20。
+        </p>
+        <p>
+            然后写成循环。词表大小是超参数：合并越多，词表越大，序列越短，中间有一个实践中的最佳点（GPT-4 约 10 万）。他用整篇博客训练，目标词表 276，也就是 20 次合并。用一个 <code>merges</code> 字典记录 (子1, 子2) → 新 token。新 token 自己也能参与后面的合并，比如第 20 次合并是 (259, 256) → 275。所以结构不是一棵树，而是一片“森林”。20 次合并后，24,000 个字节压到 19,000 个 token，压缩比约 1.27。
+        </p>
+        <h3>分词器是一个完全独立的阶段</h3>
+        <p>
+            他画了一张图强调：分词器和 LLM 是两个独立的东西。分词器有自己的训练集，用 BPE 训练一次，得到词表和合并规则，然后负责文本和 token 之间的双向翻译。实际中常常先把 LLM 的全部训练数据转成 token 存盘，丢掉原始文本，LLM 训练时读的就是这些 token。
+        </p>
+        <p>
+            分词器训练集的组成很关键。比如放进大量日语，日语就会被合并得更多，序列更短，对上下文有限的 LLM 更有利。多语言、代码比例都需要考虑。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、解码和编码（42:47–57:36）</h2>
+        <h3>解码</h3>
+        <p>
+            先建 <code>vocab</code>：0–255 对应原始字节，之后按合并顺序，每个新 token 的字节是两个子 token 字节的拼接。他提醒这里依赖 Python 3.7 之后字典按插入顺序遍历。解码就是查出每个 token 的字节，拼起来，再用 UTF-8 解码成字符串。
+        </p>
+        <p>
+            有个坑：单独解码 128 会报错 “invalid start byte”。因为 UTF-8 的多字节字符有固定格式，二进制 10000000 不能作为开头。不是所有字节序列都是合法的 UTF-8。如果模型预测出不合法的 token 序列，就无法解码。标准做法是 <code>decode("utf-8", errors="replace")</code>，非法部分显示成替换字符 �，OpenAI 的代码也是这样。看到这个字符，说明模型输出出了问题。
+        </p>
+        <h3>编码</h3>
+        <p>
+            把文本转成 UTF-8 字节，然后反复合并。顺序很重要：后面的合并依赖前面的结果（比如某个合并用到了 256），所以每一轮要在当前序列的所有相邻对里，找出在 merges 中“最早”的那一对来合并：
+        </p>
+<pre><code>while len(tokens) >= 2:
+    stats = get_stats(tokens)
+    pair = min(stats, key=lambda p: merges.get(p, float("inf")))
+    if pair not in merges:
+        break  # nothing left to merge
+    tokens = merge(tokens, pair, merges[pair])</code></pre>
+        <p>
+            不在 merges 里的对得到无穷大，不会被选中。如果所有对都是无穷大，min 会随便返回一个，这时检查它不在 merges 里就退出。长度小于 2 时直接返回，否则 stats 是空的会报错。
+        </p>
+        <p>
+            测试：任意字符串编码再解码应该得到原文（反过来不一定成立，因为不是所有 token 序列都合法）。训练文本和一段没见过的网页文本都通过了。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、GPT-2 的正则预切分（57:36–1:14:59）</h2>
+        <p>
+            从这里开始，真实分词器比上面的版本复杂很多。GPT-2 论文指出：像 dog 这样的常见词会和各种标点一起出现（dog.、dog!、dog?），朴素的 BPE 会把它们合并成很多不同的 token，把语义和标点混在一起，效果不好。所以他们要从上往下人为规定某些字符永远不能合并。
+        </p>
+        <p>
+            实现方式是 GPT-2 的 encoder.py（他吐槽这个名字，因为分词器既编码也解码）里的一个正则表达式，用的是 Python 的 <code>regex</code> 包（<code>re</code> 的增强版）。做法是先用 <code>findall</code> 把文本切成一个列表，每个元素单独做 BPE，结果再拼起来。合并只会发生在每个块内部，比如 “e” 和后面的空格属于不同的块，就永远不会合并。
+        </p>
+        <p>
+            正则大致按顺序匹配这几类：
+        </p>
+        <ul>
+            <li>常见的英文缩写：'s、't、're、've、'm、'll、'd。他不喜欢这部分：换成 Unicode 的弯引号就不起作用；而且没有忽略大小写，HOW'S 和 how's 的切法不一样（GPT-2 代码里的注释自己也承认应该加忽略大小写）。这些规则也很依赖英语。</li>
+            <li>可选空格 + 一串字母（<code>\p{L}</code>，任何语言的字母）。</li>
+            <li>可选空格 + 一串数字（<code>\p{N}</code>）。所以字母和数字被分开。</li>
+            <li>可选空格 + 一串既不是字母、数字也不是空白的字符，大致就是标点。</li>
+            <li>空白，但用了负向前瞻，不包括最后一个空格。这样多余的空格单独成块，最后一个空格留给后面的词，构成 “ you” 这样常见的 token。GPT-2 的习惯是空格放在词前面。</li>
+        </ul>
+        <p>
+            用一段 Python 代码测试，每当字符类别变化就会切开。但他发现，tiktokenizer 里 GPT-2 对代码中的连续空格从不合并，每个都是 220。说明 OpenAI 在切块和 BPE 之外还加了别的规则。GPT-2 分词器的训练代码从未公开，公开的只是推理代码，所以我们不知道它具体是怎么训练的。
+        </p>
+        <h3>tiktoken 和 GPT-4 的变化</h3>
+        <p>
+            OpenAI 官方库 tiktoken 也只有推理代码。GPT-4 的 cl100k_base 改了正则：
+        </p>
+        <ul>
+            <li>加了忽略大小写，缩写在大小写下切法一致了。</li>
+            <li>空白的处理改了不少，连续空格可以合并。</li>
+            <li>数字最多只合并 1 到 3 位，避免出现很长的数字 token。</li>
+        </ul>
+        <p>
+            他说这些改动都没有文档说明，“我们只拿到了这个正则，就这样吧”。他也说自己不打算逐字讲完这个正则，因为“太让人头昏了”，建议拿 ChatGPT 和正则文档一步步看。
+        </p>
+        <h3>GPT-2 的 encoder.py</h3>
+        <p>
+            它加载两个文件：encoder.json 等价于我们的 vocab（整数到字节），vocab.bpe 等价于我们的 merges。只靠这两个变量就能表示一个分词器。代码里还有一个 byte_encoder/byte_decoder 层，他说那只是一个无关紧要的实现细节，跳过。核心的 bpe 函数和我们的 while 循环在算法上是一样的，只是代码比较乱。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、特殊 token（1:18:26–1:25:28）</h2>
+        <p>
+            GPT-2 的词表是 50,257：256 个原始字节加 50,000 次合并是 50,256，多出来的一个是 <code>&lt;|endoftext|&gt;</code>。训练数据里，它插在文档之间，告诉模型前一篇文档结束了，后面的内容无关。模型要从数据中学会看到它就“清空记忆”。
+        </p>
+        <p>
+            在 tiktokenizer 里打出完整的 <code>&lt;|endoftext|&gt;</code>，会突然变成 token 50256。它没有经过 BPE，而是由 tiktoken（用 Rust 写的）里的特殊逻辑直接识别并替换。
+        </p>
+        <p>
+            特殊 token 在微调阶段用得更多，比如 GPT-3.5-turbo 的对话格式里有 <code>&lt;|im_start|&gt;</code>、<code>&lt;|im_end|&gt;</code> 来分隔每条消息（im 是 imaginary monologue 的缩写）。tiktoken 允许在 cl100k_base 的基础上扩展自己的特殊 token。GPT-4 除了 endoftext，还有三个 FIM（fill in the middle，补全中间）相关的 token 和一个 endofprompt。
+        </p>
+        <p>
+            加特殊 token 需要对模型做“小手术”：嵌入表加一行（一般用小随机数初始化），最后的输出层也加一个输出。从基础模型微调成聊天模型时，这是常见操作。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、练习：写你自己的 GPT-4 分词器（1:25:28–1:28:42）</h2>
+        <p>
+            他发布了 minbpe 仓库和 exercise.md，把任务拆成 4 步，最终能复现 tiktoken 对 GPT-4 的编码结果，还能自己训练（tiktoken 不提供训练功能）。他展示了 GPT-4 的合并顺序和自己在泰勒·斯威夫特维基百科页面上训练出来的合并顺序（选这个页面是因为它是最长的维基页面之一，“不是因为我是霉粉，不过她挺酷的”）。两者很像，因为算法相同；区别来自训练集，比如 GPT-4 的第一个合并是两个空格，他猜 GPT-4 分词器的训练集里有很多 Python 代码。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、SentencePiece（1:28:42–1:43:27）</h2>
+        <p>
+            SentencePiece 是 Google 的库，Llama 和 Mistral 系列都在用。它能训练也能推理，而且高效。和 tiktoken 的主要区别在操作顺序：
+        </p>
+        <ul>
+            <li>tiktoken：先把码点用 UTF-8 编码成字节，再合并字节。</li>
+            <li>SentencePiece：直接在码点上做 BPE。很少见的码点（由 character_coverage 决定）要么映射成未知 token &lt;unk&gt;，要么在开启 byte_fallback 时，用 UTF-8 编码成字节，用专门的字节 token 表示。</li>
+        </ul>
+        <p>
+            他说个人觉得 tiktoken 的做法干净得多。
+        </p>
+        <p>
+            他尝试把配置设得和 Llama 2 一样（从 Meta 发布的分词器模型文件里读出所有选项）。几点观察：
+        </p>
+        <ul>
+            <li>选项多得惊人，有很多历史包袱，有些对 BPE 根本不适用。</li>
+            <li>很多“归一化”规则（转小写、去多余空白）是 LLM 之前的 NLP 习惯。他作为深度学习的人，倾向于不碰原始数据，尽量关掉这些。</li>
+            <li>它有“句子”的概念（最大句长、打乱句子等）。他认为对 LLM 来说这是“多余又奇怪的区分”，什么算一个句子本来就很难定义，他宁愿把文件当成一个巨大的字节流。</li>
+            <li>训练后的词表顺序：特殊 token（unk、bos、eos），然后 256 个字节 token，然后合并出来的 token，最后是单个码点 token。</li>
+            <li>编码训练集里没出现过的韩文时，开启 byte_fallback 就退回字节 token；关闭的话整段都变成 unk（ID 0）。他认为 Llama 开启 byte_fallback 是对的，否则所有罕见字符都变成同一个 unk，模型完全无法区分。</li>
+            <li>add_dummy_prefix：在文本最前面加一个空格，让句首的 “world” 和句中的 “ world” 变成同一个 token。在 tiktoken 里这两个是不同的 token，模型要自己学会它们差不多。Llama 2 也开了这个选项。</li>
+        </ul>
+        <p>
+            他的总结：SentencePiece 在工业界用得很多，因为高效且能训练；但历史包袱多，有些概念容易踩坑；文档“在我看来不怎么样”，他花了很多时间自己可视化才搞明白。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、词表大小怎么定，以及扩展词表（1:43:27–1:51:41）</h2>
+        <p>
+            回到上一集的 gpt.py，vocab_size 只出现在两个地方：token 嵌入表（行数）和最后的 lm_head 线性层（每个 token 一次点积）。为什么不能无限大？
+        </p>
+        <ul>
+            <li>嵌入表和输出层变大，计算量增加。</li>
+            <li>参数更多，每个 token 在训练数据中出现得更少，对应的向量可能训练不足。</li>
+            <li>序列变短是好事（能看到更多文本），但太多信息被压进一个 token，Transformer 一次前向可能处理不过来。</li>
+        </ul>
+        <p>
+            这基本是一个经验超参数，当前最先进的模型大约在几万到 10 万左右。
+        </p>
+        <p>
+            给预训练模型加新 token 很常见，比如微调 ChatGPT 时要加很多表示对话结构的特殊 token，或者表示使用浏览器等工具的 token。只需要给嵌入表加行、给输出层加权重，常常冻结原模型只训练新参数。
+        </p>
+        <p>
+            他提到一个更大的设计空间：gist token 论文。长提示词会拖慢一切，于是引入几个新 token，冻结整个模型，只训练这几个 token 的嵌入，用蒸馏让模型带着这几个 token 的表现和带着完整长提示一样。测试时用这几个 token 替换长提示。这是一种参数高效微调。
+        </p>
+        <h3>多模态的分词</h3>
+        <p>
+            越来越多的人倾向于不改 Transformer 结构，而是把图像、视频、音频也“分词”成 token，然后当成文本一样处理。token 可以是硬的（离散整数），也可以是软的（不要求离散，但要经过类似自编码器的瓶颈）。OpenAI 的 Sora 技术报告说，LLM 有文本 token，Sora 有视觉 patch，同样是把视频切块变成 token。
+        </p>
+    </section>
+
+    <section>
+        <h2>十、回头解释开场的那些怪现象（1:51:41–2:10:20）</h2>
+        <h3>拼写差</h3>
+        <p>
+            GPT-4 词表里 “.DefaultCellStyle” 是一个 token。他问 GPT-4 这个词里有几个 l，它答错了。让它直接反转这个字符串，也反转错了。但如果先让它把每个字符用空格隔开列出来，再反转这个列表，就对了，因为拆开之后每个字符都成了单独的 token。
+        </p>
+        <h3>非英语差</h3>
+        <p>
+            模型训练时见到的非英语数据少，分词器在非英语上训练得也不够。“Hello how are you” 是 5 个 token，翻译成韩语是 15 个；韩语最常用的问候“안녕하세요”要 3 个 token，英语 hello 只要 1 个。
+        </p>
+        <h3>算术差</h3>
+        <p>
+            加法是按位从个位往上算的，需要引用数字的具体位置。但数字被怎样切分完全取决于 BPE 的合并结果。他引用了一篇博客 “Integer tokenization is insane”：GPT-2 里四位数可能是一个 token，也可能被切成 1+3、2+2、3+1。模型能应付已经很了不起了。Llama 2 用 SentencePiece 时把所有数字拆成单个数字，部分原因就是为了改善算术。
+        </p>
+        <h3>GPT-2 写 Python 差</h3>
+        <p>
+            每个空格一个 token，大大浪费了上下文长度。他说这几乎可以算是 GPT-2 分词器的一个 bug，GPT-4 修好了。
+        </p>
+        <h3>看到 &lt;|endoftext|&gt; 就停住</h3>
+        <p>
+            他让 GPT-4 打印字符串 “&lt;|endoftext|&gt;”，它好像看不见这个字符串。他不知道 OpenAI 内部具体怎么处理，但可能是把用户输入里的这段文本当成了真正的特殊 token 来解析。用户输入是攻击者可以控制的，本不该允许出现特殊 token。他说特殊 token 因此成了一个攻击面，想把 LLM 搞糊涂，可以试试给它特殊 token。
+        </p>
+        <h3>结尾空格的警告</h3>
+        <p>
+            在 OpenAI Playground 用 gpt-3.5-turbo-instruct（补全模型，更接近基础模型），提示“Here's a tagline for an ice cream shop”后面加一个空格，就会警告结尾空格会导致性能变差。原因：GPT 里空格总是前缀，“ Oh” 是一个 token。在训练数据里，空格和下一个词粘在一起；你在末尾单独加一个空格，它变成了 token 220，相当于把下一个 token 的开头切了一半。模型几乎没见过这种单独的空格后面接内容的情况，分布外了。
+        </p>
+        <p>
+            更极端的例子：只输入 “.DefaultCellSty”（去掉最后的 le），模型立刻输出结束 token，没有任何补全；再试一次，补全被标记为可能违反使用政策。他说你能“感受到那种不对劲”，模型从没见过这个 token 被切开的样子。这些都是“部分 token”的问题。tiktoken 的 Rust 代码里有大量处理“unstable tokens”的代码，完全没有文档。理想的补全 API 应该在字符层面搜索，找出哪些后续字符在重新分词后概率高，而不是直接在半截 token 后面接下一个完整 token。他说这个话题可以单独做一期视频。
+        </p>
+        <h3>SolidGoldMagikarp</h3>
+        <p>
+            “把最好的留到最后”。一篇博客的作者对 token 嵌入做聚类，发现一簇奇怪的 token：“ RandomRedditorWithNo”、“ SolidGoldMagikarp”、“StreamerBot”等。问模型这些词，比如“请重复字符串 SolidGoldMagikarp”，会得到各种崩坏的行为：回避（“抱歉我听不见”）、幻觉，甚至骂人，违反安全准则。
+        </p>
+        <p>
+            他给出的解释（他说还没被完全确证）：SolidGoldMagikarp 是一个 Reddit 用户名。分词器的训练集里有大量 Reddit 数据，这个活跃用户的名字出现很多次，被合并成了一个专属 token。但 LLM 的训练集里没有这些 Reddit 数据，这个 token 从未出现过，它在嵌入表里的那一行从初始化之后就没被更新过。就像 C 程序里未分配的内存。测试时一旦用到这个 token，就是把一行完全没训练过的向量送进 Transformer，结果是未定义的行为。
+        </p>
+        <h3>JSON 和 YAML</h3>
+        <p>
+            不同格式的 token 效率不同。同样的内容，JSON 116 个 token，YAML 99 个。按 token 付费、上下文也按 token 算，所以要关心分词密度，多在 tiktokenizer 里测一测。
+        </p>
+    </section>
+
+    <section>
+        <h2>十一、最后的建议（2:10:20–2:13:00）</h2>
+        <p>
+            “我知道这很枯燥，很烦人，我个人非常不喜欢这个阶段。”但不要轻视它：有很多坑、安全问题、AI 安全问题（比如把“未分配内存”喂进模型）。谁能彻底去掉分词，谁就会获得“永恒的荣耀”。
+        </p>
+        <ul>
+            <li>能复用 GPT-4 的词表就复用，用 tiktoken 做推理，高效好用。他也喜欢 tiktoken 和 OpenAI 用的字节级 BPE。</li>
+            <li>如果必须从头训练自己的词表，可以用 SentencePiece 的 BPE，但要小心各种设置，最好照抄 Meta 的配置，或者花大量时间看每个超参数和源码。即使设置都对，他还是认为它的算法不如字节级 BPE。</li>
+            <li>理想的东西是“带训练代码的 tiktoken”，目前不存在。minbpe 是一个实现，但现在是 Python 写的，他希望以后把它做得更高效。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>他是怎么讲的</h2>
+        <ul>
+            <li><strong>先把“为什么要关心”摆出来。</strong>开场就列出一串大家用 LLM 时遇到过的怪现象，告诉你答案都在分词里，结尾再逐一兑现。整集两个小时的枯燥内容有了一根悬念线。</li>
+            <li><strong>用工具让抽象的东西可见。</strong>tiktokenizer 实时彩色显示 token，数字、空格、大小写、韩语的问题一眼就能看到。</li>
+            <li><strong>坦白自己的情绪和偏好。</strong>“这是我最不喜欢的部分”“SentencePiece 文档不怎么样”“这个正则让人头昏”。他不假装每个技术选择都合理，反而让观众更信任他的判断。</li>
+            <li><strong>反复强调“分词器是独立阶段”。</strong>专门画图说明。这个概念一旦清楚，SolidGoldMagikarp 的解释就水到渠成。</li>
+            <li><strong>从玩具到真实系统逐层加复杂度。</strong>先写最简 BPE，再看 GPT-2 的正则、tiktoken、特殊 token、SentencePiece。每一层都指出“真实系统在这里和我们的版本不一样”。</li>
+            <li><strong>承认未知。</strong>GPT-2 分词器训练代码没公开、正则的改动没有文档、SolidGoldMagikarp 的解释没被完全确证。他明确区分“我们知道的”和“我推测的”。</li>
+            <li><strong>用实验当场验证假设。</strong>怀疑拼写差是分词导致的，就设计“先拆成字符再反转”的对照实验，结果支持了假设。</li>
+            <li><strong>给出可以照做的建议。</strong>用 tiktoken、YAML 比 JSON 省 token、不要在提示末尾加空格。观众看完能立刻改变做法。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Andrej Karpathy YouTube · Let's build the GPT Tokenizer · Notes curated by Joyce</p>
+    </footer>
+</article>
+
+</body>
+</html>

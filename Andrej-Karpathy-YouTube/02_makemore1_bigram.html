@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>makemore 1：bigram 语言模型 | Andrej Karpathy YouTube 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <span><a href="01_micrograd.html">&larr; 上一篇</a></span>
+    <span>Andrej Karpathy YouTube · 02</span>
+    <span><a href="03_makemore2_MLP.html">下一篇 &rarr;</a></span>
+</nav>
+
+<article>
+    <header>
+        <h1>makemore 第 1 集：从数数到神经网络的 bigram 语言模型</h1>
+        <p class="subtitle">同一个最简单的语言模型，用“计数”和“梯度下降”各训练一遍，得到完全相同的结果</p>
+        <div class="author-meta">
+            演讲：Andrej Karpathy · 发布：2022 年 9 月 7 日 · 时长：1 小时 57 分<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=PaCmpygFfXo" target="_blank">The spelled-out intro to language modeling: building makemore</a>（本文依据公开视频英文字幕和章节整理）<br>
+            代码：<a href="https://github.com/karpathy/makemore" target="_blank">karpathy/makemore</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一集要做什么</h2>
+        <p>
+            makemore 的名字就是它的功能：给它一批东西，它学会“再造一些类似的”。数据集 <code>names.txt</code> 是约 32,000 个英文名字，他说是从某个政府网站上找来的。训练好之后，模型能生成听起来像名字、但并不存在的新名字。
+        </p>
+        <p>
+            makemore 是一个<strong>字符级语言模型</strong>：把每个名字看成一串字符，学习“已知前面的字符，下一个字符是什么”。整个系列会用越来越强的网络做同一件事：bigram、MLP、RNN，一直到和 GPT-2 等价的 Transformer。之后还计划讲词级别的模型和图像模型。这一集从最简单的 bigram 开始。
+        </p>
+    </section>
+
+    <section>
+        <h2>一、看数据：一个名字里藏着多少训练样本（3:03–9:24）</h2>
+        <p>
+            读入文件，按行切分，先看一些基本统计：共约 32,000 个名字，最短 2 个字母，最长 15 个。
+        </p>
+        <p>
+            他让观众注意：一个名字其实包含了好几个训练样本。以 isabella 为例，它告诉模型：i 很可能是名字的第一个字母；s 很可能跟在 i 后面；a 很可能跟在 is 后面……最后还有一条：写完 isabella 之后，名字很可能就结束了。
+        </p>
+        <p>
+            <strong>bigram 模型</strong>每次只看两个相邻字符：给定当前字符，预测下一个。它完全忽略更前面的信息，所以很弱，但很适合作为起点。
+        </p>
+        <p>
+            为了表示“开头”和“结尾”，他给每个名字前后加上特殊标记。Python 里有个顺手的写法：<code>zip(w, w[1:])</code> 就能得到所有相邻字符对。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、“训练”就是数数（9:24–24:02）</h2>
+        <p>
+            最简单的学习方法是统计每对字符在数据里出现了多少次。他先用 Python 字典计数，排序后看到：n 作为结尾字母很常见，a 后面跟 n 也很常见。
+        </p>
+        <p>
+            然后把计数换成一个二维 PyTorch 张量 <code>N</code>：行是第一个字符，列是第二个字符，格子里是出现次数。他顺便介绍了张量的基本用法：创建全零数组、指定整数类型 <code>int32</code>、用下标改某个元素。还需要一张“字符到整数”的对照表 <code>stoi</code>，以及反过来的 <code>itos</code>。
+        </p>
+        <p>
+            用 matplotlib 画出这张计数表后，他发现一个设计上的浪费：最初用了两个特殊标记 &lt;S&gt; 和 &lt;E&gt;，结果有一整行和一整列永远是 0（结尾标记不可能出现在第一位，开头标记不可能出现在第二位）。于是改成只用一个点号 <code>.</code> 同时表示开头和结尾，表格从 28×28 缩到 27×27，并把点号放在第 0 位。
+        </p>
+        <p>
+            改完之后表格很好读：第 0 行是每个字母作为名字开头的次数，第 0 列是作为结尾的次数，中间是字母之间的接续关系。他说这张表已经包含了从 bigram 模型采样所需的全部信息。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、从模型里采样（24:02–36:17）</h2>
+        <p>
+            采样过程：从点号开始，取出第 0 行的计数，转成浮点数并除以总和，得到一个概率分布；用 <code>torch.multinomial</code> 按这个分布抽一个字符；再去这个字符对应的那一行抽下一个；抽到点号就停。
+        </p>
+        <p>
+            他用 <code>torch.Generator</code> 固定随机种子，保证观众在自己电脑上跑出和他一样的结果。还提醒了一个坑：<code>multinomial</code> 默认 <code>replacement=False</code>，需要手动设为 True。
+        </p>
+        <p>
+            生成的名字很糟。他说自己盯着看了几分钟才说服自己代码没写错。他解释原因：模型生成了单字母名字 “h”，是因为从模型的角度看，它只知道前一个字符是 h，并不知道这是第一个字母，而 h 后面结束的概率不低。
+        </p>
+        <p>
+            为了证明模型确实学到了东西，他换成均匀分布（27 个字符等概率）采样，结果完全是乱码。和这个对比，bigram 的输出确实“更像名字”，只是 bigram 太弱了。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、广播：一个值得敬畏的坑（36:17–50:14）</h2>
+        <p>
+            每次采样都重新归一化一行太浪费，他决定提前算好整张概率表 <code>P</code>，每一行都除以该行的总和。他说这样做也是为了练习张量操作，后面搭 Transformer 时会大量用到。
+        </p>
+        <p>
+            写法是 <code>P = N.float(); P /= P.sum(1, keepdim=True)</code>。这里涉及两个知识点：
+        </p>
+        <ul>
+            <li><code>sum(1)</code> 沿第 1 维（横向）求和，得到每一行的总和。<code>keepdim=True</code> 让结果形状保持为 27×1，而不是被压成 27。</li>
+            <li>27×27 除以 27×1 能成立，靠的是<strong>广播</strong>（broadcasting）规则：从最右边的维度开始对齐，每一维要么相等，要么其中一个是 1，要么其中一个不存在。是 1 的那一维会被复制拉伸。这里 27×1 的列向量被横向复制 27 次，每一行除以自己的和。</li>
+        </ul>
+        <p>
+            然后他演示了一个隐蔽的 bug：去掉 <code>keepdim=True</code>，代码照样能运行，但结果是错的。原因是求和结果变成了形状为 27 的一维向量，按广播规则从右对齐时，它会被当成 1×27 的<strong>行向量</strong>，然后竖着复制。结果变成了每一列除以那一行的和，归一化的方向反了。检查一下就会发现第一行的和是 7 而不是 1。
+        </p>
+        <p>
+            他用了很重的语气：要尊重广播，认真读文档，找教程练习，检查自己的结果，否则会写出极难发现的 bug。他还顺手提了一句：用 <code>/=</code> 这样的原地操作，可以避免创建新的内存。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、用一个数字衡量模型好坏：负对数似然（50:14–1:02:57）</h2>
+        <p>
+            模型训练好了，怎么评价它？他打印出训练集里每个 bigram 被模型赋予的概率。先给一个参照：27 个字符完全随机时，每个约 4%。高于 4% 说明学到了东西，有些 bigram 的概率达到 35%、40%。
+        </p>
+        <p>
+            接着他一步步推出损失函数：
+        </p>
+        <ol>
+            <li><strong>似然（likelihood）</strong>：把所有样本的概率乘起来，代表模型给整个数据集的概率。越高越好。</li>
+            <li>但很多 0 到 1 之间的数相乘会变得极小，不好处理。所以取对数，得到<strong>对数似然</strong>。因为 $\log(abc) = \log a + \log b + \log c$，乘积变成了求和。概率为 1 时对数为 0，概率越小对数越负。</li>
+            <li>损失函数应该“越低越好”，所以取负号，得到<strong>负对数似然</strong>（NLL）。最小是 0。</li>
+            <li>为了方便比较，再除以样本数，取平均。</li>
+        </ol>
+        <p>
+            $$\text{loss} = -\frac{1}{n}\sum_{i=1}^{n} \log P(c_{i+1} \mid c_i)$$
+        </p>
+        <p>
+            整个训练集上，计数得到的 bigram 模型损失约 2.45。他说训练的目标就是找到让这个数最小的参数。目前参数就是表格里的概率；之后这些数不再直接存储，而是由神经网络算出来。
+        </p>
+        <p>
+            他拿自己的名字 andrej 测试，平均每个字符的负对数似然约 3，主要是因为 “ej” 很少见。加上一个 q 变成 andrejq，损失变成无穷大，因为 “jq” 在数据里一次都没出现过，概率是 0，$\log 0 = -\infty$。
+        </p>
+        <p>
+            解决方法叫<strong>模型平滑</strong>：给所有计数加一个假的次数，比如加 1。加得越多，分布越接近均匀；加得越少，越尖锐。加 1 之后就不会再有概率为 0 的组合了。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、换一种方法：把 bigram 写成神经网络（1:02:57–1:26:17）</h2>
+        <p>
+            计数是“凭直觉觉得合理”的做法。现在他要用神经网络框架重新解决同一个问题，最后会走到几乎相同的地方，但路径完全不同。网络依然是 bigram：输入一个字符，输出下一个字符的概率分布，用负对数似然评价，用梯度下降调参数。
+        </p>
+        <h3>构造训练集</h3>
+        <p>
+            把所有 bigram 拆成输入 <code>xs</code>（第一个字符的编号）和标签 <code>ys</code>（第二个字符的编号）。他先只用 emma 一个名字，有 5 个样本：(.→e)、(e→m)、(m→m)、(m→a)、(a→.)。
+        </p>
+        <p>
+            这里他插了一段关于 API 的提醒：<code>torch.tensor</code>（小写）和 <code>torch.Tensor</code>（大写）都能用，但大写的会把整数变成 float32，小写的会自动推断类型。官方文档对此说得很不清楚，他是在一个论坛帖子里才找到答案的。他建议用小写，并借机说：要习惯读大量文档和问答帖，有些东西并没有好好写进文档里。
+        </p>
+        <h3>one-hot 编码</h3>
+        <p>
+            整数不能直接送进神经网络，因为神经元是拿权重去乘输入的，乘一个“编号”没有意义。常用的方法是 one-hot 编码：13 变成一个长度为 27 的向量，第 13 位是 1，其余是 0。用 <code>F.one_hot(xs, num_classes=27)</code> 即可，记得指定类别数，否则它会自己猜。他还提醒要检查数据类型：one_hot 返回的是整数，需要转成 float 才能送进网络。
+        </p>
+        <h3>一层线性网络</h3>
+        <p>
+            权重 <code>W</code> 用 <code>torch.randn((27, 27))</code> 从正态分布随机初始化。输入 5×27 乘以 27×27，得到 5×27：5 个样本，每个样本对应 27 个神经元的输出。他特意验证了第 3 个样本、第 13 个神经元的值，确实等于该样本向量和 W 第 13 列的点积。矩阵乘法一次性并行算完了所有样本和所有神经元。
+        </p>
+        <p>
+            这个网络没有偏置，也没有非线性，只有一层。他说这是“最笨、最小、最简单的神经网络”。
+        </p>
+        <h3>怎么把输出变成概率：softmax</h3>
+        <p>
+            网络输出的 27 个数有正有负，不能直接当概率（概率要为正、和为 1），也不能当计数（计数是正整数）。他的解释方式是：<strong>把这 27 个数理解为“对数计数”</strong>，也叫 logits。取指数后都变成正数，可以当作计数；再按行归一化，就是概率。
+        </p>
+        <p>
+            $$\text{softmax}(z)_j = \frac{e^{z_j}}{\sum_k e^{z_k}}$$
+        </p>
+        <p>
+            “取指数再归一化”这两步合起来就叫 softmax。它可以放在任意线性层之后，把输出变成概率分布。所有步骤（乘、加、指数、求和、除法）都可微，都能反向传播。
+        </p>
+        <p>
+            他把 emma 的 5 个样本逐个拆开展示：输入是什么、网络给正确答案的概率是多少、负对数似然是多少。随机初始化的网络给正确答案的概率大多只有 1% 左右，平均损失约 3.76。
+        </p>
+        <p>
+            他换了几个随机种子，有的损失低一些，有的高一些。然后说：这种“随机猜参数看看效果”的做法是业余做法（amateur hour），真正的做法是从一个随机起点出发，用梯度优化。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、用梯度下降训练（1:26:17–1:47:49）</h2>
+        <p>
+            他把 micrograd 结尾的训练代码放在旁边对照，说接下来几乎一模一样。区别只有两处：网络从 MLP 变成了一层线性加 softmax；损失从均方误差变成负对数似然（因为这是分类问题，不是回归问题）。
+        </p>
+        <p>
+            向量化的损失一行就能写完：用 <code>probs[torch.arange(n), ys]</code> 取出每个样本正确答案的概率，取对数、求平均、加负号。
+        </p>
+        <p>
+            反向传播部分：创建 W 时设置 <code>requires_grad=True</code>；每轮前把 <code>W.grad</code> 设为 None（比设为 0 更高效，PyTorch 会把 None 当作没有梯度）；调用 <code>loss.backward()</code>；然后 <code>W.data += -lr * W.grad</code>。PyTorch 和 micrograd 一样，在前向传播时记录下了整张计算图。
+        </p>
+        <p>
+            换成全部约 228,000 个 bigram，代码不用改。学习率可以调得很大，他试到 50 也能正常训练。最终损失降到约 2.46，和计数法加平滑后的结果几乎一样。
+        </p>
+        <p>
+            他解释为什么两种方法结果相同：输入的信息完全一样，都只有前一个字符。bigram 问题简单到可以直接用表格估计概率，不需要梯度优化。但梯度方法灵活得多：如果要看前 10 个字符，表格会大到存不下，神经网络却可以扩展。之后的网络会越来越复杂，一直到 Transformer，但输出 logits、softmax、负对数似然、梯度优化这条流水线不会变，变的只是“怎样从前面的字符算出 logits”。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、两个附注：两种方法其实是同一个模型（1:47:49–1:54:31）</h2>
+        <h3>one-hot 乘矩阵 = 取出一行</h3>
+        <p>
+            一个第 5 位为 1 的 one-hot 向量乘以 W，结果就是 W 的第 5 行。这和计数法里“用第一个字符去表格里查一行”完全是同一件事。所以 W 就是那张表，只不过 W 存的是对数计数，<code>W.exp()</code> 才对应计数表。区别在于：计数表是数出来的，W 是从随机值出发、由损失函数一步步引导出来的。
+        </p>
+        <h3>平滑 = 正则化</h3>
+        <p>
+            如果 W 全是 0，logits 全是 0，取指数后全是 1，概率完全均匀。所以“鼓励 W 接近 0”等价于平滑。具体做法是在损失里加一项 <code>0.01 * (W**2).mean()</code>，W 只要不为 0 就会产生额外损失。他形容这像一个把 W 往 0 拉的力：数据希望概率贴合统计，正则项希望概率均匀，两者的平衡由正则化强度决定。这个强度对应的就是计数法里加多少假次数。
+        </p>
+        <p>
+            最后他用神经网络采样，结果和计数法的输出一模一样。他说这有点虎头蛇尾，也可以说是高潮，看你怎么理解：两个模型本来就是同一个模型。
+        </p>
+    </section>
+
+    <section>
+        <h2>描述里的课后练习</h2>
+        <p>
+            视频描述里给了几道练习，大意如下：
+        </p>
+        <ul>
+            <li>训练一个 trigram 模型（用前两个字符预测第三个），看损失能否比 bigram 更低。</li>
+            <li>把数据分成训练、验证、测试三部分（80/10/10），在验证集上评估。</li>
+            <li>用验证集调平滑或正则化强度。</li>
+            <li>去掉 one-hot，直接用下标取 W 的行。</li>
+            <li>用 <code>F.cross_entropy</code> 替代手写的损失，并想想为什么它更好。</li>
+            <li>自己出一道有意思的练习并完成它。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>他是怎么讲的</h2>
+        <ul>
+            <li><strong>同一个问题，两条路走到同一个终点。</strong>计数法直观，神经网络法通用。两条路得到同样的损失、同样的采样结果，观众会真正相信 W 就是那张表。这种对照比单讲神经网络更有说服力。</li>
+            <li><strong>先建立参照物。</strong>“随机时每个字符约 4%”“均匀分布采样是乱码”，有了基准，观众才知道 2.45 和 bigram 的输出到底好在哪里。</li>
+            <li><strong>概念从上一步自然长出来。</strong>logits 被解释成“对数计数”，直接接上前面的计数表；正则化被解释成“平滑”，接上前面加假次数的做法。新概念都挂在旧概念上。</li>
+            <li><strong>花时间讲坑。</strong>keepdim 的广播 bug、大小写 tensor、one_hot 的数据类型、multinomial 的默认参数。他把这些当作正文的一部分，因为观众自己写代码时一定会遇到。</li>
+            <li><strong>先用一个小例子，再一次放大。</strong>先只用 emma 的 5 个样本，每个都能逐个打印检查；确认没问题后换成 228,000 个，代码一行不改。</li>
+            <li><strong>为后面埋线。</strong>结尾明确说：以后只有“怎么算 logits”这部分会变，其余流水线不变。观众知道这一集学的东西会一直用下去。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Andrej Karpathy YouTube · building makemore (Part 1) · Notes curated by Joyce</p>
+    </footer>
+</article>
+
+</body>
+</html>

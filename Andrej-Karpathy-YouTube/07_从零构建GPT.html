@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>从零构建 GPT | Andrej Karpathy YouTube 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <span><a href="06_makemore5_WaveNet.html">&larr; 上一篇</a></span>
+    <span>Andrej Karpathy YouTube · 07</span>
+    <span><a href="08_GPT分词器.html">下一篇 &rarr;</a></span>
+</nav>
+
+<article>
+    <header>
+        <h1>从零构建 GPT：一行行写出 Transformer</h1>
+        <p class="subtitle">在 tiny Shakespeare 上训练一个字符级的 decoder-only Transformer，从 bigram 基线一路搭到完整的 GPT 结构</p>
+        <div class="author-meta">
+            演讲：Andrej Karpathy · 发布：2023 年 1 月 17 日 · 时长：1 小时 56 分<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=kCc8FmEb1nY" target="_blank">Let's build GPT: from scratch, in code, spelled out.</a>（本文依据公开视频英文字幕和章节整理）<br>
+            代码：<a href="https://github.com/karpathy/ng-video-lecture" target="_blank">ng-video-lecture</a> · <a href="https://github.com/karpathy/nanoGPT" target="_blank">nanoGPT</a> · 论文：<a href="https://arxiv.org/abs/1706.03762" target="_blank">Attention Is All You Need</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>开场：ChatGPT 底下是什么（0:00–7:52）</h2>
+        <p>
+            视频录于 ChatGPT 刚爆红之后。他先在 ChatGPT 里让它写一首关于理解 AI 的俳句，同样的提示跑两次，结果不同，说明它是一个概率系统。又举了几个网上流行的例子，比如“写一篇关于一片树叶从树上掉下来的突发新闻”。
+        </p>
+        <p>
+            从模型的角度看，它做的事就是“补全序列”：给它开头，它往后接。底层的神经网络来自 2017 年的论文《Attention Is All You Need》，提出了 Transformer。GPT 就是 Generatively Pretrained Transformer。他说这篇论文读起来像一篇普通的机器翻译论文，作者大概没料到这个结构会在之后 5 年里几乎接管整个 AI 领域，被稍作修改后复制到大量应用里。
+        </p>
+        <p>
+            复现 ChatGPT 不现实。这一集的目标是训练一个基于 Transformer 的字符级语言模型，数据用他“最喜欢的玩具数据集” tiny Shakespeare：莎士比亚全集拼成的一个约 1MB 的文件。训练好之后可以无限生成“像莎士比亚”的文本。
+        </p>
+        <p>
+            他已经写好了 nanoGPT：两个文件，各约 300 行，一个定义模型，一个负责训练。在 OpenWebText 上训练可以复现 GPT-2 最小的 124M 版本，也能加载 OpenAI 公布的权重。这一集要从空文件开始把它重写一遍。前置要求是会 Python、懂一点微积分和统计，最好看过前面的 makemore 系列，因为语言建模框架和 PyTorch 的基础这一集会直接拿来用。
+        </p>
+    </section>
+
+    <section>
+        <h2>一、数据、分词和批次（7:52–22:11）</h2>
+        <h3>字符级分词</h3>
+        <p>
+            数据约 100 万个字符，去重后有 65 种字符（空格、标点、大小写字母）。分词（tokenize）就是把文本转成整数序列。这里最简单：每个字符对应一个整数，写一个 encode 和一个 decode。
+        </p>
+        <p>
+            他顺带介绍了实际使用的分词器：Google 的 SentencePiece，OpenAI 的 tiktoken（GPT 用的 BPE 分词器）。它们都是“子词”级别，介于字符和整词之间。GPT-2 的词表约 50,000 个，同一句 “hi there” 只编码成 3 个整数。这里有一个取舍：词表小，序列就长；词表大，序列就短。这一集为了简单用字符级。
+        </p>
+        <p>
+            前 90% 作为训练集，后 10% 作为验证集，用来观察过拟合。我们不想要一个能把莎士比亚原文一字不差背出来的模型，而是能写出“像莎士比亚”的文本的模型。
+        </p>
+        <h3>一个块里藏着多个样本</h3>
+        <p>
+            Transformer 不会一次吃下全部文本，而是从训练集中随机取小块。块的最大长度叫 block_size（也叫上下文长度），先设为 8。取 9 个字符，里面有 8 个训练样本：给第 1 个字符预测第 2 个，给前 2 个预测第 3 个……给前 8 个预测第 9 个。
+        </p>
+        <p>
+            他强调，在长度 1 到 block_size 的所有上下文上训练，不只是为了效率，也让模型习惯任何长度的上下文。生成时可以只给 1 个字符起头，超过 block_size 后就要截断，因为模型从没见过更长的输入。
+        </p>
+        <h3>batch 维度</h3>
+        <p>
+            为了让 GPU 忙起来，一次处理多个块，堆成一个张量。batch_size=4、block_size=8 时，输入 x 是 4×8，目标 y 是 x 整体右移一位。这 4×8=32 个样本彼此完全独立。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、最简单的基线：bigram 模型（22:11–42:13）</h2>
+        <p>
+            用 <code>nn.Embedding(vocab_size, vocab_size)</code> 直接查表得到 logits：每个 token 只根据自己的身份预测下一个，token 之间不交流。输出形状 B×T×C（batch、时间、通道），这里 C 是 65。
+        </p>
+        <p>
+            计算交叉熵时遇到一个形状问题：PyTorch 的 <code>F.cross_entropy</code> 对多维输入要求通道在第二维（B×C×T）。他的办法是把 logits 变成 (B·T)×C，目标变成 B·T，摊平成二维。
+        </p>
+        <p>
+            初始损失 4.87。他先估算了一下：65 个字符均匀分布时应该是 $-\ln(1/65) \approx 4.17$。实际偏高，说明初始预测不够均匀。
+        </p>
+        <p>
+            生成函数 <code>generate</code>：输入 B×T 的下标，循环 max_new_tokens 次，每次取最后一个时间步的 logits，softmax 成概率，<code>torch.multinomial</code> 采样一个，拼接到序列后面。他承认对 bigram 来说把整段历史都喂进去很傻（只用最后一个字符），但这样写是为了以后模型真正用上历史时，这个函数不用改。
+        </p>
+        <p>
+            训练换成 AdamW 优化器（makemore 里只用过最简单的 SGD），学习率一般 3e-4，小网络可以更大。batch 改为 32，训练 10,000 步，损失降到约 2.5，生成的文本有了一点样子，但还远不是莎士比亚。
+        </p>
+        <h3>改成脚本</h3>
+        <p>
+            他把笔记本里的代码整理成一个约 120 行的脚本 bigram.py，加了几样东西：
+        </p>
+        <ul>
+            <li>有 GPU 就用 CUDA：数据、模型、生成的起始上下文都要移到同一设备。</li>
+            <li><code>estimate_loss</code>：对训练集和验证集各取多个 batch 求平均损失，比单个 batch 的损失稳定得多。</li>
+            <li>评估前 <code>model.eval()</code>，评估后 <code>model.train()</code>。现在模型里没有 Dropout 或 BatchNorm，两种模式没区别，但他说要养成想清楚模型处于哪种模式的习惯。</li>
+            <li><code>@torch.no_grad()</code>：告诉 PyTorch 这里不会调用 backward，不用保存中间变量，更省内存。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>三、自注意力背后的数学技巧（42:13–1:00:18）</h2>
+        <p>
+            现在要让 token 之间开始交流。一个限制是：第 5 个位置的 token 只能看第 1 到第 5 个，不能看后面的，因为后面就是它要预测的内容。
+        </p>
+        <h3>版本 1：for 循环求平均</h3>
+        <p>
+            最简单的交流方式：每个位置取自己和之前所有位置向量的平均。这叫“词袋”（bag of words），因为只是把东西堆在一起平均。他承认这是很弱的交流方式，丢失了大量位置信息，但先这样。用两层 for 循环实现，很慢。
+        </p>
+        <h3>版本 2：用矩阵乘法</h3>
+        <p>
+            他用一个 3×3 的小例子演示：全 1 矩阵乘以 B，每行得到 B 各列的和。用 <code>torch.tril</code> 只保留下三角，第 1 行只取 B 的第 1 行，第 2 行取前两行之和，第 3 行取全部三行之和。再把每行归一化成和为 1，求和就变成了求平均。
+        </p>
+        <p>
+            所以“对过去求平均”可以写成一个 T×T 的下三角权重矩阵 wei 乘以 x。PyTorch 会自动把 T×T 广播到每个 batch 上做批量矩阵乘法，结果和 for 循环版本完全一致。
+        </p>
+        <h3>版本 3：用 softmax</h3>
+<pre><code>tril = torch.tril(torch.ones(T, T))
+wei = torch.zeros((T, T))
+wei = wei.masked_fill(tril == 0, float('-inf'))
+wei = F.softmax(wei, dim=-1)
+out = wei @ x</code></pre>
+        <p>
+            结果还是一样，但这个写法有更好的解释：wei 一开始全是 0，可以理解为 token 之间的“亲和度”（affinity）；上三角设为负无穷，表示未来的 token 不能参与；softmax 取指数后负无穷变 0，再归一化。接下来要做的就是让这些亲和度不再是常数 0，而是由数据决定：不同 token 会觉得彼此有不同程度的“有趣”。
+        </p>
+        <p>
+            （视频描述里他更正了一处口误：57:00 处应该是“未来的 token 不能交流”，不是“过去的”。）
+        </p>
+        <h3>小整理和位置编码</h3>
+        <p>
+            加一个中间层：嵌入维度 n_embd=32（他说这是 GitHub Copilot 建议的数字），token 嵌入之后再接一个线性层 lm_head 输出 logits。
+        </p>
+        <p>
+            再加位置嵌入：<code>nn.Embedding(block_size, n_embd)</code>，每个位置 0 到 T−1 有自己的向量，和 token 嵌入相加。现在对 bigram 模型还没用，但做自注意力时位置会很重要。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、本集核心：自注意力（1:02:00–1:19:11）</h2>
+        <p>
+            他说这是这条视频最重要的部分。
+        </p>
+        <h3>query、key、value</h3>
+        <p>
+            我们希望亲和度依赖数据。比如“我是一个元音，我想找我之前的辅音”。自注意力的做法：每个位置的 token 发出两个向量：
+        </p>
+        <ul>
+            <li><strong>query</strong>：大致是“我在找什么”。</li>
+            <li><strong>key</strong>：大致是“我有什么”。</li>
+        </ul>
+        <p>
+            亲和度就是 query 和 key 的点积。我的 query 和其他所有 token 的 key 做点积，对齐得好就得到高分，我就会从那个 token 那里获取更多信息。
+        </p>
+        <p>
+            实现上，key 和 query 都是对 x 做一个不带偏置的线性变换，大小为 head_size（这里 16）。每个 token 各自独立地算出自己的 key 和 query，此时还没有交流。交流发生在 <code>wei = q @ k.transpose(-2, -1)</code>：B×T×16 乘 B×16×T 得 B×T×T。注意转置的是最后两维，因为第 0 维是 batch。
+        </p>
+        <p>
+            他举了一个例子：第 8 个 token 知道自己的内容和位置，于是发出 query “我是元音，在第 8 位，我在找位置 4 以内的辅音”；某个 token 的 key 可能在某个通道上表示“我是辅音，位置在 4 以内”，两者点积就很高，经过 softmax 后这个 token 的信息会大量汇聚到第 8 个位置。
+        </p>
+        <p>
+            最后还有 <strong>value</strong>：聚合的对象换成了 v，也就是 x 再经过一个线性变换的结果。他的说法是：x 是这个 token 的“私有信息”；对这个注意力头来说，query 是“我对什么感兴趣”，key 是“我有什么”，value 是“如果你觉得我有意思，我会告诉你的东西”。
+        </p>
+        <h3>关于注意力的六个说明</h3>
+        <ol>
+            <li><strong>注意力是一种交流机制。</strong>可以看成一张有向图：每个节点有一个向量，从所有指向它的节点那里按数据决定的权重做加权求和。语言模型里，第 1 个节点只被自己指向，第 8 个节点被前面所有节点和自己指向。原则上注意力可以用在任意有向图上。</li>
+            <li><strong>注意力没有空间概念。</strong>它作用在一组向量上，节点不知道自己在哪儿，所以需要加位置编码。这和卷积不同，卷积的滤波器本身就是在空间上滑动的。</li>
+            <li><strong>batch 之间不交流。</strong>batch 是 4 时，实际上是 4 组各 8 个节点，组内交流，组间独立。</li>
+            <li><strong>encoder 块和 decoder 块。</strong>做情感分析之类任务时，可以让所有 token 彼此完全交流，这叫 encoder 块，就是删掉那行三角掩码。这里保留掩码，让未来不能和过去交流，叫 decoder 块，因为它用于自回归地“解码”语言。</li>
+            <li><strong>自注意力和交叉注意力。</strong>key、query、value 都来自同一个 x，所以叫自注意力。在 encoder-decoder 结构里，query 来自 x，key 和 value 可以来自另一个来源（比如 encoder 的输出），这叫交叉注意力。</li>
+            <li><strong>为什么要除以 $\sqrt{d_k}$。</strong>如果 q 和 k 都是单位方差，它们的点积方差约等于 head_size。除以 $\sqrt{\text{head\_size}}$ 能让方差回到 1。这很重要，因为 wei 要进 softmax：数值太极端时 softmax 会趋向 one-hot，每个节点只从一个其他节点获取信息，初始化时我们不希望这样。他演示了把输入乘以 8 后 softmax 变得很尖。</li>
+        </ol>
+        <p>
+            $$\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^\top}{\sqrt{d_k}}\right)V$$
+        </p>
+        <p>
+            （视频描述里另有一处更正：1:20:05 的代码应该用 head_size 做归一化，而不是 C。）
+        </p>
+    </section>
+
+    <section>
+        <h2>五、搭出完整的 Transformer（1:19:11–1:42:39）</h2>
+        <p>
+            他从这里开始每加一个组件就训练一次，记录验证损失。
+        </p>
+        <h3>单头注意力：2.5 → 2.4</h3>
+        <p>
+            写一个 <code>Head</code> 模块。下三角矩阵不是参数，用 <code>register_buffer</code> 注册成 buffer。因为有了位置嵌入，生成时输入不能超过 block_size，所以 generate 里要裁掉过长的上下文。自注意力受不了很高的学习率，他调低了学习率、增加了步数。验证损失从 2.5 降到 2.4。
+        </p>
+        <h3>多头注意力：→ 2.28</h3>
+        <p>
+            多头就是多个注意力并行，结果在通道维度拼接。原来一个 32 维的头，换成 4 个 8 维的头，拼起来还是 32。他比作卷积里的分组卷积。效果更好是因为 token 有很多不同的东西要找（辅音、元音、特定位置的元音……），多个独立的交流通道可以收集不同类型的信息。
+        </p>
+        <h3>前馈层：→ 2.24</h3>
+        <p>
+            之前 token 们互相看完，马上就去算 logits 了，“没有时间思考它们从别的 token 那里发现了什么”。所以在注意力后面加一个前馈层：线性层加 ReLU，对每个 token 独立计算。他的总结是：<strong>自注意力是交流，前馈是计算</strong>。Transformer 块就是交流和计算交替进行，然后重复堆叠。
+        </p>
+        <h3>堆叠几个块后反而不好：需要残差连接</h3>
+        <p>
+            堆了 3 个块，效果不好。网络变深了，开始出现优化问题。论文里有两个关键办法帮助深网络优化。
+        </p>
+        <p>
+            第一个是<strong>残差连接</strong>（来自 2015 年 ResNet 论文）。他更喜欢这样理解：有一条从输入通到输出的“残差通路”，计算从这条路上分出去、做一些处理，再通过加法回到路上。为什么有用？回想 micrograd：加法把梯度原样分给两条分支，所以损失的梯度可以沿着这条由加号组成的“梯度高速公路”毫无阻碍地直达输入。残差块在初始化时贡献很小，几乎像不存在，随着训练逐渐“上线”。
+        </p>
+<pre><code>x = x + self.sa(self.ln1(x))
+x = x + self.ffwd(self.ln2(x))</code></pre>
+        <p>
+            多头注意力输出后加一个投影层回到残差通路；前馈层按论文把中间层放大 4 倍（论文里是 512 和 2048）。验证损失降到 2.08，训练损失开始低于验证损失，出现一点过拟合。生成的文本开始有点像英语了。
+        </p>
+        <h3>LayerNorm：→ 2.06</h3>
+        <p>
+            第二个办法是 <strong>LayerNorm</strong>。他把第 3 集的 BatchNorm1d 拿过来，说“改动非常复杂”：把求均值的维度从 0 改成 1。BatchNorm 是对每一列（每个神经元，跨样本）标准化；LayerNorm 是对每一行（每个样本，跨特征）标准化。因为不再跨样本计算，所有滑动统计量的 buffer 都可以删掉，训练和测试也没有区别了，只保留 γ 和 β。
+        </p>
+        <p>
+            他指出一个和原论文不同的地方：原论文把 Add &amp; Norm 放在变换之后，现在更常见的是先做 LayerNorm 再进变换，叫 pre-norm。代码里两个 LayerNorm 分别放在自注意力和前馈之前，最后的线性层之前再加一个。
+        </p>
+        <h3>放大模型：→ 1.48</h3>
+        <p>
+            加了 n_layer、n_head 等变量，还加了 Dropout（2014 年左右的方法）：每次前向和反向随机把一部分神经元置零，相当于训练一组子网络的集成，测试时全部启用。放在残差连接之前、多头注意力输出处、以及 softmax 之后的注意力权重上。
+        </p>
+        <p>
+            超参数：batch 64，block_size 256（上下文从 8 个字符变成 256 个），n_embd 384，6 个头（每头 64 维），6 层，dropout 0.2，学习率调低。在 A100 GPU 上训练约 15 分钟，验证损失从 2.07 降到 1.48。他提醒没有 GPU 的话不要在 CPU 或 MacBook 上跑这个配置，要把层数和维度调小。生成了 10,000 个字符，格式已经很像剧本（角色名加台词），只是读起来没有意义。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、Transformer 的几种形态和 nanoGPT（1:42:39–1:48:53）</h2>
+        <p>
+            论文的结构图里有一半他们没实现。原因是原论文做机器翻译：左边的 encoder 读入法语句子，所有 token 可以完全互相看（没有三角掩码）；右边的 decoder 生成英文，除了自注意力，还有一层交叉注意力，query 来自 decoder，key 和 value 来自 encoder 的输出。这样生成英文时既看自己前面的内容，也看完整的法语句子。生成用特殊的开始 token 起头、结束 token 收尾。
+        </p>
+        <p>
+            这一集只有一个文本文件，不需要以任何东西为条件，所以只用 decoder，这和 GPT 一样。使它成为“decoder”的就是那个三角掩码。
+        </p>
+        <p>
+            nanoGPT 的 train.py 复杂很多：保存和加载检查点、加载预训练权重、学习率衰减、编译模型、多节点多 GPU 分布式训练。model.py 和这一集几乎相同，区别在于：所有头放在一个 CausalSelfAttention 里批量计算（多一个“头”维度，变成四维张量，数学上等价但更高效）；MLP 用 GELU 而不是 ReLU，因为 OpenAI 用了 GELU，要加载他们的权重就得一致；参数分成做权重衰减和不做权重衰减两组。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、回到 ChatGPT：预训练和微调（1:48:53–1:56:00）</h2>
+        <p>
+            训练 ChatGPT 大致分两个阶段。
+        </p>
+        <h3>预训练</h3>
+        <p>
+            在大量互联网文本上训练一个 decoder-only Transformer，让它学会“胡言乱语”。和这一集做的事本质相同，只是规模差很多：
+        </p>
+        <ul>
+            <li>这一集的模型约 1,000 万参数，数据约 100 万字符，按 OpenAI 的子词词表算大约 30 万 token。</li>
+            <li>GPT-3 最大的模型 1,750 亿参数，训练了 3,000 亿 token，是这里的约 100 万倍。他说按今天的标准这都不算多，会到 1 万亿以上。</li>
+        </ul>
+        <p>
+            GPT-3 论文里的超参数（层数、嵌入维度、头数、头大小、batch、学习率）现在应该都看得懂了，结构和这一集几乎一样。难点在基础设施：需要成千上万张 GPU 互相通信。
+        </p>
+        <p>
+            预训练完得到的是一个“文档补全器”，不是助手。你问它问题，它可能用更多问题回答你，可能无视你的问题，也可能去续写一篇新闻，行为是不确定的。
+        </p>
+        <h3>微调（对齐）</h3>
+        <p>
+            根据 OpenAI 的 ChatGPT 博客，大致三步：
+        </p>
+        <ol>
+            <li>收集“问题在上、回答在下”格式的数据，可能是几千条量级，用它微调模型。大模型在微调时样本效率很高，所以这样能行。</li>
+            <li>让模型生成多个回答，由人工评分员排序，用排序数据训练一个奖励模型，预测某个回答有多好。</li>
+            <li>用 PPO（一种策略梯度强化学习方法）微调模型，让它生成的回答在奖励模型那里得分更高。</li>
+        </ol>
+        <p>
+            这些数据大多不公开，是 OpenAI 内部的，所以这个阶段更难复现。nanoGPT 只覆盖预训练阶段。
+        </p>
+        <p>
+            结尾他说，整个训练代码大约 200 行，会连同完整的 git 提交历史一起公开，还有 Colab 笔记本。
+        </p>
+    </section>
+
+    <section>
+        <h2>描述里的建议练习</h2>
+        <ul>
+            <li>把 Head 和 MultiHeadAttention 合成一个类，把头当作另一个 batch 维度并行处理（答案在 nanoGPT 里）。</li>
+            <li>在自己选的数据集上训练 GPT。进阶建议：训练 GPT 做加法 a+b=c，可以把 c 的数字倒过来预测（因为加法从右往左算），只在 c 的位置计算损失（用 cross_entropy 的 ignore_index）。更进一步：做一个支持加减乘除的“GPT 计算器”，他说这不容易，可能需要思维链。</li>
+            <li>找一个大到看不出训练和验证损失差距的数据集，先在上面预训练，再在 tiny Shakespeare 上用更少步数和更低学习率微调，看预训练能否带来更低的验证损失。</li>
+            <li>读一些 Transformer 论文，实现一个大家常用的改进，看看能否提升效果。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>他是怎么讲的</h2>
+        <ul>
+            <li><strong>从观众最熟悉的产品切入。</strong>先在 ChatGPT 里演示，再说“它底下是什么”。观众带着好奇进入两个小时的代码。</li>
+            <li><strong>先给成品预览，再从空文件开始。</strong>开头展示生成的“莎士比亚”和 nanoGPT 的复现结果，观众知道终点在哪。</li>
+            <li><strong>把最核心的技巧单独拎出来练。</strong>自注意力之前，先用一个 3×3 的玩具矩阵把“下三角矩阵乘法等于加权平均”讲透，再用三个版本（for 循环、矩阵乘法、softmax）得到同一个结果。等真正写自注意力时，只差“让权重依赖数据”这一步。</li>
+            <li><strong>每加一个组件就记录一次验证损失。</strong>2.5 → 2.4 → 2.28 → 2.24 → 2.08 → 2.06 → 1.48。观众看到每个组件的贡献，而不是一次性接受一整个架构。</li>
+            <li><strong>用拟人化的说法解释机制，但只用在关键处。</strong>query 是“我在找什么”，key 是“我有什么”，value 是“我愿意告诉你的东西”；自注意力是交流，前馈是计算。这些说法简短，并且紧接着就落到代码上。</li>
+            <li><strong>出错就让它出错，然后引出下一个概念。</strong>堆叠多个块后效果变差，由此引出残差连接和 LayerNorm，而不是一开始就把它们加上。</li>
+            <li><strong>旧知识反复回收。</strong>残差连接为什么有效，回到 micrograd 里“加法平均分配梯度”；LayerNorm 直接改第 3 集的 BatchNorm 代码，改一个维度就完成了。</li>
+            <li><strong>最后放回大图景。</strong>把 10M 参数和 300K token 跟 GPT-3 的 175B 和 300B 对比，讲预训练和对齐的区别。观众知道自己做的是 ChatGPT 的哪一部分、还差什么。</li>
+            <li><strong>在视频描述里修正口误。</strong>两处错误没有重录，而是在描述里标出时间点更正。这是一种高效又诚实的做法。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Andrej Karpathy YouTube · Let's build GPT · Notes curated by Joyce</p>
+    </footer>
+</article>
+
+</body>
+</html>

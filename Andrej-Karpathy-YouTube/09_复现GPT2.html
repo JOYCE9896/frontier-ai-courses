@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>复现 GPT-2（124M）| Andrej Karpathy YouTube 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <span><a href="08_GPT分词器.html">&larr; 上一篇</a></span>
+    <span>Andrej Karpathy YouTube · 09</span>
+    <span><a href="10_大语言模型入门.html">下一篇 &rarr;</a></span>
+</nav>
+
+<article>
+    <header>
+        <h1>复现 GPT-2（124M）</h1>
+        <p class="subtitle">从加载 OpenAI 的权重开始，写模型、调速度、照 GPT-3 论文设超参数，跑一夜后和 GPT-2、GPT-3 对比</p>
+        <div class="author-meta">
+            演讲：Andrej Karpathy · 发布：2024 年 6 月 9 日 · 时长：4 小时 1 分<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=l8pRSuU81PU" target="_blank">Let's reproduce GPT-2 (124M)</a>（本文依据公开视频英文字幕和章节整理）<br>
+            代码：<a href="https://github.com/karpathy/build-nanogpt" target="_blank">build-nanogpt</a>（每一步都是一次 git 提交）· <a href="https://github.com/karpathy/nanoGPT" target="_blank">nanoGPT</a> · <a href="https://github.com/karpathy/llm.c" target="_blank">llm.c</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一集做什么</h2>
+        <p>
+            OpenAI 2019 年发布 GPT-2 时，同时放出了博客、论文和代码。每次发布都是一个“小系列”，不同大小的模型放在同一张图上，横轴是参数量，纵轴是各种下游任务的表现，可以画出规模定律。GPT-2 系列有 4 个，从 124M 到 1558M（他指出论文表格里的参数数字算错了，GitHub 上有更正）。这一集复现最小的 124M：12 层，768 维。
+        </p>
+        <p>
+            他说 5 年前这可能是一个相当复杂的优化，今天在云上租一台机器，大约一小时、花 10 美元左右就能训出同样好的模型。GPT-2 公开了权重，但论文对训练细节说得不多；GPT-3 论文细节多得多，而两者结构差别很小，所以这一集两篇论文一起参考。
+        </p>
+        <p>
+            视频分四段：写出 GPT-2 模型；让训练变快；按论文设置超参数并开跑；第二天早上看结果。视频描述说最后的代码和 nanoGPT 约 90% 相同。
+        </p>
+    </section>
+
+    <section>
+        <h2>第一部分：写出 GPT-2 并加载权重（3:39–45:50）</h2>
+        <h3>先看目标</h3>
+        <p>
+            原始 GPT-2 代码是 TensorFlow 写的，他说 TensorFlow“现在用得不多了”，更喜欢 PyTorch。所以用 Hugging Face transformers 里转换好的版本作为目标。注意 Hugging Face 里叫 “gpt2” 的是 124M，最大的 1.5B 叫 “gpt2-xl”。
+        </p>
+        <p>
+            打印 state_dict 看各个参数的形状：token 嵌入 50257×768（50257 就是上一集讲的 GPT-2 词表大小），位置嵌入 1024×768（最大序列长度 1024）。
+        </p>
+        <p>
+            他把位置嵌入画了出来：每一行是一个位置，能看出类似正弦、余弦的结构；单独看几个通道，有的只对某段位置有反应。曲线有点锯齿，说明模型没训练得很充分。原始 Transformer 论文的位置编码是固定的正弦余弦，GPT-2 里位置嵌入是从随机开始训练的参数，训练后自己学出了类似的结构。他说从随机噪声里能学出这么平滑的东西已经很了不起了。
+        </p>
+        <p>
+            用 Hugging Face 的 pipeline 以 “Hello, I'm a language model,” 开头生成，得到通顺的文本。目标是自己写一个 GPT-2 类，能加载这些权重并得到同样的结果。这样就确认结构完全一致，之后从随机初始化开始训练，要做的就只是“重新找到一组好的权重”。
+        </p>
+        <h3>模型结构</h3>
+        <p>
+            GPT-2 是 decoder-only Transformer，去掉了 encoder 和交叉注意力。和原论文相比有两处不同：LayerNorm 移到了注意力和 MLP 之前（pre-norm）；最后的分类器前多加了一个 LayerNorm。
+        </p>
+        <p>
+            为了方便加载权重，他让模块命名和 Hugging Face 完全一致：<code>transformer.wte</code>、<code>transformer.wpe</code>、<code>transformer.h.0</code> 到 <code>h.11</code>、<code>transformer.ln_f</code>、<code>lm_head</code>（没有偏置）。
+        </p>
+        <p>
+            Block 里他特别讲了 pre-norm 的好处：希望残差通路是“干净的”，从顶部的监督信号一路直达底部的 token。加法会把梯度原样分给两条分支，所以梯度可以不受阻碍地流到输入，各个块的贡献随训练逐渐加入。
+        </p>
+        <p>
+            他还给了一个说法：注意力是 token 之间交换信息的地方，是一种聚合、加权求和、“reduce”操作；MLP 对每个 token 单独计算，没有信息交换，是“map”操作。Transformer 就是反复做 map 和 reduce，每个块不断精炼残差流里的表示。
+        </p>
+        <h3>GELU</h3>
+        <p>
+            MLP 是两个线性层夹一个 GELU。GELU 像一个更平滑的 ReLU，在 0 附近没有完全平坦的尾巴。GPT-2 用的是 tanh 近似版本。他查到了原因：当年开发 GELU 时，TensorFlow 里精确计算需要的误差函数 erf 很慢，所以做了一个近似，后来被 BERT 和 GPT-2 沿用。今天没必要用近似版，但为了精确复现还是用它。另一个用 GELU 的理由：它总有局部梯度，不会出现 ReLU 的死神经元。更新的模型如 Llama 3 用 SwiGLU 等变体。
+        </p>
+        <h3>注意力</h3>
+        <p>
+            多头注意力不再写成多个 Head 模块拼接，而是在一个模块里批量计算：把头数变成和 batch 一样的维度，用一些转置和 view 操作一次算完。数学上和上一集完全等价，只是在 PyTorch 里更高效。整个 GPT-2 实现不到 100 行，而 Hugging Face 的文件约 2,000 行。
+        </p>
+        <h3>加载权重</h3>
+        <p>
+            写一个 <code>from_pretrained</code> 类方法：创建自己的模型，遍历 Hugging Face 的参数逐个复制。要跳过一些 buffer（比如注意力掩码），还有一个麻烦：有些权重来自 TensorFlow，方向是转置的，要手动转置回来。
+        </p>
+        <h3>前向和采样</h3>
+        <p>
+            forward 接收 B×T 的 token 下标，T 不能超过 block_size。位置嵌入对每一行都相同，加法时有广播。依次经过各个块、最后的 LayerNorm 和 lm_head，输出 B×T×vocab 的 logits。
+        </p>
+        <p>
+            采样：用 tiktoken 把前缀编码成 8 个 token，复制 5 份；每一步只取最后一个位置的 logits，softmax，做 top-k 采样（k=50，Hugging Face 的默认值：只保留概率最高的 50 个 token，其余置零再归一化，避免采到很罕见的 token 跑偏），把新 token 拼到序列后面。生成的文本通顺，但和 Hugging Face pipeline 的结果不完全一样。他找不到 pipeline 里的差别，但用 Hugging Face 的模型直接跑同样的代码，结果一致，说明模型本身没问题。
+        </p>
+        <p>
+            他还写了自动检测设备的代码：有 CUDA 用 CUDA，没有就看有没有 MPS（苹果芯片的 GPU 后端），都没有用 CPU。没有 GPU 的人也能跟到相当一部分，只是最后的多 GPU 训练做不了。
+        </p>
+    </section>
+
+    <section>
+        <h2>开始训练：最小的循环（45:50–1:22:18）</h2>
+        <h3>数据和损失</h3>
+        <p>
+            先用 tiny Shakespeare 调试。GPT-2 分词器的压缩比约 3:1，100 万个字符约 30 万 token。取 B×T+1 个 token，前 B×T 个作为输入 x，后移一位的作为目标 y，都 view 成 B×T。
+        </p>
+        <p>
+            损失用交叉熵，需要把 logits 摊平成 (B·T)×vocab。初始损失约 11。他先估算：50,257 个 token 均匀分布时 $-\ln(1/50257) \approx 10.82$，很接近，说明初始化时概率分布比较均匀，是个好起点。
+        </p>
+        <h3>先过拟合一个 batch</h3>
+        <p>
+            优化器用 AdamW。他说 AdamW 是 Adam 的一个“bug 修复版”。Adam 除了梯度还维护两个缓冲区 m 和 v（一阶和二阶矩），有点像动量加 RMSprop，对每个梯度元素单独做归一化，对语言模型的优化比 SGD 快很多，这里先当黑盒用。学习率 3e-4 是早期调试的好默认值。
+        </p>
+        <p>
+            第一次跑报错：张量不在同一设备上。原因是他把模型移到了 GPU，却忘了移数据。他提醒：模型的 <code>.to(device)</code> 是原地的，张量的 <code>.to(device)</code> 不是，会返回新张量，要写 <code>buf = buf.to(device)</code>。修好后在同一个 batch 上反复训练，损失降到很低，说明 Transformer 能记住这个 batch。
+        </p>
+        <h3>简单的数据加载器</h3>
+        <p>
+            写一个 DataLoaderLite：读入整个文本，分词，按 B×T 的块顺序往前走，到末尾就回到开头。换成每步取新 batch 后，损失降到约 6.6。他预期损失会先快速下降，因为 50,257 个 token 里很多在这个数据集里从来不出现，把它们的概率压低就能得到很多“容易的收益”。
+        </p>
+        <h3>权重共享</h3>
+        <p>
+            他发现之前加载权重时漏了一个细节：Hugging Face 模型里 token 嵌入 wte 和输出层 lm_head 不只是形状相同、数值相同，连数据指针都是同一个，是同一个张量。这个做法来自《Attention Is All You Need》，更早可以追溯到 2017 年的一篇论文。
+        </p>
+        <p>
+            直观理解：如果两个 token 语义相近（比如大小写不同，或不同语言的同一个词），我们希望它们在底部的嵌入空间里靠近，也希望它们在顶部得到相近的输出概率，两端有同样的性质。论文发现共享这个矩阵效果更好。实现只需一行：<code>self.transformer.wte.weight = self.lm_head.weight</code>。反向传播时两条分支的梯度会在这个张量上相加。顺带一个好处：这个矩阵 768×50257 约 4,000 万参数，占 124M 模型的约 30%，共享后省下了这些参数。
+        </p>
+        <h3>按 GPT-2 的方式初始化</h3>
+        <p>
+            论文对初始化写得很模糊，只能看他们公开的代码：线性层权重用标准差 0.02 的正态分布，偏置为 0；token 嵌入 0.02，位置嵌入 0.01（他统一用 0.02）。LayerNorm 用 PyTorch 默认的（缩放 1，偏移 0）。他指出 0.02 和 Xavier 初始化 $1/\sqrt{d}$ 的量级差不多（768 时约 0.036，1600 时约 0.025），所以写死 0.02 并不离谱，虽然一般更希望它随模型大小变化。
+        </p>
+        <p>
+            论文里还有一句：残差层的权重在初始化时要乘以 $1/\sqrt{N}$，N 是残差层数量。他用一个小实验解释：残差流里不断往上加东西，100 次每次加一个标准正态，最后标准差变成 10。乘以 $1/\sqrt{N}$ 正好抵消这种增长。每个 Transformer 块有两次加到残差流（注意力和 MLP），所以 N 是 2 倍层数。他用一个自定义标记 <code>NANOGPT_SCALE_INIT</code> 标出这些层，他说“不知道这是不是 PyTorch 认可的做法，但对我有用”。
+        </p>
+    </section>
+
+    <section>
+        <h2>第二部分：让它跑得快（1:22:18–2:14:55）</h2>
+        <p>
+            他的原则是：先看你有什么硬件、它能提供什么、你是否用满了。他的机器有 8 张 A100 80GB SXM（从 Lambda Labs 租的，他说 Lambda 赞助他的项目，也是他最喜欢的方式）。基线：batch 16、序列长度 1024，FP32 下每步约 1000 毫秒。他提醒显存不够就减小 batch，用 2 的幂次这样的“好数字”，不要用 17 这种。同时统计每秒处理的 token 数，这是更客观的指标。
+        </p>
+        <h3>1. TF32：1000 → 333 毫秒</h3>
+        <p>
+            PyTorch 默认所有张量都是 float32。深度学习其实能容忍低得多的精度。A100 的规格表上，FP32 是 19.5 TFLOPS，TF32 是 156，BF16/FP16 是 312（标星号的是用稀疏性的数字，不常用；INT8 用于推理，不适合训练，因为训练中的数值接近正态分布，需要浮点数）。
+        </p>
+        <p>
+            Tensor Core 是 A100 上做 4×4 小矩阵乘法的指令，所有矩阵乘法都被拆成它。在 124M 模型里，计算量最大的是最后从 768 到 50,257 的分类层。TF32 在 Tensor Core 内部把 FP32 的尾数截掉 13 位，输入输出仍是 FP32，代码完全看不出变化，只是更快、略不精确，实际训练中几乎看不出差别。只需一行：<code>torch.set_float32_matmul_precision('high')</code>。
+        </p>
+        <p>
+            理论上应该快 8 倍，实际只快 3 倍。原因是这类工作负载大多受<strong>内存带宽</strong>限制：数据在内存里搬来搬去的时间才是瓶颈，Tensor Core 大部分时间在等数据。他说一个调得很好的程序，硬件利用率能到 60% 就已经很好了。
+        </p>
+        <h3>2. BF16：333 → 300 毫秒</h3>
+        <p>
+            FP16 是先出现的，但它缩小了指数范围，表示不了 FP32 的全部数值范围，需要梯度缩放器（gradient scaler），很麻烦。BF16 在 Ampere 架构上出现，保留和 FP32 一样的指数位（范围相同），只是截掉更多尾数（精度更低），不需要梯度缩放器。
+        </p>
+        <p>
+            他推荐 PyTorch 文档里讲自动混合精度的那一页（“有另外五个版本我不推荐”），忽略梯度缩放器的部分，只用 <code>torch.autocast(device_type='cuda', dtype=torch.bfloat16)</code> 包住前向传播和损失计算，不要包反向和优化器步骤。这样 logits 变成了 BF16，但参数还是 FP32。矩阵乘法这类对精度不敏感的操作转成 BF16，softmax、LayerNorm、损失函数等更敏感的操作留在 FP32。具体哪些转换，他坦白自己也不完全清楚，文档写得不好。
+        </p>
+        <h3>3. torch.compile：300 → 130 毫秒</h3>
+        <p>
+            一行代码 <code>model = torch.compile(model)</code>，编译要花一些时间，但快了 2.3 倍。他说除非在调试，否则几乎没有理由不用。
+        </p>
+        <p>
+            为什么快？普通 PyTorch 是“急切模式”，Python 解释器一行行往下执行，每个操作单独派发一个 kernel，不知道后面要做什么。torch.compile 能看到整段代码：一是去掉 Python 解释器的开销；二是减少 GPU 内存读写。
+        </p>
+        <p>
+            他用 GELU 的公式举例：不编译时，先算 x 的三次方，要把 x 从 GPU 显存（HBM）搬到芯片上计算再写回；再乘常数，又一个来回；再加 x，又一个来回。他画了 GPU 的内存层级：芯片上有很多流式多处理器（A100 有 108 个 SM 启用，他说约 120 个），每个有寄存器和 L1 缓存，还有 L2 缓存，这些片上内存极快但总共只有几十 MB；片外的 HBM 有几十 GB，但访问很慢。编译后会做 <strong>kernel 融合</strong>：数据只搬上芯片一次，所有逐元素操作在片上做完，再写回一次。
+        </p>
+        <h3>4. FlashAttention：130 → 96 毫秒</h3>
+        <p>
+            torch.compile 找不到所有优化，FlashAttention 就是一个例子（2022 年 Stanford 的论文）。它把注意力的几行（QK 乘积、掩码、softmax、乘 V）融合成一个 kernel。有意思的是它的浮点运算次数比普通注意力更多，却快很多（论文说最多 7.6 倍），因为它非常注意内存层级，从不把 T×T 的注意力矩阵写入 HBM。
+        </p>
+        <p>
+            核心是“在线 softmax”技巧：用中间变量增量地计算 softmax，不需要一次看到所有输入。这个技巧来自 2018 年 NVIDIA 的一篇论文，论文里已经假设减少内存访问会提升性能。他觉得很有意思：NVIDIA 当时就有这个认识，却要等四年后才由 Stanford 做出 FlashAttention。
+        </p>
+        <p>
+            在 PyTorch 里把那四行换成 <code>F.scaled_dot_product_attention(q, k, v, is_causal=True)</code> 即可。他说不知道为什么 torch.compile 认不出这四行应该调用 FlashAttention。损失和之前完全一样，因为计算本身没变。
+        </p>
+        <p>
+            他从中提炼的一点是：浮点运算次数不是关键，整个内存访问模式才是。
+        </p>
+        <h3>5. 把难看的数字变好看：96 → 93 毫秒</h3>
+        <p>
+            他说这是他最喜欢的优化之一，“既最蠢又最聪明”。CUDA 里很多东西按 2 的幂次组织，kernel 按 16、64 这样的块处理，输入不是好数字时，要额外处理剩余部分，效率很低。扫一遍代码找“丑数字”：50,257 是奇数，很丑。改成 50,304（能被 128 整除）。
+        </p>
+        <p>
+            这相当于加了一些永远用不到的假 token，计算量反而增加了，却快了约 4%。会不会出问题？嵌入表多出的行永远不会被索引到；但因为和输出层共享，输出层要为这些假 token 预测概率，网络会学会把它们压到接近 0。这和 Shakespeare 里大部分 token 本来就不出现、也要被压低没有区别。他提到用 PyTorch 2.3.1 或更早版本时，这个改动能快约 30%。torch.compile 也没找到这个优化。
+        </p>
+        <p>
+            到这里，每步从约 1000 毫秒降到约 93 毫秒，提升约 11 倍。
+        </p>
+    </section>
+
+    <section>
+        <h2>第三部分：超参数和训练设置（2:14:55–3:43:05）</h2>
+        <p>
+            GPT-2 公开了权重但几乎没有训练细节；GPT-3 有大量细节但没公开权重。两者结构很接近（上下文从 1024 变成 2048，规模大得多），所以照 GPT-3 论文设超参数。
+        </p>
+        <h3>AdamW 参数和梯度裁剪</h3>
+        <p>
+            β1=0.9、β2=0.95（默认是 0.999）、ε=1e-8。梯度全局范数裁剪到 1.0：所有参数梯度平方求和再开方，超过 1 就整体缩小。目的是防止某个“倒霉的 batch”造成极高的损失和梯度，冲击整个优化。他说这有点像在更深层问题上打补丁，但大家都用。他喜欢打印梯度范数：稳定说明正常，持续上升或出现尖峰说明训练不稳定。训练开始时范数约 30，很快降到 1 以下，因为初期主要在学输出 token 的偏置。
+        </p>
+        <h3>学习率调度：预热加余弦衰减</h3>
+        <p>
+            学习率从接近 0 线性升到最大值，再按余弦曲线降到最大值的 10%。GPT-3 小模型（和 GPT-2 124M 差不多大）用的最大学习率是 6e-4。他自己写了一个约 5 行的 get_lr 函数，而不用 PyTorch 自带的调度器：“我完全理解这几行在做什么，我不喜欢用那种看不透的抽象，这是个人风格。”他也说学习率调度怎么选是个人选择，也是一个活跃的研究方向。
+        </p>
+        <h3>跳过 batch 大小递增</h3>
+        <p>
+            GPT-3 论文里 batch 从小到大线性增加，他选择跳过：这会让每一步处理的 token 数变化，计算变复杂；而且他认为这主要是系统速度上的改进，不是算法上的。训练初期模型主要在学哪些 token 不出现，每个样本的梯度高度相关，小 batch 已经能得到差不多的梯度；到后期梯度才变得去相关，大 batch 的统计价值才体现出来。
+        </p>
+        <h3>权重衰减和融合 AdamW：93 → 90 毫秒</h3>
+        <p>
+            权重衰减 0.1。只对参与矩阵乘法的二维参数和嵌入做衰减，偏置和 LayerNorm 参数等一维张量不衰减。他解释权重衰减是一种正则化：把权重往下拉，迫使网络把工作分散到更多通道，不让某个权重过大。另外用了 <code>fused=True</code> 的 AdamW（较新版本 PyTorch 才有）：不再用 for 循环逐个张量更新，而是一个 kernel 更新所有参数。他不太确定为什么 PyTorch 默认不开。
+        </p>
+        <p>
+            他补充说，权重衰减、学习率、batch 大小、Adam 参数之间的关系在优化文献里相当复杂，这里只是照抄 OpenAI 的设置。
+        </p>
+        <h3>梯度累积</h3>
+        <p>
+            GPT-3 小模型的 batch 是 50 万个 token，约 488 行 × 1024，GPU 放不下。但 batch 大小和其他超参数相互关联，想要忠实复现就得用这个数。办法是梯度累积：每次处理一个小 batch（micro batch），多次前向和反向，梯度累加，攒够了再更新一次。他取 $2^{19} = 524{,}288$ 作为总 batch，micro batch 16×1024，单卡需要累积 32 次。
+        </p>
+        <p>
+            这里有一个微妙的 bug，他让观众先想一想。他用一个小例子说明：交叉熵默认对 batch 求平均，有一个 1/B 的系数；而梯度累积是把多次 backward 的梯度相加，相当于对损失求和，丢掉了 1/累积次数 这个系数。修法是每个 micro batch 的损失先除以累积次数再 backward。
+        </p>
+        <h3>分布式数据并行（DDP）</h3>
+        <p>
+            8 张 GPU 不能闲着。用 <code>torchrun --standalone --nproc_per_node=8 train_gpt2.py</code> 启动 8 个进程，每个进程跑完全相同的代码，只是环境变量里的 RANK、LOCAL_RANK、WORLD_SIZE 不同。他提醒：读这类代码时要想象有 8 个 Python 解释器同时往下执行，唯一的区别是 rank。
+        </p>
+        <ul>
+            <li>rank 0 是“主进程”，负责打印、记日志、存检查点，其他进程主要负责计算。</li>
+            <li>梯度累积次数要除以 GPU 数：8 卡时每次前向反向处理 131,072 个 token，只需累积 4 次。</li>
+            <li>数据加载器要让每个进程取不同的数据：起始位置错开 rank×B×T，每次前进 B×T×进程数。</li>
+            <li>模型用 DDP 包起来。前向不变；反向结束后它会做 all-reduce，把各卡梯度求平均再分发给每张卡，而且能在反向传播进行中就开始通信，和计算重叠。</li>
+            <li>梯度累积时，只在最后一个 micro step 同步梯度。官方做法是用 <code>no_sync</code> 上下文管理器，他不喜欢这种需要复制代码的写法，于是直接去改源码里的 <code>require_backward_grad_sync</code> 变量。他承认这样做“有点调皮”，以后 PyTorch 可能会改掉这个变量。</li>
+            <li>打印的损失也要用 <code>dist.all_reduce</code> 求平均，否则主进程只打印自己那份。</li>
+            <li>结束时要调用 <code>destroy_process_group</code>，否则 NCCL 会报错。</li>
+        </ul>
+        <p>
+            开启 8 卡后每秒处理约 150 万个 token。单卡和多卡结果数值上不完全一样，原因是数据加载器循环回开头的方式不同；把总 batch 调小、减少边界效应后两者就能对上。
+        </p>
+        <h3>数据集：从 WebText 到 FineWeb-Edu</h3>
+        <p>
+            GPT-2 用的 WebText 从未公开：抓取 Reddit 上获得至少 3 个赞的外链网页，4,500 万个链接，约 40GB 文本。GPT-3 加入了 Common Crawl。他说 Common Crawl“比你想的糟糕得多”：广告、垃圾信息、随机表格、股票代码，一团糟，所以大家要花很大力气过滤，并混合书籍、维基百科等精选数据。GPT-3 的数据集也没公开。
+        </p>
+        <p>
+            他列举了现在不错的公开数据集：RedPajama（以及清洗去重后的 SlimPajama 子集），以及他最喜欢的 FineWeb：对 Common Crawl 做高质量过滤，得到 15 万亿 token。Hugging Face 还发布了 FineWeb-Edu，用 Llama 3 70B 判断网页是否有教育价值来筛选。他推荐读 FineWeb 的长网页，介绍了数据处理的大量细节。
+        </p>
+        <p>
+            这里用 FineWeb-Edu 的 sample-10BT 子集（100 亿 token），他之前的实验表明这足以接近 GPT-2 的表现。预处理脚本下载数据、分词（每个文档前面加 endoftext 作为分隔，用 uint16 存储节省空间，因为最大 token ID 远小于 65,535），分成 100 个分片，每片 1 亿 token，第一片作为验证集。
+        </p>
+        <p>
+            按 $2^{19}$ token 每步，100 亿 token 约 19,073 步；GPT-3 在 3.75 亿 token 内预热，约 715 步（他说这很温和，100 步可能也够）。他发现 GPU 能放下 micro batch 64，8 卡正好凑够总 batch，不需要梯度累积，每步约 330 毫秒，全程约 1.7 小时。
+        </p>
+        <h3>验证集、采样和 HellaSwag</h3>
+        <p>
+            每 100 步（后来改为 250 步）在验证集上算损失，并从模型采样。他也拿 OpenAI 的 GPT-2 124M 在 FineWeb-Edu 验证集上算了损失作为参照，但说明这不完全公平，因为 GPT-2 的训练数据分布不同。采样时用了一个独立的随机数生成器，每个 rank 用不同种子，不影响训练用的全局随机状态。
+        </p>
+        <p>
+            需要一个标准的评估，他选了 HellaSwag（2019 年）：给一段情境，四个续写选项，只有一个合理。错误选项是对抗性构造的，由语言模型生成，让模型觉得难、人觉得容易。当时人类准确率 95%，最好的模型 48%；现在已经被“完全解决”，约 96%。大家仍然喜欢它，因为它“平滑”且有“早期信号”：小模型从随机的 25% 开始也会一点点往上涨。
+        </p>
+        <p>
+            小模型做不了选择题，不理解“把字母标签和选项对应”。所以用原生的补全方式：把共同的上下文和四个选项拼成 4 行，用掩码标出选项部分，计算每个选项 token 的平均损失，损失最低的就是模型的选择。他说这应该是 GPT-3 的做法；有些评测框架用选择题格式，模型能同时看到四个选项，任务会更容易，只有大模型能做。按这个方法，GPT-2 124M 得 29.55%，GPT-2 XL 约 49%。
+        </p>
+        <p>
+            8 张卡分担评估：每个进程只处理下标除以进程数余数等于自己 rank 的样本，最后 all-reduce 汇总。他遇到一个问题：torch.compile 会导致评估和采样报错，原因不明，只好暂时关闭编译跑。
+        </p>
+    </section>
+
+    <section>
+        <h2>第四部分：第二天早上的结果（3:43:05–4:01:00）</h2>
+        <h3>一个 epoch，100 亿 token</h3>
+        <ul>
+            <li>验证损失低于 OpenAI GPT-2 124M 在同一验证集上的损失（但如前所说不完全公平）。</li>
+            <li>HellaSwag 从 25% 一路上升，超过了 GPT-2 124M，但还没到 GPT-3 124M（训练了 3,000 亿 token）。</li>
+        </ul>
+        <p>
+            GPT-2 训练了约 1,000 亿 token，这里只用了 100 亿。他列了几种可能的原因，并说明都不确定：
+        </p>
+        <ul>
+            <li>GPT-2 的数据更广，包括多语言、数学、代码，可能分走了模型容量；FineWeb-Edu 全是英文。</li>
+            <li>HellaSwag 是 5 年前的数据集，可能以某种形式混进了 FineWeb 的训练数据，那我们看到的其实是训练曲线。他希望 Hugging Face 做 FineWeb-Edu 时已经去重了，因为他们自己就用 HellaSwag 做评估，但无法确定。</li>
+            <li>现在的数据去重、过滤和质量控制比当年好得多，每个 token 的质量可能更高。</li>
+        </ul>
+        <p>
+            他也指出损失曲线有奇怪的周期性，怀疑是 FineWeb-Edu 的 10B 样本没有充分打乱，而数据加载器按顺序读取，继承了数据集本身的排列。
+        </p>
+        <h3>跑一夜：4 个 epoch，400 亿 token</h3>
+        <p>
+            睡觉时跑了 8 小时。HellaSwag 涨到 33.24%，几乎追上 GPT-3 124M。“可惜我没多睡一会儿”，跑 5 个 epoch 可能就超过了。用 400 亿 token 接近 GPT-3 用 3,000 亿 token 的结果，又是约 10 倍的效率差距。生成的文本连贯了很多。
+        </p>
+        <p>
+            他提了几个可以改进的地方：
+        </p>
+        <ul>
+            <li>多 epoch 训练时，每个 epoch 应该打乱分片内的文档顺序，甚至打乱分片顺序。现在文档总是以同样的方式接在一起，形成了虚假的相关性。</li>
+            <li>有人发现最大学习率可以提高到约 3 倍，GPT-3 的超参数可能很保守。</li>
+            <li>想更忠实于 GPT-3，可以把序列长度改成 2048，micro batch 改成 32，保持每步 50 万 token。</li>
+        </ul>
+        <h3>检查点和后续</h3>
+        <p>
+            每 5,000 步保存检查点。如果要能恢复训练，除了模型参数，还要保存优化器状态（Adam 的 m 和 v）、随机数状态等。保存模型的另一个用处是用更全面的评估工具（比如 EleutherAI 的 lm-evaluation-harness）在数学、代码、多语言等更多任务上评估。
+        </p>
+        <p>
+            这一集只是预训练，模型只会“做梦”续写文档，不能像 ChatGPT 那样对话。要对话需要监督微调（SFT）：把数据换成“用户、助手、用户、助手”结构的对话，继续训练，生成时由我们填入用户部分、模型采样助手部分。他说其实没有更深的东西了。
+        </p>
+        <h3>llm.c</h3>
+        <p>
+            他展示了自己的另一个项目 llm.c：纯 CUDA 实现的 GPT-2/GPT-3 训练，nanoGPT 作为它的 PyTorch 参照。两者在单卡上并排跑，打印的损失和梯度范数完全一样，但 llm.c 启动更快（不需要 torch.compile 的漫长编译）、每秒约 22.3 万 token 对 PyTorch 的 18.5 万。他说不确定自己是否已经榨干了 PyTorch 版本的性能，而且 PyTorch 是通用框架，两者不完全可比，但如果只训练 GPT-2/3，llm.c 很快。
+        </p>
+        <h3>还没解决的问题</h3>
+        <p>
+            损失曲线的周期性、torch.compile 会破坏评估和采样、数据加载器没有打乱。他说会在 build-nanogpt 仓库里陆续记录勘误和后续。
+        </p>
+    </section>
+
+    <section>
+        <h2>他是怎么讲的</h2>
+        <ul>
+            <li><strong>从终点开始。</strong>先加载 OpenAI 的模型、看参数、看生成结果，再自己写一个能加载这些权重的版本。这样第一个检查点就是“和官方一模一样”，后面的一切都建立在确定正确的基础上。</li>
+            <li><strong>每次优化都报出一个数字。</strong>1000 → 333 → 300 → 130 → 96 → 93 → 90 毫秒。每一步说清楚是什么、为什么快、理论上该快多少、实际快了多少，差距从哪来。</li>
+            <li><strong>把硬件讲到能想象的程度。</strong>Tensor Core、HBM、SRAM、片上片外，用 GELU 的例子讲清楚 kernel 融合省掉了哪些来回。抽象的“快”变成了具体的“少搬几次数据”。</li>
+            <li><strong>把论文当成需要侦查的线索。</strong>GPT-2 论文模糊，就去翻代码；GPT-2 没细节，就用 GPT-3 的；论文里算错的参数量也指出来。他示范了怎样从不完整的资料中拼出真实做法。</li>
+            <li><strong>在 bug 出现前让观众先想。</strong>梯度累积的 1/N 问题，他先说“这里有个微妙的错误，你可以想想”，再用一个小例子演示。</li>
+            <li><strong>说明自己的偏好和理由。</strong>不用 PyTorch 的学习率调度器，因为看不透；不喜欢 no_sync 的写法，因为要复制代码；跳过 batch 递增，因为让计算变复杂。每个选择都附带理由，观众可以不同意，但知道取舍在哪。</li>
+            <li><strong>真实的时间线。</strong>“开跑，第二天早上回来看结果”，“可惜没多睡一会儿”。整个视频像跟着他做了一次完整的项目。</li>
+            <li><strong>结果和不确定性一起交代。</strong>超过了 GPT-2，同时列出 HellaSwag 可能被污染、数据分布不同、曲线有周期性等疑点。观众得到的是一个有保留的结论。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Andrej Karpathy YouTube · Let's reproduce GPT-2 (124M) · Notes curated by Joyce</p>
+    </footer>
+</article>
+
+</body>
+</html>

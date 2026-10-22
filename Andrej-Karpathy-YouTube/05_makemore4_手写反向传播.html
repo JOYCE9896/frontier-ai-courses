@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>makemore 4：手写反向传播 | Andrej Karpathy YouTube 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <span><a href="04_makemore3_激活与BatchNorm.html">&larr; 上一篇</a></span>
+    <span>Andrej Karpathy YouTube · 05</span>
+    <span><a href="06_makemore5_WaveNet.html">下一篇 &rarr;</a></span>
+</nav>
+
+<article>
+    <header>
+        <h1>makemore 第 4 集：成为反向传播忍者</h1>
+        <p class="subtitle">不用 loss.backward()，在张量层面手写整个两层 MLP（含 BatchNorm）的反向传播</p>
+        <div class="author-meta">
+            演讲：Andrej Karpathy · 发布：2022 年 10 月 11 日 · 时长：1 小时 55 分<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=q8SA3rM6ckI" target="_blank">Building makemore Part 4: Becoming a Backprop Ninja</a>（本文依据公开视频字幕和章节整理；这条视频的自动字幕质量较差，个别细节以视频描述和配套笔记本为准）<br>
+            配套：<a href="https://colab.research.google.com/drive/1WV2oi2fh9XXyldh02wupFQX0wh5ZC-z-?usp=sharing" target="_blank">练习用 Colab</a> · 博客 <a href="https://karpathy.medium.com/yes-you-should-understand-backprop-e2f06eab496b" target="_blank">Yes you should understand backprop</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一集的用法</h2>
+        <p>
+            Karpathy 在视频描述里用一排感叹号强调：这条视频不是用来“看”的。他建议打开 Colab 练习本自己做，卡住时再播放视频看他的答案。
+        </p>
+        <p>
+            任务是：把上一集的两层 MLP（嵌入 → 线性层 → BatchNorm → tanh → 线性层 → 交叉熵）的反向传播全部手写出来，不调用 <code>loss.backward()</code>。和 micrograd 的区别在于，这次是在张量层面做，而不是一个个标量。
+        </p>
+    </section>
+
+    <section>
+        <h2>一、为什么要学这个，以及一点历史（0:00–7:26）</h2>
+        <p>
+            他说那一行 <code>loss.backward()</code> 让他不放心。他在博客里把反向传播称为“有漏洞的抽象”（leaky abstraction）：你不能随便把一堆可微函数像积木一样拼起来，交叉手指运行反向传播，然后期待一切自动正常。不理解里面在发生什么，就会搬起石头砸自己的脚。他举的例子都在前几集出现过：激活函数饱和导致梯度消失、死神经元，以及后面要讲的 RNN 梯度爆炸和消失。
+        </p>
+        <p>
+            他还展示了从网上某个项目里找到的一段代码：作者想限制梯度的最大值，结果写成了限制损失的最大值。这样一来，损失超过阈值的样本梯度被直接设成 0，这些异常样本实际上被忽略了。作者显然没有理解反向传播。
+        </p>
+        <p>
+            历史部分：今天手写反向传播只是练习，但大约 10 年前这是深度学习的常规操作，包括他自己在内，人人都手写。
+        </p>
+        <ul>
+            <li>2006 年 Hinton 和 Salakhutdinov 在 Science 上发表了关于受限玻尔兹曼机（可以看作一种自编码器）的论文，很有影响。</li>
+            <li>2010 年左右他有一个训练受限玻尔兹曼机的库，是用 Matlab 写的。那时 Python 还没在深度学习里普及，Matlab 有方便的张量类、绘图和调试器。训练用的是 contrastive divergence 来估计梯度，然后手动更新参数。</li>
+            <li>2014 年他的论文 fragment embeddings（对齐图像片段和句子片段，有点像后来的 CLIP），代码已经是 numpy 了，损失函数和反向传播都是手写的，再用数值梯度检查确认没写错。</li>
+        </ul>
+        <p>
+            他认为那时的人对神经网络的工作方式有更直觉的理解，所以这个练习值得做。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、起始代码（7:26–13:01）</h2>
+        <p>
+            网络和上一集基本相同，但前向传播被拆得很细，每一步都存成一个中间变量（logits、logit_maxes、norm_logits、counts、counts_sum、counts_sum_inv、probs、logprobs……），反向传播时对每个变量 <code>x</code> 求出对应的 <code>dx</code>。还有一个 <code>cmp</code> 函数，把手算梯度和 PyTorch 算出的梯度对比，报告是否完全相等、是否近似相等（<code>torch.allclose</code>）、最大差值是多少。
+        </p>
+        <p>
+            两个特意的设置：
+        </p>
+        <ul>
+            <li>偏置用很小的随机数初始化，而不是 0。因为变量全是 0 时，梯度表达式会被简化，一些写错的梯度会被掩盖。</li>
+            <li>保留了 BatchNorm 之前那层的偏置 b1。按上一集的说法它没用，但留着可以检查我们能否正确算出它的梯度（应该是 0）。</li>
+        </ul>
+        <p>
+            整集分 4 个练习：
+        </p>
+        <ol>
+            <li>按最细的原子操作，一步步反传整张图。</li>
+            <li>把交叉熵当作一个整体，在纸上推出 dlogits 的公式。</li>
+            <li>把 BatchNorm 当作一个整体，推出它的反向公式。</li>
+            <li>把这些拼起来，完全用自己的反向传播训练网络。</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>三、练习 1：逐个原子操作反传（13:01–1:26:31）</h2>
+        <p>
+            这是最长的一段。他的固定流程是：先写出前向这一行涉及的张量形状；如果涉及广播，就想清楚哪一维被复制了；再用一个小的玩具例子（3×3 矩阵之类）推出局部导数；写出候选答案，用 <code>cmp</code> 验证。
+        </p>
+
+        <h3>损失 → logprobs</h3>
+        <p>
+            损失是 <code>-logprobs[range(n), Yb].mean()</code>，从 32×27 的矩阵里每行挑出正确答案那一格，求平均取负。他用三个数的例子推：$-(a+b+c)/3$ 对 $a$ 的导数是 $-1/3$。推广到 32 个样本，被挑中的位置导数是 $-1/n$，其他没被挑中的位置对损失没影响，导数是 0：
+        </p>
+<pre><code>dlogprobs = torch.zeros_like(logprobs)
+dlogprobs[range(n), Yb] = -1.0/n</code></pre>
+
+        <h3>logprobs → probs</h3>
+        <p>
+            $\log x$ 的导数是 $1/x$，所以 <code>dprobs = (1.0/probs) * dlogprobs</code>。他解释这一行的直观含义：如果模型给正确答案的概率接近 1，梯度原样通过；如果概率很低，除以一个很小的数会把梯度放大。也就是说，模型当前猜得越差的样本，得到的梯度越大。
+        </p>
+
+        <h3>probs → counts_sum_inv：广播的反向是求和</h3>
+        <p>
+            <code>probs = counts * counts_sum_inv</code>，counts 是 32×27，counts_sum_inv 是 32×1。他强调这看起来是一个操作，实际上是两个：先把 32×1 的列向量横向复制 27 次，再逐元素相乘。
+        </p>
+        <p>
+            乘法的局部导数是另一个因子，所以先得到 <code>counts * dprobs</code>。然后处理复制：同一个数被用了 27 次，按照 micrograd 里学过的规则，一个变量被多次使用时梯度要相加。所以沿第 1 维求和，并保持维度：
+        </p>
+<pre><code>dcounts_sum_inv = (counts * dprobs).sum(1, keepdim=True)</code></pre>
+
+        <h3>counts 是被用了两次的节点</h3>
+        <p>
+            <code>dcounts = counts_sum_inv * dprobs</code> 只是第一条分支的贡献。counts 还通过 counts_sum 影响损失，所以暂时不能检查 dcounts，要等第二条分支算完再用 <code>+=</code> 加上去。
+        </p>
+
+        <h3>求和的反向是复制</h3>
+        <p>
+            <code>counts_sum = counts.sum(1, keepdims=True)</code>。用 3×3 矩阵按行求和的例子：$b_1 = a_{11} + a_{12} + a_{13}$，$b_1$ 对这三个元素的局部导数都是 1，对其他行的元素是 0。所以加法把梯度原样分发给参与求和的每个元素，等于把 32×1 的梯度横向复制 27 次：
+        </p>
+<pre><code>dcounts += torch.ones_like(counts) * dcounts_sum</code></pre>
+        <p>
+            他后面总结了一个对偶规律：<strong>前向里的求和，在反向里变成复制（广播）；前向里的复制（广播），在反向里变成求和</strong>，而且都沿同一个维度。
+        </p>
+
+        <h3>减去最大值那一步</h3>
+        <p>
+            <code>norm_logits = logits - logit_maxes</code>，减最大值只是为了数值稳定（上一集讲过，防止 exp 溢出）。从数学上说，每行 logits 加减同一个常数，softmax 结果不变，损失也不变，所以 dlogit_maxes 应该是 0。实际算出来是 1e-9 量级的数，因为浮点误差。他说如果用 PyTorch 的 cross_entropy 这种整体实现，这条分支本来可以直接跳过；拆成原子操作再算，结果也印证了它对损失没有影响。
+        </p>
+        <p>
+            logit_maxes 对 logits 的梯度：<code>max</code> 会返回最大值所在的下标，梯度只流回每行最大值那个位置。他用 <code>F.one_hot</code> 构造了一个每行只有一个 1 的矩阵，再乘以 dlogit_maxes，同样用 <code>+=</code> 加到 dlogits 上。
+        </p>
+
+        <h3>线性层：不用背公式，靠形状推</h3>
+        <p>
+            logits = h @ W2 + b2。他说不需要去查矩阵微积分。在纸上写一个 2×2 的小例子：$D = AB + C$，把矩阵乘法展开成一项项乘和加，$d_{11} = a_{11}b_{11} + a_{12}b_{21} + c_1$，然后用 micrograd 里的规则逐个求导。比如 $a_{11}$ 同时出现在 $d_{11}$ 和 $d_{12}$ 里，梯度是两条路径之和。把所有结果排好，会发现：
+        </p>
+        <p>
+            $$\frac{\partial L}{\partial A} = \frac{\partial L}{\partial D} B^\top, \qquad \frac{\partial L}{\partial B} = A^\top \frac{\partial L}{\partial D}, \qquad \frac{\partial L}{\partial c} = \sum_{\text{rows}} \frac{\partial L}{\partial D}$$
+        </p>
+        <p>
+            也就是说，矩阵乘法的反向传播还是矩阵乘法。然后他“透露了一个秘密”：他自己从来记不住这些公式，靠的是形状。dh 必须和 h 一样是 32×64；它一定是 dlogits（32×27）和 W2（64×27）的某种矩阵乘积；唯一能让形状对上的写法就是 <code>dlogits @ W2.T</code>。dW2 要是 64×27，唯一的写法是 <code>h.T @ dlogits</code>。db2 要是 27 维，只能是 dlogits 沿第 0 维求和。
+        </p>
+
+        <h3>tanh 和 BatchNorm 的缩放平移</h3>
+        <ul>
+            <li>tanh：<code>dhpreact = (1.0 - h**2) * dh</code>，和 micrograd 一样，用输出表示导数。</li>
+            <li>γ 和 β 的形状是 1×64，前向时被竖着复制到 32 行，所以反向时要沿第 0 维求和并保持维度。</li>
+        </ul>
+
+        <h3>BatchNorm 的各个零件</h3>
+        <p>
+            他把 BatchNorm 拆成：均值 bnmeani、差值 bndiff = x − μ、平方 bndiff2、方差 bnvar、倒数平方根 bnvar_inv、标准化输出 bnraw。逐个反传，规则和前面一样：逐元素操作用局部导数相乘；涉及广播的地方求和；bndiff 被用了两次，要等两条分支都算完。他也提到 cmp 能发现错误：bndiff 只算了一条分支时，检查确实报错，说明它不是在一味说“对”。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、插曲：BatchNorm 里的贝塞尔校正（1:05:17）</h2>
+        <p>
+            他在算方差时除以 $n-1$，而论文里是除以 $n$。他借此讲了一个他认为重要却被论文说得很含糊的细节：
+        </p>
+        <ul>
+            <li>除以 $n$ 是有偏估计，除以 $n-1$ 是无偏估计（贝塞尔校正）。样本量很小时（比如 mini-batch 只有 32 个），除以 $n$ 几乎总会低估方差。</li>
+            <li>论文训练时用有偏版本，但在讲推理时提到滑动方差用的是无偏版本。这样训练和测试之间就产生了不一致。</li>
+            <li>PyTorch 的 BatchNorm1d 文档说标准差用有偏估计，实际上滑动平均用的是无偏估计，有人为此提过 bug 报告。</li>
+        </ul>
+        <p>
+            他说自己不喜欢训练和测试之间的不一致，认为这是个错误，论文也没给出好的理由。BatchNorm 层也没有参数可以统一这一点，所以在他看来，用 BatchNorm 的代码里都带着一点“bug”，batch 大时问题小一些。他自己的做法是训练和测试都用 $n-1$。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、练习 2：交叉熵的整体反向（1:26:31–1:36:37）</h2>
+        <p>
+            练习 1 做了很多多余的工作。实际中没人这样拆。把交叉熵当成一个数学表达式，在纸上求导，很多项会互相抵消，最后的公式很短。
+        </p>
+        <p>
+            对单个样本，损失是 $-\log p_y$，其中 $p = \text{softmax}(l)$。分 $i = y$ 和 $i \neq y$ 两种情况求导，结果是：
+        </p>
+        <p>
+            $$\frac{\partial L}{\partial l_i} = p_i - \mathbb{1}[i = y]$$
+        </p>
+        <p>
+            也就是 softmax 的概率，在正确答案的位置减 1。因为损失是 batch 的平均，还要除以 n：
+        </p>
+<pre><code>dlogits = F.softmax(logits, 1)
+dlogits[range(n), Yb] -= 1
+dlogits /= n</code></pre>
+        <p>
+            和 PyTorch 对比，最大差值约 5e-9，是浮点误差。
+        </p>
+        <h3>dlogits 的直观意义</h3>
+        <p>
+            他把 dlogits 画成图，并解释了他觉得很漂亮的一点。看任意一行：它等于这一行的概率，只是正确答案的位置减了 1。所以这一行的和是 0。可以把每个格子的梯度理解成一个力：错误答案的概率被往下压，正确答案的概率被往上拉，向下压的总量正好等于向上拉的量。
+        </p>
+        <p>
+            力的大小和预测的错误程度成正比。如果模型预测完全正确（正确位置概率为 1，其他为 0），这一行的梯度全是 0，没有任何推拉。如果某个错误答案被很自信地预测，它会被用力往下压。这个推拉通过整个网络传下去，最后变成作用在每个权重和偏置上的拉力，每一步更新就是顺着这个方向挪一点。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、练习 3：BatchNorm 的整体反向（1:36:37–1:50:02）</h2>
+        <p>
+            同样的思路用在 BatchNorm 上：给定 dhpreact，用一个公式直接算出 dhprebn（这里先忽略 γ 和 β，它们的梯度前面已经很简单了）。他在纸上推了两页，建议观众按 1、2、3、4 的顺序自己推：先 $\hat{x}$，再 $\sigma^2$，再 $\mu$，最后 $x$，和 micrograd 里拓扑排序的顺序一样，只是在纸上用符号做。
+        </p>
+        <p>
+            推导的难点在于分清哪些是向量、哪些是标量：
+        </p>
+        <ul>
+            <li>$\sigma^2$ 是一个标量，但它影响全部 32 个 $\hat{x}_i$，所以求 $\partial L/\partial \sigma^2$ 时要对 32 条路径求和。</li>
+            <li>$\mu$ 影响 32 个 $\hat{x}_i$，还影响 $\sigma^2$，共 33 条路径。其中 $\partial \sigma^2/\partial \mu$ 一项，在 $\mu$ 恰好是均值的情况下等于 0，这让表达式简化了不少。</li>
+            <li>每个 $x_i$ 有三条路径：到 $\mu$、到 $\sigma^2$、到自己的 $\hat{x}_i$。$\hat{x}_i$ 只依赖 $x_i$，所以 x 到 $\hat{x}$ 的“一根箭头”其实是 32 根并行、互不干扰的箭头。</li>
+        </ul>
+        <p>
+            代入时要注意下标：求和用的局部变量要从 $i$ 改名成 $j$，否则会和要求的那个 $x_i$ 混在一起。最后把 $(\sigma^2+\epsilon)^{3/2}$ 拆成三个 $(\sigma^2+\epsilon)^{1/2}$ 分配到不同的项里，很多项能化简成 $\hat{x}$，得到一个紧凑的公式，并能写成一行向量化的代码，对全部 64 个神经元同时计算。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、练习 4：拼起来训练（1:50:02–1:55:00）</h2>
+        <p>
+            按视频章节和描述，最后一个练习把交叉熵、第二个线性层、tanh、BatchNorm、第一个线性层和嵌入表的反向传播都换成手写版本，去掉 <code>loss.backward()</code>，只用 PyTorch 的张量运算来训练这个两层 MLP，得到和自动求导一样的结果。
+        </p>
+        <p>
+            嵌入表的反向是练习 1 的最后一步：前向时用 Xb 里的下标从 C 中取行，反向时要把每个位置的梯度加回 C 对应的行。同一个字符在 batch 里出现多次，梯度要累加，所以用 <code>+=</code>。他说自己没想到比 Python for 循环更好的写法，也许有人能想出向量化的版本。
+        </p>
+    </section>
+
+    <section>
+        <h2>他是怎么讲的</h2>
+        <ul>
+            <li><strong>把视频设计成练习，而不是讲座。</strong>他在描述和开头都明说：先自己做，卡住再看答案。观众的角色从“看”变成了“做”。</li>
+            <li><strong>用真实的错误代码说明为什么要学。</strong>网上项目里把梯度裁剪写成损失裁剪的例子，比抽象地说“理解很重要”有说服力得多。</li>
+            <li><strong>讲自己的历史。</strong>2010 年的 Matlab、2014 年的 numpy，展示他当年手写反向传播的原始代码。观众知道这曾经是这个领域的日常，练习有它的来历。</li>
+            <li><strong>每一步都用同一套流程。</strong>看形状 → 想广播 → 小例子推导 → 写候选 → cmp 验证。重复几十次之后，观众学到的是一种方法，而不是几十个公式。</li>
+            <li><strong>说出“我记不住公式”。</strong>他承认自己记不住矩阵乘法的反向公式，靠形状推导。这让观众放下背公式的负担，学一种更可靠的思路。</li>
+            <li><strong>总结出可迁移的规律。</strong>“前向求和 ↔ 反向复制”的对偶关系，是从一个个具体例子里归纳出来的，最后被点明。</li>
+            <li><strong>给抽象结果一个物理直觉。</strong>dlogits 被讲成推力和拉力，大小与错误程度成正比。公式 $p - \mathbb{1}$ 由此有了画面。</li>
+            <li><strong>在细节上表达自己的立场。</strong>贝塞尔校正那段，他明确说“我认为这是个错误”，并说明自己的做法。教学里带着判断，而不只是转述论文。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Andrej Karpathy YouTube · Building makemore Part 4 · Notes curated by Joyce</p>
+    </footer>
+</article>
+
+</body>
+</html>

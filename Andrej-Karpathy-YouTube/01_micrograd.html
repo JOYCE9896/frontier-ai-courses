@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>从零写 micrograd | Andrej Karpathy YouTube 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <span><a href="index.html">&larr; 视频目录</a></span>
+    <span>Andrej Karpathy YouTube · 01</span>
+    <span><a href="02_makemore1_bigram.html">下一篇 &rarr;</a></span>
+</nav>
+
+<article>
+    <header>
+        <h1>从零写 micrograd：神经网络和反向传播到底在算什么</h1>
+        <p class="subtitle">Neural Networks: Zero to Hero 第 1 集。只用 Python 标量，一步步写出自动求导引擎和一个能训练的小神经网络</p>
+        <div class="author-meta">
+            演讲：Andrej Karpathy · 发布：2022 年 8 月 16 日 · 时长：2 小时 25 分<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=VMj-3S1tku0" target="_blank">The spelled-out intro to neural networks and backpropagation: building micrograd</a>（本文依据公开视频英文字幕和章节整理）<br>
+            代码：<a href="https://github.com/karpathy/micrograd" target="_blank">karpathy/micrograd</a> · <a href="https://github.com/karpathy/nn-zero-to-hero" target="_blank">nn-zero-to-hero 笔记本</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一集要解决什么问题</h2>
+        <p>
+            视频从一个空白的 Jupyter 笔记本开始，到结尾训练出一个小神经网络。Karpathy 给的门槛很低：会写 Python，还隐约记得高中学过导数，就够了。
+        </p>
+        <p>
+            他要讲清楚的是训练神经网络时“底下发生了什么”。所有深度学习框架（PyTorch、JAX）的数学核心都是同一个算法：反向传播（backpropagation）。它能高效算出“损失函数对每个权重的导数”，有了这些导数，就知道每个权重该往哪边调、调多少，模型就能一点点变好。
+        </p>
+        <p>
+            micrograd 是他两年前放到 GitHub 上的一个小库。核心的自动求导引擎（engine.py）大约 100 行，神经网络部分（nn.py）大约 50 行。他在开头就下了一个判断，整集都在证明这句话：<strong>训练神经网络需要的东西 micrograd 里都有，其余都是为了效率。</strong>
+        </p>
+        <p>
+            micrograd 只处理单个数字（标量），这在实际中太慢，没人这么用。真实框架把很多数字打包成张量（tensor，也就是多维数组）并行计算，但数学完全一样。他故意从标量讲起，因为这样不用一开始就面对多维数组的形状问题，注意力可以全放在链式法则上。
+        </p>
+    </section>
+
+    <section>
+        <h2>一、先把“导数”重新弄懂（8:08–19:09）</h2>
+        <p>
+            他没有直接写公式。先随手定义一个函数 $f(x) = 3x^2 - 4x + 5$，用 matplotlib 画出来，是一条抛物线。然后问：在 $x=3$ 这一点，导数告诉我们什么？
+        </p>
+        <p>
+            他刻意不走课本上那条“用求导法则推出导函数”的路，理由很实际：神经网络的表达式有成千上万项，没有人会把它整个写出来再求导。所以他回到导数的定义：
+        </p>
+        <p>
+            $$f'(x) = \lim_{h \to 0} \frac{f(x+h) - f(x)}{h}$$
+        </p>
+        <p>
+            直白地说：把输入往正方向推一点点（$h$），看输出变了多少，再除以 $h$，就是这一点的斜率。他直接在代码里取 $h = 0.001$ 算，在 $x=3$ 得到约 14，和手算的 $6x - 4 = 14$ 对上。在 $x=-3$ 斜率是负的，在 $x = 2/3$ 附近斜率是 0。他还顺带提醒：$h$ 取得太小，浮点数精度不够，结果反而会错。
+        </p>
+        <p>
+            接着换成三个输入的函数 $d = a \cdot b + c$，取 $a=2, b=-3, c=10$。每次只推动一个输入，先让观众猜输出会变大还是变小，再跑代码验证：
+        </p>
+        <ul>
+            <li>推动 $a$：因为 $b$ 是负数，$d$ 会变小，斜率是 $b = -3$。</li>
+            <li>推动 $b$：因为 $a$ 是正数，$d$ 会变大，斜率是 $a = 2$。</li>
+            <li>推动 $c$：$d$ 增加同样多，斜率是 1。</li>
+        </ul>
+        <p>
+            这一段的目的只有一个：让你对“导数 = 输出对某个输入有多敏感”形成直觉。后面整个反向传播都建立在这个直觉上。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、Value 对象：把计算过程记下来（19:09–32:10）</h2>
+        <p>
+            神经网络是很大的数学表达式，所以需要一种数据结构把表达式记下来。他写了一个 <code>Value</code> 类，包着一个数字，再逐步加功能：
+        </p>
+        <ol>
+            <li>重载 <code>__add__</code> 和 <code>__mul__</code>，让两个 Value 能相加相乘，返回新的 Value。</li>
+            <li>每个新 Value 记住它的“孩子”（<code>_prev</code>，由哪些 Value 算出来）和操作符（<code>_op</code>，是 + 还是 *）。</li>
+            <li>加一个 <code>label</code>，方便画图时认出变量。</li>
+            <li>用 Graphviz 写一个 <code>draw_dot</code> 函数，把整个计算图画出来。</li>
+        </ol>
+<pre><code>class Value:
+    def __init__(self, data, _children=(), _op='', label=''):
+        self.data = data
+        self.grad = 0.0          # d(output)/d(self), starts at "no effect"
+        self._prev = set(_children)
+        self._op = _op
+        self.label = label
+
+    def __add__(self, other):
+        return Value(self.data + other.data, (self, other), '+')
+
+    def __mul__(self, other):
+        return Value(self.data * other.data, (self, other), '*')</code></pre>
+        <p>
+            他搭了一个例子：$e = a \times b$，$d = e + c$，$L = d \times f$，最终输出 $L = -8$。这一步叫前向传播（forward pass）：从输入一路算到输出。
+        </p>
+        <p>
+            然后他在 Value 里加一个 <code>grad</code> 属性，含义是“最终输出 $L$ 对这个值的导数”。初始化为 0，意思是先假设它对输出没有影响。在神经网络里，有些叶子节点是权重，有些是数据。我们只关心权重的梯度，因为数据是给定的，不会去改它。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、手动做一次反向传播（32:10–51:10）</h2>
+        <p>
+            这是整集最核心的一段。他从输出开始往回走，一个节点一个节点填梯度，并且每填一个都用“推一点点 $h$”的数值方法验证一遍。他管这个叫 inline gradient check。
+        </p>
+        <h3>起点：$\partial L / \partial L = 1$</h3>
+        <p>
+            输出对自己的导数是 1。这是反向传播的起点。
+        </p>
+        <h3>乘法节点</h3>
+        <p>
+            $L = d \times f$。对 $d$ 求导得 $f$，对 $f$ 求导得 $d$。他用导数定义把这个推了一遍：$(d+h)f - df$ 除以 $h$，剩下 $f$。所以 <code>d.grad = f.data = -2</code>，<code>f.grad = d.data = 4</code>。
+        </p>
+        <h3>关键一步：链式法则</h3>
+        <p>
+            接下来要求 $\partial L / \partial c$。问题是 $c$ 并不直接连到 $L$，中间隔着 $d$。他说如果你懂了这个节点的梯度怎么算，就懂了整个反向传播。
+        </p>
+        <p>
+            我们已经知道 $L$ 对 $d$ 有多敏感（$-2$），也能在本地算出 $d$ 对 $c$ 有多敏感（$d = c + e$，所以是 1）。把两者乘起来，就是 $L$ 对 $c$ 的敏感度：
+        </p>
+        <p>
+            $$\frac{\partial L}{\partial c} = \frac{\partial L}{\partial d} \cdot \frac{\partial d}{\partial c} = -2 \times 1 = -2$$
+        </p>
+        <p>
+            他吐槽维基百科上链式法则的写法很绕，自己更喜欢这个版本：如果 $z$ 依赖 $y$，$y$ 依赖 $x$，那么 $dz/dx = dz/dy \cdot dy/dx$。他引用了维基上那个例子：汽车速度是自行车的 2 倍，自行车是步行的 4 倍，那汽车就是步行的 8 倍。变化率可以相乘。
+        </p>
+        <p>
+            他特别强调“局部导数”这个概念。图里的一个加号节点不知道整张图长什么样，它只知道自己把 $c$ 和 $e$ 加起来得到了 $d$，所以只知道 $\partial d/\partial c$。整张图的信息由上游传下来的梯度提供，节点只负责把它乘上自己的局部导数，再传给孩子。
+        </p>
+        <p>
+            由此得到两条很好记的规则：
+        </p>
+        <ul>
+            <li><strong>加法节点</strong>把梯度原样分给每个输入（局部导数都是 1）。他说加法是他最喜欢的反向传播操作，因为最简单。</li>
+            <li><strong>乘法节点</strong>给每个输入的梯度 = 上游梯度 × 另一个输入的值。</li>
+        </ul>
+        <p>
+            照这个规则一路往回，得到 <code>a.grad = 6</code>，<code>b.grad = -4</code>，全部用数值方法验证通过。
+        </p>
+        <h3>预演一次优化（51:10）</h3>
+        <p>
+            有了梯度能做什么？他把每个叶子节点沿梯度方向挪一小步（<code>a.data += 0.01 * a.grad</code>），重新跑前向传播，$L$ 从 $-8$ 变成约 $-7$，确实变大了。这就是一步优化。梯度告诉我们怎样影响最终结果，训练神经网络就靠这个。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、对一个神经元做反向传播（52:52–1:09:02）</h2>
+        <p>
+            他放出一张多层感知机（MLP）的示意图，说明神经元的数学模型：输入 $x_i$ 乘以权重 $w_i$（突触强度），加起来，加上偏置 $b$（他形容为这个神经元天生“多容易被触发”），再经过激活函数：
+        </p>
+        <p>
+            $$o = \tanh\left(\sum_i w_i x_i + b\right)$$
+        </p>
+        <p>
+            激活函数一般是一种“压缩”函数。他画了 tanh 的图：输入为 0 时输出 0，输入很大时平滑地趋近 1，很小时趋近 −1。
+        </p>
+        <p>
+            这里有一个设计上的讲解。tanh 需要指数运算，而 Value 目前只会加和乘。他可以先实现 exp，再用 exp 拼出 tanh；但他选择直接实现 tanh 作为一个整体操作，以此说明：<strong>操作可以设计在任意抽象层级</strong>，只要你知道它的局部导数，就能把梯度传过去。tanh 的导数是 $1 - \tanh^2(x)$，正好可以用输出 $o$ 直接算出：$1 - o^2$。
+        </p>
+        <p>
+            他还故意把偏置调成 6.8813735870195432 这种奇怪的数，就是为了让 tanh 的输出是 0.7071，这样 $1 - o^2 = 0.5$，后面的手算数字都很整齐。
+        </p>
+        <p>
+            手动反传的结果里有一个值得停下来想的地方：$x_2 = 0$，所以 $w_2$ 的梯度是 0。直觉上也对：输入是 0，权重怎么变，乘出来都是 0，对输出没有影响。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、把反向传播自动化（1:09:02–1:27:05）</h2>
+        <h3>每个操作带一个 _backward 函数</h3>
+        <p>
+            “手动做反向传播显然很荒唐，我们来结束这种痛苦。”他给每个 Value 加一个 <code>_backward</code> 闭包，在创建输出时一起定义，负责把输出的梯度乘上局部导数，传给输入：
+        </p>
+<pre><code>def __mul__(self, other):
+    out = Value(self.data * other.data, (self, other), '*')
+    def _backward():
+        self.grad += other.data * out.grad
+        other.grad += self.data * out.grad
+    out._backward = _backward
+    return out</code></pre>
+        <p>
+            录制时他犯了一个错：把 <code>out._backward = _backward()</code> 写成了调用函数，导致报错。他说想过重录，但觉得这个错误挺好笑，就留下了。
+        </p>
+        <h3>拓扑排序决定调用顺序</h3>
+        <p>
+            一个节点要等它后面所有的节点都处理完，才能调用自己的 <code>_backward</code>。这需要拓扑排序：把有向无环图排成一列，让所有边都朝同一个方向。他的实现是一个递归函数，先处理所有孩子，再把自己加进列表。最后把 <code>backward()</code> 封装进 Value：输出的 grad 设为 1，然后按拓扑序的反序依次调用每个节点的 <code>_backward</code>。
+        </p>
+        <h3>一个变量用两次时的 bug（1:22:28）</h3>
+        <p>
+            他主动构造了一个出错的例子：<code>b = a + a</code>。正确的梯度应该是 2，代码却给出 1。原因是加法的 backward 先把 <code>self.grad</code> 设成 1，再把 <code>other.grad</code> 设成 1，而 self 和 other 是同一个对象，后一次覆盖了前一次。
+        </p>
+        <p>
+            修复方法来自多元链式法则：一个变量通过多条路径影响输出时，各条路径的梯度要相加。所以所有的 <code>=</code> 都改成 <code>+=</code>。这也是为什么 grad 初始化为 0。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、补齐更多操作，再把 tanh 拆开（1:27:05–1:39:31）</h2>
+        <p>
+            这一段是练习。他补上了几个让代码更好用的细节：
+        </p>
+        <ul>
+            <li><code>a + 1</code> 会报错，因为 1 不是 Value。在 <code>__add__</code> 里把普通数字自动包成 Value。</li>
+            <li><code>2 * a</code> 也会报错，因为 Python 先尝试 <code>(2).__mul__(a)</code>。需要定义 <code>__rmul__</code> 作为后备，交换操作数。</li>
+            <li>exp：导数是它自己，即 <code>out.data * out.grad</code>。</li>
+            <li>除法：$a/b = a \cdot b^{-1}$。所以他实现更一般的幂运算 $x^k$（$k$ 为常数），导数是 $k x^{k-1}$，除法只是 $k=-1$ 的特例。</li>
+            <li>减法：加上一个取负的数，取负就是乘以 −1。</li>
+        </ul>
+        <p>
+            然后他用 $\tanh(x) = (e^{2x}-1)/(e^{2x}+1)$ 把 tanh 拆成 exp、加、减、除。计算图变长了很多，但前向结果和所有叶子节点的梯度都和之前一模一样。
+        </p>
+        <p>
+            这次练习想说明：一个操作是“原子的”还是“组合的”，其实是你自己定的。只要有输入、有输出、能写出局部导数，它就能嵌进反向传播。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、在 PyTorch 里做同一件事（1:39:31–1:43:55）</h2>
+        <p>
+            他把同一个神经元用 PyTorch 写了一遍。区别主要有三点：
+        </p>
+        <ul>
+            <li>PyTorch 以张量为单位。这里只用了只含一个元素的张量，并转成 double（float64），让精度和 Python 的 float 一致。</li>
+            <li>叶子节点默认不需要梯度（为了效率，输入数据通常不需要），所以要显式设置 <code>requires_grad = True</code>。</li>
+            <li>取出单个数字要用 <code>.item()</code>。</li>
+        </ul>
+        <p>
+            结果前向输出 0.7071，梯度 0.5、0、−1.5、1，和 micrograd 完全一致。micrograd 的 API 本来就是照着 PyTorch 设计的，PyTorch 相当于它在张量上的高效版本。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、搭一个 MLP 并训练它（1:43:55–2:14:03）</h2>
+        <h3>Neuron、Layer、MLP 三个类</h3>
+        <ul>
+            <li><strong>Neuron</strong>：权重和偏置随机初始化在 −1 到 1 之间；调用时计算 $\tanh(w \cdot x + b)$。</li>
+            <li><strong>Layer</strong>：就是一列彼此独立的神经元，每个都接收全部输入。</li>
+            <li><strong>MLP</strong>：一串 Layer 依次连接。他按示意图搭了一个 3 输入、两个 4 神经元隐藏层、1 输出的网络，共 41 个参数。</li>
+        </ul>
+        <h3>数据和损失函数</h3>
+        <p>
+            数据集只有 4 个样本，每个是 3 个数字，目标是 1 或 −1，相当于一个二分类问题。随机初始化的网络输出和目标差得很远。
+        </p>
+        <p>
+            深度学习的做法是用一个数字概括网络整体表现，这个数字叫损失（loss）。这里用均方误差：每个样本的预测减目标、平方、再求和。平方是为了去掉正负号，预测和目标完全相等时损失为 0，差得越远损失越大。
+        </p>
+        <p>
+            调用 <code>loss.backward()</code> 后，41 个参数都有了梯度。他把整个损失的计算图画出来，规模很大，因为它包含 4 次完整的前向传播。输入数据也有梯度，但没用，因为数据不会改。
+        </p>
+        <h3>梯度下降和符号问题</h3>
+        <p>
+            他加了 <code>parameters()</code> 方法收集所有参数（对应 PyTorch 的同名方法），然后对每个参数做更新。这里他停下来讨论了符号：梯度指向损失增大的方向，我们要让损失变小，所以要往反方向走：
+        </p>
+<pre><code>for p in n.parameters():
+    p.data += -0.01 * p.grad</code></pre>
+        <p>
+            重复“前向、反向、更新”，损失从约 4.8 降到 4.36、3.9、3.66……他把学习率调大后损失降得更快，但走得太猛时也会越过头，甚至让损失爆炸。他说学习率的选择是“一门微妙的手艺”：太小收敛慢，太大不稳定。
+        </p>
+        <h3>录到一半发现的 bug：忘了清零梯度（2:09:59）</h3>
+        <p>
+            写成正式的训练循环后，他坦白：这里有一个很常见的 bug，“我这辈子大概是第 20 次犯，还是在镜头前”。他翻出自己以前发过的一条推文，列着神经网络最常见的错误，第三条就是“忘了在 backward 之前 zero_grad”。
+        </p>
+        <p>
+            因为 backward 用的是 <code>+=</code>，每一轮的梯度会叠加在上一轮上，从不清零。之所以之前还能训练成功，是因为问题太简单，累积的梯度相当于一个超大的步长，误打误撞收敛得更快。修好之后下降变慢了，但这才是正确的。
+        </p>
+        <p>
+            他借这个 bug 说了一个重要的经验：神经网络有 bug 时常常照样能“工作”。简单问题上看不出来，换成复杂问题就会训练不好。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、总结和延伸（2:14:03–2:24:39）</h2>
+        <p>
+            他的总结是这样一条链：神经网络是一个数学表达式，输入是数据和权重；前向传播之后接一个损失函数，衡量预测好不好；对损失做反向传播得到梯度；沿梯度反方向小步调整参数；重复很多次，这就是梯度下降。
+        </p>
+        <p>
+            GPT 这样的模型有上千亿参数，任务是根据前面的词预测下一个词，用的损失是交叉熵（cross-entropy），优化器比简单的随机梯度下降复杂一些。但他强调底层原理相同：Value 和梯度还在，梯度下降也还在。
+        </p>
+        <p>
+            最后他带着看了 GitHub 上的 micrograd 完整代码：
+        </p>
+        <ul>
+            <li><code>engine.py</code>：Value 类。用的激活函数是 ReLU，不是视频里的 tanh。他选 tanh 是因为它的导数稍复杂，更能练习局部梯度。</li>
+            <li><code>nn.py</code>：Neuron、Layer、MLP，外加一个模仿 PyTorch <code>nn.Module</code> 的父类，带 <code>zero_grad</code>。</li>
+            <li>测试：同样的表达式在 micrograd 和 PyTorch 里各算一遍，确认前向和反向都一致。</li>
+            <li>demo.ipynb：更复杂的二维点分类，用到了 mini-batch（每次只取一部分样本）、max-margin 损失、L2 正则化和学习率衰减（训练后期把学习率调小）。这些概念他说以后再讲。</li>
+        </ul>
+        <p>
+            结尾他去 PyTorch 源码里找 tanh 的 backward 实现，花了 15 分钟，搜出 2800 个结果、406 个文件，最后在一个 CPU kernel 和一个 CUDA kernel 里找到了 <code>a * (1 - b*b)</code> 这样的式子，和 micrograd 里的一模一样。他借此说明工业级库体积庞大、很难读，但核心公式就是这些。他还展示了 PyTorch 允许你注册自定义函数：只要写出 forward 和 backward，它就能和其他操作一起组合使用。
+        </p>
+    </section>
+
+    <section>
+        <h2>他是怎么讲的</h2>
+        <p>
+            这一集是整个 Zero to Hero 系列的样板，后面所有视频都沿用这些做法。
+        </p>
+        <ul>
+            <li><strong>开头先给结论，再花两个小时证明它。</strong>“micrograd 就是你训练神经网络需要的全部，其余都是效率。”这句话给了观众一个明确的目标，看完会回头验证。</li>
+            <li><strong>先让观众猜，再跑代码。</strong>每推动一个输入，他都先问“你觉得输出会变大还是变小”。观众先动脑，再看结果，记得更牢。</li>
+            <li><strong>每一步都验证。</strong>解析梯度算出来，立刻用数值方法核对。观众看到的是一个可以检验的过程，不是要相信的结论。</li>
+            <li><strong>挑数字让心算变容易。</strong>把偏置设成奇怪的值，只为让 tanh 输出 0.7071、导数等于 0.5。</li>
+            <li><strong>故意制造错误，也保留真实的错误。</strong><code>a + a</code> 的 bug 是他设计的；忘记 zero_grad 和闭包写错是真的失误，他选择不剪掉，顺便讲清楚为什么错、为什么错了还能跑。</li>
+            <li><strong>先手动，再自动。</strong>手算梯度做到观众觉得烦了，才封装成 <code>_backward</code>，再封装成 <code>backward()</code>。每一层抽象都是在观众已经理解的东西上加的。</li>
+            <li><strong>最后接回真实世界。</strong>对照 PyTorch 的 API、翻 PyTorch 源码、提到 GPT 用的是同样的原理。观众知道自己学的这个玩具和工业界是连着的。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>延伸阅读</h2>
+        <ul>
+            <li><a href="https://github.com/karpathy/micrograd" target="_blank">micrograd</a>：本集写出的完整库。</li>
+            <li><a href="https://colab.research.google.com/drive/1FPTx1RXtBfc4MaTkf7viZZD4U2F9gtKN?usp=sharing" target="_blank">视频配套练习（Colab）</a>：Karpathy 在描述里给的习题。</li>
+            <li><a href="../00-Foundations/index.html">AI 基础</a>：如果对导数、梯度下降还不熟，可以先读这里的入门篇。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Andrej Karpathy YouTube · building micrograd · Notes curated by Joyce</p>
+    </footer>
+</article>
+
+</body>
+</html>

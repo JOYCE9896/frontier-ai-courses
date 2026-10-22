@@ -39,7 +39,7 @@ Stanford 和 CMU 2025–2026 学年 AI 课程的中文笔记，附一套给零�
 | [CMU 11-768](https://joyce9896.github.io/frontier-ai-courses/11-768-AI-Agents/) | AI Agent 的构建、训练与安全（课程进行中） |
 | [Stanford CS25](https://joyce9896.github.io/frontier-ai-courses/CS25-Transformers-United/) | Transformer 前沿研讨 |
 | [Stanford CME296](https://joyce9896.github.io/frontier-ai-courses/CME296-Diffusion-and-Large-Vision-Models/) | 扩散模型与视觉生成 |
-| [Andrej Karpathy YouTube](https://joyce9896.github.io/frontier-ai-courses/Andrej-Karpathy-YouTube/) | Karpathy 当前全部 17 条公开视频：LLM 原理、GPT-2、分词器、从零构建 GPT、micrograd、makemore、扩散实验与日常工作流 |
+| [Andrej Karpathy YouTube](https://joyce9896.github.io/frontier-ai-courses/Andrej-Karpathy-YouTube/) | Karpathy 全部 17 条视频，每条一篇：micrograd、makemore、从零构建 GPT、分词器、复现 GPT-2、LLM 原理与日常用法，外加一篇讲法拆解 |
 
 ### 产业与系统
 
