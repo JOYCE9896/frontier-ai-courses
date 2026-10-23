@@ -14,7 +14,7 @@ Stanford、CMU 和 Harvard 2025–2026 学年 AI 课程的中文笔记，附一�
 
 ## 怎么读
 
-**零基础** → AI 基础 → CS224N → 11-711 → CS336 → 11-664 → CS329A / 11-768 / CS2680
+**零基础** → AI 基础 → CS224N → 11-711 → CS336 → 11-664 → CS329A / 11-768 / CS2680 / CS146S
 
 非技术类课程（MS&E 435、CS153）不需要数学基础，可以直接读。想补计算机系统基础，读 CMU 15-213，会一点 C 就能开始。
 
@@ -44,6 +44,7 @@ Stanford、CMU 和 Harvard 2025–2026 学年 AI 课程的中文笔记，附一�
 | [Stanford CS329A](https://joyce9896.github.io/frontier-ai-courses/CS329A-Self-Improving-AI-Agents/) | 自我改进的 Agent |
 | [CMU 11-768](https://joyce9896.github.io/frontier-ai-courses/11-768-AI-Agents/) | AI Agent 的构建、训练与安全（课程进行中） |
 | [Harvard CS2680](https://joyce9896.github.io/frontier-ai-courses/CS2680-Modern-AI-Systems/) | 现代 AI 系统：从 Claude Code、Agent 设计到 LLM 推理服务与 GPU，附五个作业梳理（课程进行中） |
+| [Stanford CS146S](https://joyce9896.github.io/frontier-ai-courses/CS146S-Modern-Software-Developer/) | 现代软件开发者：编程 Agent 的内部、RePPIT 规格驱动开发、MCP、Skill、常驻 Agent、AGENTS.md，附四个作业梳理（课程进行中） |
 | [Stanford CS25](https://joyce9896.github.io/frontier-ai-courses/CS25-Transformers-United/) | Transformer 前沿研讨 |
 | [Stanford CME296](https://joyce9896.github.io/frontier-ai-courses/CME296-Diffusion-and-Large-Vision-Models/) | 扩散模型与视觉生成 |
 | [Andrej Karpathy YouTube](https://joyce9896.github.io/frontier-ai-courses/Andrej-Karpathy-YouTube/) | Karpathy 全部 17 条视频，每条一篇：micrograd、makemore、从零构建 GPT、分词器、复现 GPT-2、LLM 原理与日常用法，外加一篇讲法拆解 |

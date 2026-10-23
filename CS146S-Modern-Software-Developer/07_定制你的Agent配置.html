@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第七讲：定制你的 Agent 配置 | Stanford CS146S 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="06_常驻Agent怎样工作.html">&larr; 上一讲</a>
+    <span>Stanford CS146S: Lecture 7</span>
+    <a href="作业.html">作业 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第七讲：定制你的 Agent 配置</h1>
+        <p class="subtitle">MCP 的额外好处，四种定制手段（AGENTS.md / CLAUDE.md、Hook、Skill、子 Agent），怎样写一份好的 AGENTS.md，Hook 能在哪些事件上运行、用来做什么，子 Agent 适合哪些支线任务，常用的 MCP 服务器，以及上下文是怎样一层层叠起来的</p>
+        <div class="author-meta">
+            主讲：Mihail Eric<br>
+            资料来源：<a href="https://docs.google.com/presentation/d/152VaUifBKH4T6hxd6fCKKM9kJTSAuBmkF8zSYwuTYAo/edit" target="_blank">课件</a>（2026 年 10 月 13 日；这一讲没有公开转录，本文依据课件整理）<br>
+            课程推荐阅读：<a href="https://david.coffee/i-still-prefer-mcp-over-skills" target="_blank">I Still Prefer MCP Over Skills</a>、<a href="https://docs.factory.com/harness/agents-md" target="_blank">AGENTS.md（Factory 文档）</a>、<a href="https://claude.com/resources/articles/steering-claude-code-skills-hooks-rules-subagents-and-more" target="_blank">Steering Claude Code: Skills, Hooks, Rules, Subagents, and More</a>、<a href="https://hlyr.dev/blog/writing-a-good-claude-md" target="_blank">Writing a Good CLAUDE.md</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、开场事务</h2>
+        <ul>
+            <li>期末项目的技术规格周四截止。</li>
+            <li>第一次开源贡献周日截止。</li>
+            <li>从这周起，所有周四的课（客座讲座）改在 STLC 111。周四的嘉宾是 Claude Code 的创造者 Boris Cherny（那一讲没有公开课件和转录）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>二、补充：MCP 的额外好处</h2>
+        <p>
+            开头再放了一次 API、MCP、Skill 的对比表（见<a href="04_MCP与工具调用.html">第四讲</a>），然后补了几条 MCP 相对于直接调 API 或写 Skill 的好处。推荐阅读里那篇《I Still Prefer MCP Over Skills》也站在这一边。
+        </p>
+        <ul>
+            <li>认证顺畅：OAuth 这类流程由协议和客户端处理，不用每次自己写。</li>
+            <li>版本管理和更新容易：服务器一更新，所有客户端都用上新版本。</li>
+            <li>能在不同客户端之间移植：同一个服务器，Claude Code、Cursor、Codex 都能接。</li>
+            <li>远程 MCP 天然有沙箱：能力跑在别人的服务器上，和你的本地环境隔开。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>三、为什么要定制</h2>
+        <p>
+            要用编程 Agent 达到最高效率，就得掌控自己的工具栈，而可用来定制的机制有很多。课件列了四种：
+        </p>
+        <ol>
+            <li>Agent 行为文件（CLAUDE.md / AGENTS.md）</li>
+            <li>Hook</li>
+            <li>Skill</li>
+            <li>子 Agent</li>
+        </ol>
+        <p>
+            这四样在<a href="02_现代编程Agent的解剖.html">第二讲</a>拆 Claude Code 时都见过，这一讲讲怎样用好它们。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、怎样写一份好的 AGENTS.md</h2>
+        <p>
+            把它看作"写给 Agent 的 README"。建议的结构：
+        </p>
+        <ul>
+            <li>项目概览：代码库的地图。</li>
+            <li>构建和测试命令，要具体到"用 maven 而不是 gradle"这种程度。</li>
+            <li>代码风格规范。</li>
+            <li>测试说明。</li>
+            <li>安全注意事项。</li>
+            <li>语言或技术栈特有的坑，比如"React 18 加 TypeScript，用 Vite，不是 React 脚手架"。</li>
+        </ul>
+        <p>
+            写法上的几条原则：
+        </p>
+        <ul>
+            <li>指令尽量写成普遍适用的。这个文件会出现在每一次请求里，只对某个任务有用的话会在其他任务里变成噪音。</li>
+            <li>不要放代码片段，它们很快就会过时。第二讲也说过，最多放一两条确切的命令。</li>
+            <li>注意长度，控制在 300 行以内。</li>
+            <li>大仓库用嵌套的配置文件，根目录的 AGENTS.md 当路由器用，比如写一句"API 网关设计的细节见 docs/API-GATEWAY.md"，Agent 需要时再去读。这和 Skill 的渐进式披露是同一个思路。</li>
+        </ul>
+        <p>
+            作业 4（见<a href="作业.html">作业页</a>）就是给一个陌生的开源仓库写这样一份文件，要求每一行都只适用于这个仓库，大约一页长。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、Hook</h2>
+        <p>
+            Hook 是在预定义的事件上运行的确定性脚本。和提示词不同，它一定会执行，不依赖模型自己记得去做。常见的事件类型：
+        </p>
+        <ul>
+            <li>PreToolUse：工具调用之前。</li>
+            <li>PostToolUse：工具调用之后。</li>
+            <li>UserPromptSubmit：用户提交提示词时。</li>
+            <li>PreCompact：上下文压缩之前。</li>
+            <li>还有更多。</li>
+        </ul>
+        <p>
+            用途：
+        </p>
+        <ul>
+            <li>清理用户的提示词。</li>
+            <li>拦住敏感操作。</li>
+            <li>对生成的代码跑 linter 和格式化工具。</li>
+            <li>任务完成后跑测试。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>六、Skill 和子 Agent</h2>
+        <p>
+            <strong>Skill</strong>（详见<a href="05_Agent_Skills.html">第五讲</a>）：把常用的提示词做成文件，让 Agent 可以执行。用途包括跑测试、做计划、做研究、审查代码、验证输出。
+        </p>
+        <p>
+            <strong>子 Agent</strong> 是运行时的委派。它的作用是：
+        </p>
+        <ul>
+            <li>把不同工作流的上下文干净地分开。</li>
+            <li>只把最后一条消息返回给主 Agent。</li>
+            <li>名字、描述和工具列表在会话开始时就加载。</li>
+            <li>可以隐式调用（主 Agent 判断该用），也可以显式调用。</li>
+            <li>把最常做的工作流自动化。</li>
+        </ul>
+        <p>
+            典型用途：探索、理解代码库；改完代码后做简化；端到端测试应用。总之最适合做支线任务，主线的上下文不被它们的细节填满。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、常用的 MCP 服务器</h2>
+        <table>
+            <thead><tr><th>类别</th><th>例子</th><th>用来做什么</th></tr></thead>
+            <tbody>
+                <tr><td>产品管理</td><td>Jira、Linear</td><td>创建和更新 issue；拉取 issue 信息，据此启动任务</td></tr>
+                <tr><td>文档</td><td>Notion、Confluence</td><td>根据功能规格创建 issue</td></tr>
+                <tr><td>可观测性</td><td>Datadog、Sentry</td><td>实时调试生产环境</td></tr>
+                <tr><td>数据库</td><td>Redshift</td><td>调试数据问题，弄清数据是怎样组织的</td></tr>
+                <tr><td>技术文档</td><td>Context7</td><td>永远不用过时的库定义，减少幻觉</td></tr>
+                <tr><td>实验追踪</td><td>Arize</td><td>拿一次测试运行的输出，建议新的实验</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section>
+        <h2>八、上下文是怎样叠起来的</h2>
+        <p>
+            课件最后一页画了一摞方块，从上到下是一次请求里上下文的组成：
+        </p>
+        <ol>
+            <li>系统提示词</li>
+            <li>Memory.md（记忆）</li>
+            <li>环境信息</li>
+            <li>MCP 工具</li>
+            <li>Skill</li>
+            <li>AGENTS.md（全局）</li>
+            <li>AGENTS.md（本地）</li>
+        </ol>
+        <p>
+            这些都在你打第一个字之前就占进了上下文。结合第三讲的"聪明 token"和"笨区"：前面这些层越臃肿，留给任务本身的好用空间就越少。所以定制的目标是放进对的东西，而不是放进更多东西。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS146S: The Modern Software Developer &copy; Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="06_常驻Agent怎样工作.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="作业.html">作业 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

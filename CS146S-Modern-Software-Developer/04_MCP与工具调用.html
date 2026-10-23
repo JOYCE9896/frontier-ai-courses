@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第四讲：MCP、工具调用与更进一步 | Stanford CS146S 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="03_高级提示与RePPIT.html">&larr; 上一讲</a>
+    <span>Stanford CS146S: Lecture 4</span>
+    <a href="05_Agent_Skills.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第四讲：MCP、工具调用与更进一步</h1>
+        <p class="subtitle">为什么需要 MCP，从 M × N 个连接器到 M + N，主机、客户端、服务器、工具四个术语，一次工具调用的完整流程，好的 MCP 服务器怎样设计（面向结果而不是操作、参数明确、说明即上下文），只暴露"搜索"和"执行"两个工具的 code mode，以及 API、MCP、Skill 的区别</p>
+        <div class="author-meta">
+            主讲：Mihail Eric<br>
+            资料来源：<a href="https://docs.google.com/presentation/d/1q2cB1a7P4XsR0UJqE0RmtZFeggNOLdPaSnOpbBVewHA/edit" target="_blank">课件</a>、<a href="https://themodernsoftware.dev/materials/10-1-26-transcript.txt" target="_blank">课堂转录</a>、<a href="https://drive.google.com/drive/folders/1aEHCXzZKkokuA4AYjD_2i6OrcM5iQosW" target="_blank">课上的 Skill 文件</a>（2026 年 10 月 1 日；本文依据课件和转录整理）<br>
+            课程推荐阅读：<a href="https://blog.cloudflare.com/enterprise-mcp" target="_blank">Enterprise MCP（Cloudflare）</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、开场事务</h2>
+        <ul>
+            <li>开源合作伙伴的分配明天公布，约 80 人已提交志愿，没交的会被随机分配。</li>
+            <li>这门课的评分不算严，很多按完成度给分。开源贡献主要看 PR 有没有被合进主分支。但有一条硬规定："AI 垃圾"PR 得零分。维护者是在慷慨地花时间审大家的代码，出于感激，也像在任何团队里一样，要自己先审过，别往队友身上"扔垃圾手雷"。可以而且应该用编程 Agent 生成 PR，这就是课程的意义；但不能离截止还有一小时随手生成一个就交。是否算垃圾由维护者判断。</li>
+            <li>项目开题今晚截止。这只是第一个里程碑，后面还有大约三个，目的是逼大家早点想清楚要做什么，好给反馈。</li>
+            <li>Factory 的 Ashley 课后办工作坊，介绍 Factory 这个编程 Agent 和更广的编程平台。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>二、为什么需要 MCP</h2>
+        <p>
+            今天的 LLM 是预训练系统，在大量数据上训练，包括网页数据和更定制的数据集。它们在参数里学到的很大程度上是静态信息，是训练数据在某个时间点的快照，只有重新训练才会更新。作为静态系统它们已经很有用，但要在现代环境里使用，对世界上正在发生的事、对系统的最新版本作出反应，就必须把能力扩展到预训练权重之外。要做出完全自主的系统，需要可靠的方式把动态数据送进去。为此有了工具，也有了 MCP 这样的协议。MCP 出现已经快两年，社区积累了不少经验，Eric 认为它仍是 LLM、尤其是编程 Agent 最重要的基础构件之一。
+        </p>
+        <p>
+            MCP 是 Model Context Protocol（模型上下文协议）的缩写，是 Anthropic 大约两年前推出的开放协议。它让系统（比如包在 API 外面的一层）以一种能跨各种底层系统通用的方式，为 AI 模型（通常是 LLM）提供相关上下文。说得最直白：它是向 LLM 暴露工具的标准格式和协议。这里的工具不只是本地自己写的，也包括第三方服务的。要和 Gmail 或 DoorDash 交互，你不想自己写集成，最好能说"这已经有一个拿高薪的能干团队做好了，我直接用 DoorDash 提供的功能"。
+        </p>
+
+        <h3>从 M × N 到 M + N</h3>
+        <p>
+            以前，要把编程 Agent 或 LLM 连到第三方服务，得为每一对搭一个连接器。一边有 M 个 LLM 或 Agent，另一边有 N 个服务，就需要 M × N 个连接器。而且每个连接器都要重写认证、错误处理、限流等公共部分。
+        </p>
+        <p>
+            有了 MCP，只要 LLM 一侧会说 MCP，服务一侧也实现了协议的另一端，这些公共部分只需处理一次。Gmail 一次就能把自己暴露给所有 Agent，每个 Agent 也都能和 Gmail 说话。输出格式也统一了，底层基本全是 JSON（具体是 JSON-RPC），结构化、可读。课件的两张图：原来左边三个 LLM、右边 Twitter、SOAP（代表老式的服务暴露方式）、Facebook 三个服务，中间线条交错，要 3 × 3 = 9 个连接；有了 MCP，中间是 MCP，只要 3 + 3 = 6 个。三个看不出多大差别，但规模一大，几百个 Agent 和模型、更多的服务，乘法变成加法，差别就很大。
+        </p>
+        <p>
+            Eric 补充说这张图简化过头了：中间那个 MCP 方块代表的是协议，是共同的语言，不是一个服务器。实际上每个 API 都有自己的 MCP 服务器，Twitter 一个，Facebook 一个。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、术语和一次调用的流程</h2>
+        <ul>
+            <li><strong>主机（host）</strong>：Cursor、Claude Desktop 这样的应用。</li>
+            <li><strong>MCP 客户端（client）</strong>：嵌在主机里的库，协议定义了它，它对每个服务器维持一个有状态的会话。实际中人们不太提主机，多说客户端库，可以想成 Cursor 里面跑着的 Python 或 JavaScript SDK。</li>
+            <li><strong>MCP 服务器（server）</strong>：包在第一方或第三方工具外面的轻量封装。第三方的通常通过 HTTP 远程访问；自己写的（作业里会写一个）常常放在本地，Agent 通过 stdio（标准输入输出）和它说话。MCP 提供 stdio 和可流式 HTTP 两种传输层。</li>
+            <li><strong>工具（tool）</strong>：一个可调用的函数，可以是数据源，也可以是 API。Eric 加了大大的引号说它"有点像 API"，但不完全是。</li>
+        </ul>
+        <p>
+            典型流程：
+        </p>
+        <ol>
+            <li>客户端向 MCP 服务器调用 <code>tools/list</code>，问"你能做什么？"，这一步叫发现。</li>
+            <li>服务器返回 JSON，描述每个工具：名字、摘要、JSON schema。和第二讲在 Claude Code 外壳里看到的结构一样，这是 LLM 使用工具、决定何时使用所需要知道的一切。</li>
+            <li>主机把这段 JSON 注入模型的上下文。</li>
+            <li>用户的提示触发模型；如果模型决定用某个 MCP 工具，就按收到的定义输出一个结构化的工具调用。</li>
+            <li>MCP 服务器执行，返回结果，对话继续。</li>
+        </ol>
+        <p>
+            课件上的示意图：用户对 ChatGPT 之类说"总结 Jack 发给我的邮件"（Eric：Jack 是谁？不知道）。①查询到达主机里的 MCP 客户端；②发现：问 MCP 服务器有哪些能力，这个例子里接了 Gmail、S3、DoorDash 三个第三方服务器，都不是我们写的，比如 AWS 工具由亚马逊团队暴露，我们已经通过 OAuth 认证过；③智能层：把查询和可用工具一起交给 LLM，问"这个邮件请求该用哪个工具？"，LLM 认出 Gmail 相关，返回结构化的工具调用；④MCP 服务器执行，大概是 Gmail 的列邮件工具，服务器在底层调用 API，所以说它是 API 的封装；⑤把响应送回，继续。
+        </p>
+        <p>
+            课堂问答：
+        </p>
+        <ul>
+            <li>MCP 只能给 API 用吗？任何遵守协议定义的两方都能交换信息，哪一方都可以是接收或提供方。只是通常接收方是 LLM，协议针对 LLM 的需要做了优化，服务器通常是 API 的封装。</li>
+            <li>所有工具都会暴露出来吗？默认是的。第二讲那份 Claude Code 记录大约一万行 JSON，真正的对话加提示词只有六七百行，其余全是工具的 schema、参数和名字。这是 MCP 很大的局限：天真用法很快就会遇到工具问题，一是把上下文占满，二是让 LLM 搞混，工具太多它很难推理该用哪个。有论文和方法是在 MCP 前面先做一层 RAG：给所有工具建索引，语义搜索出最相关的，比如最多 10 个，只把这些放进上下文。后面还会讲业界更常见的办法。</li>
+            <li>怎样连接？通常通过 OAuth 或其他认证方式：在 Codex 或 Claude 里运行一条命令添加服务器，给出名字或地址，完成认证。认证令牌有存活时间（TTL），过期后要重新认证，所以实际上认证一次，在令牌有效期内都能用。</li>
+            <li>早期人们把 API 端点和 MCP 工具一一对应，赶热潮。可是基本问题仍然是：怎样把工具暴露给 LLM？可以直接用 API，把 API 令牌放进上下文让模型调用；也可以用命令行工具。MCP 是为优化"向 LLM 暴露工具"而设计的协议，好处包括标准化、安全和版本管理。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>四、怎样设计好的 MCP 服务器（做法一）</h2>
+        <p>
+            Eric 不讲"每个 API 端点对应一个 MCP 工具"的天真做法，2024 年到 2025 年初的头三四个月大家试过，效果不好：工具膨胀、上下文膨胀、LLM 搞混，那时的模型更不擅长区分工具。他记得 Cursor 一度只允许 IDE 里有 88 个工具，有的服务器根本没法全部加载，光 GitHub 一家就有 120 到 150 个工具。
+        </p>
+        <p>
+            核心观点：MCP 服务器不是 REST API 的封装。LLM 是根据你给的上下文去推理的，而 API 端点是为人设计的，有时连对人都设计得不怎么好，未必适合 LLM 消费，一一对应会浪费掉很多。很多 API 能用，但粒度太细，LLM 很难推理，结果是一大堆小工具（取 UID、取资源……），光是 API 定义就可能占满上下文，造成又大又复杂的上下文，Agent 还要花大量时间编排简单的逻辑。课件列出的最佳实践：
+        </p>
+        <ul>
+            <li>
+                <strong>面向结果设计，而不是面向操作。</strong>做同一件事的两种方式：一种是 <code>send_payment(user_email)</code>，给邮箱，付款，完事；另一种照搬传统 API：API 可能从来没定义"按邮箱付款"，只有"按账户付款"，那账户 ID 从哪来？要按邮箱列出用户的账户；可你手上也许只有认证令牌里的用户 ID，于是先 <code>get_users(user_id)</code> 拿到邮箱，再 <code>list_account(user_email)</code>，最后 <code>send_payment(account_id)</code>。三次工具调用要接连做对，每次都是一轮 LLM 请求和响应，只能祈祷不出错。前一种是把结果做成操作，而不是暴露达成结果的每一步。传统 API 不一定是按语义设计的，它是为了暴露和修改每一块数据。
+            </li>
+            <li>
+                <strong>参数要明确。</strong>不要嵌套字典式的输入。第一讲的读文件、改文件、列文件工具都标了参数类型；类型标注、docstring、函数名都是 LLM 推理用的上下文。偷懒的 Python 写法是到处用 <code>*args</code> 和 <code>**kwargs</code>，能跑，但 LLM 很难推理该往里放什么。早期 MCP 服务器最先出的错之一就是参数和工具调用对不上：模型选对了工具，参数给错了，原因之一是没有严格说明函数调用的要求。避免巨大的无类型字典；真要用字典，就用 Pydantic 或类型标注描述它。
+            </li>
+            <li>
+                <strong>说明就是上下文。</strong>docstring、每个标注、错误信息都是提示词。设计 MCP 服务器时，你写的一切既给自己看也给 LLM 看。连抛一个通用的 Exception，而不是 ValueError、NameError 或自定义错误类型这种小事都有影响，具体或自定义的错误类型给了 LLM 解读错误、自我调试的线索。
+            </li>
+            <li>
+                <strong>为发现而命名。</strong>工具名带上服务前缀，比如第二讲看到的 <code>mcp__</code> 加服务名的命名方式。
+            </li>
+        </ul>
+        <p>
+            有同学问：在付款那个例子里，是相信 LLM 自己会从邮箱找到账户 ID，还是你把这些 API 串好写死？Eric 说实际中很难预先知道该给 LLM 暴露怎样的语义，你不知道它会怎么用这些工具，也不知道会提供哪些工具。通常一开始不太讲究，为了覆盖面什么都加，然后发现有 100 个工具，得减。这时去看 LLM 的调用记录，找出常见模式来合并。比如分别有搜会议、搜转录、搜 Slack 线程三个工具，可以合成一个 <code>search_resource</code>，把要搜的资源当参数。最初设计时你可能根本没想到要支持 Slack 或邮件，怎么能预见需要一个跨渠道的通用工具？所以一般是先积极地扔一堆上墙，看哪些粘得住，等 LLM 连简单任务都开始搞混时再合并。这就是重构，不需要事先全想好。
+        </p>
+        <p>
+            另一个问题：给所有人用的外壳和自己本地用的有什么不同？他引了一句喜欢的话：软件工程就是给编程加上时间和人。很多人长期参与时，它才变成一门工程学科。知道会被广泛使用，就要认真设计，想清楚有哪些类别的使用者；只给自己用，可以随意一些。还有人说付款例子太简单，模型大概能自己想出顺序：没错，但即使三步都做对，也更贵、更慢、出错概率更高，这些都说明值得优化。什么时候换更聪明的模型、怎样做路由，是另一个话题，后面讲。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、做法二：只暴露"搜索"和"执行"</h2>
+        <p>
+            这是现在 MCP 服务器设计的主流做法，和前面说的 RAG 思路相关：与其把每个服务器的每个工具一次性全放进上下文，不如在需要时把对的工具拉进来。MCP 服务器越来越多时，在你和其他服务器之间放一个"元"MCP 服务器，它只暴露两个工具：
+        </p>
+        <ul>
+            <li><strong>search</strong>：Agent 调用它找到相关的服务器、工具和定义。</li>
+            <li><strong>execute</strong>：在搜索缩小候选范围之后执行操作，方式是生成确定性的代码来完成。</li>
+        </ul>
+        <p>
+            也就是说，中间这层动态生成把工具和函数串起来的代码，不再让 LLM 一个个去走工具调用。好处：上下文大幅减少，因为不再把所有工具同时装进窗口；接口与有多少个服务器无关，任意多个 MCP 服务器都能被索引进搜索。有研究报告这种方法能减少 90% 以上的 token。业界叫法不一，一个值得记住的名字是"code mode"：用代码生成工具调用、发起服务器请求。
+        </p>
+        <p>
+            课件上的例子，请求是"找一个 Jira 工单，用 Google Drive 里的信息更新它"，软件团队很常见的操作。第一段代码根据请求动态生成：获取可用工具，按名字里是否含 "jira" 或 "drive" 过滤，返回这些工具的名字和参数。这段代码不是事先写好的，LLM 看到请求、知道自己有一个 code mode 的 SDK，就生成代码去取最相关的工具。第二步是执行：假设搜出来的有用 JQL 搜 Jira、取 Google Workspace Drive 内容、更新 Jira 工单三个工具，再动态生成第二段代码把它们串起来：搜出项目里"进行中"的工单，读取一份 Drive 文档的内容，把它追加到第一个工单的描述里，返回更新了哪个工单。
+        </p>
+        <p>
+            这段代码是作为一个进程执行的，通常在虚拟机里跑，不由 LLM 自己执行，完整的工具集从来没有进入模型的上下文。有同学问过滤必须是语义的吗？可以是语义的，也可以是字面的。这里是字面的：LLM 认出请求里提到了 Jira 和 Google Drive，就生成用 <code>includes</code> 按关键词过滤的简单 JavaScript；也可以扩展成语义搜索。
+        </p>
+        <p>
+            课件最后一页是"高级 MCP 架构设计"，画的是 Cloudflare 的方案：左边是 MCP 客户端（ChatGPT、Cursor 等），中间是 Cloudflare 的 MCP 服务器门户、远程 MCP 服务器和零信任访问（ZTNA），右边是内部服务（ClickHouse、Snowflake）和 SaaS 的 MCP 服务器（Slack、Salesforce、Jira、PayPal、Shopify、GitHub）。MCP 网关是团队使用时的另一个话题，Eric 留到学期后面讲。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、Skill 预告，以及 API、MCP、Skill 的区别</h2>
+        <p>
+            课件预告了下一讲的 Agent Skill：一种动态加载 Agent 能力的标准，针对特定领域，结合代码和提示词，由 Agent 按需加载；用途包括写文档、做 PPT、数据分析等。一个 SKILL.md 的骨架是：开头用 <code>---</code> 包住的元数据，写 name 和 description（"简短说明这个 Skill 做什么、什么时候用"）；正文写给 Agent 的详细指令，分"何时使用"和"指令"两部分，指令里是分步指导、领域惯例、最佳实践，以及"需要澄清需求时用提问工具问用户"。
+        </p>
+        <table>
+            <thead><tr><th></th><th>是什么</th><th>谁来用</th><th>用法</th></tr></thead>
+            <tbody>
+                <tr><td>API</td><td>应用暴露给开发者调用的 HTTP、REST、GraphQL 服务接口</td><td>你自己或 SDK</td><td>认证、重试、分页、输入校验都由你决定</td></tr>
+                <tr><td>MCP</td><td>服务器暴露的工具定义，让 LLM Agent 能以标准方式调用</td><td>模型或 Agent 运行时（以工具调用的形式），而不是每次手写定制集成的人类开发者</td><td>与外部资源、数据、服务交互的主要机制</td></tr>
+                <tr><td>Skill</td><td>可复用的任务包或流程，教 Agent 怎样完成一项工作，常常编排多个工具或端点</td><td>Agent 或 Agent 框架，作为可以调用的更高层能力</td><td>工作流抽象："这是完成 X 的可重复做法"</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS146S: The Modern Software Developer &copy; Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="03_高级提示与RePPIT.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="05_Agent_Skills.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
