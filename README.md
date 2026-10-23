@@ -1,6 +1,6 @@
 # 前沿 AI 名校课
 
-Stanford 和 CMU 2025–2026 学年 AI 课程的中文笔记，附一套给零基础读者的入门教程。
+Stanford、CMU 和 Harvard 2025–2026 学年 AI 课程的中文笔记，附一套给零基础读者的入门教程。
 
 **[在线阅读 →](https://joyce9896.github.io/frontier-ai-courses/)**
 
@@ -14,7 +14,7 @@ Stanford 和 CMU 2025–2026 学年 AI 课程的中文笔记，附一套给零�
 
 ## 怎么读
 
-**零基础** → AI 基础 → CS224N → 11-711 → CS336 → 11-664 → CS329A / 11-768
+**零基础** → AI 基础 → CS224N → 11-711 → CS336 → 11-664 → CS329A / 11-768 / CS2680
 
 非技术类课程（MS&E 435、CS153）不需要数学基础，可以直接读。
 
@@ -37,6 +37,7 @@ Stanford 和 CMU 2025–2026 学年 AI 课程的中文笔记，附一套给零�
 | [CMU 11-664/763](https://joyce9896.github.io/frontier-ai-courses/11-664-LM-Inference/) | 语言模型推理算法与推理效率 |
 | [Stanford CS329A](https://joyce9896.github.io/frontier-ai-courses/CS329A-Self-Improving-AI-Agents/) | 自我改进的 Agent |
 | [CMU 11-768](https://joyce9896.github.io/frontier-ai-courses/11-768-AI-Agents/) | AI Agent 的构建、训练与安全（课程进行中） |
+| [Harvard CS2680](https://joyce9896.github.io/frontier-ai-courses/CS2680-Modern-AI-Systems/) | 现代 AI 系统：从 Claude Code、Agent 设计到 LLM 推理服务与 GPU，附五个作业梳理（课程进行中） |
 | [Stanford CS25](https://joyce9896.github.io/frontier-ai-courses/CS25-Transformers-United/) | Transformer 前沿研讨 |
 | [Stanford CME296](https://joyce9896.github.io/frontier-ai-courses/CME296-Diffusion-and-Large-Vision-Models/) | 扩散模型与视觉生成 |
 | [Andrej Karpathy YouTube](https://joyce9896.github.io/frontier-ai-courses/Andrej-Karpathy-YouTube/) | Karpathy 全部 17 条视频，每条一篇：micrograd、makemore、从零构建 GPT、分词器、复现 GPT-2、LLM 原理与日常用法，外加一篇讲法拆解 |

@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第三讲：从用户角度看 Agent（二）：多 Agent 与最佳实践 | Harvard CS2680 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="02_Claude_Code怎样工作.html">&larr; 上一讲</a>
+    <span>Harvard CS2680: Lecture 3</span>
+    <a href="04_上下文管理与工具设计.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第三讲：从用户角度看 Agent（二）：多 Agent 与最佳实践</h1>
+        <p class="subtitle">两个插件案例（Superpowers 和 Caveman），并行 Agent、子 Agent、Agent 团队、动态工作流、长时间运行的 Agent，十六个 Agent 写出一个 C 编译器，"编程 3.0"与不确定性，以及 OpenAI 内部使用 Codex 的数据</p>
+        <div class="author-meta">
+            主讲：Juncheng Yang<br>
+            资料来源：<a href="https://cs2680.seas.harvard.edu/slides/3_agent_use_2.pdf" target="_blank">课件</a>（2026 年 9 月 14 日；课程不录像，本文依据课件整理）<br>
+            课程推荐阅读：Claude Code 的 <a href="https://code.claude.com/docs/en/agent-teams" target="_blank">Agent teams 文档</a>、Karpathy 的演讲 <a href="https://www.youtube.com/watch?v=LCEmiRjPEtQ" target="_blank">Software is changing (again)</a>、OpenAI 的 <a href="https://openai.com/index/research-acceleration-view-inside-openai/" target="_blank">Research acceleration: The view inside OpenAI</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、回顾</h2>
+        <p>
+            上一讲讲了三件事。Agent 循环：模型提议，Harness 执行，结果并入上下文。状态管理：上下文是工作记忆，每次用户提示、模型回复、工具结果都追加进去；持久记忆跨会话保留，包括 CLAUDE.md（在其他 Agent 里常叫 AGENTS.md）和自动记忆。工具：内置工具，以及 Skill、MCP、Hook、Plugin 四种扩展方式。这一讲先用两个真实插件把这些机制串起来，再讲怎样同时用很多个 Agent。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、案例一：Superpowers</h2>
+        <p>
+            Superpowers（github.com/obra/superpowers）是一个软件开发插件，可以从官方插件市场安装。它最值得看的一点是：同一个模型、同一套工具，只换了指令，工作方式就完全不同。
+        </p>
+        <p>
+            默认情况下，人提一个功能需求，Agent 直接开始写代码，然后边跑边改。装了 Superpowers 之后，流程变成六步：澄清问题；人批准设计；写详细计划；测试驱动地实现；审查和验证；完成或合并分支。前三步是计划，第四步是构建，后两步是交付，中间有人工把关。
+        </p>
+
+        <h3>九个 Skill</h3>
+        <ul>
+            <li>using-superpowers：怎样发现和调用其他 Skill 的规则。</li>
+            <li>brainstorming：把需求变成一份经批准的设计。</li>
+            <li>writing-plans：把设计拆成具体任务。</li>
+            <li>using-git-worktrees：建一个隔离的工作目录。</li>
+            <li>test-driven-development：强制"先写失败的测试，再让它通过，再重构"。</li>
+            <li>systematic-debugging：先找到根因，再提修复方案。</li>
+            <li>requesting-code-review：对照计划审查实现。</li>
+            <li>verification-before-completion：报告成功之前必须拿出证据。</li>
+            <li>finishing-a-development-branch：合并、开 PR、保留或清理分支。</li>
+        </ul>
+
+        <h3>结构</h3>
+        <p>
+            仓库里有 .claude-plugin/plugin.json（插件元数据）、hooks/（一个会话开始时运行的 Hook）、skills/（Skill 库）和 tests/。插件只是分发的容器，真正决定行为的是 Skill 和 Hook。
+        </p>
+        <p>
+            以 brainstorming 为例，它的 SKILL.md 开头是元数据（name 和 "在创造性工作之前使用" 的 description），正文是 Agent 要遵循的流程：检查项目，判断范围，澄清需求，比较几种方案，给出设计，等待用户批准，然后调用 writing-plans。课件总结 SKILL.md 有六个组成部分：name（稳定的标识）、description（什么时候适用）、指令（要遵循的流程）、检查点（继续之前需要批准）、参考资料（需要时才读）、脚本（确定性的操作）。一个"流程型"Skill 还可以规定进入条件、必须做的动作、禁止的动作、人工批准关口、验证要求，以及下一个该用的 Skill。
+        </p>
+
+        <h3>为什么光有 Skill 不够</h3>
+        <p>
+            装了 Skill 只是让它"可用"，不保证 Agent 会去查看它。Superpowers 的办法是加一个 SessionStart Hook：每次会话开始、每次清空上下文、每次压缩之后，都运行一段脚本。脚本找到插件安装位置，读出 using-superpowers 这个引导 Skill 的全文，转成 JSON 格式，作为 additionalContext 返回，Claude Code 就把它加进上下文。Hook 保证了三件事：每个会话都在确定的时刻执行；在 Agent 做任何事之前执行；清空和压缩之后会重新执行。
+        </p>
+        <p>
+            端到端的过程：Claude Code 启动会话；Hook 读入引导 Skill；Agent 拿到"该用哪个 Skill"的规则；用户说"加上登录认证"；Agent 加载 brainstorming，开始澄清；用户批准设计；Agent 加载 writing-plans；之后依次是实现计划、隔离工作目录、测试驱动构建、代码审查、验证、合并分支。
+        </p>
+
+        <h3>从 Superpowers 学到的设计</h3>
+        <table>
+            <tr><th>设计问题</th><th>Superpowers 的答案</th></tr>
+            <tr><td>复杂行为怎样表示？</td><td>拆成小的、可组合的 Skill</td></tr>
+            <tr><td>Agent 怎样记得用它们？</td><td>用会话 Hook 注入一个引导 Skill</td></tr>
+            <tr><td>上下文怎样保持可控？</td><td>任务相关时才加载对应 Skill</td></tr>
+            <tr><td>各阶段怎样衔接？</td><td>每个 Skill 写明自己的关口和下一个 Skill</td></tr>
+            <tr><td>用户怎样安装？</td><td>全部打包成一个插件</td></tr>
+            <tr><td>每个插件都要命令或 MCP 吗？</td><td>不需要，用到时才加</td></tr>
+        </table>
+    </section>
+
+    <section>
+        <h2>三、案例二：Caveman</h2>
+        <p>
+            Caveman 是一个压缩 token 的插件，用了五种扩展机制，外加一个本地代理。
+        </p>
+
+        <h3>为什么要压缩 Agent 的 token</h3>
+        <p>
+            三个原因：上下文会被日志、diff 和工具输出塞满，挤掉真正的工作内容；每一轮的 token 都要付钱、都要等，输入输出两个方向都是；压缩做得太晚会丢掉关键细节。课件的例子是一次 npm test 输出了 786 行，模型真正需要知道的只有一句："3 个测试失败，错误是 client.ts 第 88 行的 ETIMEDOUT"。原则是两个方向都压缩，同时保留原文以备检索。
+        </p>
+
+        <h3>两个方向</h3>
+        <p>
+            输出方向靠一个回复风格 Skill：事先注入上下文，让模型说话更省。保留技术术语、命令、路径、代码、错误信息、数字、单位和否定词；去掉客套、重复、寒暄和含糊其辞；用短句和主动语态。输入方向靠本地代理加压缩引擎：日志、工具结果、diff、文件在发给模型之前先压缩。一句话概括：Skill 改变模型怎么写，代理改变模型读到什么。项目自己报告输出 token 减少了 65%，但 Skill 本身要占输入 token，所以整个会话的节省会少一些。
+        </p>
+        <p>
+            一个例子：输入 <code>/caveman ultra</code>，再说"跑测试并解释失败原因"。依次发生：Hook 记下 ultra 模式；Hook 注入"简洁回复"的提醒；Agent 执行模型给出的命令；代理压缩嘈杂的测试输出；模型收到精简后的上下文；模型返回简短的诊断；如果需要原文，通过 MCP 按需取回。
+        </p>
+
+        <h3>各个部件</h3>
+        <ul>
+            <li>命令给用户显式控制：<code>/caveman</code> 开默认模式，<code>/caveman ultra</code> 最大压缩，<code>/caveman off</code> 关闭，另有生成简短提交信息、简短审查意见、压缩记忆文件、查看本会话 token 统计等命令。命令本身也是一个 Markdown 文件，带参数提示。</li>
+            <li>Hook 让提示里做出的选择持续生效。SessionStart 时决定本会话模式、安全保存模式状态、把规则作为隐藏上下文注入、压缩后恢复规则；UserPromptSubmit 时检查每条用户提示，识别 <code>/caveman ultra</code> 或"恢复正常模式"之类的说法并更新模式。</li>
+            <li>MCP 把压缩做成可调用的工具，共五个：压缩（返回压缩结果和一个恢复句柄）、按字节原样取回原文、压缩统计，以及 JSON 和 TOON 格式（一种更省 token 的数据表示）之间的互转。</li>
+            <li>本地代理压缩模型读到的内容，按类型保留关键部分：日志保留错误、调用栈和首尾；代码保留 import、函数签名、类型和函数体；diff 保留文件名、块头和改动行；JSON 保留键、结构和出错的子树；搜索结果保留高价值的匹配；HTML 和文本保留标题和相关段落。</li>
+        </ul>
+        <p>
+            代理和 MCP 的区别：代理拦截每一个请求，MCP 只在被调用时运行；代理位于 Agent 和模型服务商之间，MCP 在旁边；代理能改上下文，MCP 不能。Hook 能拦截请求，但不能透明地改写发给模型的请求，所以需要代理。课件补了一句：如果是自己写 Harness，就可以直接在里面做。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、用多个 Agent 成为百倍工程师</h2>
+        <p>
+            课件的开场问题是：怎样两个小时做完作业？答案是多个 Agent 并行。并行的不只是 Agent，账单也跟着翻倍。
+        </p>
+
+        <h3>三个扩展维度</h3>
+        <ul>
+            <li>并行 Agent，扩展宽度：同时跑多个互相独立的任务，每个在自己隔离的工作目录里。它换来的是吞吐量，即缩短总耗时，答案质量不会因此变好。</li>
+            <li>子 Agent，扩展宽度和深度：把一个边界清楚的任务交给一个全新的上下文，拿回一段摘要。换来的是吞吐量和专注，主 Agent 看不到中间的杂乱过程。</li>
+            <li>长时间运行的 Agent，扩展时长：让一个大任务跨越很多步。换来的是工作范围，用更少的人工干预完成更多工作。</li>
+        </ul>
+        <p>
+            Agent 团队和动态工作流是把这三者组合起来。
+        </p>
+
+        <h3>手动并行</h3>
+        <p>
+            每个会话一个任务，各自在自己的 git worktree 里。worktree 是 git 的功能：同一个仓库可以有多个工作目录，每个目录检出不同的分支，但共享同一份提交历史和对象库。比如 <code>claude -w feature-payments</code> 在终端 1 开发新功能，<code>claude -w bugfix-auth</code> 在终端 2 修 bug，两边改的文件互不影响，不用 stash，也不用再克隆一份。桌面版 Claude 每开一个新会话都会自动建一个 worktree。
+        </p>
+        <p>
+            手动并行的上限很明显：计划全在你脑子里；会话之间互相看不见，发现的东西只能靠你搬运；分支由你来合并和解决冲突；整个过程没有记录下来，没法重跑。三个会话你还管得过来，二十个就需要一个你的分身了。
+        </p>
+
+        <h3>子 Agent</h3>
+        <p>
+            子 Agent 是一个专门的助手，有自己的上下文窗口、工具和权限。用它有五个理由：保护上下文，日志、搜索结果和大段文件内容不进主对话；施加约束，限定子 Agent 能用哪些工具、用哪个模型；可复用，针对某个领域写好的提示可以跨项目和团队共享；并行，独立的子任务同时跑，总耗时取决于最慢的那个，比如风格检查、安全扫描、测试覆盖率三个同时做；控制成本，把任务交给更快更便宜的模型，比如在子 Agent 的配置里写 <code>model: haiku</code>。
+        </p>
+        <p>
+            Claude Code 有三个内置子 Agent，会自动委派：Explore，只读地搜索代码库，禁止写和编辑，每次调用可以设彻底程度；Plan，在计划模式下做调研，让探索过程不进主窗口；通用型，处理既要探索又要动手的复杂多步工作。Explore 和 Plan 会跳过 CLAUDE.md 和 git status，以保持快速和便宜。
+        </p>
+        <p>
+            自定义子 Agent 是一个带 YAML 文件头的 Markdown 文件，正文就是它的系统提示。比如 <code>.claude/agents/code-reviewer.md</code>，文件头写 name、description、可用工具（Read、Glob、Grep）和模型（sonnet），正文写"你是代码审查员，分析代码并给出可操作的反馈"。放在项目的 <code>.claude/agents/</code> 下可以进版本控制、团队共享；放在 <code>~/.claude/agents/</code> 下对你所有项目可用。
+        </p>
+        <p>
+            子 Agent 可以嵌套：只要它的工具列表里有 Agent 工具，它就能再派生子 Agent。最多允许 5 层，2 到 3 层最合适。常见模式是：第 0 层主 Agent 掌握计划；第 1 层有实现、调试、代码审查三个子 Agent；第 2 层有写测试和验证的子 Agent。每一层都从全新的上下文开始，只返回摘要。
+        </p>
+        <p>
+            调用子 Agent 有三种方式，控制力依次增强：自然语言，在提示里提到它的名字，由 Claude 决定要不要委派，只管这一次；@ 提及，如 <code>@agent-code-reviewer 看看认证相关的改动</code>，保证会运行，管一个任务；<code>--agent</code> 参数，如 <code>claude --agent code-reviewer</code>，整个会话都采用它的提示、工具和模型。
+        </p>
+        <p>
+            什么时候用子 Agent，什么时候留在主对话？子 Agent 从零开始，看不到历史，收集上下文要花时间。留在主对话的情况：需要反复来回；几个阶段共享上下文；改动小而明确；在意延迟。交给子 Agent 的情况：输出很长且以后用不到；需要限制工具或权限；工作自成一体，只要一个摘要；可以并行的独立工作；简单工作可以交给小模型。如果想要的是在主上下文里复用一套流程，应该用 Skill。
+        </p>
+
+        <h3>Agent 团队</h3>
+        <p>
+            Agent 团队是几个 Claude Code 会话一起工作：一个负责人，几个队友。适合四类工作：审查，队友从不同角度检查，再互相质疑对方的发现；独立模块，每个队友负责一块，互不干扰；调试，并行验证几个相互竞争的假设，收敛更快；跨层工作，前端、后端、测试各由一个队友负责。它有代价：协调开销和 token 成本随团队规模增长。如果任务是顺序的、要改同一个文件、或者依赖很重，就用单个会话或子 Agent。这个功能还在实验阶段，默认关闭。
+        </p>
+        <p>
+            团队由四部分组成：负责人（主会话，派生队友、协调工作、汇总结果）；队友（独立的 Claude Code 实例，各有上下文窗口）；任务列表（共享的工作项，队友认领并标记完成）；信箱（每个 Agent 一个 JSON 收件箱）。队友不继承你的对话，它们会自动加载 CLAUDE.md 和 Skill，任务细节要写在给它们的提示里。
+        </p>
+        <table>
+            <tr><th></th><th>子 Agent</th><th>Agent 团队</th></tr>
+            <tr><td>上下文</td><td>独立窗口，结果交回调用者</td><td>独立窗口，各自独立</td></tr>
+            <tr><td>通信</td><td>只向调用者汇报</td><td>队友之间直接通信</td></tr>
+            <tr><td>协调</td><td>负责人管理工作</td><td>共享任务列表</td></tr>
+            <tr><td>适合</td><td>只需要结果的任务</td><td>需要讨论的工作</td></tr>
+            <tr><td>token 成本</td><td>较低</td><td>较高</td></tr>
+        </table>
+
+        <h3>动态工作流</h3>
+        <p>
+            当任务需要的 Agent 多到一个对话协调不过来时，用动态工作流：一段在后台编排很多子 Agent 的 JavaScript 脚本。适用场景如全代码库排查 bug、500 个文件的迁移、交叉核对的调研、从几个角度出计划。启动方式有两种：在提示里写 ultracode；或者用 <code>/effort ultracode</code> 让 Claude 自己决定。两种都会派生很多子 Agent，分别做计划、设计、实现、审查。
+        </p>
+
+        <h3>长时间运行：/goal 和 /loop</h3>
+        <p>
+            <code>/goal</code> 交给 Agent 一个可验证的终止状态，它会一直工作到条件成立。比如 <code>/goal "npm run lint 零错误退出"</code>。完成条件必须是 Claude 能测试的（测试通过、零 lint 错误）；每次尝试之后有一个评估器重新检查条件，不满足就让 Claude 继续；条件满足或用完 <code>--max-tries</code> 次数就停。关键是可验证："所有集成测试通过"可以，"重构代码"不行。
+        </p>
+        <p>
+            <code>/loop</code> 按时间间隔重复运行同一个提示，直到你叫停。比如 <code>/loop 5m "检查 CI，修好坏掉的东西"</code>。它是一个触发器而不是一个测试；在两次运行之间按 Esc 结束；默认提示可以写在 <code>.claude/loop.md</code> 里。区别在于：/goal 在条件成立时停，/loop 在你叫停时停。
+        </p>
+        <p>
+            小结一下。更多 Agent 同时工作有四种方式：手动并行，由你自己合并；子 Agent，Claude 委派，结果交回；Agent 团队，负责人通过共享列表监督队友；工作流，由脚本而不是对话掌握计划。让一个 Agent 跑得更久有两种：/goal 和 /loop。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、选读：十六个 Agent 写出一个 C 编译器</h2>
+        <p>
+            这是 Anthropic 工程博客上的一个案例：用 Rust 写一个能编译 Linux 内核的 C 编译器。规模是 16 个 Agent 并行、两周内约 2000 个会话、20 亿输入 token 和 1.4 亿输出 token、API 费用接近 2 万美元。结果是约 10 万行代码，能在 x86、ARM 和 RISC-V 上编译 Linux 6.9，还能编译 QEMU、FFmpeg、Postgres、Redis 和 Doom，在主要测试集上通过率约 99%。
+        </p>
+        <p>
+            协调靠的是很朴素的基础设施：容器、Git 和文本文件。每个 Agent 在自己的容器和 Git 检出里工作；通过简单的锁文件认领任务；Git 是协调和集成层；新会话读进度文档来恢复上下文；有专门负责文档、性能、质量和去重的 Agent；自动化测试给 Agent 提供进度信号。没有聊天，也没有管理者 Agent。每个 Agent 的循环是：克隆仓库，读文档和日志；在 current_tasks/ 目录下放锁文件认领任务；在自己的容器里实现和测试；先拉取别人的改动，再合并、推送、解锁。两个 Agent 认领了同一个任务，其中一个就换下一个；README、进度文档和 CI 失败记录给新会话提供背景。
+        </p>
+        <p>
+            它也没有完全成功：合并冲突很频繁；当所有 Agent 都撞上同一个内核编译失败时，并行就不再有帮助；16 位 x86 的部分仍依赖 GCC；生成的代码效率不如 GCC。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、编程 3.0 与不确定性</h2>
+
+        <h3>两种"3.0"</h3>
+        <p>
+            讲者提出了自己的"编程 3.0"说法（和 Karpathy 的定义不同）。编程 1.0 是直接给硬件写机器指令或汇编；编程 2.0 是人写编程语言，编译器翻译成机器指令；编程 3.0 是人用自然语言表达目标，Agent 写出编程语言代码，再经编译器变成机器指令。每往上一层，生产力更高，不确定性也更大。
+        </p>
+        <p>
+            Karpathy 的"软件 3.0"是另一个角度：软件 1.0 的程序是源代码，靠人写 Python、C++；软件 2.0 的程序是神经网络权重，靠收集数据、用优化器训练；软件 3.0 的程序是 LLM 提示，用自然语言写。课件说，知道在 1.0、2.0、3.0 之间怎样划界，是一项重要的工程能力。
+        </p>
+
+        <h3>不确定性是新问题吗</h3>
+        <p>
+            不完全是。"同样的源代码不一定产生同样的输出"很早就存在。在编程 2.0 时代，不确定性来自三处：硬件（32 位和 64 位、字节序），靠固定宽度类型、交叉编译、虚拟化解决；环境（并发、不可靠的网络），靠内存一致性模型、幂等 API 解决；软件（编译器版本、依赖漂移），靠升级前充分测试解决。编程 3.0 又在每一处加了新的：硬件上有 GPU 的非确定性内核和浮点误差；环境上，Agent 在写代码的同时就在和环境交互；软件上，模型会选不同的内核，还有采样。
+        </p>
+        <p>
+            从需求到结果的链条上，不确定性也变多了。以前是人（产品经理）提出需求，程序员结合环境和记忆写出程序，再得到结果，"需求到程序"这一步有形式化验证等方法。现在是人提出需求，LLM Agent 写程序，一句提示带来的输入歧义是新问题，课件说还需要更多研究。
+        </p>
+        <p>
+            课件把不确定性的来源排成一条链：自然语言有语义不确定性；检索和上下文有检索漂移（索引更新、切块方式、上下文截断）；模型生成有概率性（采样，以及软硬件的非确定性）；Agent 与工具的循环有轨迹和环境的非确定性（工具失败、环境变化）；生成出来的程序一般是确定的，除非它在运行时又去调用模型或工具。结论是要学会和不确定性共处。
+        </p>
+
+        <h3>编程 3.0 的最佳实践</h3>
+        <ul>
+            <li>定义：事先说明假设，让模型在执行前确认任何有歧义的地方；给出结果要求而不是提示，即需求、不变量、约束和验收测试。</li>
+            <li>控制：把提议和执行分开，Agent 提计划，提交之前先验证；显式管理上下文，自己掌握记忆、来源和检索，让过时信息失效。</li>
+            <li>验证与治理：收紧"生成，验证"的循环，频繁的廉价检查好过最后一次昂贵的审查；往下多测一层，写测试，看多个指标，用自己能推理清楚的合成负载。</li>
+        </ul>
+        <p>
+            两条总原则：别指望 Agent 是确定性的，要让它周围的系统可靠；自主程度要和风险相匹配，自主越多，不确定性和风险越高。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、来自一线的数据：OpenAI 怎样用 Codex</h2>
+        <p>
+            最后一部分引用了 OpenAI 的两份报告（2026 年 6 月和 9 月）。
+        </p>
+        <p>
+            从对话到委派：对话式 AI 是人提问、模型回答，人始终在循环里并亲自执行工作；Agent 式 AI（Codex）是人委派任务，Agent 自己规划、调工具、改文件、跑命令，交付产出物，人负责审查和集成。2026 年上半年 Codex 活跃用户增长超过 5 倍。过去 28 天用过 Codex 的比例：个人用户不到 1%，组织用户 17.3%，OpenAI 员工几乎全部。
+        </p>
+        <p>
+            委派的任务越来越大。2025 年 12 月到 2026 年 5 月，人类做需要 1 小时以上的任务占比从 25.6% 升到 70.2%，需要 8 小时以上的从 2.1% 升到 35.4%，处理整天任务的用户增加了 12 倍（课件图上的四个数字按这样配对最合理）。
+        </p>
+        <p>
+            一个人，多个 Agent。人的角色变成规划者、委派者、监督者、审查者和集成者。2026 年 6 月的数据：28.6% 的 OpenAI 用户在一周内同时跑过 5 个以上 Agent；OpenAI 员工的中位数是每天约 2.5 个 Agent 小时，第 99 百分位是每天约 71 个 Agent 小时，比 4 月增加了 88%。9 月的报告说，6 月之前 Agent 的工作时长还落后于人，现在 Agent 完成的工作量是人的 3.14 倍，大多数研究员同时有 4 个以上的工作流。其他几页的标题是：工程师交付速度快了近 8 倍；Agent 能解决的任务越来越复杂，但仍需要人工干预。
+        </p>
+        <p>
+            课件最后给出一个"委派阶梯"：1 聊天机器人，AI 回答，人干活；2 助手，人和 AI 一起做；3 Agent，人委派一整块工作；4 多 Agent 工作者，人协调多个 Agent；5 系统化的工作流，由 Skill 和 Agent 运行整个流程。课件的判断是，OpenAI 的员工整体还处在阶梯的低处。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、选读：Claude Code 之外的编程 Agent</h2>
+        <p>
+            课件引用了 2026 年 7 月的《State of CLI Coding Agents, Mid-2026》，把命令行编程 Agent 分成四类：模型实验室自己出的（模型和 Harness 一体），如 Claude Code、Codex CLI、Antigravity CLI、Grok Build、Mistral Vibe、Kimi Code、Qwen Code；嵌在开发平台里的，如 Copilot CLI、Cursor CLI、Amp、Auggie、Droid、Junie CLI、Qoder、CodeBuddy；开源、自带 API 密钥的，如 OpenCode、Crush、Goose、Aider、Cline、Kilo、Continue、OpenHands、Reasonix、Codebuff；极简内核、小而可审计的，如 Deepseek Harness、Pi 和 oh-my-pi、mini-SWE-agent、gptme、Open Interpreter。
+        </p>
+        <p>
+            它们在五个维度上不同：开源还是闭源（Codex CLI、OpenCode、Goose、Cline、Pi 开源；Claude Code、Copilot CLI、Cursor、Droid、Junie 闭源）；绑定一家还是可接任意模型（Claude Code、Antigravity CLI、Grok Build 只用自家模型；OpenCode 支持 75 家以上服务商，Kilo 支持 500 多个模型）；用操作系统沙盒还是权限提示（Codex CLI、Copilot CLI、OpenHands 容器用沙盒，Claude Code 和多数其他工具用权限提示）；本地还是云端（Goose、Nanocoder、gptme 本地优先、不收集遥测；Copilot CLI、Codex、Mistral Vibe 可以把任务交给远程 Agent）；大而全还是极简（Omp 功能最多，Claude Code 也很全；Pi 和 mini-SWE-agent 只有四个工具，后者约 100 行 Python）。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Harvard CS2680: Modern AI Systems: Agents and System Optimizations &copy; Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="02_Claude_Code怎样工作.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="04_上下文管理与工具设计.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

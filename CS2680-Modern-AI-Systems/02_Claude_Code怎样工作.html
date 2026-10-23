@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第二讲：从用户角度看 Agent（一）：Claude Code 怎样工作 | Harvard CS2680 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="01_课程概览与AI系统.html">&larr; 上一讲</a>
+    <span>Harvard CS2680: Lecture 2</span>
+    <a href="03_多Agent与百倍工程师.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第二讲：从用户角度看 Agent（一）：Claude Code 怎样工作</h1>
+        <p class="subtitle">Agent 循环，敲下第一个字之前上下文里已经有什么，模型提议、Harness 执行，权限层，上下文压缩，CLAUDE.md 与自动记忆，核心工具，以及 Skill、MCP、Hook、Plugin 四种扩展方式</p>
+        <div class="author-meta">
+            主讲：Juncheng Yang<br>
+            资料来源：<a href="https://cs2680.seas.harvard.edu/slides/2_agent_use_1.pdf" target="_blank">课件</a>（2026 年 9 月 9 日；课程不录像，本文依据课件整理）<br>
+            课程推荐阅读：Karpathy《How I use LLMs》（本站有 <a href="../Andrej-Karpathy-YouTube/index.html">笔记</a>）、Claude Code 官方的 <a href="https://code.claude.com/docs/en/best-practices" target="_blank">Best practices</a>、Simon Willison 的 <a href="https://simonwillison.net/guides/agentic-engineering-patterns/" target="_blank">Agentic Engineering Patterns</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、课表调整</h2>
+        <p>
+            第二讲开头先宣布了调整。LLM 的内部原理挪到后面讲，现在先把 LLM 当作一个"会推理的黑盒"，学 Agent 不需要知道它里面怎么算。因为大多数学生对 Agent 更感兴趣，课表多加了两讲 Agent 设计，相应减少了 GPU 的课时，也减少和其他课程的重复。论文报告不再强制，分数并入课堂参与和项目，作业 1 的分享改成加分项。
+        </p>
+        <p>
+            课堂参与的计分方式是：在课上提问或回答问题，每节课最多 1 分，下课后找助教登记。课件里标着"举手 = 得分"的页就是提问页。标 OPTIONAL 的是选读，标 ADVANCED 的可以略读。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、在 Claude Code 里敲一句话，会发生什么</h2>
+
+        <h3>Agent 循环</h3>
+        <p>
+            Claude Code 是 Anthropic 的命令行编程 Agent。你在终端里给它一句话，比如"修好那个失败的登录测试"，它背后跑的是一个三步循环：
+        </p>
+        <ol>
+            <li>收集上下文：你的提示、相关文件、上一次工具调用的结果。</li>
+            <li>生成动作：模型决定下一步调哪个工具，比如运行 bash 命令、读文件、改文件。</li>
+            <li>运行工具：在你的机器上执行，比如跑测试，拿到输出，重新读取状态。</li>
+        </ol>
+        <p>
+            然后回到第一步，每一步都以上一步的返回为条件。这里有三个角色：模型（在 Anthropic 的服务器上）负责想；Harness（Claude Code 这个程序本身）负责组织循环；你的机器负责真正执行。所以一句用户提示不是一次请求，而是很多次模型调用加很多次工具执行。
+        </p>
+
+        <h3>敲第一个字之前，上下文已经有一万多 token</h3>
+        <p>
+            模型每次被调用时看到的全部输入叫上下文。LLM 本身没有记忆，它只知道这次请求里塞进来的东西。Claude Code 每次请求的上下文按顺序大致是：
+        </p>
+        <ul>
+            <li>系统提示：Claude Code 自己的行为说明。</li>
+            <li>项目环境：当前目录、操作系统、是否是 git 仓库等。</li>
+            <li>记忆：持久的项目或用户笔记，比如 CLAUDE.md。</li>
+            <li>工具定义：Read、Edit、Bash、Glob、Grep、Web、Agent 等工具的名字、说明和参数格式。</li>
+            <li>Skill 和 MCP：这里只放名字和一句描述，完整内容在真正要用时才加载。</li>
+            <li>最后才是你的那句话。</li>
+        </ul>
+        <p>
+            加起来，用户还没开口，上下文就已经有一万多个 token 了。
+        </p>
+
+        <h3>它不会把整个仓库发出去</h3>
+        <p>
+            一个仓库动辄几千个文件，Claude Code 不会全部塞进上下文。仓库留在你的硬盘上，模型先问自己"我需要什么"，然后调用工具，比如 <code>Grep("authentication")</code>，只拿回几行匹配的内容，这一小片才进入上下文。按需取用，是上下文能保持在可控大小的前提。
+        </p>
+
+        <h3>模型提议，Harness 执行</h3>
+        <p>
+            模型本身不能碰你的机器。它输出的只是一个结构化的请求，比如"调用 Bash，参数是 pytest"。Claude Code 收到后解析这个请求，检查权限，然后在你的机器上真正运行 pytest，拿到标准输出和错误输出，再把它作为"工具结果"（tool_result）放回模型的上下文。下一次调用模型时，模型就能看到测试结果。
+        </p>
+        <p>
+            课件举了一个修 bug 的实际过程：跑 pytest 看到失败；读 session.py；grep 搜 create_session；修改 session.py；再跑 pytest，全部通过。每一步之间都夹着一次模型推理，每次推理都以前一次推理和前一次工具结果为条件。
+        </p>
+
+        <h3>权限层夹在意图和执行之间</h3>
+        <p>
+            模型提出的工具请求只是一个提议，要经过批准才会执行。比如模型想执行 <code>rm -rf build/</code>，权限层有几种模式：手动（每次都问你）；自动接受编辑（改文件不问，其他问）；跳过权限（全部放行）；自动模式（由一个小模型来判断这条命令安不安全）。判定结果有三种：允许，命令直接运行；询问，你确认后才运行；拒绝，什么都不发生。
+        </p>
+
+        <h3>上下文会增长，然后被压缩</h3>
+        <p>
+            每一步都往上下文里加东西：模型的回复、读进来的文件内容、命令输出。请求 1、请求 2……请求 N，上下文越来越长。快到上限时，Claude Code 会做压缩（compaction）：把旧的轨迹总结成一段摘要，再重新注入 CLAUDE.md 和记忆，然后继续。
+        </p>
+        <p>
+            课件给的数字是，现在常见的上下文窗口是 100 万 token（Sonnet、Opus、Fable、GPT 5.6），而今年早些时候常见的是 25.6 万。上下文不是免费的：一次 Agent 任务的费用里，大部分花在读取前缀缓存上。每次调用模型都要把整个上下文再发一遍，即使前面的部分已被缓存、按折扣价计费，几十上百次调用累计下来仍是大头。上下文管理是 Harness 设计的重要部分，第四讲会专门讲。
+        </p>
+        <p>
+            总结起来，Agent 循环就是：提示和上下文进去，模型提议，Harness 执行，结果并入上下文，循环直到任务完成。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、记忆</h2>
+        <p>
+            第一讲的 Agent 图里有三块：LLM、工具、状态。LLM 是无状态的，工具负责行动，状态由上下文和记忆组成。
+        </p>
+
+        <h3>上下文是一种记忆</h3>
+        <p>
+            Agent 在两次运行之间没有状态，每个会话都从零开始。上下文是工作记忆：模型此刻能看到的东西，会话结束就没了。持久记忆是能跨会话保留、下次重新加载的东西。实际做法很朴素：所谓记忆，就是会话启动时加载的一些文件。课件提醒，每创建一条记忆，就是决定让它以后每次都被重读。
+        </p>
+
+        <h3>为什么需要记忆</h3>
+        <p>
+            没有记忆会出四种问题：同样的设置每次都要重新解释一遍；上下文被压缩后，之前做的决定和背后的理由丢了；Agent 每次都要重新读同样的文件来摸清项目结构；不同会话做出不同的选择，行为不一致。课件的说法是：记忆让一次性的指令变成长期的惯例。
+        </p>
+
+        <h3>两套记忆：CLAUDE.md 和自动记忆</h3>
+        <p>
+            两者都在每次会话开始时加载进上下文，区别在于谁写、写什么：
+        </p>
+        <table>
+            <tr><th></th><th>CLAUDE.md</th><th>自动记忆</th></tr>
+            <tr><td>谁写</td><td>你</td><td>Claude 自己</td></tr>
+            <tr><td>内容</td><td>指令和规则</td><td>学到的经验和规律</td></tr>
+            <tr><td>范围</td><td>项目、用户或整个组织</td><td>每个仓库一份，同一仓库的多个工作树共享</td></tr>
+            <tr><td>加载</td><td>每个会话全部加载</td><td>每个会话加载索引的前 200 行（25KB）</td></tr>
+            <tr><td>适合放</td><td>代码规范、工作流程、架构说明</td><td>你的偏好、你给过的纠正、项目背景</td></tr>
+        </table>
+
+        <h3>CLAUDE.md 放在哪里</h3>
+        <p>
+            CLAUDE.md 有四个位置，按范围从大到小依次加载，离当前目录最近的最后读：组织统一下发的管理策略（不能排除）；用户级 <code>~/.claude/CLAUDE.md</code>，对你所有项目生效；项目级 <code>./CLAUDE.md</code> 或 <code>./.claude/CLAUDE.md</code>，进版本控制和团队共享；本地级 <code>./CLAUDE.local.md</code>，个人用，不进 git。
+        </p>
+
+        <h3>CLAUDE.md 里该写什么</h3>
+        <p>
+            课件的一句话是：上下文是租来的，记忆是自己的，要想清楚拥有什么。形式上，每个文件不超过 200 行，用 Markdown 标题和列表，规则要具体，不能互相矛盾或过时。
+        </p>
+        <p>
+            该写的：怎样跑测试、构建、代码检查的命令；硬约束，比如"不要直接提交到 main""不要改自动生成的文件"；Agent 自己不容易推断出来的事实，比如目录布局、谁负责哪块、容易踩的坑。不该写的：模型本来就知道的语言或框架知识；格式化工具已经强制的风格要求；长篇大论、更新日志，以及任何机密。
+        </p>
+        <p>
+            文件太长时，可以拆到 <code>.claude/rules/</code> 目录下，一个主题一个文件（比如 testing.md、api-style.md、db-migrations.md）。在文件头写一个 <code>paths:</code> 字段，规则就只在 Claude 碰到匹配的文件时才加载；不写则每个会话都加载。这样 CLAUDE.md 保持简短，细节放在按需加载的规则里，上下文窗口也就小了。
+        </p>
+
+        <h3>自动记忆：Claude 自己的笔记</h3>
+        <p>
+            自动记忆存在 <code>~/.claude/projects/&lt;项目&gt;/memory/</code> 下。每个文件有一个类型字段，分四类：user（你的角色、专长和工作偏好）；feedback（你给过的纠正、你确认过的做法）；project（进行中的工作和代码里看不出来的决定）；reference（存在项目之外的信息）。<code>MEMORY.md</code> 是索引，每次会话只加载它的前 200 行。记忆只存在本机，同一仓库的工作树共享目录，默认开启，可以用 <code>/memory</code> 关掉。
+        </p>
+        <p>
+            检索靠索引：会话开始时加载 MEMORY.md 索引，判断当前任务和哪个主题相关，按需读那个主题文件，再用到任务上。索引始终在上下文里，主题文件只有需要时才读，这样上下文保持很小。
+        </p>
+        <p>
+            四个查看和控制记忆的命令：<code>/memory</code> 浏览、编辑、删除或关闭记忆；<code>/context</code> 看加载了哪些指令文件；<code>/init</code> 生成一份初始 CLAUDE.md；<code>/doctor</code> 找出可能不该放在 CLAUDE.md 里的内容。
+        </p>
+
+        <h3>记忆的代价</h3>
+        <p>
+            每个永久保存的 token 都是房租，每次会话开始时都要付一次。记忆和任务争抢同一个上下文窗口；而且你发给 Anthropic 的每个 token 都要付钱。过时的记忆比没有记忆更糟，因为它会主动误导 Agent。所以要像对待代码一样对待记忆：审查它，删减它，放进版本控制。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、核心工具</h2>
+        <p>
+            记忆给了 Agent 状态，工具给了它行动能力。Claude Code 的核心工具有六类：
+        </p>
+        <ul>
+            <li>读（Read）：打开文件、检查状态，是用得最多的工具。</li>
+            <li>搜索（grep 和 glob）：不用把所有东西读一遍就能找到目标。grep 按内容搜，glob 按文件名模式搜。</li>
+            <li>抓取（Fetch）：拉取网页或文档。它会把不可信的外部文字带进上下文，这一点在安全上要注意。</li>
+            <li>编辑和写入（Edit/Write）：修改文件，这是第一个会产生后果的工具。</li>
+            <li>Shell：构建、测试、git，只要没有沙盒限制，就等于能动整台机器。</li>
+            <li>委派（Delegate）：派生一个子 Agent，它对主 Agent 来说是一个"返回一段摘要"的工具。</li>
+        </ul>
+        <p>
+            用哪个工具由模型决定，使用者不太需要操心。作业 2 里要自己实现这些工具。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、扩展 Agent：Skill、MCP、Hook、Plugin</h2>
+        <p>
+            四种扩展机制解决四个不同的问题，不能互相替代：
+        </p>
+        <ul>
+            <li>Skill 决定 Agent 怎样完成一项任务，提供知识和步骤。</li>
+            <li>MCP 决定 Agent 能接触哪些外部数据和操作。</li>
+            <li>Hook 决定在生命周期的某个事件上自动发生什么，用来强制执行。</li>
+            <li>Plugin 决定这些扩展怎样打包和分发。</li>
+        </ul>
+        <p>
+            它们挂在 Agent 循环的不同位置：模型推理时，Skill 提供知识和流程；选择工具时，MCP 提供外部工具；循环的任何阶段，Hook 都可以检查、拦截或响应；Plugin 把 Skill、MCP 服务器和 Hook 打成一个可安装的包。
+        </p>
+        <p>
+            课件用发布版本的流程举例：准备版本、验证、发布到 GitHub、通知团队。"按发布流程走"是 Skill；"创建 GitHub release"靠 MCP；"测试失败就禁止发布"是 Hook；"把整套配置分享给别人"是 Plugin。
+        </p>
+
+        <h3>Skill：可复用的流程</h3>
+        <p>
+            Skill 是任务需要时才加载的知识和流程，可以包括领域知识、参考资料、可重复的工作流。模型和用户都能调用它，具体怎么做仍由模型在运行时推理。课件建议把它当作上下文工程来理解：在合适的时机把合适的说明放进上下文。
+        </p>
+        <p>
+            结构上，一个 Skill 是一个文件夹，比如 <code>.claude/skills/release/</code>，里面有 SKILL.md，可选的 references/ 和 scripts/。SKILL.md 开头写 name 和 description，description 决定 Agent 能不能在合适的时候发现它；正文写具体流程，比如"1 读发布说明，2 确认版本号，3 跑测试，4 准备提交，5 发布前先问"；附带文件提供参考资料和脚本。用户也可以直接输入 <code>/release</code> 运行。
+        </p>
+        <p>
+            调用方式有两种：模型调用，即 Claude 发现描述和任务匹配时自己加载；用户调用，即用户输入 <code>/技能名</code>。上下文成本上，所有 Skill 的描述在会话开始时就加载，完整正文只在运行时加载。有副作用的流程通常应该要求显式调用；描述写得清楚、彼此区分得开，能减少选错 Skill。
+        </p>
+
+        <h3>MCP：外部能力层</h3>
+        <p>
+            MCP（Model Context Protocol，模型上下文协议）用一套标准协议把 Agent 接到外部服务上：读写 GitHub issue，查数据库，取监控数据，访问 Figma 设计稿，往 Slack 发消息，控制浏览器。这些能力既不在模型里，也不在本地文件里。
+        </p>
+        <p>
+            一次 MCP 工具调用分六步：Claude 判断需要某个操作；MCP 客户端调用工具；MCP 服务器处理连接；外部服务执行操作；结构化结果返回给 Claude；Claude 评估结果。对模型来说它和本地工具几乎一样：同样有名字、描述和带类型的参数格式，同样是调用后返回，只是运行在另一个进程里。协议负责传递调用，调不调仍由 Agent 决定。
+        </p>
+
+        <h3>Hook：生命周期自动化</h3>
+        <p>
+            一个会话从左到右经过这些事件：会话开始、用户提示、模型推理、工具调用、工具结果、停止。Hook 可以挂在：会话开始（加载上下文、记日志）；用户提示（验证或补充内容）；工具使用前（检查或拦截）；工具使用后（格式化、跑测试、记日志）；停止前（确认测试通过）。模型推理本身不是事件，不能挂 Hook。Hook 触发后可以运行命令、发 HTTP 请求、调 MCP 工具、跑一段提示，或者启动子 Agent。
+        </p>
+        <p>
+            Hook 和 Skill 的区别在于确定性：Skill 里写"每次改完都格式化"，模型可能忘；Hook 写成"每次编辑后运行格式化"，就一定会执行。
+        </p>
+
+        <h3>Plugin：打包层</h3>
+        <p>
+            Plugin 是一个可安装的单元，目录里有 skills/、hooks/、agents/、.mcp.json、.lsp.json 和 .claude-plugin/plugin.json。打包带来五个好处：一条命令安装；版本固定；命名空间隔离，不会重名；整个团队用同一套配置；可以通过插件市场分发。课件的说法是，Plugin 让一套能用的配置变成别人也能装的东西。
+        </p>
+
+        <h3>四者怎样配合</h3>
+        <p>
+            Claude 负责推理和使用工具；Skill 提供判断所需的知识和流程；MCP 提供 GitHub、Slack、数据库等外部能力；Hook 在每次工具调用前后的生命周期事件上强制执行；Plugin 把前三者打包，装到别处。
+        </p>
+
+        <h3><code>.claude/</code> 目录里有什么</h3>
+        <p>
+            项目的 <code>.claude/</code> 目录包括：记忆（CLAUDE.md、rules/）；配置（settings.json 和 settings.local.json，管权限、Hook、环境变量）；工作流（skills/、commands/）；委派和护栏（agents/、hooks/），以及 plugins/。用户级的 <code>~/.claude/</code> 有同样的结构，两者冲突时项目设置优先。
+        </p>
+
+        <h3>设计练习</h3>
+        <p>
+            课件最后让大家给下面的需求归类，并说明为什么不用其他机制：
+        </p>
+        <table>
+            <tr><th>需求</th><th>机制</th></tr>
+            <tr><td>遵守公司的 API 规范</td><td>Skill</td></tr>
+            <tr><td>读取 Jira 上的 issue</td><td>MCP</td></tr>
+            <tr><td>每次编辑后运行格式化</td><td>Hook</td></tr>
+            <tr><td>指导一次多步骤部署</td><td>Skill</td></tr>
+            <tr><td>任务完成时发通知</td><td>Hook 加 MCP</td></tr>
+            <tr><td>禁止写入生产环境</td><td>Hook 或权限策略</td></tr>
+            <tr><td>在多个仓库间共享全部配置</td><td>Plugin</td></tr>
+        </table>
+    </section>
+
+    <section>
+        <h2>六、选读：MCP 的细节</h2>
+
+        <h3>为什么要有 MCP</h3>
+        <p>
+            没有统一协议时，N 个 AI 客户端要接 M 个外部服务，就要写 N×M 套集成。MCP 是一个开放的无状态协议，让 AI 应用发现和使用外部服务器暴露的能力，每个服务只需实现一次服务端，每个客户端只需实现一次客户端。
+        </p>
+
+        <h3>架构</h3>
+        <p>
+            四个角色：Host 是你直接对话的应用，比如 Claude Code；MCP 客户端由 Host 运行，每个服务器一条连接；MCP 服务器把某个系统的能力暴露成工具；外部系统是 GitHub、Slack、PostgreSQL 或本地服务。
+        </p>
+
+        <h3>三种原语</h3>
+        <p>
+            工具（Tools）是 Claude 可以调用的操作，比如 <code>create_issue(…)</code>。资源（Resources）是可读的数据，比如一个 issue 或数据库表结构，地址形如 <code>github://issues/123</code>。提示（Prompts）是服务器提供的可复用提示模板，比如 <code>triage_issue(…)</code>，返回一段指令："审查 issue #123，判断能否复现，评估严重程度，推荐负责人和下一步"。提示由用户控制，在 Claude Code 里显示为带命名空间的斜杠命令，比如 <code>/mcp__github__triage_issue 123 high</code>。
+        </p>
+        <p>
+            三者配合的例子：用户说"给 issue #123 分级，如果是严重的登录 bug 就指派出去"。Prompt 提供组织内部的分级流程，Resource 提供 issue 内容，Tool（比如 get_related_errors）取回当前的诊断信息。
+        </p>
+
+        <h3>安全</h3>
+        <p>
+            接上的服务器能看到你发给它的内容，并用你的凭证行事。四条原则：最小权限，令牌只开放到确实需要的仓库、表或频道；读写分开，修改操作要经过批准；不信任工具输出，返回的内容永远不当作指令执行；安装前审查，第三方服务器可能夹带提示注入。连接前先问：这个服务器能读什么，能改什么？
+        </p>
+
+        <h3>MCP 网关</h3>
+        <p>
+            网关是夹在 AI 客户端和一个或多个 MCP 服务器之间的控制层，类似 API 网关，但说的是 MCP 协议（工具列表、工具调用、资源、提示、参数格式、协议版本）。对客户端来说它就是另一个 MCP 服务器。它做六件事：聚合（一条连接，一个带命名空间的目录，如 github.*、jira.*、postgres.*）；路由（把每个调用转给对应的服务器，靠请求头路由而不用解析请求体）；执行策略（谁能连接，哪些工具可见、可调用、需要人工批准）；代管身份（客户端认证一次，上游凭证留在网关后面）；观测（集中审计：身份、工具、决定、延迟、结果、成本）；扩展（负载均衡、重试、熔断、目录缓存、配额）。
+        </p>
+        <p>
+            当用户、Agent、服务器、凭证或合规要求很多、需要统一管理时，网关值得上。但它本身是一道信任边界，风险包括凭证权限过大、丢失终端用户身份、名称冲突、日志里泄露机密，以及单点故障。
+        </p>
+
+        <h3>2026-07-28 版规范</h3>
+        <p>
+            这是 MCP 发布以来最大的一次修订。核心变成无状态，不再需要维持会话，任何请求都能落到任何一个实例上，放在普通负载均衡器后面就行。新增 Mcp-Method 请求头，网关不读请求体就能路由，列表结果可以按 TTL 缓存。处理长时间任务的 Tasks 和由服务器渲染界面的 MCP Apps 作为扩展发布。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Harvard CS2680: Modern AI Systems: Agents and System Optimizations &copy; Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="01_课程概览与AI系统.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="03_多Agent与百倍工程师.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
