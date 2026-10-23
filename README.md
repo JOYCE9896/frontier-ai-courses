@@ -16,7 +16,7 @@ Stanford、CMU 和 Harvard 2025–2026 学年 AI 课程的中文笔记，附一�
 
 **零基础** → AI 基础 → CS224N → 11-711 → CS336 → 11-664 → CS329A / 11-768 / CS2680
 
-非技术类课程（MS&E 435、CS153）不需要数学基础，可以直接读。
+非技术类课程（MS&E 435、CS153）不需要数学基础，可以直接读。想补计算机系统基础，读 CMU 15-213，会一点 C 就能开始。
 
 ## 课程
 
@@ -26,6 +26,12 @@ Stanford、CMU 和 Harvard 2025–2026 学年 AI 课程的中文笔记，附一�
 | :-- | :-- |
 | [AI 基础](https://joyce9896.github.io/frontier-ai-courses/00-Foundations/) | 向量、概率、导数、神经网络、Transformer、训练与解码，每篇用具体数字算一遍 |
 | [动手练习](https://joyce9896.github.io/frontier-ai-courses/01-Labs/) | 能跑的小程序，代码和实际运行结果原样贴出：从零训练一个小 LLaMA 等 |
+
+### CS 基础
+
+| 课程 | 内容 |
+| :-- | :-- |
+| [CMU 15-213 (CS:APP)](https://joyce9896.github.io/frontier-ai-courses/15-213-CSAPP/) | 计算机系统入门，CS:APP 两位作者亲授的 2015 年秋季版全部 27 讲：数据表示、x86-64 机器代码、高速缓存、链接、进程与信号、虚拟内存、malloc、网络、并发 |
 
 ### 技术
 
