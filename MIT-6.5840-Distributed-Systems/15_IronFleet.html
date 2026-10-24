@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十五讲：分布式系统的验证：IronFleet | MIT 6.5840 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="14_FaRM与乐观并发控制.html">&larr; 上一讲</a>
+    <span>MIT 6.5840: Lecture 15</span>
+    <a href="16_Memcached.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十五讲：分布式系统的验证：IronFleet</h1>
+        <p class="subtitle">"我的 Raft 通过了所有测试，论文又有证明"为什么不够；机械化验证的四个部分和可信计算基；霍尔逻辑：前置条件、后置条件、断言、循环不变式、SMT 求解器，用 Dafny 验证插入排序；用状态机描述分布式系统；IronFleet 式的精化，用锁服务举例；不变式和归纳；IronFleet 的三层方法：实现、协议、规范；把它用到 Raft 上，没有选举限制会卡在哪里；证明工程；安全性和活性，TLA 和公平性假设；局限</p>
+        <div class="author-meta">
+            主讲：Upamanyu Sharma（助教，2026 年春季）；本讲没有公开录像，内容根据讲义和其中的 Dafny 例子整理<br>
+            资料来源：<a href="https://pdos.csail.mit.edu/6.824/notes/l-ironfleet.txt" target="_blank">2026 讲义</a>、论文 <a href="https://pdos.csail.mit.edu/6.824/papers/ironfleet.pdf" target="_blank">IronFleet: Proving Practical Distributed Systems Correct（SOSP 2015）</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、动机</h2>
+        <p>
+            论断：我的 Raft 实验没有 bug，因为 (1) 我通过了所有测试用例；(2) Raft 的博士论文里有证明。问：有说服力吗？答：没有。测试是不完整的；证明可能是错的；证明说的不是代码。要是有别的办法就好了，今天就讲另一种获得正确性的途径。
+        </p>
+        <p>
+            IronFleet 是对分布式系统的形式化验证。回想课上所有的论文、所有的"如果……会怎样"。它既回答了"怎样对这些系统做推理"，也许还能帮助更深地理解为什么分布式系统那么难推理。学完这篇论文，目标是了解分布式系统验证的基本技术。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、基本的机械化验证</h2>
+        <pre><code>implementation  ----+
+specification   ----+--&gt; [proof checker] --&gt; "yes" / "no"
+proof           ----+</code></pre>
+        <ul>
+            <li><strong>实现</strong>：真正运行的代码。</li>
+            <li><strong>规范</strong>（specification）：定义系统应该提供什么。<strong>可信的</strong>。</li>
+            <li><strong>证明</strong>：表明规范被满足的步骤。<strong>不可信的</strong>，写错了检查器会拒绝。</li>
+            <li><strong>证明检查器</strong>：读入规范、证明和实现，输出"是"或"否"的工具。<strong>可信的</strong>。</li>
+        </ul>
+        <p>
+            可信计算基（TCB，trusted computing base）包括规范和验证器：如果规范写错了（没表达你真正想要的），或者验证器有 bug，"验证通过"就没有意义；而证明和实现本身不需要信任，检查器会替你把关。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、霍尔逻辑和 Dafny</h2>
+        <p>
+            课上的演示用的是 Dafny，一种带验证器的编程语言。概念：前置条件（调用前必须成立的条件）、后置条件（返回后保证成立的条件）、SMT 求解器（比如 Z3，自动判断逻辑公式是否成立）、断言、循环不变式（每次循环开始和结束时都成立的性质，验证器靠它推理整个循环）。
+        </p>
+        <pre><code>predicate sorted(s: seq&lt;int&gt;) {
+  forall i, j :: 0 &lt;= i &lt; j &lt; |s| ==&gt; s[i] &lt;= s[j]
+}
+
+predicate pivoted(s: seq&lt;int&gt;, p: int) {
+  forall i, j :: 0 &lt;= i &lt;= p &lt; j &lt; |s| ==&gt; s[i] &lt;= s[j]
+}
+
+method insertion_sort(a: array&lt;int&gt;)
+  modifies a
+  ensures sorted(a[..])
+  ensures multiset(a[..]) == multiset(old(a[..]))
+{
+  var i := 1;
+  while i &lt; a.Length
+    invariant 1 &lt;= i
+    invariant sorted(a[..(if i &lt; a.Length then i else a.Length)])
+    invariant multiset(a[..]) == multiset(old(a[..]))
+  {
+    var j := i;
+    while j &gt; 0 &amp;&amp; a[j-1] &gt; a[j]
+      invariant 0 &lt;= j &lt;= i
+      invariant multiset(a[..]) == multiset(old(a[..]))
+      invariant sorted(a[..j])
+      invariant sorted(a[j..i+1])
+      invariant pivoted(a[..i+1], j)
+    {
+      a[j-1], a[j] := a[j], a[j-1];
+      j := j - 1;
+    }
+    i := i + 1;
+  }
+}</code></pre>
+        <ul>
+            <li>规范是两个后置条件（ensures）：结束时数组有序；结束时数组里的元素多重集和开始时相同，即只是重排，没有丢元素或造出元素。</li>
+            <li>外层循环的不变式：前 i 个元素已经有序，元素多重集不变。</li>
+            <li>内层循环把 a[j] 往前挪：前 j 个有序；从 j 到 i 这段有序；pivoted 说位置 j 之前（含）的每个元素都不大于 j 之后的元素，这样挪完以后前 i+1 个就整体有序。</li>
+            <li>演示：在代码里引入一个 bug，Dafny 验证失败。</li>
+            <li>Dafny 能把验证过的代码编译成可运行的程序。</li>
+        </ul>
+        <p>
+            教训：规范是可信的。如果你漏掉了第二个 ensures，一个把数组全部改成 0 的"排序"也能通过验证。（延伸话题：最弱前置条件、分离逻辑。）那分布式系统呢？
+        </p>
+    </section>
+
+    <section>
+        <h2>四、用状态机描述分布式系统</h2>
+        <p>用状态机规定整个分布式系统的行为：</p>
+        <ul>
+            <li>State：每台机器的状态，加上网络的状态（在途的包）；</li>
+            <li>Init ⊆ State：允许的初始状态；</li>
+            <li>Next ⊆ State × State：允许的一步转移。</li>
+        </ul>
+        <p>
+            例子：锁服务。规范状态机很简单：状态是"当前谁持有锁"，转移是把锁交给另一个节点。实现状态机要复杂得多：每个节点有自己的状态（是否持有锁、当前轮次），网络里有在途的 Transfer 包；并发表现为转移的交错；节点之间靠传 Transfer 包转交锁。状态机只是工具，可以放在任何抽象层次上。
+        </p>
+        <h3>IronFleet 式的精化（refinement）</h3>
+        <p>
+            低层的行为是高层行为的子集，只关心"外部可见"的事件。以锁服务为例：实现的每一步，要么对应规范的一步（比如某个节点拿到锁），要么在规范层面什么都没变（比如一个包在网络里传）。可以用"停顿"（stutter）步来表达后一种（相比 IronFleet 论文里更复杂的图）。证明精化需要一个精化映射：把实现的状态映射成规范的状态，比如"当前持有锁的节点"就是规范里的锁持有者。精化是可传递的：A 精化 B，B 精化 C，则 A 精化 C，这就是能分层证明的原因。
+        </p>
+        <h3>不变式</h3>
+        <p>
+            在整个执行过程中都成立的性质。它可以表达重要的保证，也可以作为证明的中间步骤，比如 Raft 实现里"每个任期只有一个领导者"。不变式在每次"原子"转移之后都成立，它帮助证明精化。
+        </p>
+        <h3>归纳</h3>
+        <p>
+            程序验证的基本规则：循环不变式用的就是归纳。分布式系统的归纳不变式：证明 Init 满足它，再证明从任何满足它的状态走 Next 一步，结果仍满足它。概念图：可达状态集合包含在归纳不变式里，归纳不变式又包含在想证明的安全性质里。难点在于，你想证明的性质（比如"最多一个节点持有锁"）往往本身不是归纳的，需要加强。锁服务的例子：
+        </p>
+        <pre><code>(exists a valid Transfer packet for epoch e and no node holds the lock)
+  \/
+(all Transfer packets are stale and exactly one node holds the lock)</code></pre>
+        <p>
+            要么锁正在网络里传（有一个有效的 Transfer 包，此时没有节点持有锁），要么锁在某个节点手里（所有 Transfer 包都已过时）。这个更强的性质是归纳的：任何一步之后仍成立，而它蕴含"最多一个持有者"。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、IronFleet 的方法（论文图 3）</h2>
+        <pre><code>[Spec state machine]        trusted, simple
+        ^  refines
+[Protocol state machine]    mathematical integers, unbounded sequences,
+        ^  refines          immutable types, high-level messages
+[Implementation]            real code: bytes, machine integers, mutable state</code></pre>
+        <ul>
+            <li>复杂的实现状态机；</li>
+            <li>稍简单一些的协议状态机：用数学整数、无界序列、不可变类型，发送高层的消息（而不是字节）；</li>
+            <li>可信的、更简单的规范状态机。</li>
+        </ul>
+        <p>讲义提出两个问题：怎样把方法的前置/后置条件和状态机的转移联系起来？（每个事件处理函数的后置条件说明它执行了协议状态机的一步。）怎样证明精化（对锁，需要一个精化映射）？</p>
+        <h3>怎样把 IronFleet 方法用到 Raft 上</h3>
+        <p>
+            按图 3：顶层规范的状态是一个日志；Init：空；转移：Commit(op)。也就是说，规范只说"已提交的日志只会往后加"。
+        </p>
+        <p>
+            课前问题：一个用 Dafny 写的 Raft 实现，没有实现论文的选举限制（跟随者投票时不检查候选人的日志是否足够新），开发者用 IronFleet 方法时会卡在图 3 的哪里？讲义的答案：任何一步都可能卡住。如果协议状态机写错了（也没有选举限制），可能证得出"实现精化协议"，却卡在"协议精化规范"，因为协议本身就会回滚已提交的条目。如果协议写对了（有选举限制），那么"实现精化协议"这一步会卡住，而"协议精化规范"也许能证出来。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、证明工程、活性和局限</h2>
+        <h3>证明工程</h3>
+        <ul>
+            <li>论文图 12 给出了证明的工作量：规范、实现和证明各有多少行代码。</li>
+            <li>自动化：有很多不同的判定过程，各有取舍。</li>
+            <li>触发器（triggers）：告诉 SMT 求解器什么时候实例化一个全称量词公式，否则求解器可能迷路或超时。</li>
+            <li>库：可复用的引理。</li>
+            <li>不透明性（opaqueness）：把某些定义（比如时序逻辑公式）对求解器隐藏起来，只在需要时打开，避免求解器被太多事实淹没。</li>
+        </ul>
+        <h3>活性和安全性</h3>
+        <p>
+            安全性说"坏事永远不发生"，活性说"好事最终会发生"。IronFleet 用 TLA（Temporal Logic of Actions，动作时序逻辑）表达活性，例如：（网络最终是好的）→ 每个节点会无限次地持有锁。要证明：对任何（满足假设的）无限执行，都存在一个"好"状态。假设是"公平性"假设（比如某个动作如果一直可以执行，最终就会被执行）。推理原则如 "WF1"（弱公平性规则）。然后有 10 分钟问答。
+        </p>
+        <h3>局限</h3>
+        <ul>
+            <li>没有本地并发，所以用轮转调度器（一个节点里一次只处理一件事）；</li>
+            <li>没有崩溃恢复；</li>
+            <li>没有（验证过的）客户端库；</li>
+            <li>不清楚怎样把一个验证过的 IronFleet 系统作为更大的验证系统的一部分。</li>
+        </ul>
+        <p>
+            （第八讲的 FAQ 也提到，检验分布式系统正确性的常见做法是彻底测试，比如 Porcupine 这样的线性一致性检查器，以及形式化方法；Amazon 等公司在用形式化方法，证明复杂程序的重要定理比普通编程难得多，可以试试 MIT 6.826 的实验体会一下。）
+        </p>
+    </section>
+
+    <section>
+        <h2>课前问题</h2>
+        <p>
+            考虑一个用 Dafny 写的 Raft 实现，它没有实现论文的选举限制（即跟随者投票时不检查候选人的日志是否是最新的）。用 IronFleet 方法时，开发者会在图 3 的哪里卡住？（答案见第五节。）
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>MIT 6.5840: Distributed Systems &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="14_FaRM与乐观并发控制.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="16_Memcached.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

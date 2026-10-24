@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十八讲：Ray：基于所有权的分布式 future | MIT 6.5840 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="17_AWS_Lambda.html">&larr; 上一讲</a>
+    <span>MIT 6.5840: Lecture 18</span>
+    <a href="19_SUNDR.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十八讲：Ray：基于所有权的分布式 future</h1>
+        <p class="subtitle">为什么读 Ray：MapReduce、Spark 的现代版本，用 future 高效地搬运大数据；新一类并行应用：函数式和有状态结合、低延迟，模型服务和在线视频处理；三个想法：future、actor、按所有权分片；Ray 的 API 和代码例子；借用；一个假想的中心化协调者的实现，引用计数和血缘重建；中心化的瓶颈；按所有权分片的所有者表；ID 的构成；分布式调度器；对象存储和内存管理；故障恢复：血缘重建、二级拷贝、命运共享；课前问题的答案</p>
+        <div class="author-meta">
+            主讲：Frans Kaashoek（2026 年春季讲义）；本讲没有公开录像，内容根据讲义和 FAQ 整理<br>
+            资料来源：<a href="https://pdos.csail.mit.edu/6.824/notes/l-ray.txt" target="_blank">2026 讲义</a>、<a href="https://pdos.csail.mit.edu/6.824/papers/ray-faq.txt" target="_blank">Ray FAQ</a>、论文 <a href="https://pdos.csail.mit.edu/6.824/papers/ray.pdf" target="_blank">Ownership: A Distributed Futures System for Fine-Grained Tasks（Stephanie Wang 等，NSDI 2021）</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、为什么读这篇论文</h2>
+        <ul>
+            <li>MapReduce、Spark 等系统的一个现代版本；</li>
+            <li>用 future 高效地搬运大数据，和实验里的 RPC 很不一样；</li>
+            <li>用所有权（ownership）高效地管理分布式 future；</li>
+            <li>被广泛使用的开源项目（比如 OpenAI 在用），Anyscale 公司提供商业的 Ray 服务。</li>
+        </ul>
+        <h3>不断演进的并行应用</h3>
+        <p>把函数式和有状态结合起来，并且有低延迟的要求。例子：</p>
+        <ul>
+            <li><strong>模型服务</strong>（论文图 3a）：要快速响应；数据大（客户上传的图片）；路由器和模型副本要在多次调用之间保持状态。FAQ：路由器是一个 actor，所以能做批处理；每个模型 actor 在调用之间保留权重，让它们一直"热"在本地 GPU 内存里。</li>
+            <li><strong>在线视频处理</strong>（图 3b 的视频防抖）：计算一个物体的轨迹；看到下一帧之前就要开始处理这一帧；用一个 actor 存解码后的帧。</li>
+        </ul>
+        <p>MapReduce 和 Spark 不擅长这些。FAQ：Ray 和 MapReduce、Spark 同一谱系，但同时支持函数式和有状态的计算、调用计算的延迟低，所以能处理更广的一类应用。</p>
+        <h3>三个想法</h3>
+        <ul>
+            <li><strong>future</strong>：一次计算结果的句柄；</li>
+            <li><strong>actor</strong>：在多次调用之间保持状态；</li>
+            <li><strong>按所有权对 future 的状态分片</strong>。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>二、future 和 actor</h2>
+        <h3>future（论文表 1 的 API）</h3>
+        <ul>
+            <li>程序可以异步地调用一个函数，返回一个 future；</li>
+            <li>程序可以把 future 的引用作为参数传给其他函数；</li>
+            <li>程序可以强制求值一个 future（get）。</li>
+        </ul>
+        <p>好处：由系统决定在哪里运行 future、什么时候搬运数据。</p>
+        <h3>借用的例子（图 2）</h3>
+        <pre><code>f1 = C()
+f2 = C()
+f3 = Add(shared(f1), shared(f2))   # pass f1 + f2 by reference
+c = get(f3)</code></pre>
+        <p>两次调用 C() 立即返回 future；Add 拿到的是 f1、f2 的引用，不是值，数据可以直接从算出它们的地方搬到运行 Add 的地方，不必经过调用者。</p>
+        <h3>借用的例子（图 6）</h3>
+        <pre><code>def A():
+    x = B()
+    y = C(shared(x))   # pass x by reference
+f1 = A()</code></pre>
+        <h3>Ray 里用 future 远程执行的例子</h3>
+        <pre><code># see https://docs.ray.io/en/latest/ray-core/tips-for-first-time.html
+import ray
+ray.init()
+
+@ray.remote
+def g(i):
+    return i
+
+f = g.remote(10)   # f is a future and ray invokes g asynchronously
+
+# the 4 g invocations run in parallel
+future_ids = [g.remote(i) for i in range(4)]
+results = ray.get(future_ids)</code></pre>
+        <h3>actor 和对象引用的例子</h3>
+        <pre><code>@ray.remote
+class Counter:
+    def __init__(self):
+        self.value = 0
+    def increment(self):
+        self.value += 1
+        return self.value
+
+counter = Counter.remote()          # instantiate as a remote actor
+f = counter.increment.remote()      # future corresponding to an object ref
+print(ray.get(f))</code></pre>
+        <p>
+            FAQ：actor 和 task 有什么区别？actor 是一种 task：有状态的，可以被多次调用，在调用之间保留状态。actor 模型是一种计算模型，计算可以在多次调用之间保持本地状态。为什么要支持 actor？开发者可能想要长时间运行、在调用之间保持状态的任务，比如上面模型服务的例子。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、实现的挑战和一个假想的中心化方案</h2>
+        <p>挑战：</p>
+        <ul>
+            <li>跟踪 future 和对象，包括对 future 和对象做垃圾回收；</li>
+            <li>工作机在运行一个 future 时崩溃：Ray 对幂等的 future 做透明恢复（图 5）。</li>
+        </ul>
+        <h3>中心化协调者的简单（假想）实现</h3>
+        <p>协调者维护一张表：(id, task, refs, worker, value)。</p>
+        <ul>
+            <li>调用一个 future 任务：调度器选一台工作机；把 future 加进表里。</li>
+            <li>Get() 联系协调者：值在就返回值；不在就在协调者那里阻塞，直到工作机填上值；值很大时，存到对象存储里，表里的值是对象 ID，调用者直接从对象存储取对象。对象是不可变的。</li>
+            <li>任务可以对它的 future 和对象做垃圾回收。</li>
+            <li>如果工作机崩溃，驱动程序/任务重新启动它调用过的任务，即"血缘重建"（lineage reconstruction）：重新执行任务及其后代，重新创建 future 以及更下面的后代；可以用对象的第二份拷贝避免重新计算。</li>
+        </ul>
+        <h3>例子：B 和 C 都在运行时的状态（图 6b）</h3>
+        <pre><code>ID | Task  | Refs   | Locations
+-------------------------------
+x    B()     W1,W3    W2
+y    C(x)    W1       W3
+
+worker 1 is running A, worker 2 running B, worker 3 running C</code></pre>
+        <ul>
+            <li>Refs 用来做引用计数。如果 C 返回，把 W3 从 x 的 Refs 里去掉，但还不能回收 x，因为 A 还在用它；如果 A 返回，x 和 y 都没有引用了，可以安全地删除 x 和 y。</li>
+            <li>通过血缘重建恢复：比如重新执行 A，也会重新执行 B 和 C。</li>
+        </ul>
+        <p>
+            FAQ：血缘重建沿调用图往回追溯到一个没崩溃的任务，重新执行它的任务，复现崩溃的那些任务，计算必须是幂等的。和用持久化日志恢复相比，血缘恢复要求幂等，而且可能很久、很贵，可能要重跑很多计算、产生大量数据，所以 Ray 尽量复用二级拷贝来加速恢复，有第二份拷贝就不必重跑计算。非幂等的任务、有副作用的任务怎么办？Ray 本身不处理，需要比如带预写日志的类事务方案，这超出了 Ray 的范围，但 actor 可以自己实现这样的方案。
+        </p>
+        <h3>中心化方案的问题</h3>
+        <ul>
+            <li>每次调用和 get 都要和协调者一次往返；</li>
+            <li>future 很多，有些只运行很短时间（几毫秒），协调者成为可扩展性的瓶颈。</li>
+        </ul>
+        <p>
+            替代方案：把表分片（比如按对象 ID）。仍然要和协调者一次往返；垃圾回收可能涉及多个分片。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、Ray 的办法：按所有权分片</h2>
+        <p>例子：</p>
+        <ul>
+            <li>A 拥有 "x"；</li>
+            <li>C "借用" x：它可能把 x 继续传下去，并做引用计数；</li>
+            <li>函数的调用者是返回的 future 的所有者，但对象的值存在运行那个任务的工作机上。比如 x：A 是 x 的所有者，x 的值存在运行 B 的工作机（2）上。</li>
+        </ul>
+        <p>好处：A 调用 C 时不需要和 B 有任何通信。</p>
+        <h3>例子：B 和 C 都在运行时各工作机的所有者表</h3>
+        <pre><code>Owner table at 1:
+ID  Task  Owner  Ref     Loc  Val
+x   B()   W1     W1,W3   W2
+y   C(x)  W1     W1      W3
+
+Owner table at 2:
+ID  Owner  Ref  Loc  Val
+x   W1          W2
+
+Owner table at 3:
+ID  Owner  Ref  Loc  Val
+x   W1          W2
+y   W1          W3</code></pre>
+        <p>
+            应用的结构引导分片：如果一个任务调用了很多 future，就把它拆成几个子任务，每个子任务负责一部分 future，这样所有者的负担也被分开了。
+        </p>
+        <h3>所有权的实现</h3>
+        <ul>
+            <li>所有者 = (IP, 端口, 工作机 ID)；</li>
+            <li>taskId = 父任务 ID + 任务序号；</li>
+            <li>objectId = taskId + 对象序号。</li>
+        </ul>
+        <p>ID 由调用路径确定地推导出来，所以不需要中心服务来分配 ID，从对象 ID 也能知道它是哪个任务产生的。</p>
+        <h3>分布式调度器（图 8）</h3>
+        <pre><code>schedule(t):
+  id = local worker
+  while true:
+    ok, id = reserve @id using resource request
+    if ok:
+      l = lease(id)
+      break
+  table[t].Loc = l
+// optimization: reuse leased worker</code></pre>
+        <p>
+            先在本地预留资源，不行就换一个调度器再试，成功后拿到那台工作机的租约，并把位置记进所有者表。优化：复用已租到的工作机。FAQ：默认策略是尽量在本地运行任务；本地调度器容量不够时，随机问另一个调度器能不能（按任务请求的资源）运行它。
+        </p>
+        <h3>内存管理（图 9）</h3>
+        <ul>
+            <li>对象存储的 API：Create、Get、Pin、Release。Get 阻塞直到对象被创建；初次 Create 会钉住（pin）对象。</li>
+            <li>tab[oid].Location = 对象在对象存储里的位置，可能有二级拷贝：如果 x 很大，C 的工作机从 B 的工作机取来 x 之后，就有了 x 的一份拷贝。</li>
+        </ul>
+        <p>
+            FAQ：如果 Ray 用 Go 实现，能不能用分布式垃圾回收代替引用计数？可以实现一个利用 Go 本地 GC 的分布式 GC，但在分布式系统里特别有挑战，因为有故障，也因为暂停时间可能很长（GC 要联系远端节点）。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、故障恢复：命运共享</h2>
+        <p>检查表里的位置：</p>
+        <ul>
+            <li>丢了一个被拥有的对象：沿血缘重新执行任务，用二级拷贝避免重新计算。</li>
+            <li>丢了一个所有者：有悬空引用的风险，用"命运共享"（fate sharing）。例子：如果 2 崩溃，3 可能有悬空引用；3 失败，1 也失败。</li>
+        </ul>
+        <h3>例子</h3>
+        <ul>
+            <li>如果工作机 3 失败（开始执行 C 之后、完成之前）：工作机 1（A）会得知，它是 y 的所有者（并且有任务信息），请 Ray 重新执行 C(x)。</li>
+            <li>如果工作机 1 和 2 失败，工作机 3 持有对 x 的悬空引用，它永远不会被解析成一个值。工作机 3 和 "x" 的所有者"命运共享"，即它自己终止，假装崩溃了。A 的调用者会重新提交 A。</li>
+        </ul>
+        <p>
+            FAQ：命运共享泛指强迫一个任务和失败的任务同命运，也让它失败。在 Ray 里这很重要，因为阻塞在一个悬空 future 上的任务可能永远阻塞下去，那个本可以完成这个 future 的任务已经崩溃了。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、课前问题</h2>
+        <p>如果图 6(a) 里的 C() 是这样的：</p>
+        <pre><code>def C(x):
+    z = D(x)
+    return get(z)   # return value of future z</code></pre>
+        <p>
+            假设运行 D 的工作机在完成前失败了，哪台工作机会发起 D() 的重新执行？谁拥有 z？调用者：C。谁重新提交 D？C。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、FAQ 选摘</h2>
+        <ul>
+            <li><strong>所有权的想法是受其他领域（比如 Rust 的程序语言设计）启发的吗？</strong>所有权是系统里常见的想法，FAQ 作者认为 Ray 和 Rust 对所有权的具体用法没多少重叠，比如在 Ray 里借用者可以修改对象，Rust 不允许。</li>
+            <li><strong>Ray 的安全模型？</strong>每个 Ray 部署只服务一个应用，用标准方式与其他部署隔离：租用私有机器、虚拟机或容器。也就是说 Ray 本身不是多租户的。</li>
+            <li><strong>为什么叫 Ray？</strong>没有真正的原因，据作者说是几个候选名字之一，听起来不错。</li>
+        </ul>
+        <p>参考：Ray: A Distributed Framework for Emerging AI Applications（OSDI 2018）。</p>
+    </section>
+
+    <footer class="document-footer">
+        <p>MIT 6.5840: Distributed Systems &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="17_AWS_Lambda.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="19_SUNDR.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

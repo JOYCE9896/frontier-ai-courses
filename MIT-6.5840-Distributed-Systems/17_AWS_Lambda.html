@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十七讲：AWS Lambda 的容器按需加载 | MIT 6.5840 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="16_Memcached.html">&larr; 上一讲</a>
+    <span>MIT 6.5840: Lecture 17</span>
+    <a href="18_Ray.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十七讲：AWS Lambda 的容器按需加载与 SnapStart（客座讲座）</h1>
+        <p class="subtitle">AWS 副总裁、杰出工程师 Marc Brooker 的讲座：Lambda 是什么、为什么存在；从 250 MB 的 zip 到 10 GB 的容器镜像，而且冷启动不能变慢；启动时只需要 6.4% 的容器数据；对应用不可见地按需加载和去重；Firecracker 微虚拟机和 virtio 块设备；确定性展平成 ext4 镜像和 512 kB 的块；三级缓存：工作机本地、可用区共享、S3；缓存要多大：Gray 和 Putzolu 的规则；故障：一份不够持久，两份太贵，"6 取 4"的纠删码和尾延迟；把同样的办法用于内存快照，userfaultfd，快照后的唯一性；安全：各组件的最小权限，内容寻址，收敛加密</p>
+        <div class="author-meta">
+            主讲：Marc Brooker（AWS，线上讲座）；本讲没有公开录像，内容根据他的课件整理，课件里很多页是图，这里只记下有文字的部分并解释其中的概念<br>
+            资料来源：<a href="https://pdos.csail.mit.edu/6.824/notes/mbrooker_cs_slides_2026.pdf" target="_blank">课件</a>、阅读材料 <a href="https://pdos.csail.mit.edu/6.824/papers/atc23-brooker.pdf" target="_blank">On-demand Container Loading in AWS Lambda（USENIX ATC 2023）</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、Lambda 是什么，为什么</h2>
+        <p>
+            课件引用 AWS 的定义："AWS Lambda 是一种计算服务，响应事件运行你的代码，并自动管理计算资源。"也就是"无服务器"（serverless）计算：用户只交上一个函数，不管机器。为什么要有它：
+        </p>
+        <ul>
+            <li>构建可扩展、容错的系统很难；</li>
+            <li>把硬件利用率提高很难；</li>
+            <li>多租户（很多客户共享同一批机器）让这件事更容易；</li>
+            <li>云需要"胶水"，把各种服务连起来的小段代码；</li>
+            <li>代码靠近数据更高效？（课件打了问号。）</li>
+        </ul>
+        <p>
+            课件接着并列了两组词：用户眼里应该是"简单""容易""快"；而背后要做的是"复杂""繁琐""困难"。这场讲座讲的就是背后的那一部分。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、问题：支持容器镜像</h2>
+        <table>
+            <thead><tr><th>以前</th><th>以后</th></tr></thead>
+            <tbody>
+                <tr><td>最大 250 MB</td><td>最大 10 GB</td></tr>
+                <tr><td>代码或 .zip</td><td>容器镜像</td></tr>
+                <tr><td>专门的工具</td><td>标准工具</td></tr>
+            </tbody>
+        </table>
+        <p>
+            而且<strong>冷启动不能变慢！</strong>冷启动是指一个函数第一次（或者长时间没调用后）被调用，Lambda 要在某台工作机上把它的代码和运行环境准备好，再执行。镜像从 250 MB 变成 10 GB，如果每次冷启动都先把整个镜像下载到工作机，冷启动会慢得不可接受，总的数据搬运量也极其巨大（课件有一页只写着 "150 Pb/s"，没有附加说明）。
+        </p>
+        <p>
+            关键的观察来自 Harter 等人的论文（Slacker: Fast Distribution with Lazy Docker Containers，FAST 2016）：<strong>启动时只需要 6.4% 的容器数据！</strong>镜像里大部分文件在启动时根本不会被读到。而且不同客户的镜像有大量相同的内容（同样的基础镜像、同样的库）。
+        </p>
+        <p>
+            目标：找到一种对应用<strong>不可见</strong>的办法，按需加载数据，并对常见数据去重。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、按需加载</h2>
+        <h3>在虚拟块设备这一层"撒谎"</h3>
+        <pre><code>Customer's Function Code
+MicroVM
+Firecracker          &lt;-- virtio block device: "insert lies here"</code></pre>
+        <p>
+            客户的函数代码运行在一个 Firecracker 微虚拟机（MicroVM）里（Agache 等，Firecracker: Lightweight Virtualization for Serverless Applications，2020）。虚拟机看到的磁盘是一个 virtio 块设备，由 Firecracker 提供。课件在这里写着"在这里撒谎"：虚拟机以为自己有一整块本地磁盘，实际上块设备背后只有被读到的块才去取，没读到的块根本不存在于工作机上。对应用来说完全不可见。
+        </p>
+        <h3>但是容器镜像不是文件系统</h3>
+        <p>
+            容器镜像是一层层的 tar 包，不是能直接按块读取的文件系统。办法：<strong>确定性展平</strong>（deterministic flattening），把镜像的各层展开、合并成一个 ext4 文件系统镜像，再切成 512 kB 的块。"确定性"很重要：同样的输入总是产生字节完全相同的输出，这样不同客户镜像里相同的内容会产生相同的块，才能去重。
+        </p>
+        <h3>但真实存储非常快</h3>
+        <p>
+            真实的存储（本地 SSD）非常快（不到 100 微秒），所以按需加载也必须非常快。如果有一个"非常快、拥有全部数据集"的存储，延迟不到 1 毫秒，问题就解决了，但那样的存储不存在。办法是分层缓存：
+        </p>
+        <pre><code>Customer's Code
+MicroVM
+Firecracker
+Local Cache (L1)            on the Lambda worker
+AZ-Local Shared Cache (L2)  shared within an availability zone
+Authority: S3 (L3)</code></pre>
+        <p>
+            课件用示意图比较了三级缓存（注明是假数据，只为说明大意，因为不能公开真实数字）。分层的道理在于：越近的缓存越快但越小。又因为不同客户、不同函数的镜像共享大量相同的块，一个块被某台工作机取过，同可用区的其他工作机很可能也要用到它。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、缓存要多大</h2>
+        <p>
+            课件引用了 Jim Gray 和 Franco Putzolu 1977 年在 IBM Research 的规则（照片来自 Pat Helland）：<strong>缓存的成本 = 重新加载的成本</strong>。一份数据放在缓存里要占存储（花钱），不放则每次用到都要重新加载（也花钱，网络、S3 请求、延迟）；当一份数据的访问频率高到"留着它的成本"低于"反复重新加载的成本"时，就该缓存它。（这就是 Gray 和 Putzolu 著名的"五分钟规则"背后的思路，那篇论文一般记作 1987 年，课件上写的是 1977。）
+        </p>
+        <p>
+            Brooker 的结论：缓存大小 = Max（从成本看需要的大小，从延迟看需要的大小）。只按成本算可能得出一个较小的缓存，但为了让冷启动的延迟足够低，可能需要更大的缓存，取两者中较大的。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、故障怎么办</h2>
+        <p>
+            L2 是共享的缓存服务，由很多台服务器组成。课件借用了 Dynamo 论文（DeCandia 等，SOSP 2007）里一致性哈希环的图，表示块分布在这些服务器上。一台缓存服务器坏了怎么办？
+        </p>
+        <ul>
+            <li><strong>一份拷贝</strong>：不够持久。缓存服务器一坏，那部分块全部要回到 S3 取，许多冷启动同时变慢。</li>
+            <li><strong>两份拷贝</strong>：成本翻倍！（或者说，有效缓存容量减半。）</li>
+            <li><strong>纠删码</strong>（erasure code）："6 个里任意 4 个"。把一个块编码成 6 片放在 6 台服务器上，读回任意 4 片就能重建原块。存储开销是 6/4 = 1.5 倍，比两份拷贝的 2 倍低，却能容忍任意两台坏掉。</li>
+        </ul>
+        <p>
+            课件接着有一页标着 "p99"，指尾延迟。纠删码对尾延迟还可能有好处：读的时候可以多发几片请求，只要最先回来的 4 片就能重建，不必等最慢的那台，所以偶尔变慢的服务器不容易拖慢请求（具体做法见论文）。讲座的问答部分还有一页"纠删码 vs 复杂性"，即这些好处要以更复杂的实现为代价。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、别的数据块，比如内存</h2>
+        <p>
+            同样的思路能用于别的"块"吗？比如内存？这就是 Lambda SnapStart：先把一个初始化好的函数的微虚拟机做成快照（包括内存），以后冷启动时直接从快照恢复，而不是从头启动运行时、加载代码、跑初始化。课件引用了 Brooker 等人的 Restoring Uniqueness in MicroVM Snapshots（arXiv 2102.12892）：从同一个快照恢复出很多个虚拟机，它们的内存一模一样，包括随机数生成器的状态，所以要想办法恢复"唯一性"，否则它们可能生成相同的"随机"数，这对加密和唯一 ID 来说是灾难。
+        </p>
+        <p>
+            恢复时同样按需加载：用 Linux 的 userfaultfd（"创建一个在用户空间处理缺页的文件描述符"）。虚拟机访问一个还没加载的内存页时触发缺页，由用户态程序去分层缓存里把那一页取来，就像块设备按需取块一样。
+        </p>
+        <p>
+            不只是冷启动！同样的技术还能用于：租户隔离（多租户服务处理不可信代码时，每个租户一个独立的微虚拟机，从快照快速创建）；会话隔离（比如给 AI 智能体每个会话一个隔离环境）。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、安全</h2>
+        <p>问答部分讲了安全设计。各组件只有最小的权限：</p>
+        <ul>
+            <li>确定性展平器：只能放入块，不能读块；</li>
+            <li>工作机：只能读它正在运行的函数的块；</li>
+            <li>其他所有人：基本上什么都不能做。</li>
+        </ul>
+        <h3>块怎样命名和加密</h3>
+        <p>课件一步步推出块的命名方式：</p>
+        <ol>
+            <li>块名 = SHA2(块数据)：内容寻址，同样的内容得到同样的名字，于是自然去重；名字也能用来校验取回的数据没被篡改。</li>
+            <li>但块数据要加密存放。如果每个客户用自己的随机密钥加密，同样的明文会变成不同的密文，就没法跨客户去重了。</li>
+            <li>收敛加密（convergent encryption，Douceur 等，Reclaiming Space from Duplicate Files in a Serverless Distributed File System，微软，2002）：块密文 = AES-GCM(key = f(块数据), iv = [0, …], 块数据)。密钥由块内容本身推导出来，IV 固定，所以同样的明文总是得到同样的密文；只有知道明文的人才能算出密钥。</li>
+            <li>块名 = SHA2(块密文)。课件留了一个问题：为什么不直接用 GCM 的认证标签当名字？</li>
+            <li>每个函数有一个清单：块 1 的名字和密钥、块 2 的名字和密钥……块 N 的名字和密钥，整个清单用客户自己的 KMS 密钥加密。所以没有客户的密钥，就不知道一个函数由哪些块组成，也拿不到解密这些块的密钥。</li>
+        </ol>
+        <p>
+            这样既能在所有客户之间对相同的块去重（同样的基础镜像只存一份），存储和缓存里的数据又始终是加密的。
+        </p>
+    </section>
+
+    <section>
+        <h2>课前问题</h2>
+        <p>
+            论文第 5.1 节提到解密会增加取一个块的延迟。那么一开始为什么要用收敛加密来加密块？（提示：见第七节。只用普通加密，相同的内容在不同客户那里会变成不同的密文，就无法去重；不加密，存在共享缓存和 S3 里的客户数据就是明文。收敛加密同时满足了去重和加密。）
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>MIT 6.5840: Distributed Systems &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="16_Memcached.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="18_Ray.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
