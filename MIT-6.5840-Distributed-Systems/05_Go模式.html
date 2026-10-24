@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第五讲：Go 并发的模式与提示 | MIT 6.5840 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="04_Paxos.html">&larr; 上一讲</a>
+    <span>MIT 6.5840: Lecture 5</span>
+    <a href="06_Raft一.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第五讲：Go 并发的模式与提示（客座讲座）</h1>
+        <p class="subtitle">Go 项目负责人之一 Russ Cox 的讲座：并发不是并行；序章：用 goroutine 保存状态，把数据状态变成代码状态，引号字符串解析器的逐步改写；调试 goroutine：Ctrl-\ 和 /debug/pprof/goroutine；模式一：发布/订阅服务器，从互斥锁版本到 goroutine 加 select 的版本，慢订阅者和带队列的辅助 goroutine；模式二：工作调度器的七次改写，关闭 channel 表示不再发送，重试失败任务时的死锁；模式三：复制服务的客户端，超时和偏好的服务器；模式四：协议多路复用器；全部提示汇总</p>
+        <div class="author-meta">
+            主讲：Russ Cox（Google，Go 项目负责人之一）；本讲没有公开录像，内容根据他的课件整理<br>
+            资料来源：<a href="https://pdos.csail.mit.edu/6.824/notes/Go-MIT6824-2026.pdf" target="_blank">课件 Patterns and Hints for Concurrency in Go</a>、<a href="https://pdos.csail.mit.edu/6.824/papers/go-faq.txt" target="_blank">FAQ</a>、阅读材料 <a href="https://cacm.acm.org/magazines/2022/5/260357-the-go-programming-language-and-environment/fulltext" target="_blank">The Go Programming Language and Environment（CACM 2022）</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、并发不是并行</h2>
+        <ul>
+            <li><strong>并发</strong>（concurrency）：把各自独立执行的过程组合起来。</li>
+            <li><strong>并行</strong>（parallelism）：同时执行（可能相关的）计算。</li>
+        </ul>
+        <p>
+            并发是关于同时<strong>应对</strong>很多事情；并行是关于同时<strong>做</strong>很多事情。这场讲座讲的是前者：怎样用 goroutine、channel 和互斥锁把程序组织清楚。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、序章：用 goroutine 保存状态</h2>
+        <p>
+            例子：判断输入是不是一个带引号的字符串，即匹配正则表达式 <code>/"([^"\\]|\\.)*"/</code>：以双引号开始，中间是除引号和反斜杠以外的字符，或者反斜杠加任意一个字符（转义），以双引号结束。
+        </p>
+        <h3>状态机写法</h3>
+        <pre><code>state := 0
+for {
+    c := read()
+    switch state {
+    case 0:
+        if c != '"' {
+            return false
+        }
+        state = 1
+    case 1:
+        if c == '"' {
+            return true
+        }
+        if c == '\\' {
+            state = 2
+        } else {
+            state = 1
+        }
+    case 2:
+        state = 1
+    }
+}</code></pre>
+        <p>
+            课件一步步改写它：先把 read() 挪进每个 case；再把 switch 换成 goto 标签（state0、state1、state2）；state0 只走一次，可以去掉跳转；state2 只是读一个字符再回到 state1，可以内联；两个分支都 goto state1，可以合并；最后 goto 变成循环：
+        </p>
+        <pre><code>func parse(read func() rune) bool {
+    if read() != '"' {
+        return false
+    }
+    var c rune
+    for c != '"' {
+        c = read()
+        if c == '\\' {
+            read()
+        }
+    }
+    return true
+}</code></pre>
+        <p>
+            原来的 state==0、1、2 分别对应程序里的不同位置：第一次 read 之前、循环里、读完反斜杠之后。也可以写一个带 inEscape 布尔变量的版本（inEscape==false 对应状态 1，true 对应状态 2），但不如上面清楚。
+        </p>
+        <p class="hint"><strong>提示：在能让程序更清楚时，把数据状态变成代码状态。</strong></p>
+
+        <h3>当调用方要一个字符一个字符地喂数据时</h3>
+        <p>
+            如果接口必须是"每来一个字符调用一次 Write(c)，返回需要更多输入 / 成功 / 输入错误"，就只能回到状态机：
+        </p>
+        <pre><code>type quoter struct {
+    state int
+}
+
+func (q *quoter) Init() {
+    q.state = 0
+}
+
+func (q *quoter) Write(c rune) Status {
+    switch q.state {
+    case 0:
+        if c != '"' {
+            return BadInput
+        }
+        q.state = 1
+    case 1:
+        if c == '"' {
+            return Success
+        }
+        if c == '\\' {
+            q.state = 2
+        } else {
+            q.state = 1
+        }
+    case 2:
+        q.state = 1
+    }
+    return NeedMoreInput
+}</code></pre>
+        <p>（课件 Init 里写成了 r.state，是笔误。）另一种办法：开一个 goroutine 运行清楚的 parse，用两个 channel 在 Write 和它之间来回传字符和状态：</p>
+        <pre><code>type quoter struct {
+    char   chan rune
+    status chan Status
+}
+
+func (q *quoter) Init() {
+    q.char = make(chan rune)
+    q.status = make(chan Status)
+    go q.parse()
+    &lt;-q.status // always NeedMoreInput
+}
+
+func (q *quoter) Write(c rune) Status {
+    q.char &lt;- c
+    return &lt;-q.status
+}
+
+func (q *quoter) parse() {
+    if q.read() != '"' {
+        q.status &lt;- SyntaxError
+        return
+    }
+    var c rune
+    for c != '"' {
+        c = q.read()
+        if c == '\\' {
+            q.read()
+        }
+    }
+    q.status &lt;- Done
+}
+
+func (q *quoter) read() rune {
+    q.status &lt;- NeedMoreInput
+    return &lt;-q.char
+}</code></pre>
+        <p>
+            parse 还是那段顺序代码，"现在走到哪一步"保存在这个 goroutine 的程序计数器和栈里，不需要 state 变量。（课件里 parse 的接收者写成了 quoteReader、read 的返回类型写成了 int，这里按上下文改成了一致的写法。）
+        </p>
+        <p class="hint"><strong>提示：用额外的 goroutine 保存额外的代码状态。</strong></p>
+
+        <h3>知道每个 goroutine 为什么、什么时候退出</h3>
+        <pre><code>package main
+
+import (
+    "net/http"
+    _ "net/http/pprof"
+)
+
+var c = make(chan int)
+
+func main() {
+    for i := range 100 {
+        go f(0x10*i)
+    }
+    http.ListenAndServe("localhost:8080", nil)
+}
+
+func f(x int) { g(x+1) }
+func g(x int) { h(x+1) }
+func h(x int) {
+    c &lt;- 1
+    f(x+1)
+}</code></pre>
+        <p>
+            这 100 个 goroutine 都卡在 h 里向一个没人接收的 channel 发送，永远不会退出，这就是 goroutine 泄漏。上面 parse 的例子里，如果调用方喂到一半就不喂了，那个 goroutine 也会一直等着。
+        </p>
+        <p class="hint"><strong>提示：知道每个 goroutine 为什么、什么时候退出。</strong></p>
+        <p>
+            怎样找出它们卡在哪：在终端里按 Ctrl-\（发送 SIGQUIT），程序退出并打印所有 goroutine 的栈，例如 "goroutine 18 [chan send]: main.h(0x12) ... main.g(0x11) ... main.f(0x10) ... created by main.main"。程序还在跑时，导入 net/http/pprof 后访问 HTTP 服务器的 /debug/pprof/goroutine，能看到按栈归类的所有活着的 goroutine，例如 "goroutine profile: total 106"，其中 "100 @ ..." 都卡在 main.h。
+        </p>
+        <p class="hint"><strong>提示：按 Ctrl-\ 杀掉程序并转储所有 goroutine 的栈。用 HTTP 服务器的 /debug/pprof/goroutine 查看活着的 goroutine 的栈。</strong></p>
+    </section>
+
+    <section>
+        <h2>三、模式一：发布/订阅服务器</h2>
+        <pre><code>type PubSub interface {
+    // Publish publishes the event e to
+    // all current subscriptions.
+    Publish(e Event)
+
+    // Subscribe registers c to receive future events.
+    // All subscribers receive events in the same order,
+    // and that order respects program order:
+    // if Publish(e1) happens before Publish(e2),
+    // subscribers receive e1 before e2.
+    Subscribe(c chan&lt;- Event)
+
+    // Cancel cancels the prior subscription of channel c.
+    // After any pending already-published events
+    // have been sent on c, the server will signal that the
+    // subscription is cancelled by closing c.
+    Cancel(c chan&lt;- Event)
+}</code></pre>
+        <h3>互斥锁版本</h3>
+        <pre><code>type Server struct {
+    mu  sync.Mutex
+    sub map[chan&lt;- Event]bool
+}
+
+func (s *Server) Init() {
+    s.sub = make(map[chan&lt;- Event]bool)
+}
+
+func (s *Server) Publish(e Event) {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    for c := range s.sub {
+        c &lt;- e
+    }
+}
+
+func (s *Server) Subscribe(c chan&lt;- Event) {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    if s.sub[c] {
+        panic("pubsub: already subscribed")
+    }
+    s.sub[c] = true
+}
+
+func (s *Server) Cancel(c chan&lt;- Event) {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    if !s.sub[c] {
+        panic("pubsub: not subscribed")
+    }
+    close(c)
+    delete(s.sub, c)
+}</code></pre>
+        <h3>慢的 goroutine 怎么办</h3>
+        <p>
+            Publish 在锁里依次往每个订阅者的 channel 发送，一个订阅者接收得慢，所有人都被拖住。选项：
+        </p>
+        <ul>
+            <li>减慢事件的产生（上面的代码就是这样，Publish 会阻塞）；</li>
+            <li>丢弃事件，例子：os/signal、runtime/pprof；</li>
+            <li>把任意多个事件排进队列。</li>
+        </ul>
+        <p class="hint"><strong>提示：引入无界队列之前要仔细想清楚。</strong></p>
+
+        <h3>goroutine 加 select 的版本</h3>
+        <pre><code>type Server struct {
+    publish   chan Event
+    subscribe chan subReq
+    cancel    chan subReq
+}
+
+type subReq struct {
+    c  chan&lt;- Event
+    ok chan bool
+}
+
+func (s *Server) Init() {
+    s.publish = make(chan Event)
+    s.subscribe = make(chan subReq)
+    s.cancel = make(chan subReq)
+    go s.loop()
+}
+
+func (s *Server) Publish(e Event) {
+    s.publish &lt;- e
+}
+
+func (s *Server) Subscribe(c chan&lt;- Event) {
+    r := subReq{c: c, ok: make(chan bool)}
+    s.subscribe &lt;- r
+    if !&lt;-r.ok {
+        panic("pubsub: already subscribed")
+    }
+}
+
+func (s *Server) Cancel(c chan&lt;- Event) {
+    r := subReq{c: c, ok: make(chan bool)}
+    s.cancel &lt;- r
+    if !&lt;-r.ok {
+        panic("pubsub: not subscribed")
+    }
+}
+
+func (s *Server) loop() {
+    sub := make(map[chan&lt;- Event]bool)
+    for {
+        select {
+        case e := &lt;-s.publish:
+            for c := range sub {
+                c &lt;- e
+            }
+        case r := &lt;-s.subscribe:
+            if sub[r.c] {
+                r.ok &lt;- false
+                break
+            }
+            sub[r.c] = true
+            r.ok &lt;- true
+        case r := &lt;-s.cancel:
+            if !sub[r.c] {
+                r.ok &lt;- false
+                break
+            }
+            close(r.c)
+            delete(sub, r.c)
+            r.ok &lt;- true
+        }
+    }
+}</code></pre>
+        <p>
+            订阅表 sub 现在是 loop 这个 goroutine 的局部变量，不再需要锁：只有它能碰这张表，所有操作通过 channel 排队交给它。（课件里 cancel 分支写成了 case c := &lt;-s.cancel，下面又用 r，是笔误，这里写成 r。）
+        </p>
+        <p class="hint"><strong>提示：在能让程序更清楚时，把互斥锁变成 goroutine。</strong></p>
+
+        <h3>给慢订阅者加一个带队列的辅助 goroutine</h3>
+        <pre><code>func helper(in &lt;-chan Event,
+            out chan&lt;- Event) {
+    var q []Event
+    for in != nil || len(q) &gt; 0 {
+        // Decide whether and what to send.
+        var sendOut chan&lt;- Event
+        var next Event
+        if len(q) &gt; 0 {
+            sendOut = out
+            next = q[0]
+        }
+        select {
+        case e, ok := &lt;-in:
+            if !ok {
+                in = nil // stop receiving from in
+                break
+            }
+            q = append(q, e)
+        case sendOut &lt;- next:
+            q = q[1:]
+        }
+    }
+    close(out)
+}</code></pre>
+        <p>
+            课件的推进过程：最初的写法是 select 里直接 case out &lt;- q[0]，q 为空时会越界。改成：只有队列非空时才把 sendOut 设成 out，否则 sendOut 是 nil，对 nil channel 的发送永远不会就绪，select 自然跳过这个分支。再处理关闭：in 被关闭时把 in 设成 nil，不再接收，等队列发完后关闭 out，这样 Cancel 的语义（先送完已发布的事件，再关闭 channel）也保住了。这样就可以给每个订阅者配一个 helper：loop 往 helper 的 in 发，helper 按订阅者自己的节奏往 out 发，loop 不会被慢订阅者拖住。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、模式二：工作调度器</h2>
+        <p>这和 Lab 1 的 coordinator 有关：</p>
+        <pre><code>func Schedule(servers []string, numTask int,
+              call func(srv string, task int))</code></pre>
+        <h3>第一版：空闲服务器放进带缓冲的 channel</h3>
+        <pre><code>func Schedule(servers []string, numTask int,
+              call func(srv string, task int)) {
+    idle := make(chan string, len(servers))
+    for _, srv := range servers {
+        idle &lt;- srv
+    }
+    for task := range numTask {
+        go func() {
+            srv := &lt;-idle
+            call(srv, task)
+            idle &lt;- srv
+        }()
+    }
+}</code></pre>
+        <p class="hint"><strong>提示：用带缓冲的 channel 作为并发的阻塞队列。用 goroutine 让各自独立的事情独立运行。</strong></p>
+        <p>
+            问题一：每个任务一开始就开一个 goroutine，任务有一百万个就是一百万个 goroutine 排队等服务器，又是无界队列。问题二：Schedule 不等任务完成就返回了。
+        </p>
+        <h3>第二版：先拿到空闲服务器再开 goroutine，最后等所有服务器归还</h3>
+        <pre><code>    for task := range numTask {
+        srv := &lt;-idle
+        go func() {
+            call(srv, task)
+            idle &lt;- srv
+        }()
+    }
+    for range servers {
+        &lt;-idle
+    }</code></pre>
+        <h3>第三版：每台服务器一个 goroutine，从 work channel 取任务</h3>
+        <pre><code>func Schedule(servers []string, numTask int,
+              call func(srv string, task int)) {
+    work := make(chan int)
+    done := make(chan bool)
+    runTasks := func(srv string) {
+        for task := range work {
+            call(srv, task)
+        }
+        done &lt;- true
+    }
+    for _, srv := range servers {
+        go runTasks(srv)
+    }
+    for task := range numTask {
+        work &lt;- task
+    }
+    close(work)
+    for range servers {
+        &lt;-done
+    }
+}</code></pre>
+        <p>
+            课件先给的是用共享计数器 done++ 加 runtime.Gosched() 忙等的版本，那有竞态，也浪费 CPU；改成每个 runTasks 结束时往 done channel 发一个值，主线程收够服务器数量个。close(work) 让每个 runTasks 的 for range 在取完任务后结束。
+        </p>
+        <p class="hint"><strong>提示：关闭一个 channel 来表示不会再发送值。不要通过共享内存来通信，要通过通信来共享内存。</strong></p>
+
+        <h3>第四版：服务器会动态加入</h3>
+        <p>
+            servers 改成 chan string，新服务器随时会从这里冒出来，所以单开一个 goroutine 不停地接收新服务器、为每台启动 runTasks。这时就不知道总共有几台服务器了，不能再"等每台服务器结束一次"，改成每完成一个任务发一次 done，主线程收够 numTask 个：
+        </p>
+        <pre><code>    runTasks := func(srv string) {
+        for task := range work {
+            call(srv, task)
+            done &lt;- true
+        }
+    }
+    go func() {
+        for srv := range servers {
+            go runTasks(srv)
+        }
+    }()
+    for task := range numTask {
+        work &lt;- task
+    }
+    close(work)
+    for range numTask {
+        &lt;-done
+    }</code></pre>
+        <p>
+            但这里有死锁：主线程卡在 work &lt;- task 上发任务，而 runTasks 做完一个任务后卡在 done &lt;- true 上，主线程要等发完所有任务才开始收 done。课件给了三种解法：用 select 在发任务的同时也收 done（带标签的 continue WorkLoop）；或者把"发任务"放进一个单独的 goroutine（"让各自独立的事情独立运行"）；或者把 work 改成容量为 numTask 的带缓冲 channel，发送不会阻塞。
+        </p>
+        <p class="hint"><strong>提示：引入无界队列之前要仔细想清楚。</strong>（这里队列的大小是 numTask，是有界的。）</p>
+
+        <h3>第五版：call 可能失败，失败的任务要重做</h3>
+        <pre><code>func Schedule(servers chan string, numTask int,
+              call func(srv string, task int) bool) {
+    work := make(chan int, numTask)
+    done := make(chan bool)
+    runTasks := func(srv string) {
+        for task := range work {
+            if call(srv, task) {
+                done &lt;- true
+            } else {
+                work &lt;- task
+            }
+        }
+    }
+    go func() {
+        for srv := range servers {
+            go runTasks(srv)
+        }
+    }()
+    for task := range numTask {
+        work &lt;- task
+    }
+    for range numTask {
+        &lt;-done
+    }
+    close(work)
+}</code></pre>
+        <p>
+            失败的任务重新放回 work。注意 close(work) 必须挪到收完所有 done 之后：如果像前面那样发完任务就关闭，之后某个失败的任务要放回 work 时，会向已关闭的 channel 发送而 panic。因为 work 的容量是 numTask，同时在途的任务不会超过 numTask 个，放回去也不会阻塞。（课件里有一版 for 循环写成 for _, srv := range servers，servers 已经是 channel，应为 for srv := range servers。）
+        </p>
+        <p class="hint"><strong>提示：知道每次通信为什么、什么时候能进行。</strong></p>
+    </section>
+
+    <section>
+        <h2>五、模式三：复制服务的客户端</h2>
+        <pre><code>type ReplicatedClient interface {
+    // Init initializes the client to use the given servers.
+    // To make a particular request later,
+    // the client can use callOne(srv, args), where srv
+    // is one of the servers from the list.
+    Init(servers []string, callOne func(string, Args) Reply)
+
+    // Call makes a request on any available server.
+    // Multiple goroutines may call Call concurrently.
+    Call(args Args) Reply
+}</code></pre>
+        <pre><code>type Client struct {
+    servers []string
+    callOne func(string, Args) Reply
+
+    mu     sync.Mutex
+    prefer int
+}</code></pre>
+        <p class="hint"><strong>提示：如果互斥锁是最清楚的写法，就用互斥锁。</strong>（prefer 只是一个小小的共享变量，用锁保护最简单。）</p>
+        <h3>先试一台，超时就换下一台</h3>
+        <pre><code>func (c *Client) Call(args Args) Reply {
+    type result struct {
+        serverID int
+        reply    Reply
+    }
+
+    const timeout = 1 * time.Second
+    t := time.NewTimer(timeout)
+    defer t.Stop()
+
+    done := make(chan result, len(c.servers))
+
+    c.mu.Lock()
+    prefer := c.prefer
+    c.mu.Unlock()
+
+    var r result
+    for off := range c.servers {
+        id := (prefer + off) % len(c.servers)
+        go func() {
+            done &lt;- result{id, c.callOne(c.servers[id], args)}
+        }()
+        select {
+        case r = &lt;-done:
+            goto Done
+        case &lt;-t.C:
+            // timeout
+            t.Reset(timeout)
+        }
+    }
+    r = &lt;-done
+
+Done:
+    c.mu.Lock()
+    c.prefer = r.serverID
+    c.mu.Unlock()
+    return r.reply
+}</code></pre>
+        <ul>
+            <li>每个请求在单独的 goroutine 里调用 callOne，主流程用 select 等结果或超时。超时了不取消前一个请求，而是再向下一台服务器发一个，谁先回来用谁；所有服务器都试过还没回复，就一直等第一个回来的。</li>
+            <li>done 的缓冲区大小是服务器数：Call 返回以后，那些迟到的 goroutine 发送结果时不会阻塞，能正常退出。如果是无缓冲 channel，它们会永远卡住，就是泄漏。</li>
+            <li>记住上次回复的服务器（prefer），下次先试它（上次能及时回复的服务器，下次多半也能）。</li>
+            <li>defer t.Stop()：不需要的计时器要停掉。课件注明这一条在 Go 1.23 里已经修复（在那之前，没停止也没触发的计时器不会被垃圾回收）。</li>
+        </ul>
+        <p class="hint"><strong>提示：停掉不需要的计时器。知道每个 goroutine 为什么、什么时候退出。知道每次通信为什么、什么时候能进行。如果 goto 是最清楚的写法，就用 goto。</strong></p>
+    </section>
+
+    <section>
+        <h2>六、模式四：协议多路复用器</h2>
+        <p>
+            很多并发请求共用一条连接：每个请求带一个标签（tag），回复带回同样的标签，多路复用器根据标签把回复交给对应的调用者。
+        </p>
+        <pre><code>type ProtocolMux interface {
+    // Init initializes the mux to manage messages to the given service.
+    Init(Service)
+    // Call makes a request with the given message and returns the reply.
+    // Multiple goroutines may call Call concurrently.
+    Call(Msg) Msg
+}
+
+type Service interface {
+    // ReadTag returns the muxing identifier in the request or reply message.
+    // Multiple goroutines may call ReadTag concurrently.
+    ReadTag(Msg) int64
+    // Send sends a request message to the remote service.
+    // Send must not be called concurrently with itself.
+    Send(Msg)
+    // Recv waits for and returns a reply message from the remote service.
+    // Recv must not be called concurrently with itself.
+    Recv() Msg
+}</code></pre>
+        <pre><code>type Mux struct {
+    srv  Service
+    send chan Msg
+
+    mu      sync.Mutex
+    pending map[int64]chan&lt;- Msg
+}
+
+func (m *Mux) Init(srv Service) {
+    m.srv = srv
+    m.send = make(chan Msg)
+    m.pending = make(map[int64]chan&lt;- Msg)
+    go m.sendLoop()
+    go m.recvLoop()
+}
+
+func (m *Mux) sendLoop() {
+    for args := range m.send {
+        m.srv.Send(args)
+    }
+}
+
+func (m *Mux) recvLoop() {
+    for {
+        reply := m.srv.Recv()
+        tag := m.srv.ReadTag(reply)
+        m.mu.Lock()
+        done := m.pending[tag]
+        delete(m.pending, tag)
+        m.mu.Unlock()
+        if done == nil {
+            panic("unexpected reply")
+        }
+        done &lt;- reply
+    }
+}
+
+func (m *Mux) Call(args Msg) (reply Msg) {
+    tag := m.srv.ReadTag(args)
+    done := make(chan Msg, 1)
+    m.mu.Lock()
+    if m.pending[tag] != nil {
+        m.mu.Unlock()
+        panic("mux: duplicate call tag")
+    }
+    m.pending[tag] = done
+    m.mu.Unlock()
+    m.send &lt;- args
+    return &lt;-done
+}</code></pre>
+        <ul>
+            <li>Send 不能并发调用，所以只让 sendLoop 这一个 goroutine 调用它，其他人通过 m.send channel 把请求交给它。</li>
+            <li>Recv 也不能并发调用，所以只有 recvLoop 调用它。</li>
+            <li>"标签 → 等待回复的 channel" 这张表被 Call 和 recvLoop 共享，用互斥锁保护最简单。</li>
+            <li>每个 Call 的 done 有 1 个缓冲，recvLoop 交付回复时不会被某个调用者拖住。</li>
+        </ul>
+        <p>
+            （课件 Init 里没有创建 m.send，pending 的类型写成了 map[int64]chan Msg，和结构体里的 chan&lt;- Msg 不一致，另一版 recvLoop 里写成了 m.srv.Tag，这里按接口统一改正。）
+        </p>
+        <p class="hint"><strong>提示：如果 goroutine、channel 和互斥锁一起用是最清楚的写法，就一起用。</strong></p>
+    </section>
+
+    <section>
+        <h2>七、全部提示</h2>
+        <ul>
+            <li>用竞态检测器，开发时用，甚至生产环境也用。</li>
+            <li>不要通过共享内存来通信，要通过通信来共享内存。</li>
+            <li>在能让程序更清楚时，把数据状态变成代码状态。</li>
+            <li>在能让程序更清楚时，把互斥锁变成 goroutine。</li>
+            <li>用额外的 goroutine 保存额外的代码状态。</li>
+            <li>用 goroutine 让各自独立的事情独立运行。</li>
+            <li>考虑慢 goroutine 的影响。</li>
+            <li>知道每次通信为什么、什么时候能进行。</li>
+            <li>知道每个 goroutine 为什么、什么时候退出。</li>
+            <li>按 Ctrl-\ 杀掉程序并转储所有 goroutine 的栈。</li>
+            <li>用 HTTP 服务器的 /debug/pprof/goroutine 查看活着的 goroutine 的栈。</li>
+            <li>用带缓冲的 channel 作为并发的阻塞队列。</li>
+            <li>引入无界队列之前要仔细想清楚。</li>
+            <li>关闭一个 channel 来表示不会再发送值。</li>
+            <li>如果互斥锁是最清楚的写法，就用互斥锁。</li>
+            <li>解锁互斥锁时优先用 defer。</li>
+            <li>如果 goto 是最清楚的写法，就用 goto。</li>
+            <li>如果 goroutine、channel 和互斥锁一起用是最清楚的写法，就一起用。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>八、FAQ 里 Russ Cox 的几个回答</h2>
+        <ul>
+            <li><strong>defer 是别的语言里就有的吗？</strong>defer 是 Go 新加的，最初是为了从 panic 中恢复（见语言规范里的 recover），结果对 "defer mu.Unlock()" 这样的惯用法也很有用。后来 Swift 也加了 defer，显然受 Go 启发。</li>
+            <li><strong>为什么不像 C++、Java 那样用类和面向对象？</strong>Go 的面向对象方式更接近 Smalltalk 而不是 Java/C++/Simula，更轻量，更容易改造大型程序。</li>
+            <li><strong>为什么 while 循环也叫 for？</strong>C 里 while(cond) {} 和 for(;cond;) {} 是一回事，Go 不需要两个关键字做同一件事。</li>
+            <li><strong>多行的 struct 定义为什么要求末尾逗号？</strong>Go 发布后不久把分号变成了可选的，规则很简单：每行末尾隐式加分号，除非最后一个记号不可能结束一个语句（比如加号或逗号）。不写末尾逗号，那一行就会被加上分号，解析不了。</li>
+            <li><strong>为什么这么重视并发和 goroutine？</strong>以往的经验表明，用 channel 和轻量进程提供好的并发支持，会让 Google 要建的那类系统容易写得多。</li>
+            <li><strong>Go 传参是传值还是传引用？</strong>大多数类型（数字、结构体）传值的拷贝；字符串内容不能修改，相当于传值；channel、map、slice 实际上像传引用，调用者和被调用者都能看到对数据结构的修改；带指针接收者的方法调用会传对象的指针，虽然调用处没有 &amp;。这种不统一可能让人困惑，比如把 sync.WaitGroup 传给函数大概要传 &amp;wg，而 channel 不用 &amp;。</li>
+            <li><strong>从 Rust、D、Swift、Nim 这些新语言学到了什么？</strong>希望有一天 Go 编译器能更好地推断所有权规则，甚至在类型系统里有轻量的所有权表达，Javari、Midori、Pony 和 Rust 是灵感来源。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>课前问题</h2>
+        <p>
+            Russ Cox 是 Go 项目的负责人之一。你最喜欢 Go 的什么？为什么？你想改变语言里的什么吗？如果想，改什么、为什么？
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>MIT 6.5840: Distributed Systems &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="04_Paxos.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="06_Raft一.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

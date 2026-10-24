@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第二讲：线程与 RPC | MIT 6.5840 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="01_导论与MapReduce.html">&larr; 上一讲</a>
+    <span>MIT 6.5840: Lecture 2</span>
+    <a href="03_GFS.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第二讲：线程与 RPC</h1>
+        <p class="subtitle">为什么用 Go；线程是什么，为什么要线程（I/O 并发、多核、方便），事件驱动的替代方案；线程的三个难题：竞态、协调、死锁；网页爬虫的三种写法：串行、共享数据加锁、用 channel；闭包捕获循环变量的坑，WaitGroup，竞态检测器；什么时候用锁、什么时候用 channel；投票计数的六个版本：忙等、加锁、睡眠、条件变量、channel；RPC 的结构、Go 的 RPC 例子、绑定和编组；RPC 失败时客户端看到什么，"尽力而为"和"至多一次"</p>
+        <div class="author-meta">
+            主讲：Frans Kaashoek（2026 年春季讲义）；录像为 2020 年春季 Robert Morris 讲的同一主题<br>
+            资料来源：<a href="https://pdos.csail.mit.edu/6.824/notes/l-rpc.txt" target="_blank">2026 讲义</a>、示例代码 <a href="https://pdos.csail.mit.edu/6.824/notes/crawler.go" target="_blank">crawler.go</a>、<a href="https://pdos.csail.mit.edu/6.824/notes/kv.go" target="_blank">kv.go</a>、<a href="https://pdos.csail.mit.edu/6.824/notes/condvar.tar.gz" target="_blank">投票计数例子</a>、<a href="https://pdos.csail.mit.edu/6.824/papers/tour-faq.txt" target="_blank">Go FAQ</a>、<a href="https://www.youtube.com/watch?v=gA4YXUJX7t8" target="_blank">2020 课堂录像</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、为什么用 Go</h2>
+        <p>
+            这一讲的主题是怎样实现分布式系统，以及实验要用的 Go 编程：Go 的线程和网页爬虫、Go 的 RPC。细节是 Go 特有的，但概念重要，用得很广。
+        </p>
+        <ul>
+            <li>对线程支持好；</li>
+            <li>RPC 方便。Morris 说这听起来不算什么，但在 C++ 里还真不容易找到一个好用的 RPC 包，而这门课时时刻刻都在用 RPC；</li>
+            <li>类型安全、内存安全：很难因为 bug 写坏一块随机内存，消灭了一大类 bug；</li>
+            <li>有垃圾回收（不会有释放后使用的问题）。线程加垃圾回收特别有吸引力：没有 GC 的语言里，要判断最后一个使用共享对象的线程什么时候用完了它才能释放，往往要手写引用计数之类的记账代码，有 GC 这个问题就消失了；</li>
+            <li>不太复杂。Morris 说 C++ 的编译错误信息复杂到不值得去读，不如直接看行号猜错在哪；</li>
+            <li>Go 常被用于分布式系统。</li>
+        </ul>
+        <p>
+            课程以前用 C++，也用得不错（Go FAQ）。Java 等有这些特性的语言大概也行。学完 Go 教程之后，推荐读 Effective Go。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、线程</h2>
+        <p>
+            线程是很有用的组织程序的工具，但可能很棘手。Go 叫它 goroutine，其他地方都叫线程。线程是"执行的线索"：让一个程序同时做很多件事；每个线程像普通的无线程程序一样串行执行；线程之间共享内存；每个线程有自己的状态：程序计数器、寄存器、栈。Morris 补充：各线程的栈其实都在同一个地址空间里，知道地址的话一个线程可以访问另一个线程的栈，只是通常不这么做；main 也只是一个 goroutine。
+        </p>
+        <h3>为什么要线程</h3>
+        <ul>
+            <li><strong>I/O 并发</strong>：客户端并行地向很多服务器发请求并等待回复；服务器同时处理很多客户端请求，每个请求都可能阻塞，在等磁盘为客户端 X 读数据时，处理客户端 Y 的请求。这个说法的来历是早年一个线程等着读磁盘时，希望另一个线程能计算或者发网络消息。对这门课来说，常见的形式是给每个要发出的 RPC 开一个线程，它发出请求、等在那里，回复来了再继续。</li>
+            <li><strong>多核性能</strong>：在多个核上并行执行代码。这门课里很少专门考虑它，但实际的服务器负载很高时很重要。</li>
+            <li><strong>方便</strong>：在后台每秒检查一次每个 worker 是否还活着。开一个 goroutine，循环里睡一秒、干活、再睡一秒。有同学问开销值不值：Morris 说开销很小，一百万个线程每毫秒醒一次发网络消息是巨大负载，但十个每秒醒一次干点小活的线程无所谓，省下的程序员时间几乎总是值得的；不过实验里可能发现某个循环睡得不够久，或者开了一堆线程从不退出，越积越多。</li>
+        </ul>
+        <h3>有没有线程的替代方案</h3>
+        <p>
+            有：在一个线程里写显式交错各项活动的代码，通常叫"事件驱动"。为每项活动（比如每个客户端请求）维护一张状态表；一个"事件"循环：检查每项活动有没有新输入（比如服务器的回复到了），为每项活动做下一步，更新状态。
+        </p>
+        <p>
+            事件驱动能得到 I/O 并发，省掉线程的开销（可能不小），但得不到多核加速，而且写起来很痛苦。Morris 补充：线程方便，是因为能写顺序的直线代码，算一算、发消息、等回复，而事件驱动要把活动切成很多小块，让循环一次激活一块。每个线程有一个栈，20 个线程无所谓，一百万个就是很多内存，调度列表也会变长；所以要用一台服务器服务一百万个客户端、每个只保存一点状态时，花更多程序员时间写一个精简的事件驱动服务更合适。也可以两者结合：机器有 8 个核，就开 8 个线程，每个线程跑一个精简的事件循环。
+        </p>
+        <p>
+            线程和进程的区别（录像里的问答）：在 UNIX 上，一个进程是一个正在运行的程序，有一个地址空间；进程里可以有多个线程。运行一个 Go 程序就创建一个 UNIX 进程，goroutine 都在这个进程里。不同进程（比如编辑器和编译器）的内存互相隔离，几乎没有交互；同一个程序里的线程可以共享内存，用 channel 和互斥锁同步。调度有两级：操作系统在它知道的线程之间切换，Go 运行时再把很多 goroutine 复用到少数几个操作系统线程上。
+        </p>
+
+        <h3>线程的难题</h3>
+        <ul>
+            <li><strong>安全地共享数据</strong>：如果两个线程同时做 n = n + 1？或者一个线程读、另一个线程加？这是"竞态"（race）：两个线程同时使用同一块内存，其中一个（或两个）在写，通常是 bug。办法：用锁（Go 的 sync.Mutex），或者避免共享可变数据。</li>
+            <li><strong>线程之间的协调</strong>：一个线程生产数据，另一个线程消费。消费者怎样等待（并让出 CPU）？生产者怎样唤醒消费者？办法：Go 的 channel、sync.Cond 或 sync.WaitGroup。</li>
+            <li><strong>死锁</strong>：线程之间互相等待形成环，可能通过锁、channel 或者 RPC。</li>
+        </ul>
+        <p>
+            Morris 对 n = n + 1 的解释：编译出来是三条机器指令，把 n 读进寄存器、加一、写回内存。两个线程都从 0 读起，都得到 1，都把 1 写回，加了两次结果是 1。叫"竞态"，是因为两边在赛跑：第一个处理器能不能在第二个读之前完成写。有同学问单条指令是不是原子的：32 位的存储几乎一定是原子的，单字节存储要看 CPU，"直接对内存加一"这种复杂指令不太可能是原子的（有专门的原子版本）。
+        </p>
+        <p>
+            锁和数据之间的关系只在程序员脑子里。有同学问 Go 怎么知道锁保护的是哪个变量：Go 不知道，语言里锁和变量之间没有任何关联。锁就是一个对象，第一个调用 Lock 的线程拿到它，其他线程等到 Unlock，Go 知道的就这么多；一棵树可以只用一把锁，也可以每个节点一把锁，策略是程序员定的。把锁藏在数据结构内部、由每个方法自己加锁是合理的做法，但有两处会出问题：调用者明知数据不共享时也得付加锁的开销；两个各自带锁的数据结构互相调用时可能形成环、死锁，常见的解决办法要把锁从实现里提到调用方。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、例子：网页爬虫</h2>
+        <p>
+            网页爬虫的目标是抓取所有网页，比如交给索引器。给它一个起始网页，它递归地跟踪所有链接；页面和链接构成一个可能有环的图，同一个页面不能抓两次，也不能陷进环里。
+        </p>
+        <h3>爬虫的挑战</h3>
+        <ul>
+            <li><strong>利用 I/O 并发</strong>：网络延迟比网络容量更限制性能。互联网延迟大约 0.1 秒（光速等原因），吞吐可能是每秒 MB 甚至 GB。并行抓很多页面，提高每秒抓取的 URL 数，所以用线程实现并发。Morris 说要不断增加并行抓取数，直到每秒抓的页面数不再增加，也就是网络容量用完。</li>
+            <li><strong>每个 URL 只抓一次</strong>：不浪费网络带宽，避开链接的环，对远端服务器友好。所以要记住访问过哪些 URL。</li>
+            <li><strong>知道什么时候结束</strong>。Morris 说他写过的一些版本里，判断结束反而是最难的部分。</li>
+        </ul>
+
+        <h3>串行爬虫</h3>
+        <pre><code>func Serial(url string, fetcher Fetcher, fetched map[string]bool) {
+	if fetched[url] {
+		return
+	}
+	fetched[url] = true
+	urls, err := fetcher.Fetch(url)
+	if err != nil {
+		return
+	}
+	for _, u := range urls {
+		Serial(u, fetcher, fetched)
+	}
+}</code></pre>
+        <p>
+            递归调用 Serial 做深度优先探索。"fetched" map 避免重复、打破环；只有一个 map，按引用传递，调用者能看到被调用者的更新（map 本身就是指向堆上数据的指针，所以不用写星号）。所有链接递归探索完就结束了，很简单。但一次只抓一个页面，慢。
+        </p>
+        <p>
+            能不能直接在 Serial() 调用前面加一个 go？会发生什么？Morris 在课上试了：只抓到第一个页面。循环不会等待，一口气把 goroutine 都派出去就返回了，main 多半在它们干活之前就退出了。（因为程序后面还有别的爬虫，这些 goroutine 的输出会混在后面的输出里出现。）
+        </p>
+
+        <h3>ConcurrentMutex：共享数据加锁</h3>
+        <pre><code>type fetchState struct {
+	mu      sync.Mutex
+	fetched map[string]bool
+}
+
+func (fs *fetchState) testAndSet(url string) bool {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	r := fs.fetched[url]
+	fs.fetched[url] = true
+	return r
+}
+
+func ConcurrentMutex(url string, fetcher Fetcher, fs *fetchState) {
+	if fs.testAndSet(url) {
+		return
+	}
+	urls, err := fetcher.Fetch(url)
+	if err != nil {
+		return
+	}
+	var done sync.WaitGroup
+	for _, u := range urls {
+		done.Add(1)
+		go func(u string) {
+			ConcurrentMutex(u, fetcher, fs)
+			done.Done()
+		}(u)
+	}
+	done.Wait()
+}</code></pre>
+        <p>
+            每抓一个页面创建一个线程，很多抓取同时进行，抓取速率更高。"go func" 创建一个 goroutine 并启动它，func... 是一个"匿名函数"。线程共享 fs.fetched 这个 map，所以任何页面只会被一个线程抓。
+        </p>
+        <p><strong>为什么 testAndSet() 里要 Lock() 和 Unlock()？</strong></p>
+        <ul>
+            <li>原因一：两个线程用同一个 URL 同时调用 ConcurrentMutex()（因为两个不同的页面都链接到它）。T1 读 fetched[url]，T2 读 fetched[url]，都看到没抓过（false），都去抓，这就错了。互斥锁让一个线程等待，另一个线程完成检查和设置两步，所以只有一个线程看到 fetched[url]==false。我们说"这把锁保护 fs.fetched[]"，但 Go 不强制锁和数据之间有任何关系！lock 和 unlock 之间的代码通常叫"临界区"。</li>
+            <li>原因二：map 内部是复杂的数据结构（树？可扩展哈希表？），并发的更新和更新可能破坏内部不变式，并发的更新和读取可能让读取崩溃。</li>
+        </ul>
+        <p>
+            为什么 fetchState 要用指针传递：要让所有 goroutine 用内存里同一个对象。mu 和 fetched 放在同一个结构体里只是为了把爬虫相关的状态放在一起，不代表 Go 把锁和 map 关联起来。
+        </p>
+        <p>
+            <strong>如果注释掉 Lock() / Unlock()？</strong>go run crawler.go，总是对？总是错？为什么？Morris 课上跑了几次都是对的：出问题的只是两三条指令，两个线程恰好同时踩上的概率很低。这正是有竞态的代码糟糕的地方：通常运行正常，到客户的机器上才出错。go run -race crawler.go：即使输出正确也能检测出竞态！它报告第 43 行读了一个变量，而这个变量之前在第 44 行被写过，中间没有释放和获取锁。原理是为每个内存位置分配"影子内存"，记录哪些线程最近读写过它，同时跟踪锁的获取和释放。它的局限：不做静态分析，只看这一次运行实际执行到的代码，没执行到的代码里有竞态它不知道，所以要设计让所有代码都跑到的测试。它也能报告这次运行里没真正发生交错、但可能发生的竞态。
+        </p>
+        <p>
+            <strong>如果忘了 Unlock()？</strong>死锁。
+        </p>
+        <p>
+            <strong>ConcurrentMutex 爬虫怎样判断结束？</strong>sync.WaitGroup 基本上是一个计数器，Wait() 等所有的 Add() 都被 Done() 抵消，也就是等所有子线程结束。goroutine 构成一棵树，覆盖在有环的 URL 图上，树里每个节点有一个 WaitGroup，每个 ConcurrentMutex 只等自己的直接子节点。Morris 补充：如果子 goroutine 中途出错退出、没执行到 Done()，就会出问题，更稳妥的写法是 defer done.Done()；两个线程同时调用 Done() 不是竞态，因为 WaitGroup 内部有类似互斥锁的东西。
+        </p>
+        <p>
+            <strong>为什么要把 u 作为参数传给匿名函数？</strong>内层函数引用外层函数里声明的变量时，用的是同一个变量。fetcher 和 fs 正需要这样，内层函数要看到对 map 的修改。但 for 循环每次迭代会更新变量 u，如果内层函数直接用外层的 u，第一个 goroutine 可能看到的是第二个 URL。所以通过参数给每个 goroutine 一份自己的拷贝。有同学问字符串不是不可变吗：问题不在字符串被改，而在变量 u 被改成指向另一个字符串。另一个问题：外层函数返回之后，内层函数引用的变量还在吗？在，编译器发现闭包用到外层变量时会把它分配到堆上，由垃圾回收器在最后一个使用者结束后释放。
+        </p>
+        <p>
+            <strong>可能同时有多少个线程？</strong>没有明显的上限。测试只有五个 URL 无所谓，真爬整个 web 可能创建数十亿个线程，每个都占内存。一个办法是预先创建一个固定大小的 worker 池，让 worker 循环地取下一个 URL 去抓。
+        </p>
+
+        <h3>ConcurrentChannel：用 channel</h3>
+        <p>Go 的 channel：</p>
+        <ul>
+            <li>channel 是一个对象：ch := make(chan int)；它让一个线程把一个对象发给另一个线程。</li>
+            <li>ch &lt;- x：发送者等到某个 goroutine 接收为止。y := &lt;- ch：接收者等到某个 goroutine 发送为止。也可以 for y := range ch。</li>
+            <li>channel 既通信又同步；多个线程可以在同一个 channel 上收发；一次收发不到一微秒，相当便宜。</li>
+            <li>记住：发送者阻塞直到接收者收到！是"同步"的，小心死锁。</li>
+        </ul>
+        <pre><code>func worker(url string, ch chan []string, fetcher Fetcher) {
+	urls, err := fetcher.Fetch(url)
+	if err != nil {
+		ch &lt;- []string{}
+	} else {
+		ch &lt;- urls
+	}
+}
+
+func coordinator(ch chan []string, fetcher Fetcher) {
+	n := 1
+	fetched := make(map[string]bool)
+	for urls := range ch {
+		for _, u := range urls {
+			if fetched[u] == false {
+				fetched[u] = true
+				n += 1
+				go worker(u, ch, fetcher)
+			}
+		}
+		n -= 1
+		if n == 0 {
+			break
+		}
+	}
+}
+
+func ConcurrentChannel(url string, fetcher Fetcher) {
+	ch := make(chan []string)
+	go func() {
+		ch &lt;- []string{url}
+	}()
+	coordinator(ch, fetcher)
+}</code></pre>
+        <ul>
+            <li>coordinator() 为每个页面创建一个 worker goroutine 去抓；worker() 把页面里的 URL 切片发到 channel 上，多个 worker 往同一个 channel 发；coordinator() 从 channel 读 URL 切片。</li>
+            <li>coordinator 在哪一行等待？等待时占用 CPU 吗？（在 for urls := range ch 处阻塞，不占 CPU。）</li>
+            <li>这里没有递归，所有 worker 都由 coordinator() 创建。</li>
+            <li>fetched map 不用加锁，因为它不共享！它是 coordinator 私有的。</li>
+            <li>coordinator 怎样知道结束了？用 n 记 worker 数，每个 worker 恰好在 channel 上发一个元素。channel 做了两件事：传递值，通知事件（比如线程结束）。n 归零后，channel 只剩 coordinator 引用，很快会被垃圾回收，所以不必 close。</li>
+            <li>为什么多个线程用同一个 channel 是安全的？channel 内部有一把锁，收发操作会加锁（FAQ 说 channel 就是一个装着缓冲区和锁的结构体，你也可以用 sync.Mutex 和 sync.Cond 自己实现）。</li>
+            <li>这算竞态吗：worker 线程修改（创建）url 切片，coordinator 使用它？worker 只在发送<strong>之前</strong>写切片，coordinator 只在接收<strong>之后</strong>读切片，所以不会同时使用，没有竞态。</li>
+            <li>为什么 ConcurrentChannel() 要专门开一个 goroutine 来执行 "ch &lt;- ..."？去掉试试：channel 是同步的，主线程发送时会一直阻塞，等不到接收者（coordinator 还没开始运行），死锁。而如果不先放进一个 URL，coordinator 的 for 循环会永远阻塞在读 channel 上。</li>
+        </ul>
+
+        <h3>什么时候用共享加锁，什么时候用 channel</h3>
+        <p>
+            大多数（所有？）问题两种风格都能解决，哪种更合理取决于程序员怎么想：想的是状态，就用共享和锁；想的是通信，就用 channel。对 6.5840 的实验，讲义推荐用 sync.Mutex / sync.Cond 管理共享状态。
+        </p>
+        <p>
+            Go FAQ 里的几条相关建议：用 channel 唤醒另一个 goroutine 时，如果对方正在运行（没在接收），发送者就会阻塞，这种情况改用条件变量 sync.Cond 更合适，它适合提醒"可能在等、也可能没在等"的 goroutine。要同时等多个 channel，可以每个 channel 开一个 goroutine，或者用 select。WaitGroup 比较专用，只适合等一批活动完成。要发一个 RPC 又不想等结果，就开一个 goroutine 让它同步地 Call()。Go 新手的常见问题：并发访问 map 不加锁（用竞态检测器！）、channel 死锁、创建 goroutine 时没捕获变量、goroutine 泄漏。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、例子：投票计数</h2>
+        <p>
+            课程网站给了一组投票计数的例子（condvar.tar.gz），对应 Raft 里候选人收集选票的情形：向 10 个节点请求投票，拿到 5 票以上就赢，或者所有回复都到了就结束。网站只给了代码，下面对每个版本问题的说明是按代码分析的：
+        </p>
+        <ol>
+            <li><strong>vote-count-1</strong>：10 个 goroutine 各自 requestVote()，直接 count++、finished++；主线程 for count &lt; 5 &amp;&amp; finished != 10 {} 空转等待。count 和 finished 被并发读写，有竞态。</li>
+            <li><strong>vote-count-2</strong>：加 sync.Mutex，goroutine 在锁里更新，主线程在循环里加锁检查、不满足就解锁再来。正确了，但主线程忙等，白白烧 CPU。</li>
+            <li><strong>vote-count-3</strong>：主线程每次检查不满足就 time.Sleep(50 * time.Millisecond)。少烧 CPU，但睡多久是拍脑袋定的。</li>
+            <li><strong>vote-count-4</strong>：用条件变量。</li>
+            <li><strong>vote-count-5</strong>：用 channel，每个 goroutine 把投票结果发到 channel 上，主线程一边接收一边计数，够 5 票或收满 10 个就停。问题是提前停下以后，剩下的 goroutine 发送时没人接收，会永远阻塞（泄漏）。</li>
+            <li><strong>vote-count-6</strong>：用 channel，但主线程总是收满 10 个结果再判断，没有泄漏，代价是要等最慢的那个回复。</li>
+        </ol>
+        <pre><code>// vote-count-4.go: condition variable version
+mu.Lock()
+for count &lt; 5 &amp;&amp; finished != 10 {
+	cond.Wait()   // atomically releases mu and sleeps; re-acquires mu on wake-up
+}
+if count &gt;= 5 {
+	println("received 5+ votes!")
+} else {
+	println("lost")
+}
+mu.Unlock()
+
+// each voter goroutine:
+//   vote := requestVote()
+//   mu.Lock(); defer mu.Unlock()
+//   if vote { count++ }
+//   finished++
+//   cond.Broadcast()   // wake up anyone waiting on cond</code></pre>
+        <p>
+            条件变量的模式：检查条件要在锁里；条件不满足就 Wait()，它原子地释放锁并睡眠，被唤醒后重新拿到锁再检查（所以用 for 而不是 if）；改变条件的一方在锁里改完后 Broadcast()。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、远程过程调用（RPC）</h2>
+        <p>
+            RPC 是分布式系统的关键机器，所有实验都用 RPC。目标：让客户端/服务器通信容易编程；隐藏网络协议的细节；把数据（字符串、数组、map 等）转换成"线上格式"（wire format）；可移植、可互操作。
+        </p>
+        <pre><code>RPC message diagram:
+  Client             Server
+    request---&gt;
+       &lt;---response
+
+Software structure:
+  client app        handler fns
+   stub fns         dispatcher
+   RPC lib           RPC lib
+     net  ------------ net</code></pre>
+
+        <h3>Go 的例子：kv.go</h3>
+        <p>
+            一个玩具键值存储服务器：Put(key, value)，Get(key) 返回 value，用 Go 的 RPC 库。
+        </p>
+        <pre><code>type GetArgs struct {
+	Key string
+}
+
+type GetReply struct {
+	Value string
+}
+
+// Client stub
+func get(key string) string {
+	client := connect()   // rpc.Dial("tcp", ":1234")
+	args := GetArgs{ key }
+	reply := GetReply{}
+	err := client.Call("KV.Get", &amp;args, &amp;reply)
+	if err != nil {
+		log.Fatal("error:", err)
+	}
+	client.Close()
+	return reply.Value
+}
+
+// Server
+type KV struct {
+	mu   sync.Mutex
+	data map[string]string
+}
+
+func server() {
+	kv := &amp;KV{data: map[string]string{}}
+	rpcs := rpc.NewServer()
+	rpcs.Register(kv)
+	l, e := net.Listen("tcp", ":1234")
+	if e != nil {
+		log.Fatal("listen error:", e)
+	}
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err == nil {
+				go rpcs.ServeConn(conn)
+			} else {
+				break
+			}
+		}
+		l.Close()
+	}()
+}
+
+func (kv *KV) Get(args *GetArgs, reply *GetReply) error {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	reply.Value = kv.data[args.Key]
+	return nil
+}</code></pre>
+        <ul>
+            <li>公共部分：为每个服务器处理函数声明 Args 和 Reply 结构体。</li>
+            <li>客户端：connect() 里的 Dial() 建立到服务器的 TCP 连接；get() 和 put() 是客户端"存根"（stub）；Call() 让 RPC 库执行调用，你指定连接、函数名、参数、放回复的地方；库编组参数、发送请求、等待、解组回复；Call() 的返回值表示有没有收到回复；通常还会有一个 reply.Err 表示服务层面的失败。</li>
+            <li>服务器：Go 要求服务器声明一个对象，它的方法作为 RPC 处理函数；服务器把这个对象注册到 RPC 库；服务器接受 TCP 连接，交给 RPC 库。RPC 库读每个请求，为这个请求创建一个新的 goroutine，解组请求，在 Register() 建的表里查找命名的对象，调用对象的命名方法（分派），编组回复，写回 TCP 连接。</li>
+            <li>服务器的 Get() 和 Put() 处理函数必须加锁，因为 RPC 库为每个请求创建一个新的 goroutine；它们读 args、修改 reply。</li>
+        </ul>
+        <h3>几个细节</h3>
+        <ul>
+            <li><strong>绑定</strong>：客户端怎样知道和哪台服务器通信？Go 的 RPC 里，服务器的名字和端口是 Dial 的参数。大系统有某种名字服务器或配置服务器。</li>
+            <li><strong>编组</strong>：把数据格式化成数据包。Go 的 RPC 库能传字符串、数组、对象、map 等；传指针时会拷贝指向的数据；不能传 channel 和函数；只编组导出的字段（即大写字母开头的字段）。</li>
+        </ul>
+
+        <h3>RPC 的难题：失败时怎么办</h3>
+        <p>
+            比如丢包、网络断了、服务器慢、服务器崩溃。对客户端的 RPC 库来说，失败是什么样子？客户端始终收不到服务器的回复，而且<strong>不知道</strong>服务器有没有收到请求！也许服务器根本没看到请求；也许服务器执行了，在发回复之前崩溃了；也许服务器执行了，但网络在送达回复之前断了。远程过程调用的行为和单机上的过程调用不一样！这是实现分布式系统时反复出现的挑战。
+        </p>
+        <h3>最简单的处理："尽力而为"（best-effort）RPC</h3>
+        <p>
+            Call() 等一段时间回复；没来就重发请求；重复几次；然后放弃，返回错误。
+        </p>
+        <p>
+            问：应用容易应对"尽力而为"吗？一个特别糟的情形：客户端执行 Put("k", 10); Put("k", 20); 两个都成功了，Get("k") 会得到什么？第一个 Put 超时重发，而原来那个请求在网络里耽搁了，在 Put("k", 20) 之后才到达服务器，最终值变成 10。
+        </p>
+        <p>
+            问："尽力而为"什么时候可以？只读操作；重复执行也无害的操作，比如数据库会检查记录是否已经插入。
+        </p>
+        <h3>另一种常见语义："至多一次"（at-most-once）</h3>
+        <p>
+            Go RPC 就是一种简单的"至多一次"：打开 TCP 连接，把请求写进 TCP 连接，Go RPC 从不重发请求，所以服务器不会看到重复的请求；如果收不到回复，Go RPC 返回错误，可能是（TCP 的）超时之后；可能服务器没看到请求，也可能服务器处理了请求，但在回复回来之前服务器或网络出了故障。
+        </p>
+        <p>
+            实验会探索实现"至多一次"的其他方式：对复制的服务器来说，不重试的限制太大了，我们希望第一个副本失败时能在另一个副本上重试。
+        </p>
+    </section>
+
+    <section>
+        <h2>课前准备</h2>
+        <p>
+            这一讲的阅读材料不是论文，是 Go 在线教程（tour.golang.org）；布置的"问题"是教程里的爬虫练习（Crawler exercise），也就是上面三种写法要解决的问题。另外要看一看 Go 的 RPC 包，Lab 1 就会用到。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>MIT 6.5840: Distributed Systems &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="01_导论与MapReduce.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="03_GFS.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

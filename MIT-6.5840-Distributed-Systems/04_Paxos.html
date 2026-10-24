@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第四讲：容错的共识，Paxos | MIT 6.5840 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="03_GFS.html">&larr; 上一讲</a>
+    <span>MIT 6.5840: Lecture 4</span>
+    <a href="05_Go模式.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第四讲：容错的共识，Paxos</h1>
+        <p class="subtitle">GFS 的 coordinator 坏了怎么办；为什么容错的主备切换很难：网络分区和脑裂；多数派（quorum）和两个多数派必然相交；2f+1 台容忍 f 台故障；Paxos 保证什么；提议者和接受者的伪代码；"被选定"是全系统的性质；正常运行、作业题、并发提议者的逐步推演；提交点在哪里；为什么要选 n_a 最大的值，为什么 accept 要检查并更新 n_p，为什么状态必须写盘；Paxos 会不会卡住，性能；用 Paxos 构建复制状态机和日志</p>
+        <div class="author-meta">
+            主讲：Robert Morris（2026 年春季讲义）；本讲没有公开录像（2020 年没有单独讲 Paxos），内容根据讲义、伪代码和 FAQ 整理<br>
+            资料来源：<a href="https://pdos.csail.mit.edu/6.824/notes/l-paxos.txt" target="_blank">2026 讲义</a>、<a href="https://pdos.csail.mit.edu/6.824/notes/paxos-code.html" target="_blank">Paxos 伪代码</a>、<a href="https://pdos.csail.mit.edu/6.824/papers/paxos-faq.txt" target="_blank">Paxos FAQ</a>、论文 <a href="https://pdos.csail.mit.edu/6.824/papers/paxos-simple.pdf" target="_blank">Paxos Made Simple（Lamport，2001）</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、从 GFS 的 coordinator 说起</h2>
+        <p>
+            回想 GFS 的 coordinator：它坏了怎么办？GFS 论文对此没说多少（需要人来切换）。很多服务建在 GFS 上，所以这件事应该是自动的、可靠的。怎么做？
+        </p>
+        <p>好的总体目标：</p>
+        <ul>
+            <li>通过复制获得<strong>高可用</strong>：即使一台服务器崩溃或联系不上，也能继续运行，"没有单点故障"。</li>
+            <li><strong>强一致</strong>：看起来像一台服务器。</li>
+        </ul>
+        <h3>为什么设计一个容错的 coordinator 很难</h3>
+        <p>
+            假设用主/备复制，希望主坏了以后客户端切换到备份。一个有问题的方案：客户端 C1、C2，网络，服务器 S1、S2。客户端平时把所有操作发给 S1，S1 回复，同时转发给 S2 做复制，S1 是主，S2 是备份。如果客户端收不到 S1 的回复，就重发给 S2，这样系统能容忍 S1 坏掉。
+        </p>
+        <p>
+            问题：假设网络故障，C1 和 S1 能通信，C2 和 S2 能通信，但 C1/S1 和 C2/S2 之间不通。两边都觉得对方坏了，于是 S1 和 S2 都各自充当主。这叫"<strong>网络分区</strong>"，结果是"<strong>脑裂</strong>"。计算机分不清"服务器崩溃了"和"网络断了"，它能观察到的只是"我的请求没有回复"。这个问题会在容错设计里一次又一次地出现！
+        </p>
+        <p>
+            有一段时间，由于分区的可能，自动的容错切换看起来是不可能的。人们用一个特殊的外部代理（一个人）来切换主。但这个人本身就是单点故障，对大系统也不太可扩展。
+        </p>
+        <p>
+            大约 1989 年出现了几种解法，出人意料！Paxos 是其中最简单、最容易理解的，启发了很多被广泛使用的方案（课程后面多篇论文里会看到 Paxos），包含值得了解的思想。（同一时期的另一种是 Viewstamped Replication，下一讲的 Raft 和它很像。）
+        </p>
+    </section>
+
+    <section>
+        <h2>二、Paxos 提供什么</h2>
+        <p>
+            Paxos 提供容错的"<strong>协定</strong>"（agreement），也叫"<strong>共识</strong>"（consensus）：让一组计算机就<strong>一个</strong>值达成一致，比如当前的主是谁。如果一些 Paxos 参与者就 X 达成了一致，就不会有参与者认为达成一致的是别的值，即使有计算机或网络故障，即使有分区也不会脑裂。
+        </p>
+        <p>
+            Paxos 只做一次协定。真实系统需要一连串 Paxos 协定，比如每次 coordinator 故障后用一次新的协定来恢复。
+        </p>
+
+        <h3>关键思想：多数派（quorum）</h3>
+        <p>
+            用奇数台服务器，比如 3 台。做任何事都需要多数派的回复，3 台里要 2 台。联系不上多数派就不能前进。（多数派的思想比 Paxos 早得多。）
+        </p>
+        <p>
+            多数派一个有用的性质：<strong>任意两个多数派必然相交</strong>。如果某个信息被一个多数派知道，之后的任何多数派里都至少有一台服务器知道它。所以多数派系统里每一步通常是这样：
+        </p>
+        <ol>
+            <li>给所有参与者发消息；</li>
+            <li>收集多数派的回复（但不再等更多），从回复里找出最新的状态；</li>
+            <li>给所有参与者发更新后的状态消息。</li>
+        </ol>
+        <p>好处：能容忍少数服务器故障或变慢；交集保证状态的改变不会丢。</p>
+        <p>
+            多数派的另一个性质：<strong>最多只有一个网络分区能包含多数服务器</strong>。少数派分区里的服务器凑不齐多数，不会前进，所以最多一个分区在执行操作，这有助于避免脑裂。注意：多数是指在<strong>所有</strong>服务器里占多数，不是在活着的服务器里占多数。
+        </p>
+        <p>
+            我们说 2f+1 台服务器能容忍 f 台故障，因为剩下的 f+1 台是 2f+1 的多数。3 台容忍 1 台故障，5 台容忍 2 台。所以可以获得更高的可用性（要付出一些代价！）。
+        </p>
+
+        <h3>Paxos 保证哪些性质</h3>
+        <ul>
+            <li><strong>正确性</strong>：如果达成了协定，所有同意的服务器同意的是同一个值；一旦达成任何协定，就永远不会改变主意。</li>
+            <li><strong>容错</strong>：只要 2f+1 台中有 f+1 台（多数）能通信，就能前进，即能容忍不超过 f 台故障；没有多数就不能前进，但多数恢复后会正确地继续，比如能挺过整个站点断电。</li>
+            <li><strong>活性</strong>（liveness）：当多数派能通信足够长的时间，会达成协定（这是一个弱的性质）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>三、Paxos 算法</h2>
+        <p>
+            下面是论文的伪代码版本。为了应对协定过程中的故障，Paxos 可能经过多个编号的轮次（round），每轮由一个提议者（proposer）驱动。任何服务器如果认为还没达成协定，都可以提议。每轮两次消息交换：prepare / prepare_ok，accept / accept_ok。
+        </p>
+        <ul>
+            <li>定义：<strong>S 接受了 n/v</strong>：S 对 accept(n, v) 回复了 accept_ok。</li>
+            <li>定义：<strong>n/v 被选定</strong>（chosen）：多数派接受了 n/v。</li>
+        </ul>
+        <p>
+            关键性质：如果 v 被选定，之后的任何选择也都等于 v。协议不会改变主意，也许换了提议者等等，但值相同！难在"被选定"是全系统的性质：比如多数接受了以后，提议者崩溃了怎么办？没有哪台服务器能在本地判断一个值已经被选定了。
+        </p>
+        <pre><code>--- Paxos Proposer ---
+
+proposer(v):
+  while not decided:
+    choose n, unique and higher than any n seen so far
+    send prepare(n) to all servers including self
+    if prepare_ok(n, n_a, v_a) from majority:
+      v' = v_a with highest n_a; choose own v otherwise
+      send accept(n, v') to all
+      if accept_ok(n) from majority:
+        send decided(v') to all
+
+--- Paxos Acceptor ---
+
+state on each node (persistent, must survive reboots):
+  n_p     --- highest prepare seen
+  n_a, v_a --- highest accept seen
+
+prepare(n) handler:
+  if n &gt; n_p
+    n_p = n
+    reply prepare_ok(n, n_a, v_a)
+  else
+    reply reject
+
+accept(n, v) handler:
+  if n &gt;= n_p
+    n_p = n
+    n_a = n
+    v_a = v
+    reply accept_ok(n)
+  else
+    reply reject</code></pre>
+        <p>
+            怎样保证提议编号唯一（FAQ）：提议者可以把一个每个提议者各不相同的 ID 放在提议编号的低位，比如 IP 地址，这样不同提议者永远不会用同一个编号；每个提议者记住自己用过的最大编号，新提议时确保更大。如果敢赌运气，也可以高位放当前时间、低位放随机数，随机位要多，让碰撞概率极低。
+        </p>
+        <p>
+            论文 2.4 节的"杰出提议者"（distinguished proposer，FAQ）：实现时应尽量让同一时刻最多只有一个活跃的提议，这不是正确性的要求，而是让协定更快达成的建议。比如每个提议者发 prepare 前随机等一段时间，随机数最小的先走，多半能在别人睡醒之前完成协定。Paxos 本身不需要领导者；论文第 3 节讲的是实现和使用 Paxos 的一种方式。Paxos 的一次协定没有明确定义的终止点，但没有故障时，提议者收到所有人的 accept 回复就知道协定已经达成，可以停止提议。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、逐步推演</h2>
+        <p>
+            记号："p5" 表示 Sx 收到 prepare(n=5)；"a5A" 表示 Sx 收到 accept(n=5, v=A)；"dA" 表示 Sx 收到 decided(v=A)。这些图不具体说明谁是提议者，只关心接受者看到了什么、怎样回复。
+        </p>
+
+        <h3>例 1：正常运行</h3>
+        <p>S1、S2、S3，但 S3 死了或者很慢。S1 发起提议，n=5，v=A。</p>
+        <pre><code>S1: p5    a5A    dA
+S2: p5    a5A    dA
+S3: dead...</code></pre>
+        <p>
+            提议者只要等多数派，所以即使 S3 宕了也能继续。如果 S3 还活着，但被网络分区隔开，而它想提议值 B 呢？S3 的 prepare 凑不齐多数派。
+        </p>
+
+        <h3>作业题</h3>
+        <p>
+            Paxos 怎样保证下面这串事件不会发生？实际会发生什么，最终选定哪个值？接受者是 A、B、C（下面写成 S1、S2、S3），S1 和 S2 也是提议者。S1 用编号 1 发 prepare，得到所有三台的肯定回复；S1 给 S1 和 S3 发 accept(1, "X")，都回复了肯定，多数接受了，S1 认为 X 被选定了；但 S1 在给 S2 发 accept 之前崩溃了。S2 用编号 2 发 prepare，得到 S2 和 S3 的肯定回复；S2 给 S2 和 S3 发 accept(2, "Y")，得到肯定回复，于是 S2 认为 Y 被选定了。
+        </p>
+        <pre><code>S1: p1 a1X
+S2: p1     p2 a2?
+S3: p1 a1X p2 a2?</code></pre>
+        <p>
+            S3 对 prepare(2) 的 prepare_ok 里会带上 "X"（它的 n_a=1, v_a=X），于是 S2 必须发 a2X，而不是 a2Y。很好：X 在第一轮已经被选定，第二轮又被选定一次。要点：如果系统已经达成了协定，某个多数派知道这个值；任何新的 prepare 多数派都与之相交，所以后来的提议者会得知已经达成一致的值，并在 accept 消息里发送它。
+        </p>
+
+        <h3>例 2：并发的提议者</h3>
+        <p>S1 发起编号 10 的提议，发出第一个 accept v=X；与此同时 S3 发起编号 11 的提议，但 S1 没收到它；S3 只需要等多数派的 prepare 回复。</p>
+        <pre><code>S1: p10 a10X
+S2: p10        p11
+S3: p10        p11  a11Y</code></pre>
+        <p>S1 还在继续发 accept 消息……有值被选定了吗？会发生什么？</p>
+        <ul>
+            <li>S2 收到 S1 的 a10X 会怎样？S2 已经见过 p11，n_p=11，10 &lt; 11，拒绝。</li>
+            <li>S1 收到 S3 的 a11Y 会怎样？S1 的 n_p 是 10，11 &gt;= 10，接受。</li>
+            <li>如果 S3 只发出一个 a11Y（给自己）就崩溃且不再重启？那么目前只有 S1 接受了 X，S3 接受了 Y，都没有凑齐多数，还没有值被选定；之后的提议者用更大的编号 prepare，会从回复里看到这些值，选其中 n_a 最大的那个。</li>
+        </ul>
+        <p>（上面几个问题讲义只提出、没写答案，答案是按伪代码推出来的。）</p>
+        <p>
+            一个重要的设计模式：<strong>如果有证据表明协定"可能"已经达成，就必须当作已经达成来行事</strong>。提议者可能并不"知道"，因为它的多数派可能只和之前的多数派重叠一台；尽管如此，也必须保守。
+        </p>
+
+        <h3>提交点在哪里</h3>
+        <pre><code>S1: p10  a10X               p12
+S2: p10          p11  a11Y
+S3: p10          p11        p12   a12X</code></pre>
+        <p>
+            这时系统对某个值达成一致了吗？毕竟多数派（S1、S3）接受了值 "X"。
+        </p>
+        <p>
+            "提交点"（commit point）是什么？即到底什么时候达成了协定？什么时候一台服务器可以安全地根据协定行事？什么时候<strong>别的</strong>服务器可能已经据此行动了？多数派有相同的 v_a 之后？不对，为什么？上面就是反例：S1 的 X 来自 a10X，S3 的 X 来自 a12X，编号不同，并不是同一次接受的多数派。多数派有相同的 v_a/n_a 之后？对。
+        </p>
+
+        <h3>为什么提议者要选 n_a 最大的 v_a</h3>
+        <pre><code>S1: p10  a10A               p12
+S2: p10          p11  a11B
+S3: p10          p11  a11B  p12   a12?</code></pre>
+        <p>
+            n=11 已经对 vB 达成了一致。n=12 同时看到 vA 和 vB，但必须选 vB。为什么这样合理，分两种情况：
+        </p>
+        <ol>
+            <li>n=11 之前已经有值被选定：那么 n=11 的 prepare 会看到这个值并复用它，所以 n=12 复用 n=11 的值是安全的。</li>
+            <li>n=11 之前没有值被选定：n=11 可能已经得到了多数派，所以 n=12 必须复用 n=11 的值。</li>
+        </ol>
+
+        <h3>为什么 accept 处理函数要检查 n &gt;= n_p</h3>
+        <p>没有这个检查，可能出现这种坏情况：</p>
+        <pre><code>S1: p1 p2 a1A
+S2: p1 p2 a1A a2B
+S3: p1 p2     a2B</code></pre>
+        <p>糟了，有一阵子 A 被选定了（S1、S2 接受了 1/A），然后又变成了 B！</p>
+
+        <h3>为什么 accept 处理函数要更新 n_p = n</h3>
+        <p>
+            为了防止更早的 n 被接受。服务器可能收到 accept(n, v)，却从没见过 prepare(n)。没有 n_p = n，可能出现：
+        </p>
+        <pre><code>S1: p1    a2B a1A p3 a3A
+S2: p1 p2         p3 a3A
+S3:    p2 a2B</code></pre>
+        <p>
+            糟了，有一阵子 B 被选定了（S1、S3 接受了 2/B），然后又变成了 A！S1 没见过 p2，n_p 还是 1，接受 a2B 时如果不把 n_p 改成 2，之后就会接受更旧的 a1A，于是 p3 从 S1 那里拿到的 n_a 最大值是 1/A，选了 A。
+        </p>
+        <p>
+            如果提议者 S2 选的 n 比 S1 的小呢？比如 S2 没看到 S1 的任何消息。S2 不会有进展，所以没有正确性问题。
+        </p>
+
+        <h3>接受者在发出 accept_ok 之后崩溃重启？</h3>
+        <pre><code>S1: p1  a1X
+S2: p1  a1X reboot  p2  a2?
+S3: p1              p2  a2?</code></pre>
+        <p>
+            我们知道 X 被选定了，但第 2 号提议会保住 X 吗？S2 是 p1 的多数派和 p2 的多数派之间唯一的交集，因此是 Paxos 已经选定 X 的唯一证据。所以 S2<strong>必须</strong>在 prepare_ok(n=2) 里返回 X，也就是 S2 必须能恢复崩溃前的 n_a/v_a（以及 n_p）。因此：如果 S2 崩溃后想重新加入这个 Paxos 实例，必须把 n_p/v_a/n_a 记在磁盘上；如果丢了，就不要重新加入！
+        </p>
+        <h3>接受者在发出 prepare_ok 之后重启？</h3>
+        <p>它必须在磁盘上记住 n_p 吗？如果没记住，可能发生：</p>
+        <pre><code>S1: p10            a10X
+S2: p10 p11 reboot a10X a11Y
+S3:     p11             a11Y</code></pre>
+        <p>
+            编号 11 的 prepare 没收到带 X 的 prepare_ok，于是 11 提议了自己的值 Y；但就在那之前，X 已经被选定了（S1、S2 接受了 10/X）！因为 S2 没记住要忽略 a10X。所以：持久化 n_p 能防止这种情况。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、Paxos 会卡住吗，性能如何</h2>
+        <p>
+            会卡住，如果没有能互相通信的多数派。网络和计算机修好后，Paxos 会继续。（两个提议者也可能不断用更大的编号互相抢先，这就是前面"杰出提议者"和随机等待要缓解的问题。）
+        </p>
+        <p>
+            性能：被认为慢，因为有多轮通信，但有很多优化和批处理的方案；被认为贵，需要 3 个副本（而不是 2 个），但在严肃的容错系统里很难避免。FAQ 补充：性能主要受两件事限制，消息交换，以及把更新后的 n 和 v 写盘（以便崩溃重启后恢复）。Paxos 达成一致至少要两次消息交换，同一数据中心里大概几百微秒；还要两次写盘（prepare 一次，accept 一次），取决于磁盘技术，从几百微秒到几十毫秒。没有巧妙的优化，Paxos 会相对慢；Google 的 Paxos Made Live 论文讲了实际需要做哪些事。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、Paxos 怎样被用起来</h2>
+        <p>很多系统在内部用 Paxos，有几种用法：</p>
+        <ul>
+            <li>在旧 coordinator 不回应时，就新 coordinator 达成一致；</li>
+            <li>就备份什么时候接管主达成一致；</li>
+            <li>就复制状态机（RSM，replicated state machine）里的操作序列达成一致。</li>
+        </ul>
+        <h3>用 Paxos 构建一个数据库 RSM</h3>
+        <pre><code>[clients] --&gt; [replica 1] [replica 2] [replica 3]
+                each replica:  DB layer (e.g. k/v DB)
+                               log
+                               paxos layer</code></pre>
+        <ul>
+            <li>客户端可以把操作发给任何一个副本；</li>
+            <li>服务器用 Paxos 就<strong>下一个</strong>要追加到日志里的操作达成一致；</li>
+            <li>服务器按日志顺序，把达成一致并记入日志的操作应用到状态上（比如键值数据库）。</li>
+        </ul>
+        <p>
+            例：客户端把 "x=1" 发给 S1；S1 选日志第 3 项；S1 用 Paxos 让所有服务器同意第 3 项是 x=1；达成一致（"提交"）后，所有数据库执行 x=1。
+        </p>
+        <p>
+            例：客户端把 "x?" 发给 S2；S2 选日志第 4 项；S2 用 Paxos 让所有服务器同意第 4 项是 "x?"；达成一致后，S2 的数据库执行 "x?" 并回复客户端。（读也要走日志，才能保证它排在之前所有写之后。）
+        </p>
+        <p>为什么要日志？</p>
+        <ul>
+            <li>帮助应对并发：后面的操作要等前面的提交以后才能执行；</li>
+            <li>帮助副本追上进度：不在多数派里的、短暂下线的副本等等；</li>
+            <li>通常只保留日志的末尾，加上"状态"。</li>
+        </ul>
+        <p>
+            FAQ 里的用例：用三台服务器建一个 Paxos 复制的数据库，一台坏了，另两台还能继续执行数据库请求。可以去搜 Chubby、Spanner、Megastore、Spinnaker、ZooKeeper 的论文看各种用法。
+        </p>
+        <p>
+            Paxos 怎样防止脑裂（FAQ）：对 Paxos 来说，脑裂意味着不同服务器"同意"了不同的值。Paxos 必须等多数派回复的那几处就足以防止它。有两个活跃的提议者时，两者都要从多数接受者那里拿到 prepare 回复和 accept 回复，两个多数派至少重叠一台服务器，这台服务器的回复会告诉编号较小的提议者它输了，或者（如果编号较小的已经达成一致）告诉编号较大的提议者达成一致的值是什么。网络分区时，最多一个分区包含多数服务器，所以只有那个分区能达成一致。
+        </p>
+        <p>接下来：一位 Go 大师的客座讲座，然后是 Raft。Lab 1 明天截止。</p>
+    </section>
+
+    <section>
+        <h2>课前问题</h2>
+        <p>
+            即上面的"作业题"：接受者是 A、B、C，A 和 B 也是提议者。Paxos 怎样保证那串事件不会发生？实际会发生什么，最终选定哪个值？
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>MIT 6.5840: Distributed Systems &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="03_GFS.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="05_Go模式.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

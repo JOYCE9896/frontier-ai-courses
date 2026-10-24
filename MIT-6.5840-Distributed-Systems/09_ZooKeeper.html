@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第九讲：ZooKeeper | MIT 6.5840 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="08_线性一致性.html">&larr; 上一讲</a>
+    <span>MIT 6.5840: Lecture 9</span>
+    <a href="10_Lab3答疑.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第九讲：ZooKeeper 案例</h1>
+        <p class="subtitle">两个角度：容错应用更简单的基础，以及类 Raft 复制的一种用法；不复制计算、只把状态放进容错存储；MapReduce coordinator 在 ZooKeeper 里存什么，坏了怎么办；服务器结构，znode 树，API；用排他创建和临时 znode 选举 coordinator；会话、临时 znode 和"隔离"（fencing），失效检测者；ready znode 方案应对写到一半崩溃；更多服务器为什么不会让 Raft 变快；读由跟随者执行，读可能过时，ZooKeeper 的保证：写线性一致、客户端 FIFO 顺序、zxid、sync；watch 和 ready 文件的时序；计数器的迷你事务；简单锁和羊群效应，可扩展锁；这些锁和 Go 的互斥锁有何不同；性能数字和可改进之处</p>
+        <div class="author-meta">
+            主讲：Frans Kaashoek（2026 年春季讲义）；录像为 2020 年春季 Robert Morris 讲的同一篇论文（第 8 讲后半和第 9 讲前半）<br>
+            资料来源：<a href="https://pdos.csail.mit.edu/6.824/notes/l-zookeeper.txt" target="_blank">2026 讲义</a>、<a href="https://pdos.csail.mit.edu/6.824/papers/zookeeper-faq.txt" target="_blank">ZooKeeper FAQ</a>、2020 录像<a href="https://www.youtube.com/watch?v=pbmyrNjzdDk" target="_blank">第 8 讲</a>和<a href="https://www.youtube.com/watch?v=IXHzbCuADt0" target="_blank">第 9 讲</a>、论文 <a href="https://pdos.csail.mit.edu/6.824/papers/zookeeper.pdf" target="_blank">ZooKeeper: Wait-free coordination for Internet-scale systems（USENIX ATC 2010）</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、为什么读 ZooKeeper</h2>
+        <p>
+            这一讲从两个角度看 ZooKeeper：容错应用更简单的基础；类 Raft 复制的一个使用例子。ZooKeeper 用得非常广，值得关注；另一个流行的协调服务 etcd 受到了 ZooKeeper 设计的影响。Morris 在录像里说的两个技术问题：Raft 是一个库，要把应用设计成显式地和它交互，能不能有一个独立的通用服务，把构建分布式系统时痛苦的一大块打包起来给任何人用，这种"通用协调服务"的 API 应该长什么样？另一个是性能：七台 ZooKeeper 服务器的成本是一台的七倍，能得到七倍的性能吗？
+        </p>
+        <h3>不复制计算，只复制状态</h3>
+        <p>
+            如果想把 MapReduce 的 coordinator 这样的服务做成容错的，可以用 Raft 复制它，那也行！但直接建在 Raft 上很难：复制状态机写起来别扭，一切都要表述成事件，先提交，再执行。有没有更简单的办法？
+        </p>
+        <p>
+            可以把状态机复制（Raft）看作复制<strong>计算</strong>，状态的复制是它的副作用。能不能不复制计算就获得容错？能！一台普通的、不复制的服务器，把状态保存在一个容错的存储服务里；服务器崩溃，换一台新的，从存储里读出状态。ZooKeeper 就是为了做这个所需的容错存储而设计的：MR coordinator 可以写成普通的直线代码，把状态更新写进 ZK，就像存文件一样。（FAQ：这个模式不新，数据库支撑的网站就是这样工作的，但如果你主要关心的是管理容错的服务，ZooKeeper 很合适。）
+        </p>
+        <p>
+            MR coordinator 会在 ZK 里存什么？coordinator 的 IP 地址、作业集合、任务状态、worker 集合、分配情况，每次变化都更新 ZK 里的数据（但大数据本身放在 GFS 里，不放 ZK）。worker 可以从 ZK 读出 coordinator 的 IP 地址，甚至任务分配。这是 MR 把 ZK 用于"配置管理"：跟踪一组服务器，帮助服务器互相找到对方。
+        </p>
+        <p>
+            如果 MR coordinator 坏了呢？我们没有在备份服务器上复制它，但也不需要！随便挑一台计算机，在上面启动 MR coordinator 软件，让它从 ZK 读出状态，新 coordinator 就能接着旧的继续做。在大型云里这很合理，很容易分配一台替代服务器。
+        </p>
+        <p>挑战：</p>
+        <ul>
+            <li>（MR coordinator 的）故障检测；</li>
+            <li>选举（同一时间只有一个 MR coordinator，不能脑裂！）；</li>
+            <li>从 ZK 恢复或修复状态（旧的 MR coordinator 可能更新到一半）；</li>
+            <li>应对旧的 MR coordinator 其实还活着、还在活动的可能！</li>
+            <li>性能。</li>
+        </ul>
+        <p>ZK 在所有这些方面都有帮助。Morris 说他眼里最核心的动机例子是用 ZooKeeper 实现 VMware FT 需要的那种 test-and-set 服务：那篇论文里这个服务有点神秘，它本身容错吗？能应对分区吗？ZooKeeper 给了我们写出一个容错、正确处理分区的 test-and-set 服务的工具。一个数据中心可以只建一个 ZooKeeper 集群（五台或七台），各种服务都把关键状态存在里面。</p>
+    </section>
+
+    <section>
+        <h2>二、ZooKeeper 的结构和数据模型</h2>
+        <pre><code>clients --writes--&gt; ZK leader --(log, ZXIDs)--&gt; ZK followers
+clients --reads, watches--&gt; ZK followers</code></pre>
+        <p>
+            类 Raft 的领导者；类 Raft 的日志、提交、复制执行和状态。ZK 领导者为进来的写选定顺序，分配 ZXID（事务编号），所有跟随者按同样顺序执行写。ZK 跟随者执行客户端的读（读不发给 ZK 领导者）。（ZooKeeper 实际运行在叫 ZAB 的原子广播协议上，就我们的目的而言可以看作和 Raft 几乎一样。）下面先把 ZK 当黑盒。
+        </p>
+        <h3>数据模型（论文图 1）</h3>
+        <ul>
+            <li>一棵像文件系统的 znode 树：znode 的名字、内容、子节点、路径名。名字和层次帮助不同应用互不干扰，比如每个应用有自己的子目录。Morris 说它并不能真的当文件系统挂载、用 ls 和 cat，只是内部用路径名给对象命名。</li>
+            <li>每个 znode 有一个版本号。</li>
+            <li>znode 的类型：普通（regular），创建后一直存在直到删除；临时（ephemeral），如果 ZooKeeper 认为创建它的客户端死了，就删掉它，它和客户端会话绑定，客户端要不时发心跳；顺序（sequential），名字后面加一个序号，即使多个客户端同时创建，也保证序号不重复且单调递增。</li>
+        </ul>
+        <h3>操作（第 2.2 节）</h3>
+        <pre><code>s = openSession()
+create(s, path, data, flags)
+    exclusive -- fails if path already exists
+exists(s, path, watch)
+    watch=true asks for notification if path is later created/deleted
+getData(s, path, watch) -&gt; data, version
+setData(s, path, data, version)
+    if znode.version = version, then update
+    (same version scheme as Lab 2)
+getChildren(s, path, watch)
+exception if the ZK server says it has terminated the session
+    so that application won't continue</code></pre>
+        <p>（还有 delete，也可以带版本号；以及 sync，后面讲。）Morris 强调：exists 检查文件是否存在和设置 watch 这两件事是原子的，在写流里检查存在的那个点和插入 watch 的那个点之间不会发生任何事，这对正确性非常重要。</p>
+        <p>ZooKeeper 的 API 是为同步和并发访问设计的：</p>
+        <ul>
+            <li>排他的 znode 创建：并发的 create 恰好一个返回成功；</li>
+            <li>getData() / setData(x, version) 支持迷你事务；</li>
+            <li>会话和临时 znode 帮助应对客户端故障；</li>
+            <li>顺序 znode 在多个客户端之间建立顺序；</li>
+            <li>watch 避免代价高的轮询。</li>
+        </ul>
+        <p>
+            FAQ："无等待"（wait-free）的含义：任何进程都能在有限步内完成任何操作，不管其他进程执行得多快。ZooKeeper 处理一个客户端的请求时不需要等其他客户端采取行动，没有哪个 API 调用的定义会让一个客户端等另一个（相比之下，一个会等当前持锁者释放的 acquire 操作就不是无等待的）。客户端最终常常还是要互相等待，用 watch 或轮询；无等待对 API 的主要影响是把 watch 从其他操作里分离出来，原子的 test-and-set 式更新（排他创建、带版本的条件写）加上 watch，客户端就能拼出更复杂的阻塞抽象，比如第 2.4 节的锁和屏障。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、例：选举 MapReduce coordinator</h2>
+        <p>这就是论文第 2.4 节的简单锁：</p>
+        <pre><code>s = openSession()
+while true:
+    if create(s, "/mr/c", ephemeral=true)
+        // we won this election and are now coordinator
+        setData(s, "/mr/ip", ...)
+        setData(s, "/mr/...", ...)
+        ...
+        break
+    else if exists(s, "/mr/c", watch=true)
+        // we lost this election
+        wait for watch event</code></pre>
+        <ul>
+            <li>排他创建：多个客户端同时尝试，只有一个会成功。</li>
+            <li>临时 znode：coordinator 失败会自动让新的 coordinator 被选出。</li>
+            <li>watch：潜在的替代 coordinator 可以不轮询地等待。</li>
+        </ul>
+        <p>
+            选出的 coordinator 失败时我们希望怎样？选出替代者；应对它在更新 ZK 状态到一半时崩溃；应对它其实<strong>没有</strong>失败的可能！虽然 /mr/c 看起来像一把锁，但 coordinator 可能失败，这让情况和比如 Go 的 sync.Mutex 不同。
+        </p>
+        <h3>客户端（比如 MR coordinator）失败时 ZK 做什么</h3>
+        <ul>
+            <li>客户端失败，客户端停止向 ZK 发送保活消息；</li>
+            <li>没有保活消息，ZK 领导者超时并终止会话；</li>
+            <li>会话终止，ZK 领导者删除这个会话的临时 znode，<strong>并且</strong>忽略这个会话之后的请求（删除临时 znode 是 A-线性一致的 ZK 操作）；</li>
+            <li>现在新的 MR coordinator 可以选自己了。</li>
+        </ul>
+        <h3>MR coordinator 在更新 ZK 状态时崩溃了怎么办</h3>
+        <p>
+            这是崩溃恢复，和数据库日志相关，需要小心。最简单：MR coordinator 把所有信息存在一个 znode 里，单次 setData() 调用是原子的（面对故障要么全有、要么全无）。如果 coordinator 把状态存在多个 znode 里呢？用论文的 "ready" znode 方案（第 2.3 节）：删除 "ready"，更新各个 znode，再创建 "ready"。
+        </p>
+        <pre><code>leader:                      worker:
+  delete(s, "ready")
+  setData(s, z1)
+  setData(s, z2)               if exists("ready", watch=ready):
+  create(s, "ready")              read z1
+                                  read z2</code></pre>
+        <p>
+            新选出的 MR coordinator 就能判断上一次更新是不是不完整。更好：写一整套新的 znode，然后更新一个指明哪一套是当前有效的 znode。三种办法都以"一次提交性的写"结束。（FAQ：新的持锁者面对更新到一半的数据，处境类似数据库的崩溃恢复，比如更新写成新建的文件，新持锁者没看到完整的一套新文件，就回退到上一套。）
+        </p>
+        <h3>旧 coordinator 还活着、还以为自己是 coordinator 怎么办</h3>
+        <p>
+            ZK 认定它死了，删除了它的临时 znode /mr/c，选出了新 coordinator。会有两台计算机都以为自己是 coordinator 吗？可能会。旧 coordinator 能修改 ZK 里的状态吗？<strong>不能！</strong>ZK 让一个客户端会话超时时，原子地做两件事：删除这个客户端的临时节点；不再理会这个会话，拒绝它的所有操作。所以旧 coordinator 再也不能修改或读取 ZK 里的数据了！如果它试图这样做，它的 ZK 客户端库会抛出异常，迫使它意识到自己不再是 coordinator。（FAQ：假设应用把所有状态都存在 ZooKeeper 里，这就防止了被废黜的赢家干扰新赢家。临时 znode 加会话起到了租约的作用。）
+        </p>
+        <p>
+            "隔离"（fencing）这个词是指忽略一个被宣布死亡的客户端的请求，即使它其实还活着。
+        </p>
+        <h3>分布式系统里一个重要的模式</h3>
+        <p>
+            由单个实体（比如 ZK）决定哪些计算机活着、哪些死了，即"失效检测者"（failure detector）。它可能是错的，比如网络丢了消息，但所有人都服从它的决定。为了避免脑裂，一致比正确更重要。但它可能出错，所以需要隔离，这就是 ZK 会话终止的作用。
+        </p>
+        <p>
+            FAQ 补充会话的作用：会话由客户端和 ZooKeeper 共同维护，客户端给每个请求标上会话 ID。会话一方面维护保证客户端 FIFO 顺序所需的状态，跟踪每个客户端的 watch；更重要的是它和临时 znode 的工作方式相关。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、性能：更多服务器能让系统更快吗</h2>
+        <p>
+            Morris 先问：在一个类 Raft 的系统里，加更多服务器，实验里的系统会变快吗？不会。领导者几乎肯定是瓶颈，它要处理每个请求，并把每个请求发给每台其他服务器，加服务器只会给瓶颈节点加更多工作，其他服务器只是乖乖照领导者说的做，不分担它的工作。所以性能大概和服务器数成反比，服务器越多越慢。有同学问如果请求作用于完全不同的部分（put x 和 put y）能不能利用：在这个框架里很有限，请求仍要经过领导者、发给所有副本；但这个"操作可交换"的想法在别的系统里会派上用场。
+        </p>
+        <p>
+            一个显然的办法：现实中大量工作负载是读多写少的，写都经过领导者，读只发给某个副本。这样读的能力随服务器数增长。但这样做能满意吗？没有理由相信领导者以外的任何副本是最新的：它可能不在领导者等的那个多数派里，网络丢了消息，根本没看到某次写；即使看到了日志条目，也可能还没收到提交；最坏情况下它可能已经和领导者分区，自己却不知道。所以想要线性一致的系统，就不能这样从副本读，Lab 3 也不行。
+        </p>
+        <p>
+            从论文的表 2 看，ZooKeeper 的读性能随服务器增加显著提高，它显然在玩某种把戏。Morris 说它的办法是：不提供线性一致的读。用定义上的魔杖一挥，"我们从没欠你线性一致"，所以返回过时数据不算 bug。这是应对性能和强一致之间矛盾的经典做法。但我们得一直追问：不线性一致，系统还有用吗？
+        </p>
+
+        <h3>ZK 怎样为高性能设计</h3>
+        <p>主要为读和 watch 的性能优化，写的性能是次要的。</p>
+        <pre><code>[leader]  [follower] [follower] [follower] ...
+              ^          ^          ^
+           clients    clients    clients</code></pre>
+        <ol>
+            <li>很多 ZK 跟随者服务器，客户端分散到它们上面以获得并行。客户端把所有操作都发给自己的 ZK 跟随者；ZK 跟随者在本地执行读，读自己那份 ZK 数据的副本，以免给 ZK 领导者增加负载；ZK 跟随者只把写转发给 ZK 领导者。</li>
+            <li>watch 而不是轮询。由 ZK 跟随者（而不是 ZK 领导者）保存 watch 信息。</li>
+            <li>ZK 的客户端可以发起异步操作：发出请求，完成通知另外交给代码，不同于 RPC。客户端可以发起很多操作而不等待；ZK 能高效地批量处理异步操作，消息和写盘都更少；客户端库给它们编号，ZK 按这个顺序执行。例如更新一堆 znode，然后创建 "ready" znode。</li>
+        </ol>
+        <p>
+            FAQ 解释"流水线"：一是 ZooKeeper 领导者（实际是它的 ZAB 层）把多个客户端操作合成一批，高效地发到网络上、高效地写盘，对网络和磁盘来说，一次送 N 个小东西往往比一个一个送高效得多，这只有在领导者同时看到很多请求、也就是活跃客户端很多时才有效；二是异步操作让每个客户端很容易同时有很多未完成的写，给领导者攒出大的批次。担心的是在途的操作可能被重排，ready 之前的写和 ready 被重排，别的客户端就可能先看到 ready。所以 ZooKeeper 保证一个客户端操作的 FIFO 顺序，这只是每客户端的保证，不同客户端的并发操作之间没有顺序保证。领导者怎样知道客户端希望的顺序？论文没说，大概是客户端库给异步请求编号，领导者为每个会话跟踪下一个应该收到的编号，领导者故障时这些信息要能保留，所以客户端序号大概也放在复制的日志条目里。
+        </p>
+
+        <h3>ZK 的读可能看不到最近完成的写</h3>
+        <p>
+            因为客户端的跟随者可能落后（不在那次写的多数派里）。什么时候读看不到最近的写也没关系？只是显示给人看的数据；只读数据；能被检查的数据，比如 GFS 的 chunkserver 列表。什么时候不行？读-改-写，比如给计数器加一；一组数据项需要彼此一致时。
+        </p>
+        <h3>ZK 对读还是提供了一些保证</h3>
+        <ul>
+            <li>每个客户端看到的写都以同样的顺序出现（按 ZXID）。所有写从整体看是线性一致的，论文第 2.3 节说"写是线性一致的"，更准确地说是 A-线性一致（见下）；修改状态的操作彼此之间线性一致。</li>
+            <li>一个客户端的读能看到它自己之前所有的写，所以跟随者可能要推迟一个读。</li>
+            <li>一个客户端的读只会在时间上向前（按 ZXID），即使客户端换了 ZK 跟随者！</li>
+            <li>"客户端 FIFO 顺序"，对上面的例子足够了。</li>
+        </ul>
+        <p>
+            Morris 解释怎样实现"读只向前"：每个日志条目被领导者标上 ZXID。副本回复客户端的读时，附上它执行这个读时紧接着之前那个日志条目的 ZXID；客户端记住见过的最大 ZXID，向同一个或另一个副本发请求时带上它，副本就知道必须用至少到这个点的数据回复。如果这个副本更落后，它必须等日志追到这个点再回复（或者拒绝，让客户端找别人）。读看到自己的写也一样：客户端先给领导者发了写，再给副本发读，副本要等到看到并执行了这个客户端之前的写。（FAQ：一个会话的所有请求都发给同一个跟随者，所以它知道这个客户端有一个写还没出现在领导者发来的已提交操作流里。）副本返回的 ZXID 可以是最后修改这一行的写的编号，也可以干脆是日志里最后提交的操作的编号，只要大于等于最后修改它的写就行。
+        </p>
+        <p>
+            要读到最新数据怎么办？有一个 sync 操作，本质上是一个写：它像写一样穿过系统，出现在副本的日志里。先 sync 再读，由客户端 FIFO 顺序，读必须看到至少到 sync 那个点的状态。代价是把一次便宜的读变成要经过领导者的 sync，不需要就别用。
+        </p>
+        <p>
+            FAQ：为什么 ZooKeeper 回复过时数据可以接受？领导者努力让所有跟随者保持最新，跟随者通常只落后几个写（或几批写）。而且即使 ZooKeeper 保证在执行读的那一刻是最新的，结果在回复到达客户端时也可能已经过时了，别的客户端可能紧接着发了一个写。典型用法是 MapReduce worker 注册自己、在 coordinator 写任务分配的目录里找活干，每 10 秒查一次或用 watch，都会比分配晚一点听到，任务足够长时这点延迟无所谓。会出问题的情形是不同客户端互相对照：C1 读到新值，之后 C2 读到旧值，这在线性一致的系统里不会发生，在 ZooKeeper 里可能。FAQ 也解释了 A-线性一致：客户端可以发很多异步请求而不等待，按普通线性一致的规则它们是并发的，可以任意顺序执行；ZooKeeper 保证按客户端发出的顺序执行，论文称之为 A-线性一致（asynchronous linearizability）。只有更新是 A-线性一致的，读不是，因为作者希望读的总吞吐高，让副本不经领导者就满足读和维护 watch。
+        </p>
+
+        <h3>ready 文件和 watch 的时序</h3>
+        <p>
+            Morris 用 ready 文件的例子说明这些保证够不够用。写的部分很直接：全是写，写按线性顺序执行，master 的写按它指定的顺序进入日志。读的部分：worker 先 exists("ready")，存在的话再读 f1、f2。如果 exists 返回真，说明 worker 所连的副本已经执行了重建 ready 的那个写；由于一个客户端后续的读只会在日志里向前，读 f1、f2 一定能看到 ready 之前的那些写。
+        </p>
+        <p>
+            麻烦的情形：worker 看到 ready 存在时，那是<strong>上一次</strong>配置完成后建的 ready；然后 master 开始改配置，删 ready、写 f1、f2；worker 读 f1 时还是旧的，读 f2 时已经是新的，读到一个新旧混合的坏配置。像 Lab 3 那样简单的 put/get 系统也会遇到这个问题，而且没有工具应对。ZooKeeper 的办法是 exists 时设一个 watch：副本保证在合适的点发出 watch 通知，相对于对这个客户端读请求的回复，通知一定先于任何"看到了触发 watch 的那个操作之后的日志"的读结果。于是 delete ready 触发通知，如果读 f2 会看到之后的新写，worker 一定先收到通知，知道要重来。watch 表由副本维护；副本崩溃时客户端会收到一个"你连的副本挂了"的通知，知道要全部重新设置。
+        </p>
+
+        <h3>一些和性能有关的实现细节</h3>
+        <ul>
+            <li>数据必须放得进内存，所以读很快（不用读盘），所以不能在 ZooKeeper 里存很大的数据。Morris：存 100 MB 很好，存 100 GB 很糟，所以人们用它存配置信息，而不是大网站的真实数据。</li>
+            <li>ZK 把写记到磁盘日志里，所以已提交的更新在崩溃或断电时不会丢；这影响性能，批处理能提高吞吐。</li>
+            <li>ZK 定期把完整快照写到磁盘，以便截断磁盘上的日志。"模糊"（fuzzy）技术允许在写操作进行的同时做快照。</li>
+        </ul>
+        <p>
+            FAQ 解释模糊快照：精确的快照对应日志里一个确定的点，要在创建和写快照时阻止所有写，可能大大降低性能。ZooKeeper 从内存数据库创建快照时仍允许写，所以快照不对应某个具体的日志点，包含了和创建过程并发的写的一个多少有点随机的子集。重启后从快照开始的那个点按顺序重放所有日志条目，就得到一致的状态。这依赖于日志里的更新是幂等的、描述的是客户端操作产生的结果状态，有些消息被应用两次也没关系。ZooKeeper 领导者把客户端 API 里的操作转换成幂等的事务：比如带版本号的条件 setData，版本号匹配时，领导者生成一个包含新数据、新版本号和更新后时间戳的 setDataTXN，执行两次结果相同。为什么重要：create(path, data, flags=sequential) 本身不幂等，执行两次会产生两个序号不同的 znode。领导者计算出结果（包括分配的序号，比如 x7），把转换后的操作放进日志；快照里已经有 x7、日志里也有这次创建时，重放不会再创建一个 x8。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、用 ZooKeeper API 做事：迷你事务和锁</h2>
+        <h3>计数器：为什么 put/get 接口不够</h3>
+        <p>
+            Morris 的第一个例子：ZooKeeper 里一个文件存一个数，多个客户端要给它加一（比如统计计数）。用 Lab 3 的 put/get 接口，x = get(k); put(k, x+1) 不是原子的：两个客户端都读到 10，都写 11，加了两次只加了一。在 ZooKeeper 里还有个额外问题：读可能是过时的，读到过时的 10，写 11，而真正的值已经是 11，应该写 12。ZooKeeper 的写法：
+        </p>
+        <pre><code>while true:
+    x, v = getData(f)
+    if setData(f, x + 1, v):
+        break
+    // maybe sleep for a randomized, exponentially growing time here</code></pre>
+        <p>
+            读到一个值和版本号，可能过时、可能最新。setData 一定发给领导者，只有当前版本仍是 v 时才写 x+1。如果读到的是最新的，期间也没人改，就成功；如果读到的是过时的，或者别的客户端抢先写了，版本号就不对，失败，重来。能保证结束吗？不保证，比如所连副本和领导者断开、一直给你过时数据；实际中领导者会把副本推向最新，最终会读到最新数据。一千个客户端同时加时，每轮总有一个成功（第一个到达领导者的），但完成全部要 N 平方量级的工作，Morris 的建议是在失败后睡一个随机的、每次翻倍范围的时间，即指数退避，和 Raft 的选举类似；更好的是改用下面的可扩展锁让加一逐个进行。
+        </p>
+        <p>
+            这叫<strong>迷你事务</strong>（mini-transaction）：读、改、写三步本身不是原子的，但一旦整个循环成功退出，效果就是原子的读-改-写。它不是数据库那种能读写成千上万项的通用事务，只是对一份数据的原子操作，但足以实现加一等。VMware FT 需要的 test-and-set 也能这样实现：读到 0 就带着版本号尝试写 1，领导者接受了就是我赢了。
+        </p>
+
+        <h3>简单锁和羊群效应</h3>
+        <pre><code>1. if create("f", ephemeral=true): return   // acquired
+2. if exists("f", watch=true):
+3.     wait for notification
+4. goto 1</code></pre>
+        <p>
+            要考虑和其他客户端的交错：两个客户端同时 create，领导者按某种顺序一个一个处理，恰好一个得到真。如果 create 失败后、exists 之前锁被释放了，exists 返回假，直接回第 1 步重试。如果持锁者正好在副本处理我的 exists 时释放：exists 一定在写流的两个日志条目之间执行；它在 delete 之前执行，就看到文件存在、把 watch 插进副本的 watch 表，然后 delete 执行时一定会通知我；它在 delete 之后执行，文件不存在，返回假，我回去 create。所以写有序、读发生在写之间的确定位置这一点很重要。
+        </p>
+        <p>
+            问题是"羊群效应"（herd effect）：一千个客户端等锁时，每次释放，所有等待者都被 watch 唤醒，都回去发 create，总共大约一千的平方个 create RPC，打在 ZooKeeper 上。这叫不可扩展的锁。
+        </p>
+        <h3>可扩展锁（第 2.4 节，第 6 页的伪代码）</h3>
+        <pre><code>1. n = create("lock/f-", sequential=true, ephemeral=true)
+2. C = getChildren("lock")
+3. if n is the lowest znode in C: return   // acquired
+4. p = the znode in C ordered just before n
+5. if exists(p, watch=true):
+6.     wait for watch event
+7. goto 2
+
+release: delete(n)</code></pre>
+        <p>
+            顺序文件为各个客户端排好了拿锁的顺序：我的序号最小就拿到锁；否则只等排在我前面那一个的文件被删除。为什么等到通知后要回到第 2 步重新列文件，而不是直接继续等？因为前一个可能还没拿到锁就死了，它的临时文件被系统删掉，我就得改为等再前一个。为什么没有羊群效应？每个等待者只盯着比自己小一号的那个文件，释放锁时只有一个客户端收到通知、去列文件、拿到锁，每次释放和获取的代价是常数个 RPC，与等待者多少无关。Morris 说他第一次见这个模式是在线程系统的可扩展锁里，ZooKeeper 能表达它让他印象深刻。（FAQ 指出论文第 6 页读锁的伪代码跳到第 3 行、写锁跳到第 2 行，前者大概是个 bug。）
+        </p>
+
+        <h3>这些锁和 Go 的互斥锁不一样</h3>
+        <p>
+            Morris 说他有点不明白论文为什么花这么多篇幅讲锁。Go 的线程不会随便死掉，所以互斥锁给你的是锁里一串操作的原子性，没人会看到更新到一半的数据。ZooKeeper 的锁不是这样：持锁者失败，锁就被释放，别人可以拿到；如果它更新了一半就崩溃，你拿到锁看到的是一团糟的数据。所以分布式里这样用锁有两种出路：一是每个拿到锁的人都准备好收拾前任留下的烂摊子，判断前任是不是崩溃在半途、怎样修复，比如前面的 ready 文件方案；二是用作"软锁"，保护的东西本身就能容忍，比如 MapReduce 用它保证每个任务只有一个 worker 在执行，worker 拿锁做完一半崩溃了，锁被释放，下一个拿到的人看到没完成，重做就是了，MapReduce 本来就能应对崩溃的 worker。也可以用类似的代码选 master。有同学问 Go 里线程持锁时崩溃怎么办：Go 里确实有办法让单个线程崩溃（某些 panic），Morris 的建议是认为程序已经坏了，直接杀掉，因为持锁期间数据的不变式不成立，没有安全的办法继续；在 Go 的内存模型下玩 ready 标志这类技巧非常难，除非有释放锁、获取锁这样的 happens-before 关系。
+        </p>
+        <p>
+            Morris 对 ZooKeeper 的总结：两个要带走的点，一是从任意副本读以获得高性能的巧妙想法，牺牲了一些一致性；二是它设计出的 API 让它能成为通用的协调服务，能写迷你事务、自己构建锁，这是简单的 put/get 接口做不到的，虽然用起来要小心。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、性能怎么样</h2>
+        <h3>图 5：吞吐</h3>
+        <p>总体上能处理每秒几万次操作。讲义留了一组思考题：</p>
+        <ul>
+            <li>这算多吗？够吗？</li>
+            <li>为什么曲线越往右（读的比例越高）越高？</li>
+            <li>为什么 x=0（全是写）时，服务器越多性能越低？</li>
+            <li>为什么"3 台服务器"那条线在 100% 读时变成最差的？</li>
+            <li>x=0 时限制在 20000 的可能是什么？每个操作是一次 1000 字节的写……</li>
+        </ul>
+        <p>（前面关于领导者瓶颈和读由跟随者分担的讨论，就是前几个问题的答案方向。）</p>
+        <h3>延迟</h3>
+        <ul>
+            <li>为什么在乎延迟？好的目标是多少？</li>
+            <li>表 2 和第 5.2 节意味着 1.3 毫秒（1 / 776），对一个每次写请求后都等待的单个 worker（客户端）而言。</li>
+            <li>1.3 毫秒可能来自哪里？写盘？通信？计算？（考虑到机械磁盘的转速，怎么能这么快？）</li>
+            <li>为什么只有约每秒 2000 次请求，而不是图 5 的 20000？</li>
+        </ul>
+        <p>FAQ：三台 ZooKeeper 服务器每秒处理 21000 次写；典型的 6.5840 Raft 三台服务器每秒提交几十次操作（用机械磁盘），用 SSD 大概几百次。</p>
+        <h3>ZK 服务器故障后恢复要多久</h3>
+        <ul>
+            <li>这是重要的考虑吗？图 8。</li>
+            <li>领导者故障：为超时和选举暂停，看图大约几秒。</li>
+            <li>跟随者故障：总吞吐短暂下降。为什么没有为超时而长时间暂停？</li>
+            <li>领导者恢复时间的权衡和障碍可能是什么？</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>七、总结</h2>
+        <p>
+            ZooKeeper 非常成功，是构建容错应用的好基础，维基百科页面上有用它的项目列表。可以改进的地方：
+        </p>
+        <ul>
+            <li>可惜读不是线性一致的；</li>
+            <li>会话很粗糙，也许每个 znode 一个租约更好；</li>
+            <li>不容易分片：znode 树没有明显可以切开的地方，会话是全局的；</li>
+            <li>多 znode 的事务会很好；</li>
+            <li>看看 etcd 和 consul 的其他设计选择。</li>
+        </ul>
+        <p>
+            FAQ 里的其他问答：ZooKeeper 的领导者怎么选出来？ZAB 是原子广播系统，像 Raft 一样内置领导者选举。数据库要多大内存？论文没报告，它面向配置和协调而不是通用数据存储，内存数据库是合理的，比如给 GFS 的 coordinator 用，那么多数据装得进一台配置不错的服务器的内存。客户端收不到回复会重发吗，怎样避免重复执行？论文没说，大概领导者跟踪每个会话收到并提交了哪些请求编号以过滤重复；如果客户端发请求时 ZooKeeper 恰好让它的会话过期，客户端可能无法判断请求是否执行了。能不停机加服务器吗？论文发表时成员是静态的，现在 ZooKeeper 支持动态重配置（有一篇 ATC 2012 的论文），可以和两年后 Raft 的联合共识比较一下。watch 在客户端库里怎么实现？大概是注册一个回调；Go 的 ZooKeeper 客户端给 GetW() 传一个 channel，watch 触发时往 channel 里发一个 Event。双屏障用在哪？一个大计算分两个阶段，所有阶段 1 的结果都出来之前不能开始阶段 2，用屏障；阶段很多或者循环迭代时用双屏障，离开屏障时每个客户端 watch 其他所有参与者的 znode，等它们都消失。
+        </p>
+        <p>下周：分布式事务。</p>
+    </section>
+
+    <section>
+        <h2>课前问题</h2>
+        <p>
+            ZooKeeper 的一种用法是作为容错的锁服务（见第 6 页 "Simple locks" 一节）。为什么两个客户端不可能拿到同一把锁？特别是，ZooKeeper 怎样判断一个客户端已经失败、可以把它的锁交给别的客户端？
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>MIT 6.5840: Distributed Systems &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="08_线性一致性.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="10_Lab3答疑.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

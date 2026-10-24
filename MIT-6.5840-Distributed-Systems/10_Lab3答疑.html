@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十讲：Lab 3 答疑：怎样组织和调试 Raft | MIT 6.5840 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="09_ZooKeeper.html">&larr; 上一讲</a>
+    <span>MIT 6.5840: Lecture 10</span>
+    <a href="11_分布式事务.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十讲：Lab 3 答疑：怎样组织和调试 Raft</h1>
+        <p class="subtitle">Raft 库的两种结构：多线程加锁、单线程状态机；安全性和活性；怎样开始一个实验；调试的循环；锁的用法和"持锁不发 RPC"；单线程事件循环的写法；代码导览的顺序；助教讲座：Go 内存模型、闭包和循环变量、周期性任务和 rf.killed()、锁保护的是不变式（银行转账的例子）、条件变量的固定写法、channel 是同步的、两个常见的 Raft bug（持锁发 RPC 导致死锁、拿到旧任期的选票就当选）、DPrintf、Ctrl-\、-race、并行跑测试</p>
+        <div class="author-meta">
+            主讲：Frans Kaashoek（2026 年春季，答疑课）；2020 年对应的是助教的 Go、线程与 Raft 讲座<br>
+            资料来源：<a href="https://pdos.csail.mit.edu/6.824/notes/l-raft-QA.txt" target="_blank">2026 讲义</a>、2020 讲义 <a href="http://nil.csail.mit.edu/6.824/2020/notes/l-go-concurrency.txt" target="_blank">l-go-concurrency</a>、<a href="https://www.youtube.com/watch?v=UzzcUS2OHqo" target="_blank">2020 录像：Go, Threads, and Raft</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、这一讲是什么</h2>
+        <p>
+            2026 年的第 10 讲是 Lab 3A/3B 的答疑课：课前每人提交一个关于实验的问题，比如做实验时想不通的地方、没弄懂的地方、印象深的 bug。讲义只有提纲和一次代码导览的顺序，所以这一页把 2020 年助教讲的那一讲（Go 并发模式和 Raft 实现的常见 bug、调试技巧）一起整理进来，两者讲的是同一件事：怎样把 Raft 写对。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、2026 答疑课提纲</h2>
+        <h3>Raft 库的两种结构</h3>
+        <ul>
+            <li>多线程加锁；</li>
+            <li>单线程状态机。</li>
+        </ul>
+        <p>两者都不严格优于对方，也可以有别的方案。</p>
+        <h3>分布式系统里的正确性</h3>
+        <ul>
+            <li><strong>安全性</strong>（safety）：永远不返回错误的结果；</li>
+            <li><strong>活性</strong>（liveness）：最终会返回一个结果。</li>
+        </ul>
+        <p>问题：举出你的解法里一个安全性 bug 和一个活性 bug 的例子。（比如同一任期选出两个领导者是安全性 bug；因为选举超时没随机化而永远分票、选不出领导者是活性 bug。）</p>
+        <h3>怎样开始一个实验</h3>
+        <p>
+            先让第一个测试用例跑通：填好 RequestVote 的结构体，发一个 RPC。之后就容易看清全貌了。另一种策略：先读完所有指南、读测试代码等等。
+        </p>
+        <h3>调试</h3>
+        <ul>
+            <li>用竞态检测器跑；</li>
+            <li>把所有动作和消息以容易搜索的方式记录下来，用标准格式：源、目的、操作码、raft 状态……；</li>
+            <li>跑测试用例：通过了就下一个；失败了就循环：研究测试用例，对可能的错误形成假设，研究日志和图 2，用竞态检测器跑，修改代码再试。</li>
+        </ul>
+        <h3>多线程的 Raft 库</h3>
+        <ul>
+            <li>很多线程：Start() 的线程、读 applyCh 的线程；</li>
+            <li>很多 RPC 线程，并行地和其他节点通信；</li>
+            <li>很多 RPC 处理线程（由 RPC 包启动）；</li>
+            <li>raft 状态用一把锁保护；</li>
+            <li>一个线程负责往 applyCh 写，用条件变量通知它。</li>
+        </ul>
+        <h3>加锁</h3>
+        <ul>
+            <li>Raft 的锁让操作串行化；</li>
+            <li>RPC 处理函数持有 Raft 的锁，所以是原子的，并行度很低；</li>
+            <li>线程在 RPC 期间不持锁。风险：如果在 RPC 期间持锁，可能死锁。</li>
+        </ul>
+        <h3>单线程状态机</h3>
+        <ul>
+            <li>观察：反正也没多少并行，主要用处是并行地发 RPC；</li>
+            <li>一个线程运行 Raft 协议：接收输入事件（比如时钟滴答、RPC 请求、回复）；处理事件，不加锁地更新 raft 结构，同时收集输出事件（持久化、发 RPC）；执行输出事件，先持久化，再发 RPC 请求；</li>
+            <li>一个线程做 applier，要把 applier 和状态机之间的状态分开，共享的状态（比如日志）用锁保护。</li>
+        </ul>
+        <h3>代码导览的顺序</h3>
+        <p>
+            Raft 结构体 → ticker → 选举超时 → 发起选举 → 处理 RequestVote → 成为领导者 → 发送 append → 处理 AppendEntries 请求 → 处理 AppendEntries 回复 → 提交 → applier → Start()。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、2020 助教讲座：Go 并发原语</h2>
+        <h3>Go 内存模型</h3>
+        <p>
+            为什么布置这篇阅读？它给出了在 Go 里正确写多线程代码的具体例子（后半部分有正确和错误代码的对比）。文档开头说"如果你需要读懂这个，你就太聪明了"，助教认为这是好建议：把注意力放在怎样写出正确的代码，不必花太多精力推理 happens-before 关系、精确解释错误代码为什么错。
+        </p>
+        <p>
+            为什么用 goroutine / 并发：表达力，和性能（并行）。实验里在乎的是表达力而不是性能，只在乎代码正确。所以从 Lab 2 往后用线程时不要搞追求 CPU 性能的花样，比如细粒度加锁，写容易推理的代码，用大锁保护大的临界区。
+        </p>
+        <h3>闭包和循环变量</h3>
+        <p>
+            goroutine 是轻量线程，彼此并发运行；main goroutine 退出时整个程序终止，所有 goroutine 都被终止。闭包能访问外层作用域的变量，和 goroutine 结合得很好。实验里常见的模式是在循环里为每个节点开一个 goroutine 并行发 RPC（候选人向所有跟随者要票，领导者向所有跟随者发 AppendEntries），因为 RPC 是阻塞的，不能一个一个串行地发。
+        </p>
+        <pre><code>for i := 0; i &lt; 5; i++ {
+    go func(x int) {
+        sendRPC(x)
+    }(i)
+}</code></pre>
+        <p>
+            要把 i 作为参数传进去。如果内层函数直接引用外层的 i，循环会继续修改 i，goroutine 真正执行到那一行时 i 可能已经变了，演示里打印出了 4 5 5 5 5。助教说在办公时间里见过这个坑很多次。（Go 1.22 起，for 循环每次迭代会创建新的循环变量，这个坑在新版本里已不存在，但旧代码里仍常见。）
+        </p>
+        <h3>周期性任务和 rf.killed()</h3>
+        <pre><code>func (rf *Raft) ticker() {
+    for !rf.killed() {
+        // do something periodically, e.g. check election timeout
+        time.Sleep(10 * time.Millisecond)
+    }
+}</code></pre>
+        <p>
+            要周期性地做某事，一个独立的函数在无限循环里干活再 time.Sleep 就够了。要在调用 Kill() 后停掉这些后台 goroutine（不留一堆随机的 goroutine 在后台跑），可以用一个由锁保护的共享变量 done，实验里直接用 rf.killed()。有同学问为什么 done 要加锁：要让一个线程的写被另一个线程看到，必须用 Go 的同步原语（channel，或者锁和条件变量）。不加锁，编译器可能把对 done 的读提到循环外面只读一次，循环就变成死循环；助教在 Piazza 上贴过一个真的被这样优化的程序。规则：访问共享变量前持锁。
+        </p>
+        <h3>锁保护的是不变式</h3>
+        <p>
+            一千个 goroutine 各给计数器加一，不加锁最后打印出 947，丢了更新；加锁后打印 1000。defer mu.Unlock() 把解锁安排在当前函数结束时执行，不容易忘，RPC 处理函数里常用"加锁，defer 解锁，然后干活"的模式。（演示程序只等了一秒就打印，严格说不保证所有 goroutine 都已完成，正确做法是用 WaitGroup 等它们。）
+        </p>
+        <p>
+            但"访问共享数据时加锁"不是全部。银行的例子：Alice 和 Bob 各有余额，两个 goroutine 各自来回转账一千次，每次改余额都加了锁：
+        </p>
+        <pre><code>// wrong: decrement and increment are each atomic, but not together
+mu.Lock()
+alice -= 1
+mu.Unlock()
+mu.Lock()
+bob += 1
+mu.Unlock()
+
+// right: the whole transfer is one critical section
+mu.Lock()
+alice -= 1
+bob += 1
+mu.Unlock()</code></pre>
+        <p>
+            再加一个审计线程，持锁检查 alice + bob 是否等于总额，前一种写法会多次发现总额不对，虽然最终钱不会丢。程序员想要的不变式是"alice + bob 等于常数"，转账中途会暂时破坏它。所以正确的理解是：锁保护不变式。拿到锁，做可能暂时破坏不变式的事，在释放锁之前恢复它，这样没人能看到进行到一半的更新。锁让一整段代码原子化，而不只是单条语句。
+        </p>
+        <h3>条件变量</h3>
+        <p>
+            以 Lab 2A 的计票为例（就是第二讲的 vote-count 系列）：候选人要并行地向所有节点要票，拿到多数就不必等其余回复。先在锁外发 RPC 要票，拿到回复后再加锁更新 count 和 finished；主线程循环加锁检查"count &gt;= 5 或 finished == 10"。这是正确的，但它在忙等，占满一个核的 CPU，可能拖慢程序其余部分让它无法前进。加一句 time.Sleep(50 * time.Millisecond) 能缓解，但助教提醒：代码里出现拍脑袋的常数，往往说明做法不够干净。正解是条件变量，固定写法：
+        </p>
+        <pre><code>// side that changes the data
+mu.Lock()
+// change the shared data
+cond.Broadcast()
+mu.Unlock()
+
+// side that waits for a condition
+mu.Lock()
+for !condition {
+    cond.Wait()   // atomically releases mu and sleeps; re-acquires mu before returning
+}
+// now condition is true and we hold the lock
+mu.Unlock()</code></pre>
+        <ul>
+            <li>条件变量和一把锁关联：cond := sync.NewCond(&amp;mu)。</li>
+            <li>改数据的一方：加锁、修改、Broadcast、解锁，Broadcast 必须在持锁时调用。</li>
+            <li>等待的一方：加锁，在 for 循环里检查条件，不满足就 Wait；Wait 原子地释放锁并把自己加入等待列表，返回前重新拿到锁，所以条件检查总在持锁时进行。</li>
+            <li>只在可能使条件变化的事发生时才被唤醒，不会周期性地醒来检查一个不可能变化的条件。按这个模式写就能避开"丢失唤醒"之类的竞态。</li>
+            <li>Signal 只唤醒一个等待者，Broadcast 唤醒所有。这门课里一律用 Broadcast，Signal 是为效率准备的，实验不需要。</li>
+        </ul>
+        <h3>channel</h3>
+        <p>
+            channel 不像有存储容量的队列，它是同步的：没人接收时发送会阻塞，直到有人接收；没人发送时接收也会阻塞。演示：一个 goroutine 等一秒再接收，主线程的发送就被阻塞了整整一秒。在同一个 goroutine 里先发后收会死锁，所有线程都睡着时 Go 能检测出死锁并崩溃；但如果另有一个 goroutine 在空转，检测器就发现不了，程序只是挂着不动。
+        </p>
+        <p>
+            带缓冲的 channel 有内部存储，填满之前发送不阻塞，填满之后就和无缓冲的一样。助教建议尽量不用带缓冲的 channel，它们很少真正解决问题，而且又是一个拍脑袋的数字。channel 适合的场景：生产者/消费者（一批 goroutine 产生结果，主线程不断接收处理）；等待 N 件事完成（效果和 WaitGroup 一样）。不适合的：唤醒一个可能在等、也可能没在等的 goroutine。助教本人大多数时候不用 channel，用共享内存加互斥锁和条件变量，觉得更容易推理。
+        </p>
+        <p>
+            WaitGroup：Add 增加内部计数，Wait 等到 Done 被调用的次数和 Add 一样多。要在启动 goroutine <strong>之前</strong>调用 Add，这样 Done 不可能先于对应的 Add 发生。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、两个常见的 Raft bug</h2>
+        <h3>bug 1：持锁发 RPC，导致死锁</h3>
+        <pre><code>func (rf *Raft) callRequestVote(server int) bool {
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
+    args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me}
+    var reply RequestVoteReply
+    ok := rf.sendRequestVote(server, &amp;args, &amp;reply)   // lock held during the RPC!
+    // ...
+    return ok
+}</code></pre>
+        <p>
+            服务器 0 和服务器 1 同时发起选举：0 持着自己的锁给 1 发 RequestVote，1 也持着自己的锁给 0 发 RequestVote；双方的 RequestVote 处理函数一开始都要拿锁，拿不到，因为锁被各自那个正在等 RPC 回复的线程持着。日志里看到 0 给 2 的请求完成了，给 1 的请求一直没完成，1 那边对称。解法：不要在 RPC 期间持锁。这里甚至根本不需要锁：在 attemptElection 里持锁时读出当前任期，作为参数传给 callRequestVote；或者持锁准备参数，发 RPC 前解锁，处理回复时再加锁。另一个原因：有些测试的不可靠网络会把 RPC 延迟比如 50 毫秒，持锁发 RPC 意味着这 50 毫秒里别的操作都做不了。
+        </p>
+        <h3>bug 2：用旧任期的选票当选，同一任期出现两个领导者</h3>
+        <pre><code>// after collecting votes in a goroutine:
+rf.mu.Lock()
+defer rf.mu.Unlock()
+votes++
+if votes &lt;= len(rf.peers)/2 {
+    return
+}
+// BUG: must re-check that we are still a candidate in the same term
+if rf.state != Candidate || rf.currentTerm != termWhenElectionStarted {
+    return
+}
+rf.state = Leader</code></pre>
+        <p>
+            日志里服务器 0 和服务器 1 都在任期 2 成了领导者。经过：服务器 0 在任期 1 发起选举，拿到了另两台的票，但回复被延迟了，没及时处理；其间服务器 1 选举超时，在任期 2 发起选举（不能是任期 1，它已经在任期 1 投给了 0），服务器 2 和服务器 0 都投给了它，服务器 0 收到更高任期的请求，把任期改成 2、退回跟随者，这都是对的。真正的问题在于服务器 0 后来处理那些任期 1 的选票时，凑够了多数就把自己设成了领导者，而此时它的任期已经是 2。因为发 RPC 时不持锁（这本身是对的），从发起选举到处理选票之间，状态可能已经变了，必须重新检查当初的假设：自己还是候选人，任期还是发起选举时的任期。有同学问只检查状态够不够：不够，可能已经在更高任期又发起了一次选举；只检查任期则足够。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、调试技巧</h2>
+        <ul>
+            <li><strong>DPrintf</strong>：骨架代码 util.go 里的 DPrintf 是对 log.Printf 的包装，可以一键打开或关闭调试输出，关掉后测试输出就是干净的。演示：测试挂住不动，先确认三台服务器都初始化了，再在发起选举、发送 RequestVote 的地方逐步加打印，缩小范围，最后发现是在已经持锁时又去拿同一把锁。</li>
+            <li><strong>在测试代码里打印测试动作</strong>：比如在 test_test.go 里 cfg.disconnect(leader1) 之后加 DPrintf("TESTACTION: leader disconnects")，就能在自己的日志里看出 bug 出现在测试的哪个阶段。演示：第二个测试在"旧领导者重新加入"之后失败，加打印后发现新领导者发了心跳但没人收到，原因是心跳的 RPC 期间持着锁，就是上面的 bug 1。</li>
+            <li><strong>Ctrl-\</strong>：发送 SIGQUIT，Go 默认的处理会打印所有 goroutine 的栈再退出，能直接看出死锁卡在哪个函数。泄漏的 goroutine 进程可以用 ps 找到，用 kill -QUIT pid 或 kill -KILL pid 处理。</li>
+            <li><strong>-race</strong>：go test -race -run 2A。提交前一定要开竞态检测跑一遍。它不是证明，没检测到不代表没有竞态，也有它检测不了的其他竞态条件。演示：它报告第 103 行读了 currentTerm、第 412 行写了 currentTerm，中间没有锁，补上锁即可。</li>
+            <li><strong>并行地大量运行测试</strong>：并发 bug 往往很少出现，助教有一个脚本（以前一位助教写的，在 Piazza 上）指定次数和并行度反复跑测试，助教本人会跑 1000 次。</li>
+            <li>通用工具：man 和 tldr 查命令用法；重定向 &gt;（只重定向 stdout）、&amp;&gt;（stdout 和 stderr 都重定向）；tee 和 |（写文件同时显示，|&amp; 包括 stderr）；head、tail、less、grep -in、ripgrep。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>课前问题</h2>
+        <p>
+            今天是 Lab 3A/3B 的答疑课。提交一个关于实验的问题：比如做实验时想不明白的地方、没弄懂的地方、一个印象深刻的 bug，或者随便什么。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>MIT 6.5840: Distributed Systems &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="09_ZooKeeper.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="11_分布式事务.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
