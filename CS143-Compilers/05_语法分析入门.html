@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第五讲：语法分析入门 | Stanford CS143 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="04_词法分析的实现.html">&larr; 上一讲</a>
+    <span>Stanford CS143: Lecture 5</span>
+    <a href="06_错误处理语法制导翻译与递归下降.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第五讲：语法分析入门</h1>
+        <p class="subtitle">正则语言为什么不够（有限自动机只能按模计数，认不出配对的括号）；语法分析器的输入输出；上下文无关文法的定义、记号和语言；推导和语法分析树，最左推导和最右推导；二义文法，用分层改写消除优先级歧义，悬空 else 的改写，以及 bison 的结合性和优先级声明</p>
+        <div class="author-meta">
+            主讲：Fredrik Kjolstad（2026 年春季）；录像主讲：Alex Aiken<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs143/lectures/lecture05.pdf" target="_blank">课件</a>（2026 年 4 月 14 日）、<a href="https://www.youtube.com/watch?v=ymCu9xH5LrI" target="_blank">录像第 5 周</a>（05-01 Introduction to Parsing 到 05-04 Ambiguity）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、正则语言的局限</h2>
+        <p>
+            形式语言在计算机科学里很重要，在编程语言里尤其如此。正则语言是广泛使用的形式语言里最弱的一种，应用很多，但很多语言不是正则的。比如配对的括号：
+        </p>
+        <p>
+            $$\{ (^i )^i \mid i \ge 0 \}$$
+        </p>
+        <p>
+            也就是 ()、(())、((()))……这很能代表编程语言的结构：嵌套的算术表达式是这样，嵌套的 if-then-else 也是，if 的作用就像左括号。Cool 有显式的结束关键字 fi，很多语言没有，但嵌套结构隐含在那里。编程语言里到处是嵌套，正则表达式处理不了。
+        </p>
+        <p>
+            为什么？看一个两状态的自动机：开始状态和接受状态之间用 1 来回切换，它接受含奇数个 1 的串。喂给它七个 1，它在两个状态之间来回跳，最后停在接受状态。但它不知道自己到过接受状态几次，不记得串有多长，它能数的只有奇偶。
+        </p>
+        <p>
+            一般地，有限自动机只能做"模 k 计数"，k 是状态数：三个状态的机器可以知道长度能不能被 3 整除，但没法数到任意大的 i。直观上，自动机跑得足够久必然会重复经过某个状态，而它记不住自己经过了几次。要认出配对的括号，就得数到任意大，有限的状态做不到。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、语法分析器做什么</h2>
+        <p>
+            输入是词法分析器给出的 token 序列，输出是程序的语法分析树（在实际编译器里通常是抽象语法树，下一讲讲）。比如 Cool 的
+        </p>
+        <pre><code>if x = y then 1 else 2 fi</code></pre>
+        <p>
+            词法分析器输出 <code>IF ID = ID THEN INT ELSE INT FI</code>，语法分析器据此建出一棵树，把嵌套结构显式表达出来：根是 IF-THEN-ELSE，三个孩子分别是条件 <code>=</code>（下面挂两个 ID）、then 分支 INT、else 分支 INT。
+        </p>
+        <table>
+            <thead><tr><th>阶段</th><th>输入</th><th>输出</th></tr></thead>
+            <tbody>
+                <tr><td>词法分析器</td><td>字符串</td><td>token 串</td></tr>
+                <tr><td>语法分析器</td><td>token 串</td><td>语法树</td></tr>
+            </tbody>
+        </table>
+        <p>
+            Aiken 补充了两点。第一，有时语法分析树只是隐式的，编译器未必真的建出完整的树，很多编译器建，很多不建。第二，有的编译器把两个阶段合成一个，全部交给语法分析器做，语法分析技术足够强，能把词法分析也包进来；但大多数编译器仍然这样分工，因为正则表达式和词法分析实在太匹配了。
+        </p>
+        <p>
+            并不是所有 token 串都是程序，语法分析器要区分合法和非法的 token 串，并对非法的报错。这需要两样东西：一种描述合法 token 串的语言，一种区分合法和非法的方法。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、上下文无关文法</h2>
+        <p>
+            编程语言的结构是递归的。Cool 的一个表达式 EXPR 可以是 <code>if EXPR then EXPR else EXPR fi</code>，可以是 <code>while EXPR loop EXPR pool</code>，等等，而这些结构又由别的表达式递归组成。上下文无关文法（CFG）是描述这种递归结构的自然记号。
+        </p>
+        <p>
+            一个 CFG 由四部分组成：
+        </p>
+        <ul>
+            <li>终结符集合 $T$。</li>
+            <li>非终结符集合 $N$。</li>
+            <li>开始符号 $S$，是一个非终结符。</li>
+            <li>一组产生式 $X \to Y_1 Y_2 \ldots Y_n$，其中 $X \in N$，$Y_i \in T \cup N \cup \{\varepsilon\}$。</li>
+        </ul>
+        <p>
+            记号约定：非终结符大写，终结符小写，第一条产生式的左边是开始符号。同一个非终结符的多条产生式用竖线合写。
+        </p>
+        <p>
+            配对括号的文法：
+        </p>
+        <p>
+            $$S \to (S) \qquad S \to \varepsilon$$
+        </p>
+        <p>
+            一个配对括号串要么是左括号、一个配对括号串、右括号，要么是空串。非终结符只有 S，终结符是 ( 和 )，开始符号是 S。也可以合写成 $S \to (S) \mid \varepsilon$。
+        </p>
+
+        <h3>文法的语言</h3>
+        <p>
+            把产生式读作替换规则：$X \to Y_1 \ldots Y_n$ 表示 X 可以被替换为 $Y_1 \ldots Y_n$，把 X 拿掉，换上右边的串。
+        </p>
+        <ol>
+            <li>从只含开始符号 S 的串开始。</li>
+            <li>把串里任一个非终结符 X 换成 X 的某条产生式的右边。</li>
+            <li>重复第 2 步，直到串里没有非终结符。</li>
+        </ol>
+        <p>
+            形式地，如果有产生式 $X_i \to Y_1 \ldots Y_m$，就有一步
+        </p>
+        <p>
+            $$X_1 \ldots X_{i-1} X_i X_{i+1} \ldots X_n \to X_1 \ldots X_{i-1} Y_1 \ldots Y_m X_{i+1} \ldots X_n$$
+        </p>
+        <p>
+            如果 $X_1 \ldots X_n \to \cdots \to Y_1 \ldots Y_m$ 经过零步或多步，记作 $X_1 \ldots X_n \to^* Y_1 \ldots Y_m$。文法 G 的语言是
+        </p>
+        <p>
+            $$L(G) = \{ a_1 \ldots a_n \mid S \to^* a_1 \ldots a_n \text{，且每个 } a_i \text{ 都是终结符} \}$$
+        </p>
+        <p>
+            就是从开始符号能推出的所有纯终结符串。终结符之所以叫终结符，是因为没有规则能替换它们，一旦生成就永远留在串里。在编程语言里，终结符应该就是语言的 token。
+        </p>
+
+        <h3>例子</h3>
+        <p>
+            Cool 的一个片段：
+        </p>
+        <p>
+            $$\text{EXPR} \to \texttt{if}\ \text{EXPR}\ \texttt{then}\ \text{EXPR}\ \texttt{else}\ \text{EXPR}\ \texttt{fi} \mid \texttt{while}\ \text{EXPR}\ \texttt{loop}\ \text{EXPR}\ \texttt{pool} \mid \texttt{id}$$
+        </p>
+        <p>
+            它的语言里有：<code>id</code>；<code>if id then id else id fi</code>；<code>while id loop id pool</code>；<code>if while id loop id pool then id else id fi</code>（while 循环当 if 的条件，你平时不会这样写，但语法上完全合法）；<code>if if id then id else id fi then id else id fi</code>。
+        </p>
+        <p>
+            简单算术表达式，这一周和下一周的贯穿例子：
+        </p>
+        <p>
+            $$E \to E + E \mid E * E \mid (E) \mid \texttt{id}$$
+        </p>
+        <p>
+            语言里有 <code>id</code>、<code>id + id</code>、<code>id + id * id</code>、<code>(id + id) * id</code> 等等。
+        </p>
+
+        <h3>还缺什么</h3>
+        <ul>
+            <li>CFG 只回答"在不在语言里"。我们还需要输入的语法分析树。</li>
+            <li>要能得体地处理错误，给程序员反馈。</li>
+            <li>需要 CFG 的实现，比如 bison。</li>
+        </ul>
+        <p>
+            另外，文法的写法很重要。很多文法生成同一个语言，但工具对文法的写法很敏感，只接受其中一些，有时必须改写文法才能让工具接受。正则表达式工具也有这个问题，但实践中很少遇到。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、推导和语法分析树</h2>
+        <p>
+            推导是从开始符号出发、一次应用一条产生式的序列 $S \to \cdots \to \cdots$。推导可以画成树：开始符号是根，应用 $X \to Y_1 \ldots Y_n$ 时，给节点 X 加上孩子 $Y_1, \ldots, Y_n$。
+        </p>
+        <p>
+            用算术文法推导 <code>id * id + id</code>：
+        </p>
+        <p>
+            $$E \to E + E \to E * E + E \to \texttt{id} * E + E \to \texttt{id} * \texttt{id} + E \to \texttt{id} * \texttt{id} + \texttt{id}$$
+        </p>
+        <p>
+            同时建树：根 E 先长出三个孩子 E、+、E；左边的 E 长出 E、*、E；然后三个 E 依次长出 id。
+        </p>
+        <p>
+            语法分析树的性质：
+        </p>
+        <ul>
+            <li>叶子是终结符，内部节点是非终结符。</li>
+            <li>按中序遍历叶子，得到的就是原始输入。</li>
+            <li>树表达了运算的结合关系，输入串本身没有。这棵树里 * 是 + 的子树，所以 * 结合得更紧，先算 E * E 再加。为什么选这棵树而不是另一棵，后面讲二义性时说。</li>
+        </ul>
+
+        <h3>最左推导和最右推导</h3>
+        <p>
+            上面的推导每一步都替换最左边的非终结符，叫<strong>最左推导</strong>。相应地，每步替换最右边的非终结符，就是<strong>最右推导</strong>：
+        </p>
+        <p>
+            $$E \to E + E \to E + \texttt{id} \to E * E + \texttt{id} \to E * \texttt{id} + \texttt{id} \to \texttt{id} * \texttt{id} + \texttt{id}$$
+        </p>
+        <p>
+            这两个推导得到同一棵语法分析树。这不是巧合，每棵语法分析树都有一个最左推导和一个最右推导，区别只在于树枝添加的顺序：应用了 E → E + E 之后，先长左子树就是最左推导，先长右子树就是最右推导。除此之外还有很多推导，可以按任意顺序选非终结符替换，但最左和最右是语法分析器实现里最重要的两种。
+        </p>
+        <p>
+            小结：我们关心的不只是 $s \in L(G)$，还要 s 的语法分析树。一个推导确定一棵语法分析树，但一棵语法分析树可以有很多推导。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、二义性</h2>
+        <p>
+            还是 $E \to E + E \mid E * E \mid (E) \mid \texttt{id}$ 和串 <code>id * id + id</code>。它有两棵语法分析树：
+        </p>
+        <ul>
+            <li>先用 E → E + E，再把左边的 E 换成 E * E：* 在下面，等于 (id * id) + id。</li>
+            <li>先用 E → E * E，再把右边的 E 换成 E + E：+ 在下面，等于 id * (id + id)。</li>
+        </ul>
+        <p>
+            这和"一棵树有很多推导"是两回事。这里是两个推导给出了完全不同的树。<strong>如果某个串有不止一棵语法分析树，文法就是二义的</strong>；等价地说，某个串有不止一个最左推导或不止一个最右推导。
+        </p>
+        <p>
+            二义性是坏事。一个程序有多棵树，就等于把"程序是什么意思"交给编译器去挑，让某些程序的含义不明确。
+        </p>
+
+        <h3>方法一：改写文法（分层）</h3>
+        <p>
+            最直接的办法是写一个新文法，生成同样的语言，但每个串只有一棵树：
+        </p>
+        <p>
+            $$\begin{aligned}
+            E &amp;\to E' + E \mid E' \\
+            E' &amp;\to \texttt{id} * E' \mid \texttt{id} \mid (E) * E' \mid (E)
+            \end{aligned}$$
+        </p>
+        <p>
+            用它分析 <code>id * id + id</code>：E 不再能直接生成 * ，要生成 + 只能用 E → E' + E。E' 要匹配 "id * 某某"，只能用 E' → id * E'（另一条带 * 的产生式以括号开头，对不上）。夹在 * 和 + 之间只有一个 id，所以这个 E' 只能变成 id。最后剩下的 E 只能先变 E' 再变 id。每一步都唯一确定。
+        </p>
+        <p>
+            这个文法把产生式分成两层，每层一个非终结符管一个运算符：
+        </p>
+        <ul>
+            <li>E 管 +：反复展开得到 E' + E' + ⋯ + E'，也就是若干个 E' 用加号连起来。</li>
+            <li>E' 管 *：反复展开得到若干个 id 或括号表达式用乘号连起来。</li>
+        </ul>
+        <p>
+            所有的 + 都必须先在外层生成，* 嵌在 + 的里面，更靠近叶子，所以 * 比 + 结合得更紧。括号里写的是 E 而不是 E'：括号的作用就是显式指定结合关系，让 + 可以出现在 * 的里面。
+        </p>
+
+        <h3>悬空 else</h3>
+        <p>
+            else 可选的 if 文法：
+        </p>
+        <p>
+            $$E \to \texttt{if}\ E\ \texttt{then}\ E \mid \texttt{if}\ E\ \texttt{then}\ E\ \texttt{else}\ E \mid \text{OTHER}$$
+        </p>
+        <p>
+            也是二义的。<code>if E1 then if E2 then E3 else E4</code> 有两棵树：else 属于外层 if（内层 if 没有 else），或者属于内层 if（一个 if-then-else 嵌在一个没有 else 的 if-then 里）。Aiken 说他知道的所有编程语言都要第二种：else 和最近的 then 配对。
+        </p>
+        <p>
+            规则是：<strong>每个 else 匹配最近的、还没有匹配的 then</strong>。据此把 if 分成两类：MIF 是所有 then 都已配对的 if，UIF 是里面有某个 then 没有配对的 if。
+        </p>
+        <p>
+            $$\begin{aligned}
+            E &amp;\to \text{MIF} \mid \text{UIF} \\
+            \text{MIF} &amp;\to \texttt{if}\ E\ \texttt{then}\ \text{MIF}\ \texttt{else}\ \text{MIF} \mid \text{OTHER} \\
+            \text{UIF} &amp;\to \texttt{if}\ E\ \texttt{then}\ E \mid \texttt{if}\ E\ \texttt{then}\ \text{MIF}\ \texttt{else}\ \text{UIF}
+            \end{aligned}$$
+        </p>
+        <ul>
+            <li>MIF 必须有 then 和 else，两个分支里嵌套的 if 也都必须配对。不是 if 的其他结构也算 MIF。</li>
+            <li>UIF 的一种情况是干脆没有 else。</li>
+            <li>关键情况：顶层的 if-then 有 else，但里面某处有未配对的 if。这时未配对的 if 只能在 else 分支里，不能在 then 分支里。如果 then 分支里有一个没配对的 then，外面这个 else 离它比离外层的 then 更近，按定义应该和它配对，矛盾。</li>
+        </ul>
+        <p>
+            回到 <code>if E1 then if E2 then E3 else E4</code>：else 属于外层的那棵树要求外层 then 分支是 MIF，而 <code>if E2 then E3</code> 不是 MIF，所以不成立；else 属于内层的那棵树是一个合法的 UIF（第一种情况，外层没有 else）。
+        </p>
+
+        <h3>方法二：消歧声明</h3>
+        <p>
+            Aiken 坦言，这个无二义的 if 文法又复杂又难懂。不幸的是，<strong>不可能自动把二义文法变成无二义文法</strong>，只能手工改写，结果是文法更复杂、更难读、更难维护。分层用得不小心也会把文法弄得很复杂。
+        </p>
+        <p>
+            另一条路是接受二义性，用更自然的二义文法，再配上消歧机制，告诉工具在有多棵树时选哪棵。大多数实用的语法分析工具采用这条路，最常见的是优先级和结合性声明。
+        </p>
+        <ul>
+            <li>$E \to E + E \mid \texttt{int}$ 即使只有一个中缀运算符也是二义的：int + int + int 可以先算左边也可以先算右边。bison 里写 <code>%left +</code> 声明 + 左结合，排除右边那棵树。</li>
+            <li>$E \to E + E \mid E * E \mid \texttt{int}$，int + int * int 有两棵树。写两条声明 <code>%left +</code> 和 <code>%left *</code>，两者都左结合，优先级由先后顺序决定：* 写在后面，优先级更高。</li>
+        </ul>
+        <p>
+            Aiken 提醒：这些声明叫结合性和优先级声明，但语法分析器内部并不懂结合性和优先级，这些声明其实是告诉它在某些情况下做某种动作。要讲到更后面的语法分析技术（第八讲的移进归约冲突）才能解释清楚。通常它们的表现和你预期的一样，但有些情况会出人意料，加了声明之后一定要检查文法的行为。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS143: Compilers &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="04_词法分析的实现.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="06_错误处理语法制导翻译与递归下降.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

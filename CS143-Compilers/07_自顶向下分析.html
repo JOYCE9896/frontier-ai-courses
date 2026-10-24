@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第七讲：自顶向下分析 | Stanford CS143 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="06_错误处理语法制导翻译与递归下降.html">&larr; 上一讲</a>
+    <span>Stanford CS143: Lecture 7</span>
+    <a href="08_自底向上分析.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第七讲：自顶向下分析</h1>
+        <p class="subtitle">预测分析和 LL(1) 这个名字的含义，提取左因子，LL(1) 分析表怎样读，用栈和分析表做分析的算法和完整演示；First 集和 Follow 集的定义、算法和逐步计算；由 First、Follow 构造 LL(1) 分析表；表项冲突说明文法不是 LL(1)，以及为什么大多数编程语言的文法都不是 LL(1)</p>
+        <div class="author-meta">
+            主讲：Fredrik Kjolstad（2026 年春季）；录像主讲：Alex Aiken<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs143/lectures/lecture07.pdf" target="_blank">课件</a>（2026 年 4 月 21 日）、<a href="https://www.youtube.com/watch?v=SsGeqEm1oSw" target="_blank">录像第 7 周</a>（07-01 Predictive Parsing 到 07-04 LL1 Parsing Tables）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、预测分析</h2>
+        <p>
+            预测分析和递归下降很像，也是自顶向下的，但分析器能"预测"该用哪条产生式，而且从不出错：只要有某条产生式能让分析成功，它就一定猜中那条。做法是看接下来的几个 token（向前看），代价是只适用于受限形式的文法。好处是没有回溯，分析器完全是确定性的。
+        </p>
+        <p>
+            预测分析器接受 <strong>LL(k)</strong> 文法：
+        </p>
+        <ul>
+            <li>第一个 L：从左到右扫描输入。这门课里所有方法都是这样。</li>
+            <li>第二个 L：构造最左推导，总是处理语法树里最左边的非终结符。</li>
+            <li>k：向前看 k 个 token。理论上研究任意的 k，实践中总是 k = 1。</li>
+        </ul>
+        <p>
+            对比：递归下降每一步可能有很多条产生式可选，靠回溯撤销错误选择。LL(1) 每一步只有一个选择：当最左边的非终结符是 A、下一个输入是 t 时，A 最多只有一条产生式 A → α 可用，其他的保证都不对。也可能一条都没有，那就是错误。可以说 LL(1) 是不带回溯的递归下降。
+        </p>
+
+        <h3>提取左因子</h3>
+        <p>
+            上一讲的文法
+        </p>
+        <p>
+            $$E \to T + E \mid T \qquad T \to \texttt{int} \mid \texttt{int} * T \mid (E)$$
+        </p>
+        <p>
+            很难预测：T 有两条产生式都以 int 开头，告诉你下一个 token 是 int 也没用；E 的两条产生式都以非终结符 T 开头，同样没法凭一个 token 决定。要先对文法<strong>提取左因子</strong>：把同一非终结符几条产生式的公共前缀提出来。
+        </p>
+        <p>
+            E 的两条都以 T 开头，写成一条 E → T X，再引入新的非终结符 X 处理剩下的不同后缀：一种是 + E，一种是什么都没有。T 的前两条有公共前缀 int，写成 T → int Y，Y 处理后缀 * T 或空；第三条 ( E ) 和 int 没有公共部分，原样保留：
+        </p>
+        <p>
+            $$E \to T X \qquad X \to + E \mid \varepsilon \qquad T \to \texttt{int}\ Y \mid (E) \qquad Y \to * T \mid \varepsilon$$
+        </p>
+        <p>
+            这其实是把决定推迟了：不再一开始就决定用 E 的哪条产生式，而是等 T 推出的东西都看完了，再决定后面是 + E 还是空串。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、LL(1) 分析表</h2>
+        <p>
+            先不管表是怎么来的，看怎样用它。行是当前最左边的非终结符，列是下一个输入 token，表项是要用的产生式右部。$ 是输入结束标记。
+        </p>
+        <table>
+            <thead><tr><th></th><th>int</th><th>*</th><th>+</th><th>(</th><th>)</th><th>$</th></tr></thead>
+            <tbody>
+                <tr><td>E</td><td>T X</td><td></td><td></td><td>T X</td><td></td><td></td></tr>
+                <tr><td>X</td><td></td><td></td><td>+ E</td><td></td><td>ε</td><td>ε</td></tr>
+                <tr><td>T</td><td>int Y</td><td></td><td></td><td>( E )</td><td></td><td></td></tr>
+                <tr><td>Y</td><td></td><td>* T</td><td>ε</td><td></td><td>ε</td><td>ε</td></tr>
+            </tbody>
+        </table>
+        <ul>
+            <li>[E, int]：当前非终结符是 E、下一个输入是 int 时，用 E → T X，它能在第一个位置生成 int。</li>
+            <li>[Y, +]：当前非终结符是 Y、下一个输入是 +，就"去掉 Y"。Y 后面能跟 + 只有一种可能：Y → ε。这和上一条情况不同：Y 本身生成不了 +，要让分析成功只能让 Y 什么都不生成，把位置让给后面的符号。</li>
+            <li>[Y, (]：不存在从 Y 推出以 ( 开头的串的办法。空表项表示错误，比如 [E, *]，无论用 E 的哪条产生式都没法分析这个输入，分析在这里报错。</li>
+        </ul>
+
+        <h3>用表分析的算法</h3>
+        <p>
+            方法和递归下降类似，只是对最左非终结符 S，看下一个输入 a，选 [S, a] 处的产生式。不用递归函数，而用一个栈记录语法树的"边界"：还没展开的非终结符，和还没与输入匹配的终结符。栈顶就是最左边的待处理符号。遇到错误表项就拒绝；输入读完且栈为空就接受。
+        </p>
+        <pre><code>initialize stack = &lt;S $&gt; and next
+repeat
+    case stack of
+        &lt;X, rest&gt; : if T[X, *next] = Y1 ... Yn
+                       then stack &lt;- &lt;Y1 ... Yn, rest&gt;;
+                       else error();
+        &lt;t, rest&gt; : if t == *next++
+                       then stack &lt;- &lt;rest&gt;;
+                       else error();
+until stack == &lt; &gt;</code></pre>
+        <ul>
+            <li>栈初始为开始符号和 $。$ 不属于字母表，可以看作扩展出来的新符号，标记栈底，也标记输入的结尾。</li>
+            <li>栈顶是非终结符 X：查表，弹出 X，把产生式右部压栈，最左边的符号 Y1 在栈顶。这相当于在树上把 X 展开，Y1 成为最左的待处理符号。</li>
+            <li>栈顶是终结符 t：检查它是否和下一个输入匹配，匹配就弹栈并前移输入；不匹配就是错误，没有回溯，没有别的办法。</li>
+        </ul>
+
+        <h3>演示：int * int</h3>
+        <table>
+            <thead><tr><th>栈</th><th>输入</th><th>动作</th></tr></thead>
+            <tbody>
+                <tr><td>E $</td><td>int * int $</td><td>T X</td></tr>
+                <tr><td>T X $</td><td>int * int $</td><td>int Y</td></tr>
+                <tr><td>int Y X $</td><td>int * int $</td><td>终结符匹配</td></tr>
+                <tr><td>Y X $</td><td>* int $</td><td>* T</td></tr>
+                <tr><td>* T X $</td><td>* int $</td><td>终结符匹配</td></tr>
+                <tr><td>T X $</td><td>int $</td><td>int Y</td></tr>
+                <tr><td>int Y X $</td><td>int $</td><td>终结符匹配</td></tr>
+                <tr><td>Y X $</td><td>$</td><td>ε</td></tr>
+                <tr><td>X $</td><td>$</td><td>ε</td></tr>
+                <tr><td>$</td><td>$</td><td>接受</td></tr>
+            </tbody>
+        </table>
+        <p>
+            Aiken 边走边画语法树，指出栈在每一步都正好记录了树上未处理的边界：比如用了 T → int Y 后，栈从上到下是 int Y X，树的未处理边界从左到右也是 int Y X。输入用完时栈还不空，剩下的符号只能生成空串，所以接下来只能用 ε 产生式，表里 [Y, $] 和 [X, $] 正是 ε。最后栈顶的 $ 和输入的 $ 相遇，接受。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、构造分析表的直觉</h2>
+        <p>
+            对非终结符 A、产生式 A → α 和 token t，有两种情况应该在 [A, t] 填 α：
+        </p>
+        <ol>
+            <li>如果 $\alpha \to^* t\beta$，即 α 能在第一个位置推出 t。那么当 A 是最左非终结符、t 是下一个输入时，展开 A → α 是好的一步，后面可以匹配 t。这时说 $t \in \text{First}(\alpha)$。</li>
+            <li>如果 α 推不出 t，但 $\alpha \to^* \varepsilon$，并且 $S \to^* \gamma A t \delta$。栈顶是 A、输入是 t、A 推不出 t 时，看似没希望，其实只要 A 能整个消失，后面的别的部分也许能匹配 t。这要求在至少一个推导里 t 能紧跟在 A 后面，这时说 $t \in \text{Follow}(A)$。</li>
+        </ol>
+        <p>
+            Aiken 特别强调第二种情况容易弄混：Follow(A) 和 A 能推出什么无关，它关心的是 A 出现在推导的什么位置，t 是出现在 A 后面，不是 A 推出了 t。
+        </p>
+        <p>
+            课件约定：希腊字母表示由终结符和非终结符组成的串。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、First 集</h2>
+        <p>
+            <strong>定义</strong>：
+        </p>
+        <p>
+            $$\text{First}(X) = \{ t \mid X \to^* t\alpha \} \cup \{ \varepsilon \mid X \to^* \varepsilon \}$$
+        </p>
+        <p>
+            X 可以是一个终结符、一个非终结符或一个符号串。所有能经过若干步出现在第一个位置的终结符都在 First(X) 里。ε 不是终结符，但出于技术原因还要记录 X 能否推出空串：要算出一个符号的 First 集里有哪些终结符，需要知道它前面的符号能不能消失。
+        </p>
+        <p>
+            <strong>算法</strong>：
+        </p>
+        <ol>
+            <li>对终结符 t，$\text{First}(t) = \{t\}$。终结符能在第一个位置生成的只有它自己。</li>
+            <li>$\varepsilon \in \text{First}(X)$，如果 $X \to \varepsilon$；或者 $X \to A_1 \ldots A_n$ 且对所有 $1 \le i \le n$ 都有 $\varepsilon \in \text{First}(A_i)$。后一种只可能在右部全是非终结符时发生，有一个终结符就不可能整个消失。</li>
+            <li>$\text{First}(\alpha) \subseteq \text{First}(X)$，如果 $X \to \alpha$；或者 $X \to A_1 \ldots A_n \alpha$ 且所有 $A_i$ 都能推出 ε。也就是右部某个前缀能整个消失，剩下的后缀 α 的 First 集就要并进来。</li>
+        </ol>
+        <p>
+            知道了终结符和非终结符的 First 集，任意符号串的 First 集也就能算。
+        </p>
+
+        <h3>例子</h3>
+        <p>
+            $$E \to T X \qquad X \to + E \mid \varepsilon \qquad T \to \texttt{int}\ Y \mid (E) \qquad Y \to * T \mid \varepsilon$$
+        </p>
+        <ul>
+            <li>终结符：First(+) = {+}，First(*) = {*}，First(() = {(}，First()) = {)}，First(int) = {int}。</li>
+            <li>First(E)：按规则 3，First(T) ⊆ First(E)，要先算 T。</li>
+            <li>First(T)：T 的两条产生式都以终结符开头，直接从文法读出 {int, (}，没有别的可能。</li>
+            <li>回到 E：如果 T 能推出 ε，First(X) 也要并进 First(E)；但 First(T) 里没有 ε，T 总会生成至少一个终结符，所以那个包含关系其实是相等：First(E) = {int, (}。</li>
+            <li>First(X)：X → + E 直接在第一个位置生成 +；X 还有 ε 产生式。First(X) = {+, ε}。</li>
+            <li>First(Y)：结构和 X 一样，First(Y) = {*, ε}。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>五、Follow 集</h2>
+        <p>
+            <strong>定义</strong>：
+        </p>
+        <p>
+            $$\text{Follow}(X) = \{ t \mid S \to^* \beta X t \delta \}$$
+        </p>
+        <p>
+            如果在某个推导里终结符 t 能紧跟在 X 后面出现，t 就在 Follow(X) 里。
+        </p>
+        <p>
+            <strong>直觉</strong>：
+        </p>
+        <ul>
+            <li>如果 X → A B，那么 First(B) ⊆ Follow(A)：两个符号在某条产生式里相邻，后一个的 First 集在前一个的 Follow 集里。</li>
+            <li>同时 Follow(X) ⊆ Follow(B)：设 $S \to^* \ldots X t \ldots$，用 X → A B 一步得到 $\ldots A B t \ldots$，t 也跟在 B 后面了。也就是说，产生式末尾的符号，其 Follow 集包含左部符号的 Follow 集。</li>
+            <li>如果 B 能推出 ε，那么 Follow(X) ⊆ Follow(A)：B 消失后 A 就到了产生式末尾。</li>
+            <li>如果 S 是开始符号，$ ∈ Follow(S)。输入的结尾跟在开始符号后面，这是用来处理输入读完时的情况。</li>
+        </ul>
+        <p>
+            <strong>算法</strong>：
+        </p>
+        <ol>
+            <li>$ ∈ Follow(S)。</li>
+            <li>对每条产生式 $A \to \alpha X \beta$：$\text{First}(\beta) - \{\varepsilon\} \subseteq \text{Follow}(X)$。Follow 集里从不放 ε，它只是终结符的集合。</li>
+            <li>对每条产生式 $A \to \alpha X \beta$，如果 $\varepsilon \in \text{First}(\beta)$（β 可以整个消失）：$\text{Follow}(A) \subseteq \text{Follow}(X)$。</li>
+        </ol>
+
+        <h3>例子</h3>
+        <p>
+            同一个文法。先列出约束（课件第 26 页），再求解：
+        </p>
+        <ul>
+            <li>$ ∈ Follow(E)（开始符号）。E 出现在 ( E ) 里，后面跟着 )，所以 ) ∈ Follow(E)。E 还出现在 X → + E 的末尾，所以 Follow(X) ⊆ Follow(E)。</li>
+            <li>X 只出现在 E → T X 的末尾，所以 Follow(E) ⊆ Follow(X)。两个集合互相包含，必然相等。E 和 X 用到的地方都看完了，没有别的东西要加：Follow(E) = Follow(X) = {$, )}。</li>
+            <li>T 出现在 E → T X 里，后面是 X，所以 First(X) − {ε} = {+} ⊆ Follow(T)。Aiken 演示了 + 是怎样跟到 T 后面的：E → T X → T + E。X 可以推出 ε，于是 Follow(E) ⊆ Follow(T)。T 还出现在 Y → * T 的末尾，所以 Follow(Y) ⊆ Follow(T)。</li>
+            <li>Y 只出现在 T → int Y 的末尾，所以 Follow(T) ⊆ Follow(Y)。又是互相包含：Follow(T) = Follow(Y) = {$, ), +}。</li>
+        </ul>
+        <p>
+            终结符的 Follow 集和 First 集不同，它们可能很有意思：
+        </p>
+        <table>
+            <thead><tr><th>符号</th><th>Follow</th><th>为什么说得通</th></tr></thead>
+            <tbody>
+                <tr><td>(</td><td>{int, (}</td><td>只出现在 ( E ) 里，后面是 First(E)。左括号后面只能是另一个嵌套的括号表达式或一个整数，不能是 * 或 +，也不能是输入结束</td></tr>
+                <tr><td>)</td><td>{+, ), $}</td><td>在 T → ( E ) 的末尾，所以是 Follow(T)</td></tr>
+                <tr><td>+</td><td>{int, (}</td><td>后面是 First(E)，而 E 不能推出 ε。加号后面总要有第二个参数</td></tr>
+                <tr><td>*</td><td>{int, (}</td><td>后面是 First(T)，T 不能推出 ε</td></tr>
+                <tr><td>int</td><td>{*, +, ), $}</td><td>后面是 First(Y) − {ε} = {*}；Y 能推出 ε，所以 Follow(T) 也并进来。几乎什么都能跟在整数后面，唯独左括号不行：不能在整数后面不加运算符直接开始一个嵌套表达式</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section>
+        <h2>六、构造 LL(1) 分析表</h2>
+        <p>
+            对文法 G 的每条产生式 A → α：
+        </p>
+        <ul>
+            <li>对每个终结符 $t \in \text{First}(\alpha)$：$T[A, t] = \alpha$。</li>
+            <li>如果 $\varepsilon \in \text{First}(\alpha)$，对每个 $t \in \text{Follow}(A)$：$T[A, t] = \alpha$（课件把这种情况写成 ε，因为例子里这样的 α 就是 ε）。</li>
+            <li>如果 $\varepsilon \in \text{First}(\alpha)$ 且 $\$ \in \text{Follow}(A)$：$T[A, \$] = \alpha$。$ 技术上不是终结符，所以单独列出：输入已经读完而栈里还有 A，唯一的希望是让 A 完全消失。</li>
+        </ul>
+        <p>
+            用到例子上：E → T X 不能推出 ε，只看 First(T X) = First(T) = {(, int}，填 [E, (] 和 [E, int]。T → ( E ) 填 [T, (]，T → int Y 填 [T, int]。X → + E 填 [X, +]，Y → * T 填 [Y, *]。剩下两条 ε 产生式按 Follow 集填：Follow(X) = {$, )}，所以 [X, $] 和 [X, )] 填 ε，意思是 X 自己生成不了 )，希望 X 消失后栈里别的符号能生成它；Follow(Y) = {$, ), +}，所以 [Y, +]、[Y, )]、[Y, $] 填 ε。这就是前面那张表。
+        </p>
+
+        <h3>不是 LL(1) 的文法</h3>
+        <p>
+            对左递归文法 S → S a | b 建表：First(S) = {b}，S 推不出 ε；Follow(S) = {$, a}。表只有一行、三列（a、b、$）。S → b 填 [S, b]；S → S a 推不出 ε，First(S a) = First(S) = {b}，也填 [S, b]。这个表项有两个动作，表不再是确定的，分析器看到 S 和 b 时不知道该怎么走。
+        </p>
+        <ul>
+            <li><strong>如果某个表项被定义了不止一次，G 就不是 LL(1) 的。</strong>这其实就是 LL(1) 的定义，唯一机械的检验办法就是建表，看每个表项是否唯一。</li>
+            <li>有几类文法保证不是 LL(1)：二义文法，左递归文法，没有提取左因子的文法。需要不止一个 token 向前看的文法也不是。但这不是完整的清单，一个文法已经提取左因子、不左递归、无二义，也不保证就是 LL(1)。</li>
+            <li><strong>大多数编程语言的文法都不是 LL(1) 的。</strong>LL(1) 太弱，覆盖不了常见语言里所有有意思、重要的结构。有更强的形式化方法，下一讲讲，它们建立在这几讲关于 LL(1) 的内容之上，只是用更复杂的方式把这些想法组合起来。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS143: Compilers &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="06_错误处理语法制导翻译与递归下降.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="08_自底向上分析.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第三讲：词法分析 | Stanford CS143 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="02_语言设计与Cool.html">&larr; 上一讲</a>
+    <span>Stanford CS143: Lecture 3</span>
+    <a href="04_词法分析的实现.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第三讲：词法分析</h1>
+        <p class="subtitle">词法分析器做什么：把字符串切成词素并给每个词素归类，token 是"类别加词素"的一对；FORTRAN、PL/I、C++ 里的词法难题和向前看；形式语言的定义，正则表达式的五种形式，语法和语义的区分，意义函数为什么是多对一；用正则表达式写关键字、整数、标识符、空白、邮箱和 Pascal 数字</p>
+        <div class="author-meta">
+            主讲：Fredrik Kjolstad（2026 年春季）；录像主讲：Alex Aiken<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs143/lectures/lecture03.pdf" target="_blank">课件</a>（2026 年 4 月 7 日）、<a href="https://www.youtube.com/watch?v=Ppnz-W_0ink" target="_blank">录像第 3 周</a>（03-01 Lexical Analysis 到 03-05 Lexical Specifications）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、词法分析要做什么</h2>
+        <p>
+            看这段代码：
+        </p>
+        <pre><code>if (i == j)
+    Z = 0;
+else
+    Z = 1;</code></pre>
+        <p>
+            人一眼就能看出单元之间的边界，因为有各种视觉线索。词法分析器没有这种便利，它看到的只是一串字符，就像文件里的字节：
+        </p>
+        <pre><code>\tif (i == j)\n\t\tz = 0;\n\telse\n\t\tz = 1;</code></pre>
+        <p>
+            词法分析器从左到右走过这串字符，在单元之间画分隔线：空白和关键字之间一条，关键字后面一条，然后是更多空白、左括号、i、空白、双等号，依此类推。目标是把输入字符串切成子串，这些子串叫 token。
+        </p>
+        <p>
+            光切开还不够，还要给每个子串按它的作用归类。英语里的类别是名词、动词、形容词；编程语言里的类别（token class）是标识符、整数、关键字、空白，还有单独成类的标点，比如左括号、右括号。
+        </p>
+        <ul>
+            <li><strong>标识符</strong>：由字母或数字组成、以字母开头的串，比如 <code>var1</code>、<code>i</code>、<code>foo</code>、<code>Person</code>。这是一个无限集合。很多语言还允许别的字符，但通常最主要的限制就是必须以字母开头。</li>
+            <li><strong>整数</strong>：非空的数字串。按这个定义，<code>001</code> 甚至 <code>00</code> 也是合法的整数。</li>
+            <li><strong>关键字</strong>：一组固定的保留字，<code>else</code>、<code>if</code>、<code>begin</code> 等。</li>
+            <li><strong>空白</strong>：非空的空格、换行、制表符序列。空白也是一个类别，因为输入里的每个字符都必须属于某个 token，连续三个空格要合成一个空白 token。</li>
+        </ul>
+        <p>
+            每个 token 类别对应一个字符串集合。语法分析器依靠这些区分工作，比如标识符和关键字要区别对待。
+        </p>
+
+        <h3>输出：类别和词素</h3>
+        <p>
+            一个实现要做两件事：
+        </p>
+        <ol>
+            <li>认出输入里对应 token 的子串。编译器的行话里，这些子串叫<strong>词素</strong>（lexeme），也就是程序里的"词"。</li>
+            <li>给每个词素确定它的 token 类别。</li>
+        </ol>
+        <p>
+            输出是一串"类别、词素"对，每一对叫一个 token。比如 <code>foo = 42</code> 经过词法分析得到三个 token：<code>(identifier, "foo")</code>、<code>(operator, "=")</code>、<code>(integer, "42")</code>。Aiken 特意强调，这时 42 还是字符串 "42"，只是在语言里扮演整数的角色，还不是数 42。实现中通常还会带上行号、文件名，方便后面报错。
+        </p>
+        <p>
+            对上面的 if 语句，用这些类别：空白、关键字、标识符、整数，加上 <code>(</code>、<code>)</code>、<code>;</code>、赋值 <code>=</code> 各自单独成类（每个类别里只有一个字符串），<code>==</code> 归为运算符。逐个标出来就是：空白、关键字 if、空白、左括号、标识符 i、空白、运算符 ==、空白、标识符 j、右括号、空白（三个字符合成一个）、标识符 z……
+        </p>
+        <p>
+            设计一个词法分析器的第一步是定一个有限的 token 集合，选哪些 token 取决于语言，也取决于语法分析器的设计；第二步是描述每个 token 包含哪些字符串。词法分析器通常把"无关"的 token 丢掉，比如空白和注释，它们对语法分析没有贡献。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、历史上的词法难题</h2>
+        <p>
+            听起来简单，如果语言设计不刁难的话确实简单。看看历史上的几个例子，课件管这一节叫"词法分析的真实罪案"。
+        </p>
+
+        <h3>FORTRAN：空白无意义</h3>
+        <p>
+            FORTRAN 的规则是空白不算数，<code>VAR1</code> 和 <code>VA R1</code> 完全一样，把程序里所有空格删掉，意思不应该有任何改变。看龙书上的例子：
+        </p>
+        <pre><code>DO 5 I = 1,25
+DO 5 I = 1.25</code></pre>
+        <p>
+            第一行是循环头：<code>DO</code> 相当于 C 的 for，I 从 1 变到 25，5 是标号，循环体从这一行一直延伸到标号为 5 的语句。第二行只差一个字符，逗号换成了句点，意思完全不同：去掉空格是 <code>DO5I = 1.25</code>，给一个叫 <code>DO5I</code> 的变量赋值 1.25。
+        </p>
+        <p>
+            从左往右扫描，读完 O 时就该判断 DO 是不是关键字了，可是信息不够，只有往后看到逗号或句点才知道。这就是需要<strong>向前看</strong>（lookahead）的情况。向前看很多会让实现变复杂，所以词法设计的一个目标是尽量减少向前看，最好让它有一个常数上界。
+        </p>
+        <p>
+            为什么有这么怪的规则？在打孔卡机器上很容易不小心多打几个空格，加这条规则是为了让打孔员不用老是返工。
+        </p>
+        <p>
+            由此可以说清两点：词法分析的目标是切分字符串，实现方式是从左到右读，一次认出一个 token；向前看可能是需要的，用来决定一个 token 在哪里结束、下一个从哪里开始。
+        </p>
+        <p>
+            向前看其实总是需要的，连我们的简单例子里也有：读到 i 时，它是变量 i 还是 if 的开头？读到一个 =，它是赋值还是 == 的前一半？读到 else 的 e，它是单字母变量（例子里有 i、j、z 这样的单字母变量）还是更长单元的一部分？
+        </p>
+
+        <h3>PL/I：关键字不保留</h3>
+        <p>
+            PL/I（Programming Language One）是 IBM 设计的，本意是让 IBM 里所有人都用它，要包含程序员需要的一切功能，所以非常通用、限制很少。其中一条是关键字不保留，关键字也可以当变量名：
+        </p>
+        <pre><code>IF ELSE THEN THEN = ELSE; ELSE ELSE = THEN</code></pre>
+        <p>
+            正确的划分是第一个 IF、第二个 THEN、第二个 ELSE 是关键字，其余都是变量。从左往右扫描时，很难不看后面就判断谁是什么。
+        </p>
+        <p>
+            另一个例子：
+        </p>
+        <pre><code>DECLARE (ARG1, ..., ARGN)</code></pre>
+        <p>
+            这既可以是一条声明（DECLARE 是关键字），也可以是数组引用（DECLARE 是数组名，括号里是下标）。只看这一段无法判断，要看后面跟着什么，比如有一个等号，那就是给数组元素赋值。括号里的参数个数没有上限，所以这里需要<strong>无界</strong>的向前看。
+        </p>
+        <p>
+            FORTRAN 和 PL/I 分别是 1950 年代和 1960 年代设计的，这些经验教会了我们词法设计上不该做什么。
+        </p>
+
+        <h3>C++：嵌套模板</h3>
+        <p>
+            问题至今没有完全消失。C++ 的模板写成 <code>Foo&lt;Bar&gt;</code>，流输入写成 <code>cin &gt;&gt; var</code>。嵌套模板 <code>Foo&lt;Bar&lt;Bazz&gt;&gt;</code> 最后两个大于号连在一起，看起来就是流运算符。很长一段时间里，C++ 编译器会把它当作流运算符，然后报语法错误；唯一的办法是插一个空格，写成 <code>Foo&lt;Bar&lt;Bazz&gt; &gt;</code>。Aiken 说，为了让词法分析正确而不得不加空白，相当难看。现在大多数 C++ 编译器已经修好了这个问题。
+        </p>
+
+        <h3>小结</h3>
+        <p>
+            词法分析的目标是把输入切成词素，并确定每个词素的 token。因为是从左到右扫描，有时需要向前看。还缺两样东西：一种描述每个 token 包含哪些词素的方法，一种解决歧义的方法（<code>if</code> 是两个变量 i 和 f 吗？<code>==</code> 是两个 = 吗？）。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、形式语言</h2>
+        <p>
+            描述 token 有几种形式化方法，最常用的是正则语言：理论简单有用，容易理解，实现高效。讲正则语言之前，先说一般的形式语言是什么，编译器内部通常同时处理好几种形式语言。
+        </p>
+        <p>
+            <strong>定义</strong>：设字母表 $\Sigma$ 是一个字符集合，$\Sigma$ 上的一个<strong>语言</strong>是由 $\Sigma$ 中字符组成的字符串的集合。
+        </p>
+        <ul>
+            <li>字母表是英文字符，语言是英语句子。这还不完全是形式语言，因为我们对哪些串算合法句子会有分歧，但可以想象定出规则来。并不是每个英文字符串都是英语句子。</li>
+            <li>字母表是 ASCII，语言是所有合法的 C 程序。这是严格定义的，正好是 C 编译器接受的输入集合。注意 ASCII 字符集和英文字符集不一样，不先定字母表，就没法谈语言。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>四、正则表达式</h2>
+        <p>
+            语言是字符串的集合，需要一种记号来写出想要的集合。正则语言的标准记号是正则表达式，每个正则表达式表示一个集合。
+        </p>
+
+        <h3>两种基本形式</h3>
+        <ul>
+            <li>单个字符 $c$：表示只含一个字符串的语言，这个串就是字符 c，即 $\{\text{"c"}\}$。</li>
+            <li>$\varepsilon$：表示只含空串的语言 $\{\text{""}\}$。它不是空集，而是含有一个元素（空串）的集合。</li>
+        </ul>
+
+        <h3>三种复合形式</h3>
+        <ul>
+            <li><strong>并</strong>：$A + B = \{ s \mid s \in A \text{ 或 } s \in B \}$。</li>
+            <li><strong>连接</strong>：$AB = \{ ab \mid a \in A, b \in B \}$。这是一个笛卡尔积式的操作：从 A 里任取一个串，从 B 里任取一个串，A 的在前拼起来，所有可能的组合构成 AB。</li>
+            <li><strong>迭代</strong>（Kleene 闭包）：$A^* = \bigcup_{i \ge 0} A^i$，其中 $A^i$ 是 A 和自己连接 i 次。因为 i 可以是 0，$A^0 = \varepsilon$，所以空串总在 $A^*$ 里。</li>
+        </ul>
+        <p>
+            <strong>定义</strong>：$\Sigma$ 上的正则表达式是包含以下表达式的最小集合：
+        </p>
+        <p>
+            $$R = \varepsilon \mid c \ (c \in \Sigma) \mid R + R \mid RR \mid R^*$$
+        </p>
+        <p>
+            这种用竖线写出各种情况的递归定义叫文法，讲语法分析时会细讲。
+        </p>
+
+        <h3>例子</h3>
+        <p>
+            字母表取 $\{0, 1\}$：
+        </p>
+        <ul>
+            <li>$1^* = \bigcup_{i \ge 0} 1^i = \{\text{""}, 1, 11, 111, \ldots\}$，所有由 1 组成的串。</li>
+            <li>$(1 + 0)1 = \{ab \mid a \in 1+0, b \in 1\} = \{11, 01\}$。</li>
+            <li>$0^* + 1^* = \{0^i \mid i \ge 0\} \cup \{1^i \mid i \ge 0\}$，全是 0 的串或者全是 1 的串。</li>
+            <li>$(0 + 1)^* = \bigcup_{i \ge 0} (0+1)^i$：长度为 i 的串每个位置都可以填 0 或 1，所以这是所有 0、1 串。它表示整个字母表上的所有串，记作 $\Sigma^*$。</li>
+        </ul>
+        <p>
+            同一个语言有很多种写法。$(1+0)1$ 也可以写成 $11 + 01$；$1^*$ 也可以写成 $1^* + 1$，多并上一个 1 不改变任何东西，虽然这样写有点傻。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、语法和语义</h2>
+        <p>
+            上面的记号其实不太严谨。写 $A + B = A \cup B$ 时，左边的 A、B 是一段语法（表达式），右边的 A、B 却突然变成了集合。为了说清楚，引入<strong>意义函数</strong> $L$，把表达式映射到它表示的字符串集合：
+        </p>
+        <p>
+            $$\begin{aligned}
+            L(\varepsilon) &amp;= \{\text{""}\} \\
+            L(c) &amp;= \{\text{"c"}\} \\
+            L(A + B) &amp;= L(A) \cup L(B) \\
+            L(AB) &amp;= \{ab \mid a \in L(A), b \in L(B)\} \\
+            L(A^*) &amp;= \bigcup_{i \ge 0} L(A^i)
+            \end{aligned}$$
+        </p>
+        <p>
+            现在递归看得很清楚：先用 L 解释 A 和 B，再对结果取并。课件上的图把 <code>'a' + 'b'</code> 画成一个贴着标签的盒子，标签是语法，盒子里装的 $\{a, b\}$ 是语义。
+        </p>
+        <p>
+            把语法和语义分开有三个理由：
+        </p>
+        <ol>
+            <li>说清楚定义里哪些是表达式，哪些是意义。L 的参数是表达式，结果是集合。</li>
+            <li>可以把记号单独拿出来考虑：意义不变，换一种写法，也许会发现某些写法更适合要解决的问题。Aiken 举了数字的例子：阿拉伯数字 0、1、42、107 和罗马数字 I、IV、X、XL 表示的都是整数，意义相同，记号完全不同。用罗马数字做加减乘很痛苦，古代没几个人擅长，换成阿拉伯数字后，算术变得容易学了，而变化的只有记号。记号决定你怎样思考、能说什么、会用什么样的步骤，不要低估它的作用。</li>
+            <li>表达式和意义不是一一对应的，通常表达式比意义多得多。$0^*$、$0 + 0^*$、$\varepsilon + 00^*$ 以及它们的各种组合都表示同一个语言，写法有无穷多种。</li>
+        </ol>
+        <p>
+            所以 L 是<strong>多对一</strong>的。这对编译器极为重要，它是优化的基础：正因为有很多功能等价的程序，才能把一个程序换成另一个跑得更快、做的事完全一样的程序。L 永远不应该是一对多的：如果一个表达式能映射到两个意义，L 就不再是函数了，而且意味着程序的意思没有明确定义，写出来的程序到底指这个还是那个说不清。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、用正则表达式描述 token</h2>
+
+        <h3>关键字</h3>
+        <p>
+            $\text{'if'} + \text{'else'} + \text{'then'} + \cdots$。逐个字符写是 $\text{'i'}\,\text{'f'}$ 这样的单字符连接，啰嗦又难读，工具通常允许把引号放在整个串的两端，<code>'else'</code> 就是 'e' 'l' 's' 'e' 的缩写。
+        </p>
+
+        <h3>整数</h3>
+        <p>
+            先定义一位数字，并给它起个名字（大多数工具都支持给正则表达式命名）：
+        </p>
+        <p>
+            $$\text{digit} = \text{'0'} + \text{'1'} + \cdots + \text{'9'}$$
+        </p>
+        <p>
+            $\text{digit}^*$ 是所有数字串，但包括空串，而整数必须非空。所以要求至少一位数字，后面跟零或多位：$\text{integer} = \text{digit}\ \text{digit}^*$。"至少一个 A"这个模式太常见了，几乎所有正则工具都有缩写 $A^+ = AA^*$，于是 $\text{integer} = \text{digit}^+$。另一个缩写是字符范围：$[0\text{-}2] = \text{'0'} + \text{'1'} + \text{'2'}$。
+        </p>
+
+        <h3>标识符</h3>
+        <p>
+            字母要写 26 个小写加 26 个大写的并，很繁琐，用字符范围 <code>[a-zA-Z]</code>：
+        </p>
+        <p>
+            $$\text{letter} = [a\text{-}zA\text{-}Z], \qquad \text{identifier} = \text{letter}\ (\text{letter} + \text{digit})^*$$
+        </p>
+        <p>
+            以一个字母开头，后面跟零或多个字母或数字。课件留了一个问题：$(\text{letter}^* + \text{digit}^*)$ 和 $(\text{letter} + \text{digit})^*$ 一样吗？不一样，前者要么全是字母要么全是数字，后者字母和数字可以任意混合。
+        </p>
+
+        <h3>空白</h3>
+        <p>
+            完整的词法规格连不关心的部分也要描述，这样才能认出它们并丢掉。空白取非空的空格、换行、制表符序列：
+        </p>
+        <p>
+            $$\text{whitespace} = (\text{' '} + \text{'\textbackslash n'} + \text{'\textbackslash t'})^+$$
+        </p>
+        <p>
+            空格好写，换行和制表符不好写：换行在这些工具里通常有特殊含义，制表符看起来和空格差不多。工具用转义序列给这些没有好的打印形式的字符命名，最常见的是反斜杠加名字，<code>\n</code> 是换行，<code>\t</code> 是制表符。
+        </p>
+
+        <h3>电话号码和邮箱</h3>
+        <p>
+            正则表达式在生活里随处可见。电话号码 (650)-723-3232：字母表是数字加上 <code>-</code>、<code>(</code>、<code>)</code>，
+        </p>
+        <p>
+            $$\text{area} = \text{digit}^3,\ \text{exchange} = \text{digit}^3,\ \text{phone} = \text{digit}^4,\ \text{phone\_number} = \text{'('}\ \text{area}\ \text{')-'}\ \text{exchange}\ \text{'-'}\ \text{phone}$$
+        </p>
+        <p>
+            邮箱 anyone@cs.stanford.edu 由四个串组成，用户名和三段域名，中间用 @ 和两个点隔开。简单起见假设这些串只含字母：
+        </p>
+        <p>
+            $$\text{name} = \text{letter}^+,\qquad \text{address} = \text{name}\ \text{'@'}\ \text{name}\ \text{'.'}\ \text{name}\ \text{'.'}\ \text{name}$$
+        </p>
+        <p>
+            Aiken 说，邮箱地址构成一个正则语言，世界上所有的邮件程序和邮件服务器都在做正则表达式处理来理解邮箱地址。实际的邮箱更复杂一些，但用稍复杂的正则表达式也能写出来。
+        </p>
+
+        <h3>Pascal 的无符号数</h3>
+        <p>
+            最后看一门真实语言的词法规格片段。Pascal 属于 Algol 家族，是早期的有类型语言，和 FORTRAN、C 是一类：
+        </p>
+        <p>
+            $$\begin{aligned}
+            \text{digit} &amp;= \text{'0'} + \text{'1'} + \cdots + \text{'9'} \\
+            \text{digits} &amp;= \text{digit}^+ \\
+            \text{opt\_fraction} &amp;= (\text{'.'}\ \text{digits}) + \varepsilon \\
+            \text{opt\_exponent} &amp;= (\text{'E'}\ (\text{'+'} + \text{'-'} + \varepsilon)\ \text{digits}) + \varepsilon \\
+            \text{num} &amp;= \text{digits}\ \text{opt\_fraction}\ \text{opt\_exponent}
+            \end{aligned}$$
+        </p>
+        <p>
+            一个数由一串数字、可选的小数部分、可选的指数部分组成，小数和指数可以各自独立出现。"并上 $\varepsilon$"就是"可选"的写法：要么前面那部分出现，要么什么都没有。指数以 E 开头，接一个可选的正负号（没写符号时大概按正数处理），再接非空的数字串。"可选"同样很常见，工具提供缩写 $A? = A + \varepsilon$，于是：
+        </p>
+        <p>
+            $$\text{opt\_fraction} = (\text{'.'}\ \text{digits})?,\qquad \text{opt\_exponent} = (\text{'E'}\ (\text{'+'} + \text{'-'})?\ \text{digits})?$$
+        </p>
+        <p>
+            文件名、grep 一族工具用的也是正则表达式。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、小结</h2>
+        <p>
+            正则表达式能描述很多有用的语言，下一周会看非正则的语言。到目前为止，正则表达式只是语言的规格，说明了想要哪些字符串，还没说怎样实现词法分析。下一讲的问题是：给定一个字符串 $s$ 和一个正则表达式 $R$，怎样判断 $s \in L(R)$？
+        </p>
+        <p>
+            录像第 3 周最后有一段 DeduceIt 的演示，那是斯坦福为在线课程做的一个研究项目，让学生逐步写形式推导并由系统自动检查，和课程内容无关，这里从略。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS143: Compilers &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="02_语言设计与Cool.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="04_词法分析的实现.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

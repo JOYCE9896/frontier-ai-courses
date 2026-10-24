@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十二讲：代码生成 | Stanford CS143 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="11_运行时组织.html">&larr; 上一讲</a>
+    <span>Stanford CS143: Lecture 12</span>
+    <a href="13_操作语义.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十二讲：代码生成</h1>
+        <p class="subtitle">用 MIPS 模拟带累加器的栈机器，五条 MIPS 指令和 7 + 5；一门小语言的代码生成：常量、加减、为什么不能把中间结果放进固定寄存器、if、活动记录和帧指针、函数调用和函数定义的调用序列、变量引用；sumto 的完整生成代码；把临时值放进活动记录的固定位置，NT(e) 方程；面向对象语言的代码生成：Cool 的对象布局、子类布局是父类布局的扩展、分派表和动态分派</p>
+        <div class="author-meta">
+            主讲：Fredrik Kjolstad（2026 年春季）；录像主讲：Alex Aiken<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs143/lectures/lecture12.pdf" target="_blank">课件</a>（2026 年 5 月 12 日）、<a href="https://www.youtube.com/playlist?list=PLxoiCo5tGquBZzK0E_-JVLSV3b3o_2OnX" target="_blank">录像第 12 周</a>（12-01 Introduction to Code Generation 到 12-06 Object Layout，按小节转载的播放列表）<br>
+            参考：<a href="https://web.stanford.edu/class/cs143/materials/SPIM_Manual.pdf" target="_blank">SPIM 手册</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、从栈机器到 MIPS</h2>
+        <p>
+            代码生成采用栈机器策略。这大概是最简单的策略，生成的代码一般不太高效，但很有意思，也并非完全不现实，对课程来说已经足够复杂。编译器为带累加器的栈机器生成代码，再在 MIPS 处理器（或模拟器）上运行，用 MIPS 指令和寄存器模拟栈机器的指令。
+        </p>
+        <ul>
+            <li>累加器放在 MIPS 寄存器 <code>$a0</code>。Aiken 说，名义上单寄存器栈机器的这个寄存器就是逻辑栈的栈顶，但为了避免术语混淆，把 $a0 叫累加器，"栈"专指内存里的其余数据。</li>
+            <li>栈放在内存里，朝低地址增长，这是 MIPS 上的标准惯例。</li>
+            <li>栈上下一个位置的地址放在寄存器 <code>$sp</code>（stack pointer）里。$sp 指向的是还没用的内存，所以栈顶在地址 <code>$sp + 4</code>。</li>
+        </ul>
+        <p>
+            MIPS 是 1980 年代设计的典型精简指令集（RISC）体系结构：算术运算的操作数和结果都在寄存器里，要用内存里的值必须用 load 和 store 指令搬进搬出。有 32 个 32 位的通用寄存器，我们只用三个：$sp、$a0，以及临时寄存器 <code>$t1</code>，用来装二元运算的另一个参数。细节看 SPIM 文档，SPIM 是课程用的 MIPS 模拟器。
+        </p>
+        <p>
+            先用五条指令：
+        </p>
+        <table>
+            <thead><tr><th>指令</th><th>含义</th></tr></thead>
+            <tbody>
+                <tr><td><code>lw reg1 offset(reg2)</code></td><td>从地址 reg2 + offset 读一个 32 位字到 reg1</td></tr>
+                <tr><td><code>add reg1 reg2 reg3</code></td><td>reg1 ← reg2 + reg3</td></tr>
+                <tr><td><code>sw reg1 offset(reg2)</code></td><td>把 reg1 里的字存到地址 reg2 + offset</td></tr>
+                <tr><td><code>addiu reg1 reg2 imm</code></td><td>reg1 ← reg2 + imm，imm 是嵌在代码里的常数；u 表示不检查溢出</td></tr>
+                <tr><td><code>li reg imm</code></td><td>reg ← imm</td></tr>
+            </tbody>
+        </table>
+        <p>
+            7 + 5 的栈机器代码和对应的 MIPS：
+        </p>
+        <table>
+            <thead><tr><th>栈机器</th><th>MIPS</th></tr></thead>
+            <tbody>
+                <tr><td>acc ← 7</td><td><code>li $a0 7</code></td></tr>
+                <tr><td>push acc</td><td><code>sw $a0 0($sp)</code><br><code>addiu $sp $sp -4</code></td></tr>
+                <tr><td>acc ← 5</td><td><code>li $a0 5</code></td></tr>
+                <tr><td>acc ← acc + top_of_stack</td><td><code>lw $t1 4($sp)</code><br><code>add $a0 $a0 $t1</code></td></tr>
+                <tr><td>pop</td><td><code>addiu $sp $sp 4</code></td></tr>
+            </tbody>
+        </table>
+        <p>
+            push 是两条指令：把值存到 $sp 指向的位置（偏移 0），再把 $sp 减 4，恢复"$sp 指向下一个空位"的不变量。加法时，因为 MIPS 只能对寄存器做运算，栈顶的值要先读进临时寄存器 $t1，它现在在 $sp 偏移 4 的地方。pop 就是 $sp 加 4。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、一门小语言</h2>
+        <p>
+            现在推广到一门比栈机器语言高一级的语言，只有整数和整数运算：
+        </p>
+        <p>
+            $$\begin{aligned}
+            P &amp;\to D;\ P \mid D \\
+            D &amp;\to \texttt{def}\ \text{id}(\text{ARGS}) = E; \\
+            \text{ARGS} &amp;\to \text{id},\ \text{ARGS} \mid \text{id} \\
+            E &amp;\to \texttt{int} \mid \text{id} \mid \texttt{if}\ E_1 = E_2\ \texttt{then}\ E_3\ \texttt{else}\ E_4 \mid E_1 + E_2 \mid E_1 - E_2 \mid \text{id}(E_1, \ldots, E_n)
+            \end{aligned}$$
+        </p>
+        <p>
+            程序是一串函数定义，每个函数有名字、参数（都是标识符）和一个表达式作为函数体。唯一允许的条件是整数相等的比较。第一个函数是"main"，在输入 i 上运行程序就是计算 f(i)。这门语言足以写斐波那契函数：
+        </p>
+        <pre><code>def fib(x) = if x = 1 then 0 else
+                 if x = 2 then 1 else
+                     fib(x - 1) + fib(x - 2)</code></pre>
+
+        <h3>代码生成策略</h3>
+        <p>
+            对每个表达式 e 生成 MIPS 代码，这段代码要：
+        </p>
+        <ul>
+            <li>算出 e 的值，放在 $a0 里；</li>
+            <li>保持 $sp 和栈的内容不变：执行 e 的代码前栈是什么样，执行完还是什么样。</li>
+        </ul>
+        <p>
+            定义代码生成函数 cgen(e)，它的结果是为 e 生成的代码。它按表达式的种类分情况。课件用颜色区分时间：红色是编译时做的事，蓝色是运行时做的事。cgen 本身在编译时执行，它产生的程序在运行时执行。Aiken 说这是为了帮你在脑子里牢牢抓住这种时间上的划分：有些事在编译器里发生，有些计算被推迟到我们产生的程序真正运行时。
+        </p>
+
+        <h3>常量</h3>
+        <pre><code>cgen(i) = li $a0 i</code></pre>
+        <p>
+            把常量复制进累加器。不修改 $sp 和栈的内容，满足要求。
+        </p>
+
+        <h3>加法</h3>
+        <pre><code>cgen(e1 + e2) =
+    cgen(e1)
+    sw $a0 0($sp)
+    addiu $sp $sp -4
+    cgen(e2)
+    lw $t1 4($sp)
+    add $a0 $t1 $a0
+    addiu $sp $sp 4</code></pre>
+        <p>
+            先在编译时生成 e1 的代码；e1 的值会留在累加器里，但我们只有一个寄存器，在算出 e2 之前得把它存起来，照例存在栈上；然后插入 e2 的代码；接着把 e1 的值读回临时寄存器，相加，弹栈。
+        </p>
+        <p>
+            能在栈顶找到 e1 的值，靠的是不变量：e2 的代码可以任意复杂，可以调用函数、分配数据结构、打印东西，但所有表达式生成的代码都保持栈不变，所以不管 e2 多复杂、跑多久，结束时栈的状态都一样，e1 的值就在栈顶。最后 add 让 e1 + e2 的值落在累加器里，pop 让栈恢复到进入这段代码时的样子，两个不变量都满足了。
+        </p>
+        <p>
+            准确地说，cgen 应该写成在编译时把指令打印到一个文件里：
+        </p>
+        <pre><code>cgen(e1 + e2) =
+    cgen(e1)
+    print "sw $a0 0($sp)"
+    print "addiu $sp $sp -4"
+    cgen(e2)
+    print "lw $t1 4($sp)"
+    print "add $a0 $t1 $a0"
+    print "addiu $sp $sp 4"</code></pre>
+        <p>
+            为了简洁，之后省掉 print，只用颜色（这里用代码块）表示推迟到运行时的指令。
+        </p>
+
+        <h3>一个错误的"优化"</h3>
+        <p>
+            能不能不压栈，直接把 e1 的结果放进 $t1？
+        </p>
+        <pre><code>cgen(e1 + e2) =
+    cgen(e1)
+    move $t1 $a0
+    cgen(e2)
+    add $a0 $t1 $a0</code></pre>
+        <p>
+            看起来不动栈，结果也在累加器里。但它是错的。生成 3 + (7 + 5) 的代码就能看出来：先 li $a0 3，move $t1 $a0，$t1 = 3；然后递归生成 7 + 5，它用同样的策略，li $a0 7，move $t1 $a0，把 3 覆盖成了 7；li $a0 5，add 得 12；回到外层 add，$t1 里是 7 而不是 3，得到 19 而不是 15。（录像里 Aiken 用 1 + (2 + 3) 演示，得到 7 而不是 6。）问题在于嵌套的表达式，特别是同一种表达式互相嵌套时，如果都用一个固定的寄存器放临时值，就会互相踩掉对方的中间结果。所以要用栈保存中间值。
+        </p>
+        <p>
+            两点要强调：
+        </p>
+        <ul>
+            <li>+ 的代码是一个带"洞"的模板：有一些固定的指令（真正做加法的那些），还有两处可以插入任意代码，分别是 e1 和 e2 的代码。别的表达式也是这个模式。</li>
+            <li>栈机器的代码生成是递归的：e1 + e2 的代码就是 e1 和 e2 的代码粘在一起，而 e1、e2 又有各自的模板，可能还是同一种表达式。所以代码生成可以写成对 AST 的递归下降，至少对表达式是这样。</li>
+        </ul>
+
+        <h3>减法</h3>
+        <p>
+            新指令 <code>sub reg1 reg2 reg3</code>：reg1 ← reg2 - reg3。模板和加法完全一样，只有中间那条换成 sub：
+        </p>
+        <pre><code>cgen(e1 - e2) =
+    cgen(e1)
+    sw $a0 0($sp)
+    addiu $sp $sp -4
+    cgen(e2)
+    lw $t1 4($sp)
+    sub $a0 $t1 $a0
+    addiu $sp $sp 4</code></pre>
+
+        <h3>条件</h3>
+        <p>
+            需要控制流指令：<code>beq reg1 reg2 label</code> 在两个寄存器相等时跳到 label；<code>b label</code> 无条件跳转。
+        </p>
+        <pre><code>cgen(if e1 = e2 then e3 else e4) =
+    cgen(e1)
+    sw $a0 0($sp)
+    addiu $sp $sp -4
+    cgen(e2)
+    lw $t1 4($sp)
+    addiu $sp $sp 4
+    beq $a0 $t1 true_branch
+false_branch:
+    cgen(e4)
+    b end_if
+true_branch:
+    cgen(e3)
+end_if:</code></pre>
+        <p>
+            先按二元运算的模式求出条件的两边，e2 的值在累加器，e1 的值读回 $t1 并弹栈，然后比较：相等就跳到 true 分支，否则落到 false 分支求 e4，再跳到结尾。true 分支求 e3。end_if 处不需要做清理：e3 和 e4 都保持栈不变，结果都在累加器里，从哪条路到达 end_if，累加器里都是整个 if 的值。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、活动记录和函数</h2>
+        <p>
+            函数调用和函数定义的代码都取决于活动记录的布局，三者要一起设计。这门语言用一个很简单的活动记录就够了：
+        </p>
+        <ul>
+            <li>结果总在累加器里，不需要存在活动记录里。</li>
+            <li>活动记录存放实参。调用 f(x1, …, xn) 时把 xn, …, x1 压栈。这些是这门语言里仅有的变量，没有局部变量和全局变量。</li>
+            <li>栈机器的纪律保证函数退出时 $sp 和进入时一样，所以不需要控制链来找调用者的活动记录；这门语言没有非局部变量，函数执行中也从不需要看别的活动记录。</li>
+            <li>需要返回地址。</li>
+            <li>一个指向<strong>当前</strong>活动（不是前一个活动）的指针很有用，放在寄存器 <code>$fp</code>（frame pointer，帧指针）里，按惯例编译器把帧指针放在这里。它有什么用，稍后就清楚。</li>
+        </ul>
+        <p>
+            总结：调用者的帧指针、实参、返回地址，这三样就够了。调用 f(x, y) 时，活动记录从高地址到低地址是：old fp、y、x、返回地址。保存旧的帧指针，是因为 $fp 寄存器会被改写成当前活动的帧指针，返回时要恢复调用者的。参数逆序压栈，最后一个参数先压，第一个参数在最上面，这样找参数的下标计算简单一点。
+        </p>
+
+        <h3>函数调用（调用者一侧）</h3>
+        <p>
+            调用者和被调用者为建立一次函数调用而执行的指令序列叫<strong>调用序列</strong>（calling sequence）。新指令 <code>jal label</code>（jump and link）：跳到 label，并把下一条指令的地址存进寄存器 <code>$ra</code>（return address）。在别的体系结构上，"call"指令会把返回地址存到栈上。
+        </p>
+        <pre><code>cgen(f(e1, ..., en)) =
+    sw $fp 0($sp)
+    addiu $sp $sp -4
+    cgen(en)
+    sw $a0 0($sp)
+    addiu $sp $sp -4
+    ...
+    cgen(e1)
+    sw $a0 0($sp)
+    addiu $sp $sp -4
+    jal f_entry</code></pre>
+        <ul>
+            <li>调用者先保存自己的帧指针。</li>
+            <li>然后逆序求出并压入实参。</li>
+            <li>jal 跳到 f 的入口，把返回地址存进 $ra。</li>
+            <li>到这里活动记录有 4n + 4 字节：n 个参数各 4 字节，加上旧帧指针 4 字节。调用者这一侧尽可能多地建好了被调用函数的活动记录。</li>
+        </ul>
+
+        <h3>函数定义（被调用者一侧）</h3>
+        <p>
+            新指令 <code>jr reg</code>：跳到寄存器 reg 里的地址。
+        </p>
+        <pre><code>cgen(def f(x1, ..., xn) = e) =
+f_entry:
+    move $fp $sp
+    sw $ra 0($sp)
+    addiu $sp $sp -4
+    cgen(e)
+    lw $ra 4($sp)
+    addiu $sp $sp z
+    lw $fp 0($sp)
+    jr $ra</code></pre>
+        <ul>
+            <li>第一条指令就是 jal 的目标，标号 f_entry（课件上漏写了，录像里补上）。</li>
+            <li>设置帧指针：把当前的 $sp 复制进 $fp。</li>
+            <li>保存返回地址。调用者一侧缺的就是它，jal 执行前不知道返回地址，所以只能由被调用者在 jal 之后从 $ra 存进帧里，再移动 $sp。到这里活动记录完整建好了。</li>
+            <li>生成函数体的代码。函数体保持 $sp 不变，所以返回地址在 $sp 偏移 4 处，读回 $ra。</li>
+            <li>弹出整个活动记录：$sp 加 z，z = 4n + 8（n 个参数，加返回地址和旧帧指针两个字）。这时 $sp 指向上一个帧之后的第一个位置，那里正是为 f 保存的第一个东西，旧帧指针，把它恢复，调用者就拿回了自己的帧指针。</li>
+            <li>jr $ra 返回调用者。</li>
+        </ul>
+        <p>
+            注意帧指针指向帧的顶部（返回地址所在处），不是底部，这在变量引用时很重要。被调用者弹出返回地址、实参和保存的帧指针，也就是弹掉整个活动记录，并恢复调用者的帧指针。
+        </p>
+        <p>
+            f(x, y) 调用的四个时刻：调用前，$fp 是调用者的帧，$sp 在某处；进入时，栈上有 old fp、y、x，$sp 指向下一个空位，也就是返回地址要放的地方；jal 之后被调用者压入返回地址，$fp 移到这个位置；调用结束后，整个活动记录都被弹掉，回到和调用前完全一样的状态。函数调用必须保持"调用前后栈相同"这个不变量。
+        </p>
+
+        <h3>变量</h3>
+        <p>
+            函数的"变量"只有它的参数，都在活动记录里，由调用者压入。问题是：函数体执行时栈会因为保存中间结果而伸缩（回想 +、-、if 的代码都在压栈弹栈），所以变量和 $sp 之间没有固定的偏移，很难用 $sp 找到它们。
+        </p>
+        <p>
+            解决办法就是帧指针：它总是指向栈上的返回地址，在函数体执行期间不动，所以总能在相对它的固定位置找到变量。设 xi 是正在生成代码的函数的第 i 个形参（i = 1, …, n）：
+        </p>
+        <pre><code>cgen(xi) = lw $a0 z($fp)     # z = 4*i</code></pre>
+        <p>
+            这就是逆序压参数的原因，下标计算很简单（正序也不难，只是不那么直观）。偏移 4i 是编译器在编译时算好的固定数字，运行时并不做乘法。对 def f(x, y) = e：x 在 fp + 4，y 在 fp + 8。
+        </p>
+
+        <h3>小结</h3>
+        <ul>
+            <li>活动记录必须和代码生成器一起设计：不能不考虑生成什么代码就设计活动记录，也不能不决定数据放在哪里就考虑生成代码。</li>
+            <li>代码生成可以用对 AST 的递归遍历完成。和类型检查一样，这让你一次只想一种情况，不用同时想所有结构。</li>
+            <li>建议在 Cool 编译器里用栈机器，它简单，给出了一个把问题拆成可管理小块的框架，是学写编译器的好办法。</li>
+            <li>产品级编译器做法不同：重点是把值（特别是当前栈帧里的值）放在寄存器里；中间结果在活动记录里预先分配位置，而不是压栈弹栈。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>四、例子：sumto</h2>
+        <p>
+            录像里 Aiken 为一个小函数生成了完整代码。它对正整数 x 求 0 到 x 的和：
+        </p>
+        <pre><code>def sumto(x) = if x = 0 then 0 else x + sumto(x - 1)</code></pre>
+        <p>
+            按模板逐段拼起来（注释标出每段来自哪个模板）：
+        </p>
+        <pre><code>sumto_entry:
+    move $fp $sp              # callee side of calling sequence
+    sw $ra 0($sp)
+    addiu $sp $sp -4
+    lw $a0 4($fp)             # cgen(x)
+    sw $a0 0($sp)             # save first operand of the predicate
+    addiu $sp $sp -4
+    li $a0 0                  # cgen(0)
+    lw $t1 4($sp)
+    addiu $sp $sp 4
+    beq $a0 $t1 true1
+false1:
+    lw $a0 4($fp)             # cgen(x), first operand of +
+    sw $a0 0($sp)
+    addiu $sp $sp -4
+    sw $fp 0($sp)             # call sumto: save caller's fp
+    addiu $sp $sp -4
+    lw $a0 4($fp)             # cgen(x - 1)
+    sw $a0 0($sp)
+    addiu $sp $sp -4
+    li $a0 1
+    lw $t1 4($sp)
+    sub $a0 $t1 $a0
+    addiu $sp $sp 4
+    sw $a0 0($sp)             # push the argument
+    addiu $sp $sp -4
+    jal sumto_entry
+    lw $t1 4($sp)             # finish +
+    add $a0 $t1 $a0
+    addiu $sp $sp 4
+    b endif1
+true1:
+    li $a0 0
+endif1:
+    lw $ra 4($sp)             # return
+    addiu $sp $sp 12          # z = 4*1 + 8
+    lw $fp 0($sp)
+    jr $ra</code></pre>
+        <ul>
+            <li>程序里可能有很多 if，所以标号加上编号（true1、false1、endif1）保证唯一。</li>
+            <li>x 是唯一的参数，总在 fp + 4。活动记录是三个字：返回地址、旧帧指针、一个参数，12 字节。</li>
+            <li>代码是一堆模板拼成的，但最后得到的是一个线性的指令序列。如果有不明白的地方，值得回去对照模板看这个例子，弄懂各段怎样拼在一起。</li>
+            <li>这段代码极其低效。比如判断 x 是否等于 0 时，先从帧里读出 x，立刻又存回栈上，然后再读回来，来回搬了好几次。这是为了让模板能正确组合而采用的简单策略的结果。代码不必这么低效，后面会讲更聪明的代码生成技术和进一步改进代码的优化。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>五、临时值放进活动记录</h2>
+        <p>
+            真正的编译器更善于把值放在寄存器里，也更善于管理不得不存在活动记录里的临时值。寄存器的问题留到以后，这里讲后者：给定临时值在活动记录里（不管出于什么原因），怎样生成最高效的代码？改进办法是让代码生成器给每个临时值在活动记录里分配一个固定位置，这样保存和恢复临时值就不用操作栈指针。
+        </p>
+
+        <h3>需要多少个临时值</h3>
+        <p>
+            以 fib 为例数一数：第一个 if 的条件比较要求出第一个参数并保存起来再求第二个，需要一个临时值；第二个 if 同样需要一个；else 分支 fib(x - 1) + fib(x - 2) 里，求 x - 1 要一个临时值保存 x，加法要一个临时值保存第一次 fib 调用的结果，求 x - 2 又要一个保存 x。
+        </p>
+        <p>
+            总共要几个？条件一判定完，它的临时值就不需要了，空间可以回收；第一次 fib 的参数算完，那个临时值也不再需要。但第一次 fib 的结果要一直保存到加法做完，而这期间要算第二次 fib 的参数，两个临时值同时在用。所以这个函数只需要两个临时值。
+        </p>
+        <p>
+            定义 NT(e) 为求 e 所需的临时值个数。NT(e1 + e2) 至少是 NT(e1)；也至少是 NT(e2) + 1，因为求 e2 时要占着一个位置保存 e1 的值。取两者的最大值而不是求和，因为 e1 求完后它的中间结果都不需要了，只要答案，e1 用过的临时空间可以给 e2 重复用。
+        </p>
+        <p>
+            $$\begin{aligned}
+            NT(e_1 + e_2) &amp;= \max(NT(e_1),\ 1 + NT(e_2)) \\
+            NT(e_1 - e_2) &amp;= \max(NT(e_1),\ 1 + NT(e_2)) \\
+            NT(\texttt{if}\ e_1 = e_2\ \texttt{then}\ e_3\ \texttt{else}\ e_4) &amp;= \max(NT(e_1),\ 1 + NT(e_2),\ NT(e_3),\ NT(e_4)) \\
+            NT(\text{id}(e_1, \ldots, e_n)) &amp;= \max(NT(e_1), \ldots, NT(e_n)) \\
+            NT(\texttt{int}) &amp;= 0 \\
+            NT(\text{id}) &amp;= 0
+            \end{aligned}$$
+        </p>
+        <ul>
+            <li>减法和加法结构相同，只是运算不同。</li>
+            <li>if：求 e1 时需要 NT(e1)；求 e2 时要保存 e1 的结果，需要 1 + NT(e2)；条件判定完，那些都不需要了，只会求 e3 或 e4 中的一个。</li>
+            <li>函数调用：公式里没有给参数的结果留位置。参数的值确实要保存，但存在正在建立的<strong>新</strong>活动记录里，而不是当前的活动记录里，而 NT 算的是当前活动需要的临时值。</li>
+        </ul>
+        <p>
+            课件问：这是自底向上还是自顶向下算的？（自底向上，由子表达式的值算出父表达式的值。）fib 的 NT 是多少？按方程算：x = 1 和 x = 2 两个条件各是 max(0, 1 + 0) = 1；fib(x - 1) 的参数 x - 1 是 1，fib(x - 2) 同理是 1；加法是 max(1, 1 + 1) = 2；内层 if 是 max(0, 1, 0, 2) = 2；外层 if 是 max(0, 1, 0, 2) = 2。答案是 2，和数出来的一样。
+        </p>
+
+        <h3>修改后的活动记录</h3>
+        <p>
+            对函数定义 f(x1, …, xn) = e，活动记录有 2 + n + NT(e) 个元素：返回地址、帧指针、n 个参数、NT(e) 个存中间结果的位置。前面部分照旧：调用者的帧指针，逆序的 n 个参数，返回地址；返回地址之后是 NT(e) 个临时值位置。
+        </p>
+        <p>
+            代码生成还要知道每一点上有多少临时值正在使用，所以给 cgen 加一个参数：下一个可用临时值的位置。
+        </p>
+        <pre><code>cgen(e1 + e2, nt) =
+    cgen(e1, nt)
+    sw $a0 nt($fp)
+    cgen(e2, nt + 4)
+    lw $t1 nt($fp)
+    add $a0 $t1 $a0</code></pre>
+        <p>
+            e1 自己可能也要存临时值，所以把 nt 传给它；e1 求完，直接把结果存到活动记录里相对帧指针偏移 nt 的位置，不用动栈指针，原来的两条指令变成一条；求 e2 时，nt 那个位置被占了，下一个可用位置是 nt + 4；e2 求完，从 nt($fp) 读回 e1 的值，相加。和原来比，这段代码少了两条指令，效率高得多。
+        </p>
+        <p>
+            临时区域被当作一个固定大小的小栈来用，栈的纪律和以前一样，只是原来在生成的代码里靠压栈弹栈完成的偏移计算，现在大多挪到了编译器里，运行时只剩下对帧指针固定偏移的读写。课件留了练习：写出其他结构的 cgen。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、面向对象语言的代码生成</h2>
+        <p>
+            好在对象的标准代码生成策略只是前面内容的扩展：前面学的都要用，再加上一些对象特有的东西。面向对象的口号是：如果 B 是 A 的子类，那么凡是需要 A 类对象的地方都可以用 B 类对象。对代码生成来说，这意味着为类 A 生成的代码必须不加修改地适用于 B 类对象。而且编译 A 时可能根本不知道它有哪些子类，将来有人定义一个新子类，编译好的 A 也得能用。
+        </p>
+        <p>
+            要完整描述对象的代码生成，只需回答两个问题：对象在内存里怎样表示？动态分派怎样实现？
+        </p>
+        <pre><code>class A {
+    a : Int;
+    d : Int;
+    f() : Int { a &lt;- a + d };
+};
+
+class B inherits A {
+    b : Int;
+    f() : Int { a };
+    g() : Int { a &lt;- a + b };
+};
+
+class C inherits A {
+    c : Int;
+    h() : Int { a &lt;- a + c };
+};</code></pre>
+        <p>
+            B 和 C 都继承了 A 的属性 a 和 d，B 的方法虽然没提到它们，也可以引用。所有方法都引用了属性 a。以方法 f 为例，三个类里都有 f，它运行在 A、B 或 C 的对象上时都要能找到 a。要让 A 的方法在 A、B、C 的对象上都正确，a 必须在每种对象的同一个"位置"。
+        </p>
+
+        <h3>对象布局</h3>
+        <p>
+            对象就像 C 的结构体，<code>foo.attribute</code> 是在 foo 结构体里按这个属性对应的偏移取值。Cool 的对象也这样实现：
+        </p>
+        <ul>
+            <li>对象放在连续的内存里，是一块没有空隙的内存。</li>
+            <li>每个属性存在对象里的固定偏移处。</li>
+            <li>调用方法时，对象本身就是 self。可以把 self 看作指向整个对象的指针，相当于 Java 的 this；属性就是这个对象里的特定位置。</li>
+        </ul>
+        <p>
+            Cool 对象的前三个字是头部信息，每个对象都有：
+        </p>
+        <table>
+            <thead><tr><th>偏移</th><th>内容</th></tr></thead>
+            <tbody>
+                <tr><td>0</td><td>类标签（class tag）</td></tr>
+                <tr><td>4</td><td>对象大小</td></tr>
+                <tr><td>8</td><td>分派指针（dispatch ptr）</td></tr>
+                <tr><td>12</td><td>属性 1</td></tr>
+                <tr><td>16</td><td>属性 2</td></tr>
+                <tr><td>…</td><td>…</td></tr>
+            </tbody>
+        </table>
+        <ul>
+            <li>类标签是一个整数，标识对象的类。编译器给所有类编号，比如 A、B、C 编为 1、2、3。具体是什么数无所谓，不必连续，只要互不相同。</li>
+            <li>对象大小也是整数，以字为单位。</li>
+            <li>分派指针指向方法表，后面讲。</li>
+            <li>后面的槽里放属性，顺序由编译器定；同一个类的所有对象属性顺序都一样。coolc 按属性在类里出现的文本顺序排列。</li>
+        </ul>
+
+        <h3>子类</h3>
+        <p>
+            观察：有了类 A 的布局，子类 B 的布局可以在 A 的布局后面追加 B 新增属性的槽来定义。A 的布局不变，B 是它的扩展。一旦决定了一个属性在某个类里的位置，它在所有子类里都不会变。
+        </p>
+        <table>
+            <thead><tr><th>类</th><th>0</th><th>4</th><th>8</th><th>12</th><th>16</th><th>20</th></tr></thead>
+            <tbody>
+                <tr><td>A</td><td>Atag</td><td>5</td><td>*</td><td>a</td><td>d</td><td></td></tr>
+                <tr><td>B</td><td>Btag</td><td>6</td><td>*</td><td>a</td><td>d</td><td>b</td></tr>
+                <tr><td>C</td><td>Ctag</td><td>6</td><td>*</td><td>a</td><td>d</td><td>c</td></tr>
+            </tbody>
+        </table>
+        <p>
+            A 有两个属性加三个头部字，大小是 5。B 的标签不同，多一个字段所以大小大 1，但 A 的属性在同样的位置，可以想象 B 对象里嵌着一个 A 对象：遮住最后那个字段，看到的就是和 A 对象一样大小、一样属性的东西，所以任何能在 A 对象上运行的代码在 B 对象上也有意义。B 自己的属性排在 A 的所有字段之后。C 同理。但不能在 C 对象上调用 B 的方法，它们第三个属性位置上的东西完全不同，类型也可能不同。这没关系，B 和 C 除了共同的祖先 A 之外毫无关系，A 之外的部分布局可以完全不同。
+        </p>
+        <p>
+            一个属性的偏移在一个类和它的所有子类里都相同，所以 A1 的任何方法都能用在子类 A2 上。对一条继承链 An &lt; … &lt; A3 &lt; A2 &lt; A1，An 的布局是：头部，A1 的属性，A2 的属性，……，An 的属性。每个前缀都是某个超类的合法布局：到 A1 的属性为止是一个合法的 A1 对象，到 A2 的属性为止是一个合法的 A2 对象，依此类推。
+        </p>
+
+        <h3>动态分派</h3>
+        <ul>
+            <li><code>e.g()</code>：如果 e 是 B，g 指 B 里的方法。</li>
+            <li><code>e.f()</code>：如果 e 是 A 或 C，f 指 A 里的方法（C 是继承来的）；如果 e 是 B，f 指 B 里的方法。B 重新定义了 f，这叫<strong>覆盖</strong>，这个定义取代了 B 本来会从 A 继承的定义。</li>
+        </ul>
+        <p>
+            方法和动态分派的实现和属性的实现非常像。每个类有一组固定的方法（包括继承来的）。知道类名，就确切知道它有哪些方法，运行时从不改变。覆盖是编译时的、静态的性质，即使子类可以重新定义方法，编译器在编译时就能算出一个类的所有方法。
+        </p>
+        <p>
+            <strong>分派表</strong>给这些方法建索引：它是一个方法入口地址的数组，每个方法一项。和属性一样，方法 f 在一个类及其所有子类的分派表里都位于固定的偏移。
+        </p>
+        <table>
+            <thead><tr><th>类</th><th>0</th><th>4</th></tr></thead>
+            <tbody>
+                <tr><td>A</td><td>fA</td><td></td></tr>
+                <tr><td>B</td><td>fB</td><td>g</td></tr>
+                <tr><td>C</td><td>fA</td><td>h</td></tr>
+            </tbody>
+        </table>
+        <ul>
+            <li>A 的表只有一个方法，偏移 0 处是指向 A 里 f 代码的指针，确切说就是指向那个方法入口标号处第一条指令的指针。</li>
+            <li>C 继承了 A 的所有方法，位于同样的偏移，偏移 0 处指向和 A 一样的 f；C 自己定义的 h 放在下一项。如果类里定义了更多方法，就像属性一样按文本顺序排下去。</li>
+            <li>B 重新定义了 f。重要的是 f 的指针仍在同一个位置，还是第一项，只是内容不同，指向 B 里定义的那个方法。B 新增的 g 排在 A 的方法之后。</li>
+        </ul>
+        <p>
+            对象头部的分派指针，就指向这个类的方法表。为什么方法要多一层间接，而属性直接嵌在对象里？因为属性可以更新，每个对象可以有自己的一组属性值；而对象的方法从不改变，同一个类的所有对象可以共享同一张表。有 100 个 A 对象，就要有 100 份属性，但它们的方法都一样，共享一张表能省很多空间。
+        </p>
+        <p>
+            编译时，类 X 的每个方法 f 被分配一个分派表里的偏移 $O_f$，这是编译器的工作。实现动态分派 <code>e.f()</code>（略有简化）：
+        </p>
+        <ol>
+            <li>求 e，得到对象 x。</li>
+            <li>从 x 的头部（每个对象的第三个字）取出分派表 D，它对应 x 所属的类。</li>
+            <li>调用 D[$O_f$]：取出 f 的入口地址并跳过去，调用时把 self 绑定到 x。</li>
+        </ol>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS143: Compilers &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="11_运行时组织.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="13_操作语义.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

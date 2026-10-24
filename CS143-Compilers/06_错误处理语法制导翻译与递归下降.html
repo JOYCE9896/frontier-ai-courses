@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第六讲：错误处理、语法制导翻译与递归下降 | Stanford CS143 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="05_语法分析入门.html">&larr; 上一讲</a>
+    <span>Stanford CS143: Lecture 6</span>
+    <a href="07_自顶向下分析.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第六讲：错误处理、语法制导翻译与递归下降</h1>
+        <p class="subtitle">编译器里的四类错误，语法错误恢复的三种办法（恐慌模式、错误产生式、局部和全局纠正）以及为什么今天只用前两种；抽象语法树；语义动作、属性、依赖图，综合属性和继承属性，用语义动作建 AST；递归下降分析的过程、通用写法、回溯的局限，左递归和消除左递归</p>
+        <div class="author-meta">
+            主讲：Fredrik Kjolstad（2026 年春季）；录像主讲：Alex Aiken<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs143/lectures/lecture06.pdf" target="_blank">课件</a>（2026 年 4 月 16 日）、<a href="https://www.youtube.com/watch?v=D6uMYa41Ank" target="_blank">录像第 6 周</a>（06-01 Error Handling 到 06-05 Left Recursion）；语义动作一节录像里没有单独讲，依据课件整理
+        </div>
+    </header>
+
+    <section>
+        <h2>一、错误处理</h2>
+        <p>
+            这一讲 PA1 和 WA1 截止，布置 PA2 和 WA2。
+        </p>
+        <p>
+            编译器有两件相对独立的工作：把合法程序翻译成正确的代码；检测不合法的程序，并给出好的反馈。错误有很多种：
+        </p>
+        <table>
+            <thead><tr><th>错误类型</th><th>例子（C）</th><th>由谁发现</th></tr></thead>
+            <tbody>
+                <tr><td>词法错误</td><td><code>... $ ...</code>（不属于任何合法符号的字符）</td><td>词法分析器</td></tr>
+                <tr><td>语法错误</td><td><code>... x *% ...</code>（每个单元都对，但拼法不对）</td><td>语法分析器</td></tr>
+                <tr><td>语义错误</td><td><code>int x; y = x(3);</code>（x 声明为整数却当函数用）</td><td>类型检查器</td></tr>
+                <tr><td>正确性错误</td><td>你最喜欢的那个程序（合法，但不做你想做的事）</td><td>测试者、用户</td></tr>
+            </tbody>
+        </table>
+        <p>
+            编译器能发现很多种错误，但发现不了全部，剩下的要靠测试者和用户。
+        </p>
+        <p>
+            对错误处理的要求：准确清楚地报告错误，让人能很快找到并修好；从错误中很快恢复，不要花很久才决定下一步；不要拖慢合法代码的编译，不用错误处理时不该为它付出代价。做好并不容易。
+        </p>
+
+        <h3>恐慌模式</h3>
+        <p>
+            最简单、最流行的办法。发现错误时，丢弃 token，直到遇到一个角色明确的 token，再从那里继续。这种 token 叫<strong>同步 token</strong>，通常是语句或表达式的结束符。典型策略是出错后跳到语句或函数的末尾，从下一条语句或下一个函数重新开始分析。
+        </p>
+        <p>
+            例子：<code>(1 + + 2) + 3</code>。分析器从左往右看到左括号、1、加号，一切正常，再看到第二个加号就卡住了，语言里没有两个加号连在一起的表达式。恐慌模式下它不再正常分析，而是一直丢输入直到认出某样东西。如果这类错误的策略是"跳到下一个整数"，它就丢掉这个加号，从 2 重新开始，当作 1 + 2，括号配上，后面照常分析。
+        </p>
+        <p>
+            bison 有一个特殊终结符 <code>error</code>，用来描述要跳过多少输入：
+        </p>
+        <p>
+            $$E \to \texttt{int} \mid E + E \mid (E) \mid \texttt{error}\ \texttt{int} \mid (\ \texttt{error}\ )$$
+        </p>
+        <p>
+            前三条是正常的产生式。如果分析 E 时它们都不行，就试带 error 的产生式：<code>error int</code> 表示丢掉直到下一个整数为止的所有输入，把整段当作一个 E；<code>( error )</code> 表示括号里出了错就把括号里的东西全扔掉，在括号边界处重新同步。可以给语言里任意多种符号写这种产生式。
+        </p>
+
+        <h3>错误产生式</h3>
+        <p>
+            把程序员常犯的错误作为另一种写法写进文法。Aiken 的例子：一门给数学家用的语言，他们总想写 <code>5 x</code> 而不是 <code>5 * x</code>，老是报语法错误让他们很恼火，那就加一条产生式 $E \to \cdots \mid E\ E$，让并列的两个表达式也合法。缺点是文法变复杂，加多了很难理解和维护，本质上是把常见错误升级成另一种语法。但实践中确实这样用：gcc 等 C 编译器经常警告你某个写法不该用，但仍然接受，用的就是这种机制。
+        </p>
+
+        <h3>局部和全局纠正</h3>
+        <p>
+            前两种只是检测错误，还可以尝试修正：找一个和原程序"相近"的正确程序。做法有插入和删除 token，使编辑距离最小；或者在一定范围内穷举搜索。缺点很多：很难实现；会拖慢正确程序的分析，因为要保存足够的状态以备搜索；"相近"不一定是程序员"想要"的那个程序；大多数工具不支持。
+        </p>
+        <p>
+            最有名的例子是 PL/C，康奈尔大学的 PL/I 编译器（C 指 correction 或 Cornell）。它以什么都肯编译出名，你可以把电话簿喂给它，有人真的喂过哈姆雷特的独白。它会打出很多错误信息，有时读起来很好笑，最后总能纠正出一个能运行的 PL/I 程序。
+        </p>
+        <p>
+            为什么那时的人要费这个劲？1970 年代重新编译的周期很慢，可能一天一次：早上交程序，下午才拿到结果。这时程序里一个语法错误就可能浪费一整天，编译器猜着修好一个小错，就能省下一天。所以当时的目标是一轮里找出尽可能多的错误，甚至自动纠正。研究者对这个题目也一直放不下。
+        </p>
+        <p>
+            今天的重新编译几乎是交互式的，用户一般每轮只改一个错误。编译器仍然会报很多错误，但 Aiken 说他自己和他看到的很多人都只改第一个，因为第一个最可靠，而且肯定要先改掉才能再编译。编译够快时这样最有效率。所以复杂的错误恢复今天没那么有吸引力了，恐慌模式似乎就够了。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、抽象语法树</h2>
+        <p>
+            语法分析器追踪了 token 序列的推导，但编译器的后续阶段需要一个能表示程序结构的数据结构。语法分析树就是一种，可它并不是我们想要的。我们要的是<strong>抽象语法树</strong>（AST）：像语法分析树，但忽略了一些细节。
+        </p>
+        <p>
+            文法 $E \to \texttt{int} \mid (E) \mid E + E$，串 <code>5 + (2 + 3)</code>，词法分析后是 <code>int5 '+' '(' int2 '+' int3 ')'</code>。语法分析树如实表达了程序，也完全可以拿来做编译，只是用起来很不方便：
+        </p>
+        <ul>
+            <li>太啰嗦。有些节点 E 只有一个孩子，比如 E 下面只挂一个 int5，这个 E 没有用，可以直接把 5 放在那里。</li>
+            <li>括号在分析时很重要，它们决定了两个加号谁嵌套在谁里面。可分析完以后，树的结构已经表达了同样的信息，括号节点就多余了。</li>
+        </ul>
+        <p>
+            AST 把这些都压缩掉：两个 PLUS 节点，三个参数 5、2、3，结合关系由哪个 PLUS 嵌在哪个里面来表示。没有多余的非终结符，没有括号。在这样的结构上写算法要容易得多。它叫"抽象"语法树，是因为它抽象掉了具体语法的细节，只保留足以忠实表示程序并编译它的信息。AST 是编译器里一个重要的数据结构。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、语义动作与语法制导翻译</h2>
+        <p>
+            AST 怎样建出来？用语义动作，这是对 CFG 的扩展。
+        </p>
+        <ul>
+            <li>每个文法符号可以有<strong>属性</strong>。终结符（token）的属性可以由词法分析器算出来。</li>
+            <li>每条产生式可以带一个<strong>动作</strong>，写作 $X \to Y_1 \ldots Y_n\ \{\ \text{action}\ \}$，动作可以引用或计算符号的属性。</li>
+        </ul>
+
+        <h3>例子：求值</h3>
+        <p>
+            文法 $E \to \texttt{int} \mid E + E \mid (E)$，给每个符号定义属性 val：终结符的 val 是它的词素对应的值，非终结符的 val 是表达式的值，由子表达式的值算出。
+        </p>
+        <p>
+            $$\begin{aligned}
+            E &amp;\to \texttt{int} &amp;&amp; \{\ E.\text{val} = \texttt{int}.\text{val}\ \} \\
+            &amp;\mid E_1 + E_2 &amp;&amp; \{\ E.\text{val} = E_1.\text{val} + E_2.\text{val}\ \} \\
+            &amp;\mid (E_1) &amp;&amp; \{\ E.\text{val} = E_1.\text{val}\ \}
+            \end{aligned}$$
+        </p>
+        <p>
+            对 <code>5 + (2 + 3)</code>，分析用到的产生式和对应的方程：
+        </p>
+        <table>
+            <thead><tr><th>产生式</th><th>方程</th></tr></thead>
+            <tbody>
+                <tr><td>$E \to E_1 + E_2$</td><td>$E.\text{val} = E_1.\text{val} + E_2.\text{val}$</td></tr>
+                <tr><td>$E_1 \to \texttt{int}_5$</td><td>$E_1.\text{val} = \texttt{int}_5.\text{val} = 5$</td></tr>
+                <tr><td>$E_2 \to (E_3)$</td><td>$E_2.\text{val} = E_3.\text{val}$</td></tr>
+                <tr><td>$E_3 \to E_4 + E_5$</td><td>$E_3.\text{val} = E_4.\text{val} + E_5.\text{val}$</td></tr>
+                <tr><td>$E_4 \to \texttt{int}_2$</td><td>$E_4.\text{val} = 2$</td></tr>
+                <tr><td>$E_5 \to \texttt{int}_3$</td><td>$E_5.\text{val} = 3$</td></tr>
+            </tbody>
+        </table>
+
+        <h3>声明式和命令式</h3>
+        <p>
+            语义动作给出的是一组方程。有两种风格：
+        </p>
+        <ul>
+            <li>声明式：不规定求解顺序，由分析器自己找出来。</li>
+            <li>命令式：求值顺序是固定的。如果动作会修改全局状态，这一点就很重要。</li>
+        </ul>
+        <p>
+            课程把动作当作纯方程来讲，但要注意 bison 对动作有固定的求值顺序。
+        </p>
+
+        <h3>依赖图</h3>
+        <p>
+            $E_3.\text{val} = E_4.\text{val} + E_5.\text{val}$ 要求先算出 $E_4.\text{val}$ 和 $E_5.\text{val}$，我们说 $E_3.\text{val}$ 依赖于它们。在语法分析树上，每个 E 节点有一个 val 槽，按依赖关系连上边，就是依赖图。一个属性必须在依赖图里它所依赖的所有属性都算完之后才能算。在这个例子里可以自底向上算：叶子 5、2、3，然后 $E_3 = 5$，$E_2 = 5$，根 $E = 10$。只要没有环，这样的顺序就存在；循环定义的属性是不合法的。
+        </p>
+
+        <h3>综合属性和继承属性</h3>
+        <ul>
+            <li><strong>综合属性</strong>：由语法树中后代的属性算出来，E.val 就是。总可以按自底向上的顺序计算。只有综合属性的文法叫 S-属性文法，这是最常见的情况。</li>
+            <li><strong>继承属性</strong>：由父节点和（或）兄弟节点的属性算出来。课件举的例子是行计算器。</li>
+        </ul>
+        <p>
+            语义动作可以用来建 AST，也能做很多别的事，比如类型检查、代码生成、计算。这个过程叫<strong>语法制导翻译</strong>，是对 CFG 的一个重要推广。
+        </p>
+
+        <h3>用语义动作建 AST</h3>
+        <p>
+            先定义 AST 的数据类型，课程项目里由课程提供。假设抽象树类型有两个构造函数：<code>mkleaf(n)</code> 造一个值为 n 的叶子，<code>mkplus(T1, T2)</code> 造一个 PLUS 节点，两个孩子是 T1 和 T2。定义综合属性 ast，它的值是 AST；设 int.lexval 是整数词素的值：
+        </p>
+        <p>
+            $$\begin{aligned}
+            E &amp;\to \texttt{int} &amp;&amp; E.\text{ast} = \text{mkleaf}(\texttt{int}.\text{lexval}) \\
+            &amp;\mid E_1 + E_2 &amp;&amp; E.\text{ast} = \text{mkplus}(E_1.\text{ast}, E_2.\text{ast}) \\
+            &amp;\mid (E_1) &amp;&amp; E.\text{ast} = E_1.\text{ast}
+            \end{aligned}$$
+        </p>
+        <p>
+            对 <code>int5 '+' '(' int2 '+' int3 ')'</code> 自底向上求 ast 属性，得到
+        </p>
+        <pre><code>E.ast = mkplus(mkleaf(5), mkplus(mkleaf(2), mkleaf(3)))</code></pre>
+        <p>
+            正是上一节那棵 AST。括号那条产生式直接把内部的 AST 传上去，括号就这样消失了。
+        </p>
+        <p>
+            小结：用 CFG 描述语言的语法；语法分析器回答 $s \in L(G)$ 吗，并追踪出一棵语法分析树；在这些产生式里建 AST；把 AST 交给编译器的其余部分。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、递归下降分析</h2>
+        <p>
+            第一个语法分析算法。递归下降是<strong>自顶向下</strong>的：从根开始，从左往右构造语法分析树，终结符按它们在 token 流里出现的顺序被看到。以后还会讲自底向上的算法。
+        </p>
+
+        <h3>过程</h3>
+        <p>
+            文法：
+        </p>
+        <p>
+            $$E \to T \mid T + E \qquad T \to \texttt{int} \mid \texttt{int} * T \mid (E)$$
+        </p>
+        <p>
+            输入 <code>( int5 )</code>。从顶层非终结符 E 开始，按顺序试 E 的规则：
+        </p>
+        <ol>
+            <li>试 E → T，T 成为 E 的孩子。T 是唯一没展开的非终结符，试它的第一条规则 T → int。</li>
+            <li>只要还在生成非终结符，就无法判断方向对不对；一旦生成了终结符，就能拿它和下一个输入 token 比较。int 和输入的 ( 不匹配，这条路走不通，<strong>回溯</strong>：撤销最近的决定，试下一个选择。</li>
+            <li>试 T → int * T，最左边又是 int，还是不匹配，再回溯。</li>
+            <li>试 T → ( E )，( 和输入匹配，输入指针前进。展开里面的 E，同样从第一条 E → T 开始，T → int 和输入的 int 匹配，指针前进；最后 ) 也匹配。</li>
+            <li>树里所有终结符都匹配上了，输入指针也到了末尾，接受。</li>
+        </ol>
+
+        <h3>通用写法</h3>
+        <p>
+            准备：TOKEN 是所有 token 的类型，例子里有 INT、OPEN、CLOSE、PLUS、TIMES；全局变量 <code>next</code> 指向下一个输入 token，作用就是刚才那个输入指针。定义三类返回布尔值的函数：
+        </p>
+        <pre><code>// match a given terminal; note next is advanced even on failure
+bool term(TOKEN tok) { return *next++ == tok; }
+
+// Sn(): does the n-th production of S match?
+// S():  does any production of S match?</code></pre>
+        <p>
+            每个非终结符有两类函数：每条产生式一个函数，检查这条产生式能否匹配输入；再加一个把所有产生式合起来的函数。对上面的文法：
+        </p>
+        <pre><code>bool E1() { return T(); }                          // E -&gt; T
+bool E2() { return T() &amp;&amp; term(PLUS) &amp;&amp; E(); }     // E -&gt; T + E
+bool E() {
+    TOKEN *save = next;
+    return (next = save, E1())
+        || (next = save, E2());
+}
+
+bool T1() { return term(INT); }                              // T -&gt; int
+bool T2() { return term(INT) &amp;&amp; term(TIMES) &amp;&amp; T(); }        // T -&gt; int * T
+bool T3() { return term(OPEN) &amp;&amp; E() &amp;&amp; term(CLOSE); }       // T -&gt; ( E )
+bool T() {
+    TOKEN *save = next;
+    return (next = save, T1())
+        || (next = save, T2())
+        || (next = save, T3());
+}</code></pre>
+        <ul>
+            <li>E1 很简单：E → T 能匹配，当且仅当 T 的某条产生式能匹配，而试 T 的所有产生式的函数就是 T()。</li>
+            <li>E2 利用了 C 里 <code>&amp;&amp;</code> 从左到右的短路求值。T() 带着副作用：它匹配了多少输入，next 就前进多少，返回时 next 指向 T 没匹配的下一个终结符，那里必须是加号；term 再把 next 前移一位，正好是 E 开始的地方；E 匹配完后 next 停在它后面，留给外层继续匹配。</li>
+            <li>回溯在 E() 里处理。唯一需要恢复的状态就是 next，所以先用局部变量 save 记下调用时的位置。先试 E1，如果成功，<code>||</code> 短路，不再试 E2，E1 对 next 的推进保留下来；如果失败，先把 next 恢复，再试 E2。两个都失败，就把失败返回给上一层，由上一层回溯。</li>
+            <li>第一个分支里的 <code>next = save</code> 其实不需要（刚保存完就复原），写上是为了让各条产生式的写法一致。</li>
+        </ul>
+        <p>
+            启动时，把 next 指向第一个 token，调用开始符号对应的函数 E()。递归下降分析器很容易手写，人们也常常照这个套路手写。
+        </p>
+        <p>
+            录像里 Aiken 用这段代码把 <code>( int )</code> 完整走了一遍：E 调 E1 调 T，T1 失败，恢复 next；T2 的 term(INT) 也让 next 前进了一格，失败后又恢复；T3 匹配 OPEN，递归调用 E，E1 调 T，T1 匹配 int；返回到 T3 匹配 CLOSE；层层返回 true，而且输入已经用完，分析成功。
+        </p>
+
+        <h3>局限：回溯不完全</h3>
+        <p>
+            用同一段代码分析 <code>int</code>：E → E1 → T → T1 匹配 int，成功，输入用完，接受。没问题。
+        </p>
+        <p>
+            分析 <code>int * int</code>：E → E1 → T → T1 匹配第一个 int，T1 成功，所以 T 成功，E1 成功，E 返回 true。但输入只消耗到第一个 int，后面还有 <code>* int</code>，分析失败，被拒绝了。可这个串明明在语言里。
+        </p>
+        <p>
+            问题在于：T1 匹配成功后，T 就认为自己完成了。整个分析失败时，没有办法回头让 T 试别的产生式；如果试了 T2，就能匹配 int * int。在为一个非终结符找能用的产生式的过程中有回溯，但一旦某条产生式成功、函数返回，这个非终结符就认定了它，不能再回头修改这个决定。
+        </p>
+        <p>
+            所以这个算法不完全通用。递归下降作为一种技术是通用的，有带更复杂回溯的递归下降算法，能分析任何文法。讲这个版本是因为它很机械、很容易手写，而且适用于相当大的一类文法：只要对任一非终结符，任何时候最多只有一条产生式能成功。这样一旦找到成功的产生式，就不会需要回头，因为别的产生式都不可能成功。例子里的文法可以改写（比如提取左因子，下一讲讲）以适用于这个算法。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、左递归</h2>
+        <p>
+            递归下降的主要困难。看只有一条产生式的文法 $S \to S\,a$：
+        </p>
+        <pre><code>bool S1() { return S() &amp;&amp; term(a); }
+bool S() { return S1(); }</code></pre>
+        <p>
+            调用 S()，S 调 S1，S1 做的第一件事又是调 S，无限循环，什么输入都分析不了。
+        </p>
+        <p>
+            一个文法是<strong>左递归</strong>的，如果有某个非终结符 S，从它出发经过非空的若干步改写（$S \to^+ S\alpha$），又回到 S 处在最左边的局面。$S \to Sa \to Saa \to Saaa \to \cdots$，左端永远是 S。递归下降只有在生成的第一个符号是终结符时才能匹配输入，左端总是非终结符，就永远没有进展。
+        </p>
+
+        <h3>消除左递归</h3>
+        <p>
+            看更一般的形式 $S \to S\alpha \mid \beta$（β 里不含 S）。它生成所有以一个 β 开头、后面跟任意个 α 的串：
+        </p>
+        <p>
+            $$S \to S\alpha \to S\alpha\alpha \to \cdots \to S\alpha\cdots\alpha \to \beta\alpha\cdots\alpha$$
+        </p>
+        <p>
+            注意它是从右往左生成的：先生成串的右端，最后才生成出现在输入最前面的 β。这就是它和递归下降不合的原因，递归下降想先看到输入的开头，从左往右工作。修正的思路就在这里：用右递归代替左递归，从左往右生成同一个语言。为此多引入一个符号 S'：
+        </p>
+        <p>
+            $$S \to \beta S' \qquad S' \to \alpha S' \mid \varepsilon$$
+        </p>
+        <p>
+            S 先把 β 放在第一个位置，S' 生成一串 α（可以为空）：$S \to \beta S' \to \beta\alpha S' \to \beta\alpha\alpha S' \to \cdots \to \beta\alpha\cdots\alpha$。语言完全一样。
+        </p>
+        <p>
+            一般地，
+        </p>
+        <p>
+            $$S \to S\alpha_1 \mid \cdots \mid S\alpha_n \mid \beta_1 \mid \cdots \mid \beta_m$$
+        </p>
+        <p>
+            生成的串都以某个 $\beta_j$ 开头，后面跟零或多个 $\alpha_i$。改写为
+        </p>
+        <p>
+            $$S \to \beta_1 S' \mid \cdots \mid \beta_m S' \qquad S' \to \alpha_1 S' \mid \cdots \mid \alpha_n S' \mid \varepsilon$$
+        </p>
+
+        <h3>间接左递归</h3>
+        <p>
+            $$S \to A\alpha \mid \delta \qquad A \to S\beta$$
+        </p>
+        <p>
+            这里没有哪条产生式直接左递归，但 $S \to A\alpha \to S\beta\alpha$，两步之后 S 又回到最左边，所以仍然是左递归的。这种左递归也能消除，而且可以完全自动地消除，算法见龙书 4.3 节。
+        </p>
+
+        <h3>小结</h3>
+        <p>
+            递归下降是简单而通用的分析策略，可以分析任何上下文无关文法，但必须先消除左递归。原则上可以自动消除，实践中人们手工消除，因为写语义动作时需要知道文法的确切形式，而且手工消除并不难。过去人们认为回溯效率太低，所以递归下降不受欢迎；实际上加一些调整后，它在现代机器上又快又简单，回溯也可以通过限制文法来控制。很多文法复杂的产品级编译器用递归下降，因为它通用：比如 gcc 的前端就是手写的递归下降分析器。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS143: Compilers &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="05_语法分析入门.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="07_自顶向下分析.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

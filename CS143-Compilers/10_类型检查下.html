@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十讲：类型检查（下） | Stanford CS143 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="09_语义分析与类型检查上.html">&larr; 上一讲</a>
+    <span>Stanford CS143: Lecture 10</span>
+    <a href="11_运行时组织.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十讲：类型检查（下）</h1>
+        <p class="subtitle">静态类型系统的表达力，动态类型和静态类型，有子类型时的可靠性定理；Count 和 Stock 的例子为什么需要 SELF_TYPE；SELF_TYPE 是一个以当前类为上界的类型变量，子类型和最小上界怎样扩展；SELF_TYPE 能出现和不能出现的位置，为什么形参不能是 SELF_TYPE；带 SELF_TYPE 的分派和静态分派规则；语义分析的错误恢复：Object 还是 No_type</p>
+        <div class="author-meta">
+            主讲：Fredrik Kjolstad（2026 年春季）；录像主讲：Alex Aiken<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs143/lectures/lecture10.pdf" target="_blank">课件</a>（2026 年 5 月 5 日）、<a href="https://www.youtube.com/playlist?list=PLxoiCo5tGquBZzK0E_-JVLSV3b3o_2OnX" target="_blank">录像第 10 周</a>（10-01 Static vs. Dynamic Typing 到 10-06 Error Recovery，YouTube 上按小节转载的播放列表；10-01 的前半段没有找到可用的转载，那部分依据课件）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、静态类型系统的表达力</h2>
+        <p>
+            静态类型系统能发现常见错误，但也会拒绝一些正确的程序。于是有人主张改用动态类型检查，也有人主张用表达力更强的静态类型检查。可是表达力更强的类型系统也更复杂。
+        </p>
+        <ul>
+            <li>一个对象的<strong>动态类型</strong>是创建它的那个 <code>new C</code> 里的类 C。这是运行时的概念，连不是静态类型的语言也有动态类型的概念。</li>
+            <li>一个表达式的<strong>静态类型</strong>概括了这个表达式可能具有的所有动态类型。这是编译时的概念。</li>
+        </ul>
+        <p>
+            早期的类型系统里静态类型和动态类型一一对应，可靠性定理是：对所有表达式 E，dynamic_type(E) = static_type(E)，即在所有执行中，E 的值都是编译器推出的那个类型。在高级一些的类型系统里情况更复杂。
+        </p>
+        <p>
+            在 Cool 里，静态类型为 A 的变量可以装 B 类型的值，只要 $B \le A$：
+        </p>
+        <pre><code>class A { ... };
+class B inherits A { ... };
+class Main {
+    x : A &lt;- new A;     -- x has static type A; here its value has dynamic type A
+    ...
+    x &lt;- new B;         -- here x's value has dynamic type B
+    ...
+};</code></pre>
+        <p>
+            所以 Cool 类型系统的可靠性定理是
+        </p>
+        <p>
+            $$\forall E.\ \text{dynamic\_type}(E) \le \text{static\_type}(E)$$
+        </p>
+        <p>
+            编译器为 E 算出的单一静态类型，要能正确预言 E 运行时可能有的所有动态类型：它们都是这个静态类型的子类型。为什么这样可以？能用在 A 类型对象上的所有操作，也都能用在任何 $B \le A$ 的对象上，比如取属性的值、调用方法。子类只会增加属性或方法，从不删除；方法可以重新定义，但类型必须不变：代码可以改，参数类型和返回类型必须和方法第一次定义时一样。这是很多面向对象语言的标准设计。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、为什么需要 SELF_TYPE</h2>
+        <p>
+            SELF_TYPE 能让你尝到表达力更强的类型系统是什么样子。先看一个类：
+        </p>
+        <pre><code>class Count {
+    i : Int &lt;- 0;
+    inc() : Count {
+        {
+            i &lt;- i + 1;
+            self;
+        }
+    };
+};</code></pre>
+        <p>
+            Count 实现了一个计数器，新对象的计数是 0，每调一次 inc 加一。可以把它当作提供计数功能的基类：需要计数器时，定义一个子类，自动继承 inc，不用重写代码。这里代码很少，但可以想象一个实现了某种复杂逻辑的类，在子类里复用它很有用。inc 对任何子类都能工作，但类型系统里潜伏着一个问题。
+        </p>
+        <p>
+            比如写一个仓库记账程序，要记录各种货物的库存数量：
+        </p>
+        <pre><code>class Stock inherits Count {
+    name : String;    -- name of item
+};
+
+class Main {
+    a : Stock &lt;- (new Stock).inc();   -- type checking error!
+    ... a.name ...
+};</code></pre>
+        <p>
+            新建一个 Stock，调 inc 表示有了一件货，赋给一个 Stock 类型的变量。这段代码通不过类型检查。inc 声明的返回类型是 Count，被 Stock 继承时签名不变，所以 <code>(new Stock).inc()</code> 的静态类型是 Count，而 Count 不是 Stock 的子类型，Stock 类型的变量装不下 Count 类型的值，类型系统在赋值处报错。
+        </p>
+        <p>
+            可是 <code>(new Stock).inc()</code> 的动态类型确实是 Stock：inc 返回 self，返回的就是调用时传进去的那个对象。如果不做类型检查，这段程序完全能正常运行。它只是类型检查不通过，因为类型检查器丢失了"这是一个 Stock"的信息，它只知道 inc 声明返回 Count。这个声明当然是对的，每个 Stock 也都是 Count，只是在这里没用。结果是继承 inc 变得毫无用处，只能在每个子类里重新定义 inc，配上专门的返回类型。
+        </p>
+        <p>
+            观察：inc 返回 self，所以返回值和 self 的类型相同，而 self 可能是 Count 或 Count 的任何子类型。为此引入关键字 <strong>SELF_TYPE</strong>，用作这类函数的返回类型，并修改类型规则来处理它：
+        </p>
+        <pre><code>inc() : SELF_TYPE { ... }</code></pre>
+        <p>
+            意思是 inc 的返回值和最初的 self 参数类型相同。这样类型检查器就能证明：
+        </p>
+        <p>
+            $$C, M \vdash (\texttt{new Count}).\text{inc}() : \text{Count} \qquad C, M \vdash (\texttt{new Stock}).\text{inc}() : \text{Stock}$$
+        </p>
+        <p>
+            前面的程序就类型正确了。要记住：SELF_TYPE 不是动态类型，而是静态类型，是静态类型系统的一部分；它也不是一个类名，和 Cool 里其他所有静态类型不同。它帮类型检查器更好地追踪类型，让它接受更多正确的程序，简单说就是增强了类型系统的表达力。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、SELF_TYPE 的含义和运算</h2>
+        <p>
+            inc 返回的对象动态类型可能是什么？self 可能是什么类型，它就可能是什么类型。如果程序里有很多类继承自 Count（class A、B、C inherits Count），inc 可能通过任何一个被调用，所以答案是 Count 或 Count 的任何子类型。
+        </p>
+        <p>
+            一般地，如果 SELF_TYPE 在类 C 的代码里作为表达式 E 的声明类型出现，那么 $\text{dynamic\_type}(E) \le C$。这说明 SELF_TYPE 的含义取决于它出现的位置：写在类 D 里，它就表示 D 的某个子类型。为了标明所在的类，把类 C 主体里出现的 SELF_TYPE 记作 $\text{SELF\_TYPE}_C$。由此得到第一条规则：
+        </p>
+        <p>
+            $$\text{SELF\_TYPE}_C \le C \qquad (*)$$
+        </p>
+        <p>
+            Aiken 说，最好把 $\text{SELF\_TYPE}_C$ 看作一个<strong>类型变量</strong>，它的取值范围是 C 的所有子类（直接或间接继承 C 的类），以 C 为上界。
+        </p>
+        <p>
+            规则 (*) 有个重要推论：类型检查时把 $\text{SELF\_TYPE}_C$ 换成 C 总是安全的。这提示了一种处理办法：把所有 $\text{SELF\_TYPE}_C$ 都换成 C。这是可靠的，但等于没有 SELF_TYPE，回到了上面那个用不了继承的例子。要做得更好，就得把 SELF_TYPE 纳入类型系统里对类型的两个运算：子类型关系 $T_1 \le T_2$ 和最小上界 $\text{lub}(T_1, T_2)$。
+        </p>
+
+        <h3>扩展子类型关系</h3>
+        <p>
+            设 T、T' 是 SELF_TYPE 以外的任意类型（普通类名）。四种情况：
+        </p>
+        <ol>
+            <li>$\text{SELF\_TYPE}_C \le \text{SELF\_TYPE}_C$。把它看作变量：代入 C 的任一子类 A，两边必须代入同一个，得到 $A \le A$，总成立。Cool 的类型规则保证永远不需要比较来自不同类的 SELF_TYPE（比如 $\text{SELF\_TYPE}_C$ 和 $\text{SELF\_TYPE}_D$），看完规则就能明白。</li>
+            <li>$\text{SELF\_TYPE}_C \le T$，当且仅当 $C \le T$。$\text{SELF\_TYPE}_C$ 可以是 C 的任何子类型，包括 C 本身；C 是它可能取的所有类型的超类型，只要 T 至少是 C 或在类层次里更高，T 就是它所有可能取值的超类型。这是能允许的最灵活的规则。</li>
+            <li>$T \le \text{SELF\_TYPE}_C$ 永远为假。如果 T 和 C 不相关，显然不行。即使 $T \le C$ 也不行：设 T 有一个子类 A，$\text{SELF\_TYPE}_C$ 可以取 A，而 T 不是 A 的子类型。规则必须对所有可能的取值都成立，所以只能是假。有一个特例可以争论：如果 C 下面只有一条继承链、T 是链末端唯一的叶子，那 T 确实是 C 的唯一最小子类型。但这极其脆弱：有人往 C 下面加一个和 T 无关的子类 A，T 就不再是 A 的子类型，原来通过类型检查、一个字都没改的代码突然报类型错误。这不是好的语言设计。</li>
+            <li>$T \le T'$：按原来的规则。</li>
+        </ol>
+
+        <h3>扩展最小上界</h3>
+        <ol>
+            <li>$\text{lub}(\text{SELF\_TYPE}_C, \text{SELF\_TYPE}_C) = \text{SELF\_TYPE}_C$。</li>
+            <li>$\text{lub}(\text{SELF\_TYPE}_C, T) = \text{lub}(C, T)$。因为 C 是 SELF_TYPE 可能取的最大类型，保证覆盖两者的最大类型就是 C 和 T 的 lub。这是能做到的最好结果。</li>
+            <li>$\text{lub}(T, \text{SELF\_TYPE}_C) = \text{lub}(C, T)$，lub 是对称的。</li>
+            <li>$\text{lub}(T, T')$：按原来的定义。</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>四、SELF_TYPE 能出现在哪里</h2>
+        <p>
+            语法分析器检查 SELF_TYPE 只出现在需要类型的地方，但这太宽了，有些能写类型的地方不能写 SELF_TYPE：
+        </p>
+        <ol>
+            <li><code>class T inherits T' {...}</code>：T、T' 都不能是 SELF_TYPE，它不是类名。</li>
+            <li><code>x : T</code>（属性声明）：T 可以是 SELF_TYPE，这个属性的类型 $\le \text{SELF\_TYPE}_C$。</li>
+            <li><code>let x : T in E</code>：T 可以是 SELF_TYPE。</li>
+            <li><code>new T</code>：T 可以是 SELF_TYPE，创建一个和 self 同样动态类型的对象。注意 self 的动态类型在运行时未必是外层的那个类。</li>
+            <li><code>m@T(E1, ..., En)</code>：T 不能是 SELF_TYPE，静态分派必须指明一个真实的类名。</li>
+            <li><code>m(x : T) : T' { ... }</code>：只有返回类型 T' 可以是 SELF_TYPE，参数类型都不能是。</li>
+        </ol>
+        <p>
+            为什么形参不能是 SELF_TYPE？两种看法。
+        </p>
+        <p>
+            从规则看：调用 <code>e.m(e')</code>，实参 e' 的类型 T0 必须是形参类型的子类型。如果形参是 SELF_TYPE，就要求 $T_0 \le \text{SELF\_TYPE}_C$，而前面说过这永远为假，没有类型能被证明是 SELF_TYPE 的子类型。
+        </p>
+        <p>
+            从运行看：
+        </p>
+        <pre><code>class A {
+    comp(x : SELF_TYPE) : Bool { ... };
+};
+
+class B inherits A {
+    b : Int;
+    comp(x : SELF_TYPE) : Bool { ... x.b ... };
+};
+
+...
+let x : A &lt;- new B in ... x.comp(new A); ...
+...</code></pre>
+        <p>
+            comp 大概是把 self 和参数比较，返回真或假。B 继承 A，多了一个字段 b，覆盖了 comp，签名相同，但方法体访问了参数的 b 字段。x 的静态类型是 A、动态类型是 B，这个差距正是问题的关键。<code>x.comp(new A)</code> 能通过类型检查：x 是 A，实参也是 A，如果允许 SELF_TYPE 作参数类型，这种两者类型完全相同的情况必须被允许。可运行时，x 的动态类型是 B，调用的是 B 的 comp，它去访问参数的 b 字段，而参数的动态类型是 A，根本没有 b 字段，结果是运行时崩溃或未定义行为。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、带 SELF_TYPE 的类型规则</h2>
+        <p>
+            回忆类型判断的形式 $O, M, C \vdash e : T$：在变量类型环境 O 和方法签名 M 下，出现在类 C 主体里的表达式 e 的静态类型是 T。之前一直没解释为什么需要 C，原因就在这里：SELF_TYPE 的含义取决于外层类，环境里的 C 就是那个下标，告诉我们遇到的 SELF_TYPE 是哪一种。
+        </p>
+        <p>
+            大多数规则看起来和原来一样，只是用的是扩展后的 $\le$ 和 lub。比如赋值：
+        </p>
+        <p>
+            $$\frac{O(\text{Id}) = T_0 \quad O, M, C \vdash e_1 : T_1 \quad T_1 \le T_0}{O, M, C \vdash \text{Id} \leftarrow e_1 : T_1}\ [\text{Assign}]$$
+        </p>
+        <p>
+            这里的 $\le$ 已经是包含 SELF_TYPE 的版本，所以这条规则对 SELF_TYPE 和普通类名都适用。
+        </p>
+
+        <h3>分派</h3>
+        <p>
+            要改的是分派规则。原来的规则不变，但要明确它只管返回类型不是 SELF_TYPE 的情况：
+        </p>
+        <p>
+            $$\frac{O, M, C \vdash e_0 : T_0 \quad \cdots \quad O, M, C \vdash e_n : T_n \quad M(T_0, f) = (T_1', \ldots, T_n', T_{n+1}') \quad T_{n+1}' \neq \text{SELF\_TYPE} \quad T_i \le T_i'}{O, M, C \vdash e_0.f(e_1, \ldots, e_n) : T_{n+1}'}$$
+        </p>
+        <p>
+            SELF_TYPE 真正带来好处的地方，正是返回类型为 SELF_TYPE 的方法。这时：
+        </p>
+        <p>
+            $$\frac{O, M, C \vdash e_0 : T_0 \quad \cdots \quad O, M, C \vdash e_n : T_n \quad M(T_0, f) = (T_1', \ldots, T_n', \text{SELF\_TYPE}) \quad T_i \le T_i'}{O, M, C \vdash e_0.f(e_1, \ldots, e_n) : T_0}$$
+        </p>
+        <p>
+            返回类型是 SELF_TYPE，结果就是被分派的那个表达式的类型：e0 就是 self 参数，不管 e0 推出什么类型，那都是整个调用结果的一个可靠的静态类型。这条规则处理了 Stock 的例子。另外几点：
+        </p>
+        <ul>
+            <li>形参不能是 SELF_TYPE，但实参可以，扩展后的 $\le$ 能处理。</li>
+            <li>被分派的表达式本身的类型 T0 也可能是 SELF_TYPE。这时要用哪个类去 M 里查 f 的签名？在类 C 里做类型检查时，这是 $\text{SELF\_TYPE}_C$，把它换成 C 总是安全的，所以用当前所在的类 C 去查。</li>
+        </ul>
+
+        <h3>静态分派</h3>
+        <p>
+            同样，原规则加上 $T_{n+1}' \neq \text{SELF\_TYPE}$ 的条件；返回类型是 SELF_TYPE 时：
+        </p>
+        <p>
+            $$\frac{O, M, C \vdash e_0 : T_0 \quad \cdots \quad O, M, C \vdash e_n : T_n \quad T_0 \le T \quad M(T, f) = (T_1', \ldots, T_n', \text{SELF\_TYPE}) \quad T_i \le T_i'}{O, M, C \vdash e_0@T.f(e_1, \ldots, e_n) : T_0}$$
+        </p>
+        <p>
+            唯一有点奇怪的是结果类型是 T0 而不是 T。在类 T 里分派一个返回 SELF_TYPE 的方法，得到的不是一个 T 吗？不是。SELF_TYPE 是 self 参数的类型，而 self 可能是方法所在类的子类型。静态分派只是用来调用一个可能被子类覆盖、因而被隐藏的超类方法定义，这并不改变 self 参数的类型：即使运行的是 T0 的超类里的方法，self 的类型仍然是 T0。
+        </p>
+
+        <h3>两条新规则</h3>
+        <p>
+            $$\frac{}{O, M, C \vdash \texttt{self} : \text{SELF\_TYPE}_C} \qquad \frac{}{O, M, C \vdash \texttt{new SELF\_TYPE} : \text{SELF\_TYPE}_C}$$
+        </p>
+        <p>
+            这是需要知道外层类的地方之一。SELF_TYPE 还在其他一些地方用到（见 Cool 参考手册）。
+        </p>
+
+        <h3>实现上的提示</h3>
+        <ul>
+            <li>扩展后的 $\le$ 和 lub 能做很多工作，大多数规则不用改，大部分时候不需要为 SELF_TYPE 做什么特别处理。</li>
+            <li>SELF_TYPE 只能用在很少几个地方，要自己检查它没有出现在别处。</li>
+            <li>SELF_TYPE 总是指当前类的某个子类型，只有一个例外：分派的类型检查。在某个类里查方法 f，它的返回类型可能是 SELF_TYPE，而这个类可能和当前类毫无关系，这个 SELF_TYPE 指的是被查的那个类的 SELF_TYPE。好在永远不需要拿它和当前类的 SELF_TYPE 比较，不同的 SELF_TYPE 之间没有交叉。这是类型规则里唯一会遇到不属于当前类的 SELF_TYPE 的地方。</li>
+        </ul>
+
+        <h3>为什么讲 SELF_TYPE</h3>
+        <p>
+            SELF_TYPE 还是一个研究性的想法，它增加了类型系统的表达力，但在主流语言里找不到。它本身并不那么重要，除了对课程项目。讲它是为了说明类型检查可以相当微妙，不全是"int 加 int 等于 int"，里面有相当精细的推理。实践中要在类型系统的复杂度和表达力之间取得平衡：更复杂的类型系统更难学、更难用好，但能写出更多的程序。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、语义分析中的错误恢复</h2>
+        <p>
+            和词法、语法分析一样，类型检查也要能从错误中恢复。但比语法分析容易得多，因为已经有了 AST，不需要像语法分析那样在还不知道程序结构时跳过一段代码。问题是：一个没有合法类型的表达式，给它什么类型？类型检查是按结构归纳进行的，不能卡住；某个子表达式没法给出有意义的类型，也得给它点什么，才能检查包围它的表达式。这个类型会影响外层表达式的类型。
+        </p>
+
+        <h3>方案一：Object</h3>
+        <p>
+            给类型错误的表达式定为 Object。直觉是：就算不知道它本来该是什么类型，肯定是 Object 的子类型，定为 Object 总是安全的。
+        </p>
+        <pre><code>let y : Int &lt;- x + 2 in y + 3</code></pre>
+        <p>
+            设 x 没有声明。递归走到叶子 x，发现找不到它的类型，报"x 未定义"，按恢复策略给它 Object。往上走到 +，Object 加 Int，+ 不能用在 Object 上，报第二个错误，并说 Object + Int = Object。再往上是初始化，把 Object 赋给 Int 类型的 y，报第三个错误。这个办法能恢复、能继续检查，但一个错误会引出一串错误：Object 上能做的事很少，而代码多半是按更具体的类型写的，错误会沿 AST 往上传，一路制造更多错误信息。
+        </p>
+
+        <h3>方案二：No_type</h3>
+        <p>
+            引入一个新类型 No_type，专门给类型错误的表达式用。它对程序员不可用，只有编译器在错误恢复时用。定义：
+        </p>
+        <ul>
+            <li>对所有类型 C，$\text{No\_type} \le C$。Object 正好相反，是所有类型的超类型。</li>
+            <li>每个操作都对 No_type 有定义，结果也是 No_type。</li>
+        </ul>
+        <p>
+            同一段代码：x 未定义，报一个错，给它 No_type；No_type + Int 合法，不报错，结果是 No_type；No_type 是 Int 的子类型，赋值也合法。No_type 沿 AST 往上传，和刚才的 Object 一样，但它是错误恢复专用的特殊类型，编译器能把它和普通类型区分开，知道第一个错误之后不要再报。整段代码只报一个错误。
+        </p>
+        <p>
+            真正的产品级编译器会用类似 No_type 的东西。但它有一个实现上的麻烦：它是所有类的子类型，类层次就不再是一棵树（顶上是 Object、往下分叉），而是多了一个最底元素，变成了有向无环图，不能直接用树的算法，要么给 No_type 写特殊情况，要么用更一般的算法。Aiken 说这点额外的麻烦，他个人认为在课程项目里不值得，建议项目里用 Object 方案，接受它带来的连锁错误。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS143: Compilers &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="09_语义分析与类型检查上.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="11_运行时组织.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
