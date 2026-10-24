@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第三讲：多核架构（续）与 ISPC | Stanford CS149 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="02_现代多核处理器.html">&larr; 上一讲</a>
+    <span>Stanford CS149: Lecture 3</span>
+    <a href="04_并行编程基础.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第三讲：多核架构（续）与 ISPC</h1>
+        <p class="subtitle">再看硬件多线程：利用率怎样算，算术和访存的比例决定需要几个线程，把多核、SIMD、多线程、超标量组合起来看 myth 机器和 GPU；延迟和带宽（101 公路、洗衣服、两根水管），为什么向量逐元素相乘在 V100 上效率不到 1%，带宽是现代计算的关键资源；指令流水线；抽象和实现的区分；ISPC 的 SPMD 编程模型：gang、programCount、programIndex、uniform，交错分配和分块分配，foreach 的四种实现，求和的错误和正确写法，跨实例操作</p>
+        <div class="author-meta">
+            主讲：Kayvon Fatahalian<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=F4bVSyz_jxo" target="_blank">课堂录像</a>（Stanford Online，2023 年秋季）、<a href="https://gfxcourses.stanford.edu/cs149/fall23/lecture/multicore2-ispc/" target="_blank">课件</a>；课件后半部分（ISPC 求和、跨实例操作等）课上没讲完，依据课件整理<br>
+            课程推荐阅读：Matt Pharr，<a href="https://pharr.org/matt/blog/2018/04/30/ispc-all.html" target="_blank">The Story of ISPC</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、再看硬件多线程</h2>
+        <p>
+            上一讲最后十分钟只有一个很简单的想法：等着某件事发生时，就去做别的。前半讲是往处理器里加更多的单元，最后这段是更高效地用这些单元。一个 SIMD 核每周期执行一条指令，每条指令同时做八件事；如果下一条指令因为等内存（可能上百个周期）没法执行，就去做别的。执行上下文（蓝色框）封装了一个线程所有变量的状态，再多加几个蓝色框，不改变任何执行能力，处理器仍然每周期只能做一条 SIMD 指令，但能管理四个线程的状态。一个线程停顿了，硬件立刻换到下一个线程的下一条指令，不浪费任何时间（"遇停顿即切换"），数据回来后再回到这个线程。
+        </p>
+        <p>
+            这个核每周期运行几条指令？一条，是 8 宽的向量指令。任一时刻运行几个线程？一个。利用率？100%，任何时刻都有东西在跑。代价有两个：要用更多芯片面积存执行上下文；每个线程完成自己工作的时间变长了，因为它和别的线程共享处理器。我们已经 100% 利用，所有工作不可能更快完成，但任何一份工作都更慢了。延迟敏感的应用可能不想这样做。
+        </p>
+        <p>
+            有同学没明白为什么会更慢。Kayvon 用办公时间打比方：15 个学生排队问问题，他给一个提示让学生去想。如果他坐着等这个学生想完再继续，这个学生能更早离开，但他很低效，其他人都在干等；如果他让学生想的时候排到队尾去，他时时刻刻都在答疑，利用率 100%，可每个学生要追问几次的话，可能很久才能离开。目标是让你尽快离开办公室，他就坐着等；目标是在固定时间里帮最多的学生，他就让大家交错进行。
+        </p>
+        <p>
+            上下文存储的大小是固定的：可以切成很多个小上下文（比如 16 个线程，每个线程寄存器很少），也可以切成少量大上下文（每个线程有很多寄存器和本地状态，但换去做别的事的能力弱一些）。
+        </p>
+
+        <h3>利用率练习</h3>
+        <p>
+            单核，硬件多线程，每周期从某个线程运行一条标量指令。程序重复"三条算术指令，然后一次访存，延迟 12 个周期，回来之前没法继续"。
+        </p>
+        <ul>
+            <li>一个线程：每 15 个周期做 3 个周期的活，利用率 3/15 = 1/5 = 20%。</li>
+            <li>两个线程：线程 0 停顿时跑线程 1 的三条指令，利用率翻倍，40%。</li>
+            <li>要几个线程才能 100%？五个。可以算 1 ÷ (1/5)；Kayvon 喜欢的想法是：一个线程停顿后要掩盖 12 个周期的延迟，每个其他线程提供 3 个周期的覆盖，需要另外 4 个线程，加上停顿的这一个，共 5 个。</li>
+            <li>换成能交错八个线程的处理器，跑同样的程序能快多少？一点也不快，已经是 100% 了。如果这是你唯一要跑的程序，造八路多线程的处理器就很低效：多烧芯片面积存上下文，每个线程的完成延迟更长。</li>
+            <li>程序改成六条算术指令再访存：现在一个线程就是 6/18 = 33%，只要另外两个线程各提供 6 个周期覆盖，共三个线程就能 100%。</li>
+        </ul>
+        <p>
+            结论：<strong>算术和访存延迟的比例决定了需要多少多线程才能达到峰值利用率</strong>。算术对访存的比例越高，需要的线程越少。等价地说，一个大的数据缓存能吸收一部分未命中、缩短访存时间，就需要更少的线程；去掉数据缓存，未命中更多，就需要更多线程。我们没有给处理器加任何同时执行的能力，没有提高峰值吞吐量，只是给了它一个更高效利用资源的机制。也没有降低访存延迟，延迟一直是 12 个周期，只是掩盖了它的影响，等待时不停顿。
+        </p>
+        <p>
+            有同学问理论上多线程最多能带来多少好处：上限是 100% 利用率；要知道多线程带来的加速，得先测出一次只跑一个线程时的性能，再对照手册上这个处理器每周期能做多少，多线程能让你接近那个高水位。切换线程要不要时间？这门课就假设一个周期，硬件只是把当前程序计数器换成另一个。Kayvon 提到 Kunle 是这个想法的主要发明者之一（Sun 的 Niagara 处理器）。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、把所有想法组合起来</h2>
+        <p>
+            虚构的芯片：16 核，每核 4 路多线程，每核 8 宽 SIMD。程序创建 64 个线程，就分到 64 个执行上下文上；每个核每周期独立地从自己的四个线程里挑一条指令运行，指令可以是 8 宽向量指令。峰值吞吐量是 16 × 8 = 128 份数据并行处理；但要掩盖延迟，最好给它 512 件事做，比如算正弦的数组至少要 512 个元素才能以峰值速率、最大延迟掩盖能力运行。
+        </p>
+
+        <h3>myth 机器</h3>
+        <p>
+            myth 机器的一个核大致是：两路多线程（Intel 叫超线程），同时是传统的 Intel 超标量核，一个核每周期能运行多条指令。它有至少三个 8 宽向量 ALU 和一些标量单元。每个周期，芯片从两个线程里最多找三个向量操作来用。粗略地说：没有向量指令时每周期约三个标量 ALU 操作，用向量指令时最多约三个向量操作，所以向量化最多能带来约 8 倍加速。
+        </p>
+        <p>
+            如果只用一个线程，线程里可能没有足够的指令级并行来凑出三个向量操作；加上第二个线程，芯片几乎总能凑出三个。所以在这个核上从一个线程跑到两个线程，你会看到性能提升，因为一个线程用不满所有执行资源。Kayvon 说，Intel 架构师坐在那里，在一个线程里很难找到足够的工作填满所有执行单元，于是把第二个线程当作独立指令的来源，直接喂进全局调度器，因为不同线程里的指令显然是相互独立的。这也是一种同时多线程：一种是不同核上的不同线程，另一种是一个核内不同线程同时执行。一个执行单元一个周期只做一件事，两个线程可以在不同周期用它，不能在同一周期给它两条指令。
+        </p>
+        <p>
+            有同学问取指译码单元要不要和 ALU 一样多：在不做复杂设计的情况下是个合理的经验规则；有的指令延迟长、不是完全流水化的，可以用较少的取指能力喂饱。早期的超线程里，如果一个线程本身有足够的 ILP 能填满机器，第二个线程反而会干扰，比如把对方的数据挤出缓存，所以可以关掉第二个线程，对某些应用有帮助。线程不总是好事。
+        </p>
+
+        <h3>GPU</h3>
+        <p>
+            如果要画 NVIDIA GPU 上 144 个核中的一个：可以想成每周期四条 32 宽向量指令，从每核最多 64 个线程里取指。概念相同，数字更大。最大延迟掩盖状态下，64 个线程/核 × 80 或 144 个核 × 每线程 32 个元素，用 sin 的例子要填满这块芯片，没有几十万件并行的事就别费劲了。这就是为什么小的 DNN 在大 GPU 上跑不好：工作不够多。
+        </p>
+        <p>
+            Kayvon 补充了一个细节：Intel CPU（也许还有 Intel GPU）上，向量操作是编译器在指令流里生成的向量指令。NVIDIA 和 AMD 的 GPU 不同：它们从不生成向量指令，总是生成标量指令；芯片的设计是，比如有 8 个线程执行上下文、底层每周期能做一个向量操作，如果 8 个线程的程序计数器相同，就把它们的指令一起放在这个向量 ALU 上执行。效果和编译器生成了向量指令一样。
+        </p>
+        <p>
+            谁决定线程跑在哪个执行上下文？操作系统。创建线程时，操作系统告诉处理器"在执行上下文 1 上开始跑这个 PC"。如果只有两个线程，放在同一个核上合理吗？大概不合理，应该一个放核 0、一个放核 1，让它们各自拥有全部执行资源；除非它们访问同一份数据、想共享缓存。而每个周期从执行上下文里选哪些指令执行，完全是芯片的事，每秒做十亿次；操作系统只是偶尔告诉芯片"这几个线程放在你的执行上下文上"，那是操作系统的上下文切换，可能要几十万个周期，很少发生。现代操作系统有 API 指定线程放在哪个执行上下文，也能关掉超线程，但指令调度器的底层细节，Kayvon 所知一般控制不了。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、延迟和带宽</h2>
+        <p>
+            上一讲的思考题：向量 A、B 逐元素相乘，各有几千万个元素。这是在这类计算机上跑的好应用吗？有同学说并行是无穷的，而且是能向量化的并行，并行度远超核数，既能用上所有 ALU 又能掩盖延迟。Kayvon 说：这大概是在任何现代计算机上能跑的最糟的并行程序，而你们一天大概跑一百次。
+        </p>
+        <p>
+            V100 有 80 个 SM，每个 SM 64 个 fp32 ALU，共 5120 个 ALU，频率约 1.6 GHz。想想每个周期给所有这些 ALU 供数据。这就引出还没讲过的东西：带宽。
+        </p>
+
+        <h3>101 公路</h3>
+        <p>
+            很多人受够了旧金山的雾，想回南湾晒太阳。设旧金山到斯坦福 50 公里，车速 100 公里/小时：
+        </p>
+        <ul>
+            <li>从旧金山开到斯坦福的<strong>延迟</strong>：半小时。</li>
+            <li>如果规定公路上一次只能有一辆车（一辆到了，下一辆才出发），<strong>吞吐量</strong>是每小时 2 辆。</li>
+            <li>方法一：开快一点。速度翻倍，吞吐量每小时 4 辆，延迟 15 分钟。开快既降低延迟又提高吞吐量，但有限度：危险，风阻大很低效。不能为了每小时 1000 辆车让每个人开到一万英里每小时。</li>
+            <li>方法二：修更多车道（加州每五年左右就这么干）。四车道，每车道每小时 2 辆，吞吐量每小时 8 辆，延迟仍是半小时。</li>
+            <li>更高效地用公路：不能两辆车同时在同一段路上，但可以把路分成很多段，车辆一辆接一辆。车距 1 公里，吞吐量每小时 100 辆（每 1/100 小时一辆，即 36 秒一辆，Kayvon 当场算错了一回）。四车道再乘 4，每小时 400 辆。延迟始终是半小时。</li>
+        </ul>
+        <p>
+            术语：<strong>内存带宽</strong>是内存系统向处理器提供数据的速率，比如 20 GB/s。动画里每秒送出 4 个方块，任何一个方块的传输延迟约 2 秒；一次送两个，延迟仍是 2 秒，带宽变成每秒 8 个。在一个车辆首尾相接、多件东西同时在途的系统里（后面叫流水线），<strong>延迟和带宽是解耦的</strong>：延迟是从内存到核要多久，带宽取决于路有多宽。
+        </p>
+
+        <h3>洗衣服</h3>
+        <p>
+            洗衣分三步：洗衣机 45 分钟，烘干机 60 分钟，大学生叠衣服 15 分钟。洗一批衣服的延迟是 2 小时，吞吐量是每 2 小时一批。
+        </p>
+        <ul>
+            <li>复制执行资源：两台洗衣机、两台烘干机，再叫上好朋友。洗两批的延迟仍是 2 小时，吞吐量翻倍到每小时一批，但资源也翻倍了，而且很多资源闲着。</li>
+            <li>流水线：只有一台洗衣机一台烘干机，有很多批衣服（比如攒了一夏天的 20 批）。洗衣机一洗完就装下一批，第二批在第 45 分钟开始洗。吞吐量是多少？每小时一批，受限于最慢的环节烘干机。洗衣机每 45 分钟能洗一批，于是湿衣服在洗衣机和烘干机之间越堆越多；总有一个有限的缓冲区，快的那个最终会慢下来，配合慢的那个。延迟仍是一批 2 小时，吞吐量每小时一批，只用一台洗衣机一台烘干机。</li>
+            <li>吞吐量计算的游戏规则：任何东西闲着，就错过了一次前进的机会。公路上不要有空位，线程不要干等，洗衣机烘干机不要闲着。</li>
+        </ul>
+        <p>
+            两根水管：一根最大流量 100 升/秒，一根 50 升/秒，接在一起，整个系统最多 50 升/秒（忽略流体物理上的细节）。串起来的系统按较低的吞吐量运行。
+        </p>
+
+        <h3>用到计算机上</h3>
+        <p>
+            一个程序的线程重复三条相互依赖的指令：<code>X = load 64 bytes</code>；<code>Y = add x + x</code>；<code>Z = add x + y</code>。运行它的多线程核：每周期执行一个数学操作；load 指令能和数学操作并行发射（通常有一个独立于数学单元的执行单元处理 load/store，不想浪费数学的周期，可以看作双发射超标量）；从内存每周期收 8 字节。假设有足够多的硬件线程来掩盖访存延迟。说 load 其实是装一整个缓存行，64 字节要 8 个周期传完；最多允许 3 个未完成的 load 请求。
+        </p>
+        <p>
+            画出来就像洗衣服：先做两次数学，发出 load，有一段延迟，然后 8 个周期传数据。内存每完成一个 load 就开始下一个，传输一直在进行。处理器的"数学、数学、load"像洗衣机，跑得很快；内存是长板，像烘干机。请求队列满了（3 个），处理器发不出下一个 load，只能停顿，等内存完成一个再塞进去。放大看，内存在每一时刻都以最快速率（每周期 8 字节）传数据，处理器却大部分时间在停顿（图上的红色区域）。这就是<strong>受内存带宽限制</strong>的执行：指令速率由内存提供数据的速率决定。课件请大家自己确认：稳态下核的利用不足只取决于指令吞吐和内存吞吐，与访存延迟、未完成请求数无关。
+        </p>
+
+        <h3>回到思考题</h3>
+        <p>
+            每次乘法要三次访存（两次读一次写，12 字节）。V100 每周期能做 5120 次 fp32 乘法（1.6 GHz），约每秒 8 万亿次，每次 12 字节，需要约 98 TB/s 的带宽才能让功能单元一直忙。而 V100 用的是靠近处理器的高带宽显存 HBM2，带宽 900 GB/s，已经是地球上最快的内存系统之一，大约 1 TB/s。数学这根管子比数据那根快一百倍，所以这段代码在 GPU 上的效率不到 1%；CPU 上也类似，只是数字小一些：3.2 GHz 的八核 Xeon E5v4 配 76 GB/s 内存总线，效率约 3%。尽管如此，GPU 仍比八核 CPU 快得多。
+        </p>
+        <p>
+            缓存帮不上忙，缓存只在重用数据时有用，这里每个数据只访问一次，而且按缓存行完美地读完。有同学问预取行不行：想象一个零延迟、每周期 8 字节的神奇内存系统，也就是完美的预取器，也没用。这不是访存延迟问题，是要从一根管子里每秒取 100 TB 的水去喂饥饿的 ALU，而世界上最好的管子只能给 1 TB/s。除了改程序或者等新的内存系统，别无他法。
+        </p>
+        <p>
+            为什么造这么多 ALU？因为这块芯片本来就不是为了高效地做向量加法设计的，如果唯一的工作负载是加两个向量，你会拆掉 99% 的 ALU。幸运的是，图形和机器学习的比例不是一次数学操作对 12 字节，而是反过来，每读一个字节做 10 到 20 个操作，就开始接近计算和带宽之比了。现代计算机架构师的第一步是：我负担得起多少带宽？然后问：给定我的应用，放多少 ALU 才能让这个内存系统一直忙？
+        </p>
+        <p>
+            内存会变快吗？一般来说处理能力的增长快于数据移动，因为移动数据很贵，移动任何东西都很贵。大约每十年会有一次大的技术跃进，带宽追上来一次，然后计算又跑远了，等到情况变得严峻，再追一次。
+        </p>
+
+        <h3>带宽是关键资源</h3>
+        <p>
+            如果处理器请求数据的速率太高，内存系统跟不上。克服带宽限制，往往是面向现代吞吐量优化系统的软件开发者面临的最重要的挑战。高性能的并行程序会：
+        </p>
+        <ul>
+            <li>组织计算，少从内存取数据：重用同一个线程之前装入的数据（时间局部性优化）；在线程之间共享数据（线程间协作）。</li>
+            <li>宁可多做算术，也不要存了再重新读，数学是"免费"的。</li>
+            <li>要点：程序必须很少访问内存，才能高效利用现代处理器。在这些现代处理器上写的几乎每个程序，游戏规则都是调整"每次访存做多少数学"这个比例，否则不管并行做得多好，都会被内存卡住。</li>
+        </ul>
+
+        <h3>指令流水线</h3>
+        <p>
+            很多学生问：一个周期怎么能做完一次浮点乘法？同样是流水线的道理。四级指令流水线：IF 取指，D 译码并读寄存器，EX 执行，WB 把结果写回寄存器。一条指令的延迟是 4 个周期，吞吐量是每周期一条（背靠背的指令相互依赖时，要小心保证正确性）。真实的流水线长度因指令而异，现代 CPU 可深达约 20 级。说一个核每周期做一个操作，指的是<strong>指令吞吐量，不是延迟</strong>。这门课几乎总是用吞吐量来谈。带宽也是吞吐量的一种度量，通常指每周期多少字节；办公时间的吞吐量可以是每周期多少个学生，总之是单位时间完成多少。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、抽象和实现</h2>
+        <p>
+            后半讲的主题：<strong>抽象和实现</strong>。把一个抽象的语义（含义）和它的实现细节混为一谈，是这门课里常见的困惑来源。Kayvon 说在办公时间常会说"我觉得你把程序的含义和某种实现弄混了"。
+        </p>
+        <ul>
+            <li><strong>语义</strong>：编程模型提供的操作是什么意思？给定一个程序和所用操作的语义，程序会算出什么答案？</li>
+            <li><strong>实现</strong>（也叫调度）：在并行机器上答案怎样算出来？程序的操作以什么（可能并行的）顺序执行？每个线程、每个执行单元、向量指令的每条通道各算哪些操作？</li>
+        </ul>
+        <p>
+            学生的目标：给定一个程序，知道某个并行编程模型是怎样实现的，能在脑子里"追踪"并行计算机的每个部分在程序每一步做什么。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、ISPC</h2>
+        <p>
+            ISPC 是 Intel SPMD Program Compiler，SPMD 是 single program multiple data（单程序多数据）。作业 1 的很多工作用它写。课程用这个相当小众的低层语言，不是为了教一门语言，而是因为它把上一讲的概念讲得非常清楚。用户数大概就是历届同学加上一两百个想从 Intel 芯片榨出好性能的人，所以在 Reddit、Stack Overflow 上找不到什么东西；课程有意让大家自己读手册，因为工作后就是这样。Kayvon 极力推荐 Matt Pharr 写的《The Story of ISPC》，它讲了为什么任意的 C 代码那么难并行化、为什么要发明另一门语言。
+        </p>
+
+        <h3>从 C 到 ISPC</h3>
+        <p>
+            C 代码里 main 是一个控制线程，调用 sinx 时这个线程跳进 sinx、顺序执行逻辑，到 return 再回到 main 继续。只有一个控制线程，这是我们自然的编程思路。把 sinx 改写成 ISPC：
+        </p>
+        <pre><code>// ISPC code: sinx.ispc
+export void ispc_sinx(
+    uniform int N,
+    uniform int terms,
+    uniform float* x,
+    uniform float* result)
+{
+    // assume N % programCount = 0
+    for (uniform int i = 0; i &lt; N; i += programCount)
+    {
+        int idx = i + programIndex;
+        float value = x[idx];
+        float numer = x[idx] * x[idx] * x[idx];
+        uniform int denom = 6;  // 3!
+        uniform int sign = -1;
+        for (uniform int j = 1; j &lt;= terms; j++)
+        {
+            value += sign * numer / denom;
+            numer *= x[idx] * x[idx];
+            denom *= (2*j+2) * (2*j+3);
+            sign *= -1;
+        }
+        result[idx] = value;
+    }
+}</code></pre>
+        <pre><code>// C++ code: main.cpp
+#include "sinx_ispc.h"
+int main(int argc, void** argv) {
+    int N = 1024;
+    int terms = 5;
+    float* x = new float[N];
+    float* result = new float[N];
+    // initialize x here
+    // execute ISPC code
+    ispc_sinx(N, terms, x, result);
+    return 0;
+}</code></pre>
+        <p>
+            SPMD 编程抽象：
+        </p>
+        <ul>
+            <li>调用 ISPC 函数会产生一个"gang"（帮），里面是若干个 ISPC "程序实例"。ISPC 刻意不用"线程"这个词，因为你对真实 C 程序里的线程怎样实现已经有概念。</li>
+            <li>所有实例并发地运行 ISPC 代码。</li>
+            <li>每个实例有自己的一份局部变量。</li>
+            <li>返回时，所有实例都已完成，控制回到普通的 C 调用者，恢复顺序执行。</li>
+        </ul>
+        <p>
+            ISPC 的关键字：
+        </p>
+        <ul>
+            <li><code>programCount</code>：gang 里同时执行的实例数（uniform 值）。</li>
+            <li><code>programIndex</code>：当前实例在 gang 里的编号，像线程 ID（非 uniform 值，叫 "varying"）。</li>
+            <li><code>uniform</code>：类型修饰符，表示所有实例的这个变量值都相同。使用它纯粹是一种优化，对正确性不是必需的。课上先让大家忽略它。</li>
+        </ul>
+        <p>
+            Kayvon 让大家讨论：8 个实例，数组大小 N，每个元素由哪个实例负责算？每个实例运行的就是这段顺序代码。实例 0 的循环里 i 从 0 开始，算 x[0]，然后 i 加 8，算 x[8]，再算 x[16]……其他七个实例的 programIndex 不同，各算错开一位的那些元素。数组元素被轮流（round robin）分给各个实例，这叫<strong>交错分配</strong>，是写程序的人自己这样设计的。
+        </p>
+        <p>
+            到这里还没说任何实现。如果 ISPC 的实现是在一个线程上先以 programIndex = 0 调用这个函数，完成后再以 programIndex = 1 调用，完全顺序，能算出正确答案吗？能，只是那样就没理由用 ISPC 了。能不能开 8 个线程分别以不同的 programIndex 运行再汇合？概念上也可以（ISPC 有些细节不允许这样实现，但概念上应该这样想）。
+        </p>
+
+        <h3>实际的实现：SIMD</h3>
+        <p>
+            ISPC 用 SIMD 指令实现 gang 抽象：gang 里的实例数就是硬件的 SIMD 宽度（或它的小倍数）；ISPC 编译器生成一个 C++ 函数的二进制（.o），函数体里是 SIMD 指令；C++ 代码照常和生成的目标文件链接。
+        </p>
+
+        <h3>版本二：分块分配</h3>
+        <pre><code>export void ispc_sinx_v2(
+    uniform int N,
+    uniform int terms,
+    uniform float* x,
+    uniform float* result)
+{
+    // assume N % programCount = 0
+    uniform int count = N / programCount;
+    int start = programIndex * count;
+    for (uniform int i = 0; i &lt; count; i++)
+    {
+        int idx = start + i;
+        float value = x[idx];
+        ...
+        result[idx] = value;
+    }
+}</code></pre>
+        <p>
+            程序改了，算出的结果一样，但每个实例现在负责数组里连续的一块，这叫<strong>分块分配</strong>。
+        </p>
+        <p>
+            哪种更好？课上没讲，课件给了答案。想想实现：gang 用 SIMD 实现，8 个实例在同一时刻执行同一条指令。
+        </p>
+        <ul>
+            <li>交错分配时，第 i 步 8 个实例访问的 x[idx] 是内存中连续的 8 个值，一条"打包向量 load"指令（vmovaps，对应 <code>_mm256_load_ps()</code> 内建函数）就能为所有实例高效地实现 <code>float value = x[idx];</code>。</li>
+            <li>分块分配时，同一步 8 个实例访问的是相隔 count 的 8 个不连续的值，需要 "gather" 指令（vgatherdps，对应 <code>_mm256_i32gather_ps()</code>），gather 是更复杂、更昂贵的 SIMD 指令。</li>
+        </ul>
+        <p>
+            这正体现了抽象和实现的区分：两个程序语义上都对，但知道 gang 是用 SIMD 实现的，才能判断哪个快。
+        </p>
+
+        <h3>foreach：提高抽象层次</h3>
+        <pre><code>export void ispc_sinx(
+    uniform int N,
+    uniform int terms,
+    uniform float* x,
+    uniform float* result)
+{
+    foreach (i = 0 ... N)
+    {
+        float value = x[i];
+        ...
+        result[i] = value;
+    }
+}</code></pre>
+        <p>
+            foreach 是 ISPC 的关键结构：它声明并行的循环迭代，程序员说的是"这些是整个 gang（而不是每个实例）要完成的迭代"，由 ISPC 的实现负责把迭代分配给 gang 里的程序实例。Kayvon 说：我不想管交错还是分块，我只告诉 ISPC 有一个从 0 到 N 的循环，迭代是独立的，你随便分，我不关心，让系统替我选个好答案。
+        </p>
+        <p>
+            foreach 可能怎样实现？课件给了四种，Kayvon 希望大家能说服自己这四种都是正确有效的实现：
+        </p>
+        <pre><code>// Implementation 1: program instance 0 executes all iterations
+if (programIndex == 0) {
+    for (int i = 0; i &lt; N; i++) {
+        // do work for iteration i here...
+    }
+}
+
+// Implementation 2: interleave iterations onto program instances
+// assume N % programCount = 0
+for (uniform int loop_i = 0; loop_i &lt; N; loop_i += programCount)
+{
+    int i = loop_i + programIndex;
+    // do work for iteration i here...
+}
+
+// Implementation 3: block iterations onto program instances
+// assume N % programCount = 0
+uniform int count = N / programCount;
+int start = programIndex * count;
+for (uniform int loop_i = 0; loop_i &lt; count; loop_i++)
+{
+    int i = start + loop_i;
+    // do work for iteration i here...
+}
+
+// Implementation 4: dynamic assignment of iterations to instances
+uniform int nextIter;
+if (programIndex == 0)
+    nextIter = 0;
+int i = atomic_add_local(&amp;nextIter, 1);
+while (i &lt; N) {
+    // do work for iteration i here...
+    i = atomic_add_local(&amp;nextIter, 1);
+}</code></pre>
+        <p>
+            （课件上实现 1 和 4 的条件写成了 <code>programCount == 0</code>，按意思应是 programIndex。）
+        </p>
+        <p>
+            很多简单情况下，用 foreach 几乎可以像写顺序程序一样表达程序，不用想并行执行，只用想迭代。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、ISPC 程序练习</h2>
+        <p>
+            以下内容在课件里，课上来不及讲。
+        </p>
+
+        <h3>这个程序做什么？</h3>
+        <pre><code>// ISPC code:
+export void absolute_repeat(
+    uniform int N,
+    uniform float* x,
+    uniform float* y)
+{
+    foreach (i = 0 ... N)
+    {
+        if (x[i] &lt; 0)
+            y[2*i] = -x[i];
+        else
+            y[2*i] = x[i];
+        y[2*i+1] = y[2*i];
+    }
+}</code></pre>
+        <p>
+            它算出 x 每个元素的绝对值，在输出数组 y 里重复写两次。
+        </p>
+        <pre><code>export void shift_negative(
+    uniform int N,
+    uniform float* x,
+    uniform float* y)
+{
+    foreach (i = 0 ... N)
+    {
+        if (i &gt;= 1 &amp;&amp; x[i] &lt; 0)
+            y[i-1] = x[i];
+        else
+            y[i] = x[i];
+    }
+}</code></pre>
+        <p>
+            这个程序的输出是<strong>未定义</strong>的：循环体的不同迭代可能写同一个内存位置（第 i 次写 y[i-1]，第 i-1 次写 y[i-1]），谁先谁后没有规定。
+        </p>
+
+        <h3>求和：两种错法</h3>
+        <pre><code>export uniform float sum_incorrect_1(
+    uniform int N,
+    uniform float* x)
+{
+    float sum = 0.0f;
+    foreach (i = 0 ... N)
+    {
+        sum += x[i];
+    }
+    return sum;
+}</code></pre>
+        <p>
+            sum 是 varying 的 float，每个实例一份，可函数返回给 C 代码的是一个 uniform float，没法把很多份变量返回给只期待一个返回值的调用者，编译时类型错误。
+        </p>
+        <pre><code>export uniform float sum_incorrect_2(
+    uniform int N,
+    uniform float* x)
+{
+    uniform float sum = 0.0f;
+    foreach (i = 0 ... N)
+    {
+        sum += x[i];
+    }
+    return sum;
+}</code></pre>
+        <p>
+            sum 是 uniform 的，所有实例共用一份，而 x[i] 每个实例的值不同，那拷进 sum 的到底是什么？同样是编译时类型错误。（课件两处说明的位置对调了，这里按代码本身解释。）
+        </p>
+
+        <h3>正确的求和</h3>
+        <pre><code>export uniform float sum_array(
+    uniform int N,
+    uniform float* x)
+{
+    uniform float sum;
+    float partial = 0.0f;
+    foreach (i = 0 ... N)
+    {
+        partial += x[i];
+    }
+    // reduce_add() is part of ISPC's cross
+    // program instance standard library
+    sum = reduce_add(partial);
+    return sum;
+}</code></pre>
+        <p>
+            每个实例累加自己私有的部分和（没有通信），然后用跨实例通信原语 <code>reduce_add()</code> 把部分和加起来，所有实例得到同样的总和（reduce_add 返回 uniform float）。它的执行方式类似于下面这段 AVX 内建函数写的 C 代码：
+        </p>
+        <pre><code>float sum_summary_AVX(int N, float* x) {
+    float tmp[8];  // assume 16-byte alignment
+    __m256 partial = _mm256_broadcast_ss(0.0f);
+    for (int i = 0; i &lt; N; i += 8)
+        partial = _mm256_add_ps(partial, _mm256_load_ps(&amp;x[i]));
+    _mm256_store_ps(tmp, partial);
+    float sum = 0.f;
+    for (int i = 0; i &lt; 8; i++)
+        sum += tmp[i];
+    return sum;
+}</code></pre>
+        <p>
+            课件的自测：如果你明白为什么这个实现正确地实现了 ISPC gang 抽象的语义，你就掌握了 ISPC。
+        </p>
+
+        <h3>跨实例操作</h3>
+        <pre><code>uniform int64 reduce_add(int32 x);              // sum of a variable over all instances
+uniform int32 reduce_min(int32 a);              // min over all instances
+int32 broadcast(int32 value, uniform int index); // broadcast one instance's value to all
+int32 rotate(int32 value, uniform int offset);   // pass value from instance i to (i+offset) % programCount</code></pre>
+        <p>
+            低层的 ISPC 也能表达很高级的协作。下面这个程序在 lg(8) = 3 步内算出 8 个元素的乘积（假设 gang 大小是 8）：
+        </p>
+        <pre><code>export void vec8product(
+    uniform float* x,
+    uniform float* result)
+{
+    float val1 = x[programIndex];
+    float val2 = shift(val1, -1);
+    if (programIndex % 2 == 0)
+        val1 = val1 * val2;
+    val2 = shift(val1, -2);
+    if (programIndex % 4 == 0)
+        val1 = val1 * val2;
+    val2 = shift(val1, -4);
+    if (programIndex % 8 == 0) {
+        *result = val1 * val2;
+    }
+}</code></pre>
+    </section>
+
+    <section>
+        <h2>七、ISPC 的抽象和实现</h2>
+        <ul>
+            <li>SPMD（单程序多数据）编程模型：程序员"认为"运行一个 gang 就是产生 programCount 个逻辑指令流，每个有不同的 programIndex。这是编程抽象，程序按这个抽象来写。</li>
+            <li>SIMD（单指令多数据）实现：ISPC 编译器生成向量指令（AVX2、ARM NEON 等）来完成一个 gang 的逻辑，并负责把条件控制流映射成向量指令（屏蔽向量通道等，作业 1 里你要手工做这件事）。</li>
+            <li>ISPC 的语义可能有些微妙：SPMD 抽象加上 uniform 值，让实现细节在抽象上露出了一点。</li>
+        </ul>
+        <p>
+            SPMD 编程模型小结：定义一个函数，在不同输入参数上并行运行这个函数的多个实例。单个控制线程调用 SPMD 函数，函数的多个实例并行运行（多个逻辑控制线程），函数返回后恢复单个控制线程。
+        </p>
+        <p>
+            <strong>ISPC 任务</strong>：gang 抽象是用 SIMD 指令实现的，在 CPU 一个 x86 核上的一个线程里执行。所以前面所有代码在 myth 机器的四个核里只会用到一个核。ISPC 还有另一个抽象"任务"（task），用来实现多核执行，作业 1 里自己读。
+        </p>
+
+        <h3>用数据并行的方式思考？</h3>
+        <ul>
+            <li>很多简单情况下，用 ISPC 的 foreach 几乎可以像写顺序程序一样表达程序，几乎可以把代码解释成"对输入数组的每个元素，独立地做这个"。例外：uniform 变量；跨实例操作（标准库里的 reduce_add 之类）。</li>
+            <li>但 ISPC 是低层语言：它暴露 programIndex 和 programCount，让程序员定义每个程序实例做什么工作、访问什么数据。所以可以写出输出未定义的程序，也可以写出只对某个特定 programCount 才正确的程序。</li>
+            <li>如果 ISPC 不想做低层语言呢？比如改语言，不让访问 programIndex、programCount，只让程序员用 foreach，几乎不用再想程序实例了。那么 foreach 之外的一切必须是 uniform 值和 uniform 逻辑。为什么？（因为 foreach 之外只有一个逻辑控制流。）</li>
+            <li>另一种选择：干脆不许数组下标。对一个"集合"数据结构的每个元素调用一次计算，程序员不写循环、不做数据下标，比如 <code>Collection y = map(doWork, x)</code>。NumPy、PyTorch 的程序员应该很熟悉这种模型：</li>
+        </ul>
+        <pre><code>import numpy as np
+
+def addOne(i):
+    return i + 1
+
+mapAddOne = np.vectorize(addOne)
+X = np.arange(15)      # create numPy array [0, 1, 2, 3, ...]
+Y = np.arange(15)      # create numPy array [0, 1, 2, 3, ...]
+Z = X + Y              # Z = [0, 2, 4, 6, ...]
+Zplus1 = mapAddOne(Z)  # Zplus1 = [1, 3, 5, 7, ...]</code></pre>
+        <p>
+            后面会讲很多这类模型。
+        </p>
+        <p>
+            总结：编程模型提供了一种思考并行程序组织方式的途径；它们提供的抽象允许多种有效的实现。这门课剩下的部分，要一直想着抽象和实现的区分。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS149: Parallel Computing &copy; Fall 2023</p>
+        <nav class="footer-nav">
+            <a href="02_现代多核处理器.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="04_并行编程基础.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

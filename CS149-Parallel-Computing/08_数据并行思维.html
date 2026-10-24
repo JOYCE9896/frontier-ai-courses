@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第八讲：数据并行思维 | Stanford CS149 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="07_GPU与CUDA.html">&larr; 上一讲</a>
+    <span>Stanford CS149: Lecture 8</span>
+    <a href="09_Spark.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第八讲：数据并行思维</h1>
+        <p class="subtitle">不再想"worker 做什么"，而用序列上的操作描述算法：序列、map、fold（及并行 fold 的结合律条件）、scan；并行扫描：O(N lg N) 的朴素算法、O(N) 的工作高效算法（上扫和下扫）、双核实现、warp 内的 SIMD 扫描、分层的大规模扫描；分段扫描和稀疏矩阵乘向量；gather / scatter，用排序和分段扫描实现 scatter；其他序列操作；案例：并行构建粒子网格的五种解法，并行直方图</p>
+        <div class="author-meta">
+            主讲：Kayvon Fatahalian<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=Ba3TqxSgnTk" target="_blank">课堂录像</a>（Stanford Online，2023 年秋季）、<a href="https://gfxcourses.stanford.edu/cs149/fall23/lecture/dataparallel/" target="_blank">课件</a>；直方图部分课上没讲，依据课件整理
+        </div>
+    </header>
+
+    <section>
+        <h2>一、今天的主题</h2>
+        <p>
+            Kayvon 说这一讲更像算法课，而不是系统课。常有人听完说"我从没这样想过"。到目前为止，课上考虑并行计算的方式要么是线程，"创建这些线程，这个线程做这件事"；要么是很简单的"对数组里每个数据做某件事"，基本就是对数组执行一个循环体。很多人现在大概已经习惯用"worker 做什么"来思考并行编程。今天希望大家换一种方式：用<strong>序列数据上的操作</strong>来描述算法：
+        </p>
+        <ul>
+            <li>map</li>
+            <li>filter</li>
+            <li>fold / reduce</li>
+            <li>scan / 分段 scan</li>
+            <li>sort</li>
+            <li>groupBy</li>
+            <li>join</li>
+            <li>partition / flatten</li>
+        </ul>
+        <p>
+            主要想法：这些操作存在高性能的并行实现，所以用这些原语写的程序往往能在并行机器上高效运行（前提是能避免受带宽限制）。思路是：如果我的代码都调用这些函数，而这些函数都高度并行，那我的程序也高度并行。写 NumPy 或其他张量语言的人天天这么做：分配大数组 A、B，用作用于这些集合的操作，比如 C = A + B，希望 + 尽可能快地实现，不想线程，也不想依赖。
+        </p>
+
+        <h3>动机</h3>
+        <p>
+            为什么应用必须暴露大量并行？为了利用大量的核：高核数的机器；很多台机器（比如云上的集群）；SIMD 处理加上多线程的核需要更多的并行；GPU 架构需要极大量的并行。回忆 V100：1.245 GHz，80 个 SM，5120 个 fp32 乘加 ALU（12.7 TFLOPS），每块芯片最多 5120 个交错的 warp，可以并发执行约 16 万个 CUDA 线程！不暴露大量并行、算术强度又不高的程序，在 GPU 上跑不高效。即使只在一块芯片上，也需要几十万份并行的事。所以今天讲的东西一点也不夸张，为一块中等大小的 GPU 写代码，就得有二十万量级的并行。
+        </p>
+
+        <h3>理解依赖是关键</h3>
+        <pre><code>x = a + b;
+y = b * 7;
+z = (x-y) * (x+y);</code></pre>
+        <p>
+            并行编程的关键之一是理解操作之间何时存在依赖，没有依赖就意味着可以并行执行。这三行的依赖图：x 依赖 a、b；y 依赖 b；z 依赖 x 和 y。图里一个节点要等前面的节点执行完才能执行。作业 2 的 B 部分就是理解并遵守依赖。今天则不在细粒度上想依赖，而是把算法归结为对这些函数的调用。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、数据并行模型和序列</h2>
+        <p>
+            数据并行模型：把计算组织成对元素序列的操作，比如对序列的所有元素执行同一个函数。熟知的现代例子：NumPy 的 C = A + B（A、B、C 是等长的向量）。
+        </p>
+        <p>
+            关键数据类型：<strong>序列</strong>，有序的元素集合（不是集合论意义上的集合，它有顺序）。Kayvon 不叫它张量或向量，因为 vector 在 C++ 里有特定含义，他沿用同事的叫法"序列"。各种语言里都有对应：
+        </p>
+        <ul>
+            <li>类 C++ 的语言里：<code>Sequence&lt;T&gt;</code></li>
+            <li>Scala 的列表：<code>List[T]</code></li>
+            <li>Python 的 Pandas DataFrame（还有 NumPy 数组，PyTorch、TensorFlow 的张量）</li>
+            <li>函数式语言（比如 Haskell）里：<code>seq T</code></li>
+        </ul>
+        <p>
+            重要的一点：<strong>和数组不同，程序只能通过特定的操作访问序列的元素</strong>。在 ISPC、CUDA、C 里拿到一个数组，虽然可以想成"对数组每个元素做 X"，但代码里能写 a[i]，随时访问任何元素，而随时访问 a 正是制造依赖、把程序搞乱的途径：这次迭代访问了 a[i]，下次又访问 a[i]，可能就有依赖。现在不让你这样做，代码就没有依赖了。
+        </p>
+
+        <h3>map</h3>
+        <ul>
+            <li>高阶函数（以函数为参数的函数）。</li>
+            <li>把一个无副作用的一元函数 <code>f :: a -&gt; b</code> 作用于输入序列的所有元素，产生同样长度的输出序列。</li>
+            <li>在函数式语言（比如 Haskell）里：<code>map :: (a -&gt; b) -&gt; seq a -&gt; seq b</code></li>
+        </ul>
+        <p>
+            记号 <code>a -&gt; b</code> 表示一个函数，输入是类型 a 的东西（比如整数），输出是类型 b 的东西。map 接受两个参数，第一个是 a 到 b 的函数，第二个是类型 a 的序列，输出是类型 b 的序列。给 map 一个把整数变成字符串的函数，作用于整数序列，输出就是字符串序列。C++ 里同样的功能写法有点别扭：
+        </p>
+        <pre><code>// C++
+int f(int x) { return x + 10; }
+int a[] = {3, 8, 4, 6, 3, 9, 2, 8};
+int b[8];
+std::transform(a, a+8, b, f);  // input start iterator, input end iterator, output start iterator</code></pre>
+        <pre><code>-- Haskell
+a = [3, 8, 4, 6, 3, 9, 2, 8]
+f x = x + 10
+b = map f a   -- [13, 18, 14, 16, 13, 19, 12, 18]</code></pre>
+        <p>
+            （Kayvon："尽管我吐槽 C++，我还是会写这样的代码。"）
+        </p>
+        <p>
+            <strong>并行化 map</strong>：因为 f 是函数（没有副作用），对序列所有元素应用 f 可以按任何顺序进行，不改变程序输出。map 的实现可以随意重排、并行处理序列的元素。而且 f 只能拿到单个元素，比如 x + 10 只知道 x，不可能不小心造出依赖；写 f 的人甚至不用想集合，只要说"给我一个元素，我告诉你怎么处理"，这是很干净的思路。
+        </p>
+        <pre><code>map f s =
+    partition sequence s into P smaller sequences
+    for each subsequence s_i (in parallel)
+        out_i = map f s_i
+    out = concatenate out_i's</code></pre>
+        <p>
+            同学们的实现思路：如果有 f 的源码，可以把 f 编译成 SIMD 版本，但 SIMD 一次只做八件事，集合可能有十万个元素；可以开 worker 线程池，各线程处理序列的不同元素。没什么花哨的。
+        </p>
+
+        <h3>fold（左折叠）</h3>
+        <ul>
+            <li>把二元操作 f 作用于每个元素和一个累积值，由类型 b 的初始值启动。</li>
+            <li><code>f :: (b,a) -&gt; b</code></li>
+            <li><code>fold :: b -&gt; ((b,a) -&gt; b) -&gt; seq a -&gt; b</code></li>
+            <li>Scala 里：<code>def foldLeft[A, B](init: B, f: (B, A) =&gt; B, l: List[A]): B</code></li>
+        </ul>
+        <p>
+            例子：<code>fold 10 +</code> 作用于 [3, 8, 4, 6, 3, 9, 2, 8]，依次得到 13、21、25、31、34、43、45、53，输出 53。输出是单个值。
+        </p>
+        <p>
+            fold 能并行化吗？有人说当然，第一讲第一题就是：先算小段的和，再把小段的和加起来。但有同学反对：我们不知道传进来的函数满足结合律，应用的顺序不同，结果可能不同。如果问题是"fold + 能不能并行"，可以，已经做过了。但对任意 f，不知道它的性质，那种把序列切成子序列、并行折叠、再折叠结果的实现，不保证得到同样答案，除非 f 满足<strong>结合律</strong>。
+        </p>
+        <p>
+            <strong>并行 fold</strong>：除了二元函数 f，还需要一个额外的二元"组合"函数 comb。由类型 b 的初始值启动，它必须是 f 和 comb 的单位元。
+        </p>
+        <ul>
+            <li><code>f :: (b,a) -&gt; b</code></li>
+            <li><code>comb :: (b,b) -&gt; b</code></li>
+            <li><code>fold_par :: b -&gt; ((b,a) -&gt; b) -&gt; ((b,b)-&gt;b) -&gt; seq a -&gt; b</code></li>
+            <li>如果 <code>f :: (b,b) -&gt; b</code> 是满足结合律的二元操作，就不需要 comb。</li>
+        </ul>
+        <p>
+            每个线程从单位元开始顺序折叠自己的子序列，得到一个 b，再用 comb 把各个 b 组合起来。注意 f 不需要满足交换律，因为正确实现时所有运算的先后顺序没变，只需要结合律。
+        </p>
+        <p>
+            Kayvon 补充了一个课件上没有的想法：比如先把所有数乘 10（map），再求和（fold +）。如果知道这些操作的定义，看到"map 然后 fold"的程序，就可以把它变换成一个 fold，在折叠时顺便乘 10，不用把所有数据过两遍。更复杂的 JIT 编译器在你的 PyTorch 代码上做的就是这种事。
+        </p>
+
+        <h3>scan</h3>
+        <ul>
+            <li><code>f :: (a,a) -&gt; a</code>（满足结合律的二元操作）</li>
+            <li><code>scan :: a -&gt; ((a,a) -&gt; a) -&gt; seq a -&gt; seq a</code></li>
+        </ul>
+        <pre><code>float op(float a, float b) { ... }
+
+scan_inclusive(float* in, float* out, int N) {
+    out[0] = in[0];
+    for (i = 1; i &lt; N; i++)
+        out[i] = op(out[i-1], in[i]);
+}</code></pre>
+        <p>
+            scan 是序列到序列。scan_inclusive + 作用于 [3, 8, 4, 6, 3, 9, 2, 8] 得到 [3, 11, 15, 21, 24, 33, 35, 43]：输出的第 i 个元素是输入中直到并包括第 i 个元素的所有元素经操作的结果。最后一个元素就是 fold 的结果，但 scan 给出所有的部分结果。另一种形式是"exclusive scan"：out[i] 是直到但不包括 in[i] 的所有元素的 scan 结果。有了 exclusive scan，加上当前元素就得到 inclusive scan。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、并行扫描</h2>
+        <p>
+            形式化定义：设 A = [a0, a1, a2, a3, ..., an-1]，⊕ 是满足结合律、单位元为 I 的二元操作。
+        </p>
+        <ul>
+            <li>scan_inclusive(⊕, A) = [a0, a0⊕a1, a0⊕a1⊕a2, ...]</li>
+            <li>scan_exclusive(⊕, A) = [I, a0, a0⊕a1, ...]</li>
+            <li>如果操作是 +，scan_inclusive(+, A) 叫"前缀和"：prefix_sum(A) = [a0, a0+a1, a0+a1+a2, ...]</li>
+        </ul>
+        <p>
+            课上同学们的想法：先用分治求出总和（这已经会了，长度 n、t 个线程，耗时约 n/t）；如果知道前一半 a0 到 a7 的和，就能并行地把它加到后一半的每个元素上；更进一步，对前一半做 scan，把结果加进后一半的 scan 结果，可以分成任意多块。Kayvon 说这些都是好答案。然后他加大难度：假设在 GPU 上跑，线程数和元素数一样多，要一个真正高度并行的解。
+        </p>
+
+        <h3>数据并行的 inclusive scan</h3>
+        <p>
+            第一步，每个元素加上它左边相邻的那个；第二步，加上左边距离 2 的；第三步，距离 4；第四步，距离 8。图上用 a0-3 表示 a0 到 a3 的和：第一步后第二个位置是 a0-1；第二步后第四个位置是 a0-3；依此类推，lg N 步后得到完整的 scan。（减去原向量就得到 exclusive scan 的结果，图上未画。）
+        </p>
+        <ul>
+            <li><strong>工作量</strong>（执行的总操作数）：O(N lg N)。每一步大约做 N 次加法，共 lg N 步。和顺序算法的 O(N) 相比效率低！</li>
+            <li><strong>跨度</strong>（span，最长的顺序步骤链）：O(lg N)。如果处理器无限多，要 lg N 时间。</li>
+        </ul>
+        <p>
+            Kayvon 不喜欢渐近地增加了工作量：N 是一百万时，lg N 不小。
+        </p>
+
+        <h3>工作高效的并行 exclusive scan（O(N) 工作）</h3>
+        <p>
+            Kayvon 提到这是 Guy Blelloch 想出的很聪明的算法：保持 lg N 的跨度，只做 O(N) 的工作。它分两个阶段，第一阶段是一棵合并树，第二阶段是一棵反过来的拆分树，网上的资料叫"上扫"（up-sweep）和"下扫"（down-sweep）。
+        </p>
+        <pre><code>// with op = "+"
+
+// Up-sweep:
+for d = 0 to (log2(n) - 1) do
+    forall k = 0 to n-1 by 2^(d+1) do
+        a[k + 2^(d+1) - 1] = a[k + 2^d - 1] + a[k + 2^(d+1) - 1]
+
+// Down-sweep:
+a[n-1] = 0      // slide writes x[n-1]
+for d = (log2(n) - 1) down to 0 do
+    forall k = 0 to n-1 by 2^(d+1) do
+        tmp = a[k + 2^d - 1]
+        a[k + 2^d - 1] = a[k + 2^(d+1) - 1]
+        a[k + 2^(d+1) - 1] = tmp + a[k + 2^(d+1) - 1]</code></pre>
+        <p>
+            上扫在这棵树上算部分和，做完后最后一个位置是整个数组的和，中间位置是后一半的和、前一半的和，沿途还有一些有用的部分和。然后就像同学说的，拿这些部分和"重新定基"：把末尾置 0，每一层把左边的值换到右边、右边加上原来左边的值，部分和沿树往回传播。以 16 个元素为例，最后得到 [0, a0, a0-1, a0-2, ..., a0-14]。
+        </p>
+        <ul>
+            <li>工作量：O(N)。第一层 N、下一层 N/2、再下一层 N/4……这个等比级数（CS161 里学过）是 O(N)。但常数是多少？大约 2，因为走了两倍的步数。</li>
+            <li>跨度：O(lg N)，常数也约为 2。</li>
+            <li>局部性：？？</li>
+        </ul>
+        <p>
+            作业 3 的 CUDA 热身就是实现它。理论家会很喜欢：O(N) 工作、lg N 步。但仔细看有 2 倍的常数；而且不是每时每刻都用上了所有处理器，越往后用的处理器越少；数据还在到处跑。作业里只要实现这个算法当编程练习；真在 NVIDIA 写 scan 库，得更费劲。
+        </p>
+
+        <h3>只有两个核时</h3>
+        <p>
+            把工作高效算法切成两半给 P1、P2：负载完全均衡，处理器之间的通信也很少（只有两个元素要移动），但访问在内存里到处跳，大家现在应该知道这不太好。本着先做最简单的事，给两个线程算 scan，Kayvon 会这样做：
+        </p>
+        <ol>
+            <li>P1 对元素 [0-7] 做顺序 scan，P2 对元素 [8-15] 做顺序 scan，都是 O(N) 地顺着内存走。</li>
+            <li>令 base = a0-7。</li>
+            <li>P1 把 base 加到 a8 到 a8-11 上，P2 把 base 加到 a8-12 到 a8-15 上，并行地完成后一半。</li>
+        </ol>
+        <ul>
+            <li>工作量：O(N)，但常数现在只有 1.5。</li>
+            <li>数据访问：空间局部性极高（连续的内存访问）。在核数很多、访存代价不一致的系统上，P1 访问 a8 到 a8-11 可能更贵；在小规模多核系统上，代价大概和 P2 访问一样。共享内存多处理器上，P2 算出的信息传到 P1 不是什么大事，读同一个内存系统而已。</li>
+        </ul>
+        <p>
+            作为作业一小时就能写完的东西，效果大概很不错。
+        </p>
+
+        <h3>SIMD 实现（CUDA）</h3>
+        <p>
+            如果 worker 是 SIMD 通道呢？例子：在 32 元素数组上做 exclusive scan，SPMD 程序，假设 32 宽 SIMD 执行。
+        </p>
+        <pre><code>__device__ int scan_warp(int *ptr, const unsigned int idx)
+{
+    const unsigned int lane = idx % 32;  // index of thread in warp (0..31)
+
+    if (lane &gt;= 1)  ptr[idx] = ptr[idx - 1]  + ptr[idx];
+    if (lane &gt;= 2)  ptr[idx] = ptr[idx - 2]  + ptr[idx];
+    if (lane &gt;= 4)  ptr[idx] = ptr[idx - 4]  + ptr[idx];
+    if (lane &gt;= 8)  ptr[idx] = ptr[idx - 8]  + ptr[idx];
+    if (lane &gt;= 16) ptr[idx] = ptr[idx - 16] + ptr[idx];
+
+    return (lane &gt; 0) ? ptr[idx-1] : 0;
+}</code></pre>
+        <p>
+            idx 是调用者的 CUDA 线程编号。由一组 32 个 CUDA 线程（一个 warp，共享同一条指令流）运行 scan_warp 时，每个线程返回元素 idx 的 exclusive scan 结果（完成后 ptr[] 里存的是 inclusive scan 结果）。也可以想成 ISPC 里 gang 的每个实例都调用这个函数。线程 ID 模 32 得到自己在 warp 里的位置，这是在对底层实现做假设，很底层、很取巧的代码。
+        </p>
+        <p>
+            为什么五步？lg 32 = 5。每步是一次两数相加，根据编号，有些线程过一阵就不再参与。工作量多少？每行代码在一个 warp 里每线程做一件事，32 个线程，共 N lg N，跨度 5，掐表的话五步完成。
+        </p>
+        <p>
+            改用 O(N) 的工作高效算法要几行？上扫五行、下扫五行，十步。奇怪吗：N lg N 的算法要五个周期，O(N) 的要十个。资源一样，这块 SIMD 执行单元一次能做 32 件事，只能执行同一条指令，做点冗余的工作没关系；工作高效的算法虽然工作少，却摊在更多、更不一致的指令上，SIMD 通道大量闲置，反而亏了。工作高效的写法需要超过两倍的指令数。
+        </p>
+        <p>
+            所以实现 scan 库时，取决于并行工作怎样映射到机器，不同做法差别很大：机器有几千个独立处理器，可能用工作高效的写法；只有两个处理器，就做那个简单的对半分；在 SIMD 处理器上，N lg N 的反而最好。课上有同学建议交错分配，Kayvon 说那解决的是另一个问题：16 宽 SIMD 单元在后面几步里大部分通道无事可做；而只有两个线程的机器上，每步没什么事做反而好，很快做完进入下一步。在乎工作效率还是在乎原始并行度，取决于机器怎样工作。
+        </p>
+
+        <h3>在更大的数组上构建 scan</h3>
+        <p>
+            例子：用 4 个 warp 的线程块做 128 元素的 scan。四个 warp 各做一个长度 32 的 SIMD scan，得到四个部分 a0-31、a32-63、a64-95、a96-127；warp 0 再对这四个部分做长度 4 的 SIMD scan，得到 base：a0-31、a0-63、a0-95、a0-127；warp 1、2、3 分别加上 base[0]、base[1]、base[2]。这样只在不付出代价时才承受 N lg N。
+        </p>
+        <pre><code>__device__ void scan_block(int* ptr, const unsigned int idx)
+{
+    const unsigned int lane = idx % 32;     // index of thread in warp (0..31)
+    const unsigned int warp_id = idx &gt;&gt; 5;  // warp index in block
+
+    int val = scan_warp(ptr, idx);          // Step 1. per-warp partial scan
+                                            // (performed by all threads in block,
+                                            // with threads in same warp communicating
+                                            // through shared memory buffer 'ptr')
+
+    if (lane == 31) ptr[warp_id] = ptr[idx];  // Step 2. thread 31 in each warp copies
+    __syncthreads();                          // partial-scan result into per-block
+                                              // shared mem
+
+    if (warp_id == 0) scan_warp(ptr, idx);  // Step 3. scan to accumulate bases
+    __syncthreads();                        // (only performed by warp 0)
+
+    if (warp_id &gt; 0)                        // Step 4. apply bases to all elements
+        val = val + ptr[warp_id-1];         // (performed by all threads in block)
+    __syncthreads();
+
+    ptr[idx] = val;
+}</code></pre>
+        <p>
+            块内协作的线程做 scan，作业 3 提供了类似的代码，可以当子程序调用，不必懂原理。代码假设 ptr 数组长度等于每块的线程数。1024 = 32² 个元素：一批 warp 并行地在五个周期内做出 32 个 scan；把部分和拼成一个 32 宽的块，再用五个周期扫描；再把 32 个部分和分回各块，每个线程一个周期加上去，共约 11 个周期。
+        </p>
+        <p>
+            更大的 scan，比如一百万个元素（每块 1024 个元素）：第一次内核启动，各块（Block 0 到 N-1）各自 scan；第二次启动，对各块的结果做一次块 scan；第三次启动，各块加上自己的 base。超过一百万元素，第二阶段也要切成多个块。这里把数据并行的 scan 和更传统的顺序算法混在一起：有帮助时用数据并行、用 SIMD，并行度远超处理器数时退回更传统的做法。作业 3 里，先用 O(N) 算法学 CUDA 编程，有余力可以试着把 scan 做得很快，和 CUDA 库里的 scan 比比。作为程序员，你只需想：调用 scan，它就和好程序员能做到的一样快。
+        </p>
+        <p>
+            有同学问空闲的 SIMD 通道能不能省电。Kayvon 问 Kunle，Kunle 说按 Bill Dally 现在讲的稀疏张量那套，可以动态门控，省得不多，可能省 1.5 倍功耗那种，NVIDIA 肯定会追这类优化；SIMD 越宽越值得考虑。
+        </p>
+
+        <h3>scan 的实现要点</h3>
+        <ul>
+            <li>并行度：scan 算法有 O(N) 的并行工作，但高效实现只利用为充分用好机器所需的那么多并行。目标是减少工作、减少通信和同步。</li>
+            <li>局部性：多级实现，匹配存储层次（CUDA 例子里每块的实现在本地内存里完成）。</li>
+            <li>算法的异构性：在机器的不同层次用不同的 scan 策略。CUDA 例子里 warp 内的 scan 和线程间的 scan 算法不同；低核数 CPU 的例子主要基于顺序 scan。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>四、并行分段扫描</h2>
+        <p>
+            常见问题：对序列的序列进行操作。例子：
+        </p>
+        <ul>
+            <li>对图里每个顶点 v：对与 v 相连的每条边 e；</li>
+            <li>对模拟里的每个粒子 p：对距离 p 不超过 D 的每个粒子；</li>
+            <li>对集合里的每个文档 d：对 d 里的每个词。</li>
+        </ul>
+        <p>
+            问题里有两层并行，程序员可能都想利用；但它是<strong>不规则</strong>的：边表、粒子邻居表、每篇文档的词数，在不同顶点（粒子）之间可能差别很大。比如在 GPU 上需要二十万件事，图有一万个顶点、每个顶点平均 10 到 20 条边，只在顶点上并行不够，必须利用边上的并行。
+        </p>
+        <p>
+            分段扫描是 scan 的推广：同时对输入序列的各个连续分段做 scan。
+        </p>
+        <pre><code>let A = [[1,2],[6],[1,2,3,4]]
+let op = +
+segmented_scan_exclusive(op, A) = [[0,1], [0], [0,1,3,6]]</code></pre>
+        <p>
+            检查一下：第一段 [1,2] 的 exclusive scan 是 [0,1]；第二段是 [0]；第三段是 [0, 1, 1+2=3, 3+3=6]。
+        </p>
+        <p>
+            假设嵌套序列用简单的"起始标志"表示：嵌套序列 A = [[1,2,3],[4,5,6,7,8]] 表示为
+        </p>
+        <pre><code>flag: 1 0 0 1 0 0 0 0
+data: 1 2 3 4 5 6 7 8</code></pre>
+        <p>
+            一个普通的扁平数组，加一个标记每段从哪里开始的二进制标志数组。这是序列的序列很紧凑的表示。在乎性能、做图处理时就这样实现图：数字是所有边的列表，再记录每个顶点从哪条边开始。
+        </p>
+        <p>
+            工作高效的分段扫描（课上没细讲，课件给出）：
+        </p>
+        <pre><code>// with op = "+"
+
+// Up-sweep:
+for d = 0 to (log2(n) - 1) do:
+    forall k = 0 to n-1 by 2^(d+1) do:
+        if flag[k + 2^(d+1) - 1] == 0:
+            data[k + 2^(d+1) - 1] = data[k + 2^d - 1] + data[k + 2^(d+1) - 1]
+        flag[k + 2^(d+1) - 1] = flag[k + 2^d - 1] || flag[k + 2^(d+1) - 1]
+
+// Down-sweep:
+data[n-1] = 0
+for d = (log2(n) - 1) down to 0 do:
+    forall k = 0 to n-1 by 2^(d+1) do:
+        tmp = data[k + 2^d - 1]
+        data[k + 2^d - 1] = data[k + 2^(d+1) - 1]
+        if flag_original[k + 2^d] == 1:      # must maintain copy of original flags
+            data[k + 2^(d+1) - 1] = 0        # start of segment
+        else if flag[k + 2^d - 1] == 1:
+            data[k + 2^(d+1) - 1] = tmp
+        else:
+            data[k + 2^(d+1) - 1] = tmp + data[k + 2^(d+1) - 1]
+        flag[k + 2^d - 1] = 0</code></pre>
+        <p>
+            理解方式：它就是原来的算法，只是把各段的起始标志也跟着信息一起传播；遇到起始标志时，就跳过跨越边界的那次回传。懂了普通 scan，就懂了分段 scan。输出在 O(N) 工作、lg N 跨度内得到。
+        </p>
+
+        <h3>例子：稀疏矩阵乘向量</h3>
+        <p>
+            y = Ax，x 是稠密向量，A 是稀疏矩阵，大部分值是零。如果 N² 的矩阵里 99% 是零，就能存得紧凑得多。稀疏矩阵在稀疏连接的地方随处可见，比如 Amazon 存顾客推荐信息：所有用户和所有商品的叉积是巨大的矩阵，但实际上很少有人买很多商品。
+        </p>
+        <ul>
+            <li>容易并行化：并行计算每行的点积。</li>
+            <li>但每行的工作量不同（宽 SIMD 执行会很麻烦）。</li>
+        </ul>
+        <p>
+            一种稀疏存储格式：压缩稀疏行（CSR，compressed sparse row）。压缩是因为不显式存零，"稀疏行"是因为按行主序。
+        </p>
+        <pre><code>values     = [ [3,1], [2], [4], ..., [2,6,8] ]
+cols       = [ [0,2], [1], [2], ...., ]
+row_starts = [0, 2, 3, 4, ... ]</code></pre>
+        <p>
+            非零值存成序列的序列：第一行的非零是 3 和 1，下一行是 2，再下一行是 4，最后一行有三个非零。每个非零还要知道所在的列，所以有另一个同样结构的列序列。row_starts 告诉你每行在这个扁平数组里从哪里开始，等价于前面的布尔标志，只是对矩阵来说直接给每行的起点更方便。
+        </p>
+        <p>
+            用分段扫描做稀疏矩阵乘法，以一个 4×4 的例子：x = [x0,x1,x2,x3]，values = [[3,1],[2],[4],[2,6,8]]，cols = [[0,2],[1],[2],[1,2,3]]，row_starts = [0,2,3,4]。
+        </p>
+        <ol>
+            <li>对所有非零值做 map：<code>products[i] = values[i] * x[cols[i]]</code>。这里先要 gather(x, cols)：对每个非零，按它的列号从 x 里取出元素，造一个和非零序列一样长的新序列（x 的元素会被复制）。products = [3x0, x2, 2x1, 4x2, 2x1, 6x2, 8x3]。</li>
+            <li>由 row_starts 造出标志向量：flags = [1,0,1,1,1,0,0]。</li>
+            <li>用加法对 (products, flags) 做 inclusive 分段扫描：[3x0, 3x0+x2, 2x1, 4x2, 2x1, 2x1+6x2, 2x1+6x2+8x3]。</li>
+            <li>取每段的最后一个元素：y = [3x0+x2, 2x1, 4x2, 2x1+6x2+8x3]。</li>
+        </ol>
+        <p>
+            （课件第 3、4 步里最后一项写成了 8x2，按 cols 应是 8x3。）这样做稀疏矩阵乘法，并行度和非零个数成正比，而不是和行数成正比。非零总数远多于行数时很有用。只要 map 和分段扫描有好的实现，它就能并行得和它们一样快。有同学问 gather 有多快：可能有点代价，但用普通 C 写也得去取那些数据；唯一的区别是这里把 gather 物化成了一个长度为非零数的稠密数组再遍历，而直接用访存就不会造出这个数组。不同行的非零数可以差得很远，把整个东西摊平，当成一个大的数据并行计算。
+        </p>
+
+        <h3>scan / 分段 scan 小结</h3>
+        <ul>
+            <li>scan：理论上问题里的并行度与元素数成线性关系；实践中要利用局部性，只用填满机器执行资源所需的并行。这是在机器不同层次应用不同策略的好例子。</li>
+            <li>分段 scan：用规则的、数据并行的方式表达对不规则数据结构（比如列表的列表）的计算。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>五、gather / scatter</h2>
+        <p>
+            数据并行思维下的数据移动操作：
+        </p>
+        <ul>
+            <li><code>gather(index, input, output)</code>：<code>output[i] = input[index[i]]</code>，"按 index_seq 里的下标从 data_seq 收集数据"，把散落各处的数据收拢成稠密的。</li>
+            <li><code>scatter(index, input, output)</code>：<code>output[index[i]] = input[i]</code>，"按 index_seq 里的下标把 data_seq 的数据散布出去"。</li>
+        </ul>
+        <p>
+            课件例子：下标序列 [3, 12, 4, 9, 9, 15, 13, 0] 从 16 元素的数据序列里 gather 出 8 个元素；scatter 则按下标 [3, 0, 4, 7, 1, 12, 9, 14] 把 8 个元素放到 16 元素输出序列的对应位置。
+        </p>
+        <p>
+            这些操作可能很贵，因为数据要移到不可预测、依赖数据的地方。
+        </p>
+        <ul>
+            <li>gather 机器指令：<code>gather(R1, R0, mem_base);</code>，"按 R0 里指定的下标，从缓冲区 mem_base 收集到 R1"。R0 是下标向量寄存器，R1 是结果向量。</li>
+            <li>2013 年的 AVX2 支持 gather，但不支持 SIMD scatter（只能写成标量循环）。AVX512 有 scatter 指令。</li>
+            <li>GPU 上有硬件支持的 gather/scatter。和连续向量的 load/store 相比仍然是昂贵的操作。</li>
+        </ul>
+        <p>
+            ISPC 里程序写 <code>a[foo]</code>，可能就是一次 gather。下标是任意的，向量的每个通道都可能在不同的缓存行上未命中，都可能触发不同的缺页处理，这条操作要做对很麻烦。所以 ISPC、CUDA 里各实例访问相邻元素时很好：不用 gather，一条"从这个基指针开始装 8 个元素"的向量 load 就行，向量 load 和非向量 load 差别很大。
+        </p>
+
+        <h3>把 scatter 变成 sort / gather</h3>
+        <p>
+            特殊情况：index 里的元素都不相同、并且覆盖所有元素（scatter 是一个置换）。这时按下标 scatter 就是按 index 序列的值对输入排序。比如 input = [3, 8, 4, 6, 3, 9, 2, 8]，index = [0, 2, 1, 4, 3, 6, 7, 5]，按 index 排序后的 input 是 [3, 4, 8, 3, 6, 8, 9, 2]。在有 gather 没有 scatter 的平台上，常见技巧是把一个变成另一个。
+        </p>
+
+        <h3>用排序、map、分段扫描实现 scatterOp</h3>
+        <pre><code>for all elements in sequence
+    output[index[i]] = atomicOp(output[index[i]], input[i])
+
+// example:
+atomicAdd(output[index[i]], input[i])</code></pre>
+        <p>
+            现在假设 index 里的元素不唯一，所以需要同步来保证原子性。比如做直方图，算出一个桶，往桶里加 1。例子 index = [1, 1, 0, 2, 0, 0]：
+        </p>
+        <ol>
+            <li>按 index 序列的值对输入序列排序（假设数据并行库里有并行排序）：排序后的 index 是 [0, 0, 0, 1, 1, 2]，按 index 排序后的输入是 [input[2], input[4], input[5], input[0], input[1], input[3]]。</li>
+            <li>计算每段相同下标的起点：starts: [1, 0, 0, 1, 0, 1]。可以完全并行地做：每个元素看自己和前一个是否不同，不同就是起点，返回 1，否则返回 0。</li>
+            <li>对每段用 op 做分段扫描：[op(op(input[2], input[4]), input[5]), op(input[0], input[1]), input[3]]。</li>
+            <li>最后把结果 scatter 到目标位置。</li>
+        </ol>
+
+        <h3>更多的序列操作</h3>
+        <ul>
+            <li>group by key：<code>Seq (key, T) -&gt; Seq (key, Seq T)</code>，创建一个序列的序列，每个子序列包含键相同的元素。比如键是文档、值是词，就是按文档把所有词归类，很多数据库类系统里常见。例子：(key, value) 对 [1,3 2,8 2,4 1,6 3,3 1,9 1,2 2,8] 按键分组得到 1: [3,6,9,2]，2: [8,4,8]，3: [3]。</li>
+            <li>filter：去掉不满足谓词的元素。例子：[3, 8, 4, 6, 3, 9, 2, 8] 经 filter（假设 f 滤掉奇数）得到 [8, 4, 6, 2, 8]。</li>
+            <li>sort。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>六、案例：在大型并行机器上构建粒子网格</h2>
+        <p>
+            Kayvon 说这个例子会和作业惊人地相似。问题：根据二维位置，把一百万个点粒子放进 16 个格子的均匀网格（4×4）。这是一个并行数据结构操作问题：构建一个"列表的二维数组"，即对每个网格单元，列出其中的粒子编号，也就是一个序列的序列（外层长度 16，内层是每格的粒子）。回忆：V100 上每个 SM 最多 2048 个 CUDA 线程，共 80 个 SM。希望在处理器很多、粒子很多、格子不多的情况下，完全并行地构建它。
+        </p>
+        <p>
+            这种结构的常见用途是 N 体问题：一个常见操作是计算与邻近粒子的相互作用。比如给定一个粒子，找出半径 R 内的所有粒子：把粒子放进单元大小为 R 的网格，只需检查周围网格单元里的粒子。银河模拟用粒子表示恒星，流体模拟用粒子表示流体，经常要建这种数据结构。
+        </p>
+
+        <h3>解法 1：在粒子上并行</h3>
+        <pre><code>list cell_list[16];  // 2D array of lists
+lock cell_list_lock;
+
+for each particle p  // in parallel
+    c = compute cell containing p
+    lock(cell_list_lock)
+    append p to cell_list[c]
+    unlock(cell_list_lock)</code></pre>
+        <p>
+            每个 CUDA 线程负责一个粒子，算出所在格子，再原子地更新那个格子的列表。Kayvon 说这大概正是他会先写的，可能是最聪明的第一版。有很多并行吗？在粒子上的 for 循环可以并行，但所有线程都在这把锁上同步：大规模争用，几千个线程争着更新一个共享数据结构。
+        </p>
+
+        <h3>解法 2：用更细粒度的锁</h3>
+        <pre><code>list cell_list[16];  // 2D array of lists
+lock cell_list_lock[16];
+
+for each particle p  // in parallel
+    c = compute cell containing p
+    lock(cell_list_lock[c])
+    append p to cell_list[c]
+    unlock(cell_list_lock[c])</code></pre>
+        <p>
+            每个格子一把锁，更新不同格子的线程不会冲突。假设粒子在二维空间里均匀分布，争用约为原来的 1/16。处理器少时有效；十万个 CUDA 线程争 16 把锁，仍然是问题。
+        </p>
+
+        <h3>解法 3：在格子上并行</h3>
+        <pre><code>list cell_lists[16];  // 2D array of lists
+
+for each cell c          // in parallel
+    for each particle p  // sequentially
+        if (p is within c)
+            append p to cell_lists[c]</code></pre>
+        <p>
+            按格子分解工作：对每个格子独立算出其中有哪些粒子，没有同步，消除了争用。问题：并行不够，只有 16 个并行任务，而高效利用 GPU 要几千个独立任务；而且工作不高效，粒子与格子的判断次数是顺序算法的 16 倍。更可怕的是，如果有一万个格子，每个线程都在遍历全部粒子，等于把整个问题做了一遍。
+        </p>
+
+        <h3>解法 4：算部分结果再合并</h3>
+        <p>
+            同学提出的：并行地生成 N 个"部分"网格，再合并。比如创建 N 个线程块（至少和 SM 数一样多），块内所有线程更新同一个网格。
+        </p>
+        <ul>
+            <li>同步更快：争用减为 1/N，而且同步作用于块内局部变量（CUDA 共享内存），代价更低；</li>
+            <li>需要额外工作：计算结束时合并 N 个网格；</li>
+            <li>需要额外内存：存 N 个列表网格而不是 1 个。</li>
+        </ul>
+        <p>
+            线程少时很好；处理器很多时，造一万个格子列表可能不可行，合并本身也可能占不小的执行时间。
+        </p>
+
+        <h3>解法 5：数据并行的做法</h3>
+        <p>
+            以 6 个粒子为例（particle_index 0 到 5）：
+        </p>
+        <ol>
+            <li>map：算出每个粒子所在的格子（在输入粒子上并行），得到 grid_cell = [9, 6, 6, 4, 6, 4]。不需要任何通信。</li>
+            <li>按格子排序（注意 particle_index 数组随排序被置换）：grid_cell = [4, 4, 6, 6, 6, 9]，particle_index = [3, 5, 1, 2, 4, 0]。分组和排序是一回事，用一个高性能的排序实现 group by。</li>
+            <li>找出每个格子的起点和终点（在 particle_index 元素上并行）：</li>
+        </ol>
+        <pre><code>// run for each element of the particle_index array
+// (each invocation has a unique value of 'thread_index')
+this_cell = grid_cell[thread_index];
+if (thread_index == 0)               // special case for first cell
+    cell_starts[this_cell] = 0;
+else if (this_cell != grid_cell[thread_index-1]) {
+    cell_starts[this_cell] = thread_index;
+    cell_ends[grid_cell[thread_index-1]] = thread_index;
+}
+if (thread_index == numParticles-1)  // special case for last cell
+    cell_ends[this_cell] = thread_index+1;</code></pre>
+        <p>
+            结果：cell_starts[4] = 0、cell_starts[6] = 2、cell_starts[9] = 5；cell_ends[4] = 2、cell_ends[6] = 5、cell_ends[9] = 6（不含终点）。给一个格子号，查起点和终点，就能在原粒子数组里找到它的粒子。图上大多数格子是空的，因为这个问题里大多数格子确实是空的。
+        </p>
+        <p>
+            一次 map、一次排序、再一次 map，得到了数据结构。这个解法保持了大量并行（并行度与粒子数成正比，而不是与格子数成正比），去掉了细粒度同步，代价是一次排序和额外几遍数据扫描（额外的带宽）！
+        </p>
+    </section>
+
+    <section>
+        <h2>七、另一个例子：并行直方图</h2>
+        <p>
+            课上没讲，课件留作参考。Kayvon 说它和刚才的网格几乎一样，区别是直方图最后还要做一次分段求和来算出总数，更像稀疏矩阵乘法的例子；做分段扫描时要小心空桶的特殊情况。
+        </p>
+        <pre><code>int f(float value);            // maps array values to histogram bin id's
+float input[N];
+int histogram_bins[NUM_BINS];  // assume bins are initialized to 0
+
+for (int i = 0; i &lt; N; i++) {
+    histogram_bins[f(input[i])]++;
+}</code></pre>
+        <p>
+            挑战：只用序列上的 map() 和 sort()，写出大规模并行的直方图实现。
+        </p>
+        <pre><code>// assume variable thread_index is the "thread index"
+// associated with the invocation of the kernel function
+
+void compute_bin(float* input, int* bin_ids) {
+    bin_ids[thread_index] = f(input[thread_index]);
+}
+
+void find_starts(int* bin_ids, int* bin_starts) {
+    if (thread_index == 0 || bin_ids[thread_index] != bin_ids[thread_index-1])
+        bin_starts[bin_ids[thread_index]] = thread_index;
+}
+
+float input[N];
+int   histogram_bins[NUM_BINS];
+
+// temporary buffers
+int   bin_ids[N];            // bin_ids[i] = id of bin that element i goes in
+int   sorted_bin_ids[N];
+int   bin_starts[NUM_BINS];  // initialized to -1
+
+// map f onto input sequence to get bin ids of all elements
+launch&lt;&lt;&lt;N&gt;&gt;&gt;compute_bin(input, bin_ids);
+
+// find starting point of each bin in sorted list
+sort(N, bin_ids, sorted_bin_ids);
+launch&lt;&lt;&lt;N&gt;&gt;&gt;find_starts(sorted_bin_ids, bin_starts);
+
+// compute bin sizes
+launch&lt;&lt;&lt;NUM_BINS&gt;&gt;&gt;bin_sizes(bin_starts, histogram_bins, N, NUM_BINS);</code></pre>
+        <pre><code>// launched with one thread per output bin
+void bin_sizes(int* bin_starts, int* histogram_bins, int num_items, int num_bins) {
+    if (bin_starts[thread_index] == -1) {
+        histogram_bins[thread_index] = 0;  // no items in this bin
+    } else {
+        // find start of next bin in order to determine size of current bin
+        // tricky edge case: if the next bin is empty, then must search
+        // forward to find the next non-empty bin
+        int next_idx = thread_index+1;
+        while (next_idx &lt; num_bins &amp;&amp; bin_starts[next_idx] == -1)
+            next_idx++;
+        if (next_idx &lt; num_bins)
+            histogram_bins[thread_index] = bin_starts[next_idx] - bin_starts[thread_index];
+        else
+            histogram_bins[thread_index] = num_items - bin_starts[thread_index];
+    }
+}</code></pre>
+        <p>
+            （课件里临时数组名写成 sorted_bin_idx、使用处写成 sorted_bin_ids，这里统一了。）这里用桶起点之差算出每个桶的大小，而不是分段求和；空桶的起点是 -1，要向后找下一个非空桶。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、小结</h2>
+        <ul>
+            <li>数据并行思维：用大数据集合上简单的操作（通常能大规模并行、有高效实现）来实现算法。</li>
+            <li>把不规则的并行变成规则的并行。</li>
+            <li>把细粒度同步变成粗粒度同步。</li>
+            <li>但大多数解法需要多遍扫描数据，很吃带宽！</li>
+        </ul>
+        <p>
+            数据并行原语是今天很多并行和分布式系统的基础：
+        </p>
+        <ul>
+            <li>CUDA 的 Thrust 库：去查它的 API 文档，会看到很眼熟的东西，map、sort、scan、分段 scan 等等。不想做疯狂的 CUDA 黑客，就用这些高层原语表达算法。</li>
+            <li>Apache Spark / Hadoop：Spark 程序都用这些序列操作写成，序列叫 RDD，只给你一组作用于 RDD 的操作。Spark 的前提是：用 RDD 就能获得跨集群的并行、容错和冗余，而这些操作足以做大量有意思的数据分析，所以 Spark 很流行。实现不同，想法和 Thrust 基本一样。下一讲 Kunle 讲 Spark。</li>
+            <li>Pandas DataFrame 的操作。</li>
+        </ul>
+        <p>
+            要点：还有一整套思考并行算法的方式，就是怎样把不规则的数据结构、不规则的并行，归结为封装在某个数据并行操作库里的规则并行。作业 3 里会对此有些体会。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS149: Parallel Computing &copy; Fall 2023</p>
+        <nav class="footer-nav">
+            <a href="07_GPU与CUDA.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="09_Spark.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

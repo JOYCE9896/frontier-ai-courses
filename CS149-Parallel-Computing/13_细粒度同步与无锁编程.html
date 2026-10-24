@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十三讲：锁的实现、细粒度同步与无锁编程 | Stanford CS149 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="12_内存一致性模型.html">&larr; 上一讲</a>
+    <span>Stanford CS149: Lecture 13</span>
+    <a href="14_期中复习.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十三讲：锁的实现、细粒度同步与无锁编程</h1>
+        <p class="subtitle">死锁、活锁、饥饿；用 MSI 协议走一遍 load/store 序列；test-and-set 锁和它产生的一致性流量；锁的理想性能特征；test-and-test-and-set 锁；票号锁；CUDA 的原子操作；用 compare-and-swap 构造 atomic_min 和锁；LL/SC；C++11 的 atomic&lt;T&gt; 和内存栅栏；有序链表：单一全局锁、手递手的细粒度加锁；阻塞与无锁；单读单写的有界和无界队列；无锁栈、ABA 问题和计数器、释放内存的问题与危险指针；无锁链表插入和删除；什么时候值得用无锁数据结构</p>
+        <div class="author-meta">
+            主讲：Kayvon Fatahalian<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=GA1ObImqaMo" target="_blank">课堂录像</a>（Stanford Online，2023 年秋季）、<a href="https://gfxcourses.stanford.edu/cs149/fall23/lecture/finegrained/" target="_blank">课件</a>；无锁部分课上只讲了开头，栈、ABA、危险指针等依据课件整理
+        </div>
+    </header>
+
+    <section>
+        <h2>一、预备：三个术语</h2>
+        <p>
+            今天的内容：锁的实现；使用锁，包括细粒度加锁的例子和无锁数据结构的设计。Kayvon 开场说最好坐在喜欢交谈的人旁边，一涉及锁，脑袋就容易炸。先统一三个术语：死锁、活锁、饥饿。死锁和活锁关乎程序正确性，饥饿其实是公平性问题。
+        </p>
+
+        <h3>死锁</h3>
+        <p>
+            死锁是这样一种状态：系统有未完成的操作要完成，但没有任何操作能取得进展。当每个操作都占有了另一个操作需要的共享资源时，就可能死锁。在死锁中，除非某个线程放弃资源（"倒车"），否则没有任何线程（在图里是汽车）能前进。
+        </p>
+        <p>
+            课件的图：十字路口里四辆车，谁都走不了。车不能倒车，每辆车要前进需要什么？前面的路是空的。黄车前面那段路被绿车占着；为什么黄车不等绿车让开？绿车也走不了，它需要的那段路被下一辆黄车占着，如此循环。每个人都占着一个资源，又需要一个拿不到的资源，拿到全部所需之前不放手，而且依赖形成一个环。Kayvon 还放了一张自己拍的照片：公交车转弯转得太宽（或者那辆车没理会地上"别越过这条线，公交要在这转弯"的标线），公交走不了因为车在那，车走不了因为公交在那，后面都堵满了，谁也倒不了。课件的旁注：在旧金山，死锁一直在发生；公交司机让另一个司机知道是他造成了死锁时还挺好笑，"去上 CS149 吧你个笨蛋！"还有几张自然界死锁的照片（National Geographic），为什么它们是死锁？谁都不肯放弃资源，因为不信任对方，于是没有进展。
+        </p>
+        <p>
+            计算机系统里的死锁：
+        </p>
+        <ul>
+            <li>例 1：线程 A 为 B 的工作队列产生工作，线程 B 为 A 的工作队列产生工作；队列是有限的，没有输出空间时 worker 就等。两个队列都满了，A 不取新工作因为没地方放输出，在等 B；B 也没地方放输出，也走不了。</li>
+            <li>例 2：第六讲消息传递那个 bug。每个线程先向编号大一的线程发消息（阻塞发送），再从编号小一的线程收消息。大家都阻塞在同一个调用上。</li>
+        </ul>
+        <pre><code>const int numEl = 1024;
+float msgBuf1[numEl];
+float msgBuf2[numEl];
+int threadId = getThreadId();
+... do work ...
+MsgSend(msgBuf1, numEl * sizeof(int), threadId+1, ...
+MsgRecv(msgBuf2, numEl * sizeof(int), threadId-1, ...</code></pre>
+
+        <h3>死锁的必要条件</h3>
+        <ol>
+            <li>互斥：一个资源一次只能被一个处理器占有（这段路只能有一辆车，这个输入队列只属于这个线程）。</li>
+            <li>占有并等待：处理器在等待完成操作所需的其他资源时，必须一直占着已有的资源（不能倒车）。</li>
+            <li>不可抢占：处理器在要做的操作完成之前不放弃资源。2 和 3 有点像，如果能把线程从处理器上拿下来并释放资源，就相当于放弃资源。</li>
+            <li>循环等待：等待的处理器之间有相互依赖（资源依赖图里有环）。最重要的是这一条：如果路口只有三辆车，总有一辆能走，走完放出资源，下一辆就能走。</li>
+        </ol>
+
+        <h3>活锁</h3>
+        <p>
+            活锁是系统在执行很多操作、却没有线程取得有意义进展的状态。死锁里什么都不发生；活锁里一直有动作，看系统日志会觉得"在发生事情"，但没有真正的进展。比如路口那几辆车能倒车，大家发现僵住了就都倒车，然后都觉得路口空了一起往前开，又僵住，又倒车……日常生活里最常见的活锁？走到门口和别人互相"你先""你先"；迎面走路时两人都往同一边让，再一起往另一边让。计算机系统里的例子：操作不断中止、重试。
+        </p>
+
+        <h3>饥饿</h3>
+        <p>
+            系统整体在进展，但有些进程毫无进展。例子：左右方向的车（黄车）必须让上下方向的车（绿车），高峰时绿车源源不断，黄车一直停着。饥饿通常不是永久状态，绿车一过黄车就能走。Kayvon 说像周末困在 Half Moon Bay 想拐上 1 号公路，永远上不去。调试时看不到黄车有动静，可能以为是死锁，其实绿车一直在完成有用的事务。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、复习：用 MSI 走一遍</h2>
+        <p>
+            缓存一致性解决什么问题？要缓存，多个缓存就是数据的多个副本，有写的时候要让副本保持更新。总体策略：要写，就不允许有副本，一写所有其他副本都得消失。状态图是所有缓存都同意的游戏规则，每个缓存各自执行这套逻辑。下面是课件的 MSI 状态图（这里把 BusWB 写作 flush，即把脏行冲刷到内存）：S 上 PrRd / --；I 上 PrRd / BusRd 到 S；I、S 上 PrWr / BusRdX 到 M；M 上 PrRd、PrWr 都无事务；M 上 BusRd / flush 到 S，BusRdX / flush 到 I；S 上 BusRdX 到 I，BusRd 不变。
+        </p>
+        <p>
+            检验理解：P0、P1 对地址 X、Y 做下面的序列，X、Y 在不同缓存行上，初值为 0。
+        </p>
+        <table>
+            <thead><tr><th>操作</th><th>缓存 0 做什么</th><th>缓存 1 做什么</th></tr></thead>
+            <tbody>
+                <tr><td>P0: LD X</td><td>发 BusRd，以 S 状态装入行 X</td><td>什么都不做</td></tr>
+                <tr><td>P0: LD X</td><td>缓存命中</td><td>什么都不做</td></tr>
+                <tr><td>P0: ST X ← 1</td><td>发 BusRdX，以 M 状态装入行 X</td><td>什么都不做</td></tr>
+                <tr><td>P0: ST X ← 2</td><td>缓存命中</td><td>什么都不做</td></tr>
+                <tr><td>P1: ST X ← 3</td><td>观察到 BusRdX，冲刷行 X，转为 I</td><td>发 BusRdX，以 M 状态装入行 X</td></tr>
+                <tr><td>P1: LD X</td><td>什么都不做</td><td>缓存命中</td></tr>
+                <tr><td>P0: LD X</td><td>发 BusRd，以 S 状态装入行 X</td><td>观察到 BusRd，冲刷行 X，转为 S</td></tr>
+                <tr><td>P0: ST X ← 4</td><td>发 BusRdX，以 M 状态装入行 X</td><td>观察到 BusRdX，转为 I</td></tr>
+                <tr><td>P1: LD X</td><td>观察到 BusRd，冲刷行 X，转为 S</td><td>发 BusRd，以 S 状态装入行 X</td></tr>
+                <tr><td>P0: LD Y</td><td>发 BusRd，以 S 状态装入行 Y</td><td>观察到 BusRd，什么都不做（行 Y 是 I）</td></tr>
+                <tr><td>P0: ST Y ← 1</td><td>发 BusRdX，以 M 状态装入行 Y</td><td>观察到 BusRdX，什么都不做（行 Y 是 I）</td></tr>
+                <tr><td>P1: ST Y ← 2</td><td>观察到 BusRdX，冲刷行 Y，转为 I</td><td>发 BusRdX，以 M 状态装入行 Y</td></tr>
+            </tbody>
+        </table>
+        <p>
+            Kayvon 的解说：读的时候要向所有缓存广播"我要有这一行的副本了"，等于说"你要写它就得告诉我"；以 S 装入是承诺只读，别人也可以读。再读一次是命中，缓存状态没变，别人已经知道，不用说。要写就喊"我要写"，别人没有这一行就不管。另一个处理器要写时，我不能留副本，而且我写过，得先把最新值冲到内存，然后丢掉，留在共享状态会过时。之后对方读，我把它冲到内存，对方的行可以留在共享状态：不能再写了，但想读时不用缺失。这些要能在脑子里一步步走。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、实现锁</h2>
+        <h3>基于 test-and-set 的锁</h3>
+        <p>
+            大家常用锁，但还没讲底层细节。给一条既不是纯 load 也不是纯 store、而是两者兼有的指令：原子的 test-and-set。实际的这类指令形式各异，可能是 compare-exchange 或 load-linked/store-conditional。
+        </p>
+        <pre><code>// atomic test-and-set instruction:
+ts R0, mem[addr]        // load mem[addr] into R0
+                        // if mem[addr] is 0, set mem[addr] to 1
+
+lock:
+    ts  R0, mem[addr]   // load word into R0
+    bnz R0, lock        // if 0, lock obtained
+
+unlock:
+    st  mem[addr], #0   // store 0 to address</code></pre>
+        <p>
+            变量为 1 表示有人持有锁，为 0 表示没有。持有锁的线程怎样解锁？写 0。加锁：执行 test-and-set，把内存里读到的值存进寄存器，如果是 0 就设为 1，一步完成，一条原子指令。读到 0：我拿到了锁；读到 1：没拿到，非零就跳回去再试。
+        </p>
+
+        <h3>x86 的 cmpxchg</h3>
+        <pre><code>lock cmpxchg dst, src   // compare and exchange (atomic when used with lock prefix)
+                        // dst: often a memory address; EAX: x86 register
+
+if (dst == EAX)
+    ZF = 1              // flag register holds result of check
+    dst = src
+else
+    ZF = 0
+    EAX = dst</code></pre>
+        <p>
+            lock 前缀表示操作是原子的。Intel 芯片上没有 test-and-set，有更复杂一点的 compare-exchange。课下可以试着确认用它也能实现同样的锁。
+        </p>
+
+        <h3>test-and-set 锁：考虑一致性流量</h3>
+        <p>
+            三个处理器都在抢这个锁："test-and-set 失败就一直试，成功了就进临界区"。从一致性协议的角度，test-and-set 是写，即使失败也是写，因为这是可能写的原子操作。
+        </p>
+        <ul>
+            <li>P1 执行 test-and-set：BusRdX，更新缓存里的行（设为 1），其他缓存使该行失效。成功，P1 持有锁。</li>
+            <li>P2 之后来抢：执行 test-and-set，BusRdX，P1、P3 失效，包含锁变量的缓存行移到 P2。尝试更新（失败）。</li>
+            <li>P3 也来抢：缓存行又跳到 P3，失败。</li>
+            <li>P2、P3 的 test-and-set 不断失败，缓存行在它们之间来回跳。</li>
+            <li>P1 要解锁：BusRdX，让大家失效，以独占方式拿到行，写 0。然后某个处理器（比如 P2）的 test-and-set 成功，P2 持有锁。</li>
+        </ul>
+        <p>
+            锁只是地址空间里的一个变量，它是被缓存的。P1 持有锁，P2 却持有包含锁变量的有效缓存行，<strong>持有锁和持有缓存行是两回事</strong>。检验理解：上一页里，P1 上的线程持有锁的时间有多长？整页的时间。P1 的缓存什么时候有包含锁变量的有效副本？只在加锁的一瞬间和解锁的一瞬间。P1 在临界区里时，其他处理器在自旋，总线上一直有流量；P1 要解锁还得先吃一次缓存缺失，这段时间别人也在干等。
+        </p>
+        <p>
+            有同学问 test-and-set 怎样实现成原子的：不管最后写没写，都需要写权限；如果先用一个总线事务读、再用一个事务升级拿写权限，就是两个事务，按定义就不原子。x86 很多指令有 lock 前缀，底层可能是多个事务，但带着锁标志，不允许中间插入对同一位置的事务，可以把它当作原子的。
+        </p>
+
+        <h3>test-and-set 锁的性能</h3>
+        <p>
+            基准程序执行 <code>lock(L); critical-section(c); unlock(L);</code>，P 个处理器总共执行 N 次加锁/解锁，去掉临界区的时间，图上只画获取和释放锁的时间（图出自 Culler、Singh、Gupta）。每次加锁解锁的代价随处理器数上升：互连争用增加了转交锁的时间（持有锁的处理器要等拿到总线才能释放）。图上没画的：争用也会拖慢临界区的执行。要拿到可写状态的缓存行，得和越来越多的处理器争。
+        </p>
+
+        <h3>理想的锁性能特征</h3>
+        <ul>
+            <li>低延迟：锁空闲、也没别的处理器在抢时，处理器应该能很快拿到锁。</li>
+            <li>低互连流量：所有处理器同时抢锁时，它们应该依次拿到锁，流量尽可能少，不要因为大家自旋把系统"DoS"掉。</li>
+            <li>可扩展：延迟和流量应随处理器数合理增长。</li>
+            <li>低存储代价。</li>
+            <li>公平：避免饥饿或严重的不公平。一个理想是处理器按请求的顺序拿到锁。</li>
+        </ul>
+        <p>
+            简单的 test-and-set 锁：低延迟（低争用时）、高流量、扩展性差、低存储代价（一个 int）、没有公平性的保证，可能 P1、P2 一直拿到锁，P3 永远拿不到。Kayvon 说高效实现锁可以讲一整节课，这里只讲几个小改进。
+        </p>
+
+        <h3>test-and-test-and-set 锁</h3>
+        <pre><code>void Lock(int* lock) {
+    while (1) {
+        while (*lock != 0);  // while another processor has the lock...
+                             // (assume *lock is NOT register allocated)
+        if (test_and_set(*lock) == 0)  // when lock is released, try to acquire it
+            return;
+    }
+}
+
+void Unlock(int* lock) {
+    *lock = 0;
+}</code></pre>
+        <p>
+            代码是对的，里面那个 while 在做什么？锁被别人拿着时，我只是读它，看它是不是还锁着；一旦解锁，我再冲进去做 test-and-set；失败了就回去继续等。把一堆写变成了一堆读。
+        </p>
+        <ul>
+            <li>P1 用 test-and-set 拿到锁（BusRdX，设为 1）；</li>
+            <li>其他处理器反复读，第一次读是 BusRd，之后它们都以共享状态持有这一行，大量的本地缓存命中，在临界区期间自旋却不产生全局流量；</li>
+            <li>P1 解锁仍要一次缓存缺失拿到独占（BusRdX，设为 0），所有人的行失效；</li>
+            <li>大家下一次读（BusRd）回到共享状态，发现是 0，一齐尝试 test-and-set（BusRdX），一个成功，其余失败。</li>
+        </ul>
+        <p>
+            特征：
+        </p>
+        <ul>
+            <li>无争用时延迟比 test-and-set 略高：要先测试，再 test-and-set。Kayvon 不太在意多出的这条指令。</li>
+            <li>互连流量少得多：每次锁释放，每个等待的处理器一次失效（O(P) 次失效）；如果所有处理器都缓存着锁，这是 O(P²) 的互连流量。回忆：test-and-set 锁是每次测试，每个等待处理器一次失效。</li>
+            <li>扩展性更好（流量少）。临界区里总线也平静了，持有者访问其他变量不用等互连。</li>
+            <li>存储代价不变（一个 int）。</li>
+            <li>仍然没有公平性的保证。</li>
+        </ul>
+
+        <h3>另一种实现：票号锁</h3>
+        <p>
+            test-and-set 类锁的主要问题：释放时所有等待的处理器都用 test-and-set 抢锁。像熟食柜台那样：来了先取号，店员做完一单就把"当前服务号"加一。
+        </p>
+        <pre><code>struct lock {
+    int next_ticket;
+    int now_serving;
+};
+
+void Lock(lock* l) {
+    int my_ticket = atomic_increment(&amp;l-&gt;next_ticket);  // take a "ticket"
+    while (my_ticket != l-&gt;now_serving);               // wait for number to be called
+}
+
+void unlock(lock* l) {
+    l-&gt;now_serving++;
+}</code></pre>
+        <p>
+            锁现在是两个整数（先不管回绕）。获取锁不需要原子操作（只是读），只在进入等待队列时需要一次原子操作。结果：每次锁释放只有一次失效（O(P) 互连流量），不会所有人一齐抢。而且是公平的，先进先出。代价是硬件要提供比 test-and-set 更复杂的东西：原子整数加法。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、原子操作</h2>
+        <h3>CUDA 提供的原子操作</h3>
+        <pre><code>int   atomicAdd(int* address, int val);
+float atomicAdd(float* address, float val);
+int   atomicSub(int* address, int val);
+int   atomicExch(int* address, int val);
+float atomicExch(float* address, float val);
+int   atomicMin(int* address, int val);
+int   atomicMax(int* address, int val);
+unsigned int atomicInc(unsigned int* address, unsigned int val);
+unsigned int atomicDec(unsigned int* address, unsigned int val);
+int   atomicCAS(int* address, int compare, int val);
+int   atomicAnd(int* address, int val);  // bitwise
+int   atomicOr(int* address, int val);   // bitwise
+int   atomicXor(int* address, int val);  // bitwise
+// (omitting additional 64 bit and unsigned int versions)</code></pre>
+        <p>
+            在 NVIDIA GPU 上运行的任何东西都能用这些。比如原子增量：读出地址上的值、加上 val、写回，是一次读改写，硬件保证对所有 CUDA 线程是原子的。
+        </p>
+
+        <h3>用 atomicCAS 实现原子的 fetch-and-op</h3>
+        <pre><code>// atomicCAS: ("compare and swap")
+// performs the following logic atomically
+int atomicCAS(int* addr, int compare, int val) {
+    int old = *addr;
+    *addr = (old == compare) ? val : old;
+    return old;
+}</code></pre>
+        <p>
+            虽然写成 C 代码，这是一条指令做的事，里面没有锁。内存里的值等于 compare 就写入 val，否则不变（这样写是为了表明不管变不变，都相当于发生了一次写）。练习：怎样用 atomicCAS 构造原子的 fetch+op？例子 atomic_min()：读一个值，和另一个值取最小，再写回。
+        </p>
+        <p>
+            要保证什么？比如内存里当前最小值是 100，我带着 90 来，没人打扰的话应该更新成 90。但如果我读到 100 之后、写 90 之前，别的线程把它更新成了 80，我再写 90 就错了。同学说用锁，Kayvon 说这里不许用锁。其实我不在乎有没有别人来过，只在乎最小值有没有变：只有内存里的值还和我开始时一样，我的写才应该发生。这正是 compare-and-swap 做的事：
+        </p>
+        <pre><code>void atomic_min(int* addr, int x) {
+    int old = *addr;
+    int new = min(old, x);
+    while (atomicCAS(addr, old, new) != old) {
+        old = *addr;
+        new = min(old, x);
+    }
+}</code></pre>
+        <p>
+            compare-and-swap 总是返回内存里原来的值。等于 old，就知道已经更新成 new；不等于 old，就再试：重新读，比如读到 80，算出新的最小值还是 80，再试。有同学说如果新值根本不比当前值小，何必去写？可以改进：新最小值和旧值一样就直接退出，精神上类似 test-and-test-and-set 锁。那这些操作呢？
+        </p>
+        <pre><code>int atomic_increment(int* addr, int x);  // for signed values of x
+void lock(int* addr);</code></pre>
+
+        <h3>另一个练习：构造锁</h3>
+        <pre><code>typedef int lock;
+
+void lock(Lock* l) {
+    while (atomicCAS(l, 0, 1) == 1);
+}
+
+void unlock(Lock* l) {
+    *l = 0;
+}</code></pre>
+        <p>
+            下面这个在争用下可能更高效，为什么？（和 test-and-test-and-set 同理。）
+        </p>
+        <pre><code>void lock(Lock* l) {
+    while (1) {
+        while (*l == 1);
+        if (atomicCAS(l, 0, 1) == 0)
+            return;
+    }
+}</code></pre>
+        <p>
+            考试和作业会假设大家熟悉 compare-and-swap（会给出定义），常见的题型是"给定 compare-and-swap，构造某个自定义的原子原语"。
+        </p>
+        <p>
+            有同学问：判断"别的处理器是否已经写过这个地址"，缓存状态不是已经在跟踪吗？比如我的行被失效了，就说明有别的写介入。Kayvon：在只有 compare-and-swap 这个原语的游戏里，你不知道缓存状态；而且一致性协议里介入的也可能只是一次读。如果能拿到这种信息，就有别的解法，这就是下面的 LL/SC。
+        </p>
+
+        <h3>load-linked / store-conditional（LL/SC）</h3>
+        <ul>
+            <li>一对对应的指令（不是像 compare-and-swap 那样的单条原子指令）：load_linked(x) 从地址读值；store_conditional(x, value)：如果自对应的 load_linked 之后没有任何处理器写过 x，就把 value 存到 x。</li>
+            <li>对应的 ARM 指令：LDREX 和 STREX。Kayvon 认为至今 LL/SC 仍是 ARM 上偏好的原语，大多数 RISC 处理器上也是。</li>
+            <li>在缓存一致的处理器上怎样实现 LL/SC？它们可以很容易地搭在一致性协议上（练习题里有：假设 MSI 一致性，怎样实现 LL/SC）。课上有人补充，以前 RISC 处理器没有缓存一致性时，可能用一些处理器状态来实现；Kayvon 记得几年前读的手册上写着最多可以有多少个未完成的 LL/SC，小处理器上大概还有张表。</li>
+        </ul>
+
+        <h3>C++11 的 atomic&lt;T&gt;</h3>
+        <pre><code>atomic&lt;int&gt; i;
+i++;  // atomically increment i
+
+int a = i;
+// do stuff
+i.compare_exchange_strong(a, 10);  // if i has same value as a, set i to 10
+bool b = i.is_lock_free();         // true if implementation of atomicity
+                                   // is lock free</code></pre>
+        <ul>
+            <li>提供对整个对象的原子读、写、读改写。原子性可以用互斥量实现，如果 T 是基本类型，也可以高效地用处理器支持的原子指令实现。比如 i++ 可以实现成"加锁 i++ 解锁"，但如果系统有原子增量指令，原子 int 上的 i++ 就会翻译成那条指令；更贵的操作可能在底层用锁。可以查询 is_lock_free 看它怎样实现。</li>
+            <li>为原子操作前后的操作提供内存顺序语义：默认是顺序一致；更多细节见 std::memory_order。</li>
+        </ul>
+        <p>
+            Kayvon 提醒：前面的锁实现都假设内存系统是顺序一致的。想想 unlock 就是往地址写 0，上面有临界区里的操作。如果由于放松的顺序，这些操作被重排，别的处理器先看到解锁、后看到临界区里的写，锁就毫无用处了。真实的、放松内存系统上的锁实现会在这里放一个内存栅栏。如果你的工作是实现同步原语（比如写驱动），会遇到放松的内存一致性；只是使用同步原语，就可以假设它们已经正确插入了栅栏。用 atomic int 的一个原因不只是原子操作，还要让编译器在它周围放好栅栏，不出意外的放松一致性问题。
+        </p>
+        <p>
+            哪种锁最常见？还有很多实现方式，操作系统课会讲。这里讲的都是自旋锁，处理器一直在转。另一种是让线程睡眠，把它从执行上下文上拿下来。很多库区分 mutex 和自旋锁；大多数重量级的锁会先自旋几次，拿不到再做更重的系统调用把你拿下处理器，Kayvon 知道 pthreads 就是这样：拿不到锁不会立刻让你睡，可能一瞬间后就有了。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、使用锁：有序链表</h2>
+        <pre><code>struct Node {
+    int value;
+    Node* next;
+};
+
+struct List {
+    Node* head;
+};
+
+void insert(List* list, int value) {
+    Node* n = new Node;
+    n-&gt;value = value;
+
+    // assume case of inserting before head of
+    // of list is handled here (to keep slide simple)
+
+    Node* prev = list-&gt;head;
+    Node* cur = list-&gt;head-&gt;next;
+
+    while (cur) {
+        if (cur-&gt;value &gt; value)
+            break;
+        prev = cur;
+        cur = cur-&gt;next;
+    }
+
+    n-&gt;next = cur;
+    prev-&gt;next = n;
+}
+
+void delete(List* list, int value) {
+    // assume case of deleting first node in list
+    // is handled here (to keep slide simple)
+
+    Node* prev = list-&gt;head;
+    Node* cur = list-&gt;head-&gt;next;
+
+    while (cur) {
+        if (cur-&gt;value == value) {
+            prev-&gt;next = cur-&gt;next;
+            delete cur;
+            return;
+        }
+        prev = cur;
+        cur = cur-&gt;next;
+    }
+}</code></pre>
+        <p>
+            就是普通面试题里的有序链表插入和删除（为简化，不处理插在表头之类的边界情况）。插入：往前走，找到第一个比我大的节点，插到它前面。多个线程同时操作这个链表，会出什么问题？Kayvon 给了大家 90 秒讨论：会丢节点吗？会丢掉链表的剩余部分吗？
+        </p>
+        <ul>
+            <li><strong>同时插入</strong>：链表 3、5、10、11、18，线程 1 插 6，线程 2 插 7。两个线程算出同样的 prev（5）和 cur（10）。线程 1：5 指向 6，6 指向 10；线程 2 后来：5 指向 7，7 指向 10。一次插入丢了！（假设线程 1 先更新 prev-&gt;next，结果是 3、5、7、10、11、18。）反过来的顺序也会发生。</li>
+            <li><strong>同时插入和删除</strong>：线程 1 插 6，线程 2 删 10。线程 2 让 5 指向 11；但按线程 1，5 指向 6，6 指向已删除的 10，它可能已经没有有效的 next 指针，链表剩下的部分丢了。可能的结果（线程 2 先完成删除）：3、5、6、10，6 后面接着已删除的 10。</li>
+            <li>同时删除：可能重复删除，释放已经释放的内存。</li>
+        </ul>
+
+        <h3>解法 1：用一把锁保护整个链表</h3>
+        <p>
+            本着做最简单的事：同学说在 insert 开头加锁、结尾解锁，delete 也一样。大家笑了。真的行吗？仔细看：delete 有多个出口，在找到节点 return 之前没解锁，会死锁。（用 C++ 里出作用域自动解锁的 unique_lock 就没事，但这个小例子说明即使是"全局套一把锁"，函数有多个出口时也会坑你。）正确的写法：
+        </p>
+        <pre><code>struct List {
+    Node* head;
+    Lock  lock;  // per-list lock
+};
+
+void insert(List* list, int value) {
+    Node* n = new Node;
+    n-&gt;value = value;
+
+    lock(list-&gt;lock);
+
+    // assume case of inserting before head of
+    // of list is handled here (to keep slide simple)
+
+    Node* prev = list-&gt;head;
+    Node* cur = list-&gt;head-&gt;next;
+
+    while (cur) {
+        if (cur-&gt;value &gt; value)
+            break;
+        prev = cur;
+        cur = cur-&gt;next;
+    }
+    n-&gt;next = cur;
+    prev-&gt;next = n;
+    unlock(list-&gt;lock);
+}
+
+void delete(List* list, int value) {
+    lock(list-&gt;lock);
+
+    // assume case of deleting first element is
+    // handled here (to keep slide simple)
+
+    Node* prev = list-&gt;head;
+    Node* cur = list-&gt;head-&gt;next;
+
+    while (cur) {
+        if (cur-&gt;value == value) {
+            prev-&gt;next = cur-&gt;next;
+            delete cur;
+            unlock(list-&gt;lock);
+            return;
+        }
+        prev = cur;
+        cur = cur-&gt;next;
+    }
+    unlock(list-&gt;lock);
+}</code></pre>
+        <p>
+            每个数据结构一把全局锁：
+        </p>
+        <ul>
+            <li>好：为数据结构操作实现正确的互斥相对简单（刚做到了！）。</li>
+            <li>坏：对数据结构的操作被串行化，可能限制并行应用的性能。那何必开这些线程？如果大部分性能都在这个数据结构上，就肯定受限。</li>
+        </ul>
+
+        <h3>挑战：谁能做得更好？</h3>
+        <p>
+            数据结构的不同部分显然可以在不同时间被修改，一个线程在这儿插入删除时，另一个线程应该能在另一部分工作。同学提议：每个节点一把锁，不再有整个链表的锁。那按什么顺序拿锁？Kayvon 给的起点：锁 3，放开 3，锁 5，放开 5，锁 10……有人指出：放开 3 时如果手上一把锁都没有，就对数据结构一无所知了，走到 5 时它可能已经没了。另一个起点：锁 3、锁 5、锁 10 全拿着再做事。同学提出只需锁住会影响自己的那一小片"爆炸半径"。
+        </p>
+        <p>
+            <strong>手递手遍历</strong>：课件放了美国忍者勇士节目里的选手在头顶的单杠上一根根换手（图片来源 Hal Boedeker，Orlando Sentinel）。如果曾经放开所有锁再拿，就像他两手都松开，重力就会接管；他总是至少抓着一根杠。
+        </p>
+        <p>
+            <strong>解法 2："手递手"加锁</strong>：线程 0 要 delete(11)。锁 3，先拿 5 的锁再放 3，拿 10 放 5，拿 11，这时 10 和 11 是线程 0 的 prev 和 cur。能放开 10 再删 11 吗？不能，要改 10 的 next 指针。担心别的线程做什么？可能删掉 10，也可能在 10 后面插入。所以删除时要一直持有 cur 和 prev 的锁。线程 1 来 delete(10)，为什么被挡住？删除规则要求持有要删的节点和它前一个的锁，线程 0 拿着 10 的锁。为什么不担心有人删 18、不需要锁 cur 后面那个？拿着 11 的锁，谁也删不了 18（删 18 要锁 11）。插入呢？拿着 11 的锁，没人能在 11 后面插入；18 后面插入我不在乎，不影响我。所以手递手、始终锁住 prev 和 cur 是行得通的。线程 0 删完 11 放锁后，线程 1 继续，删掉 10，链表变成 3、5、18。
+        </p>
+        <pre><code>struct Node {
+    int value;
+    Node* next;
+    Lock* lock;
+};
+
+struct List {
+    Node* head;
+    Lock* lock;
+};
+
+void insert(List* list, int value) {
+    Node* n = new Node;
+    n-&gt;value = value;
+
+    // assume case of insert before head handled
+    // here (to keep slide simple)
+
+    Node* prev, *cur;
+
+    lock(list-&gt;lock);
+    prev = list-&gt;head;
+    lock(prev-&gt;lock);
+    unlock(list-&gt;lock);
+    cur = prev-&gt;next;
+    if (cur) lock(cur-&gt;lock);
+
+    while (cur) {
+        if (cur-&gt;value &gt; value)
+            break;
+
+        Node* old_prev = prev;
+        prev = cur;
+        cur = cur-&gt;next;
+        unlock(old_prev-&gt;lock);
+        if (cur) lock(cur-&gt;lock);
+    }
+
+    n-&gt;next = cur;
+    prev-&gt;next = n;
+
+    unlock(prev-&gt;lock);
+    if (cur) unlock(cur-&gt;lock);
+}
+
+void delete(List* list, int value) {
+    // assume case of delete head handled here
+    // (to keep slide simple)
+
+    Node* prev, *cur;
+
+    lock(list-&gt;lock);
+    prev = list-&gt;head;
+    lock(prev-&gt;lock);
+    unlock(list-&gt;lock);
+    cur = prev-&gt;next;
+    if (cur) lock(cur-&gt;lock);
+
+    while (cur) {
+        if (cur-&gt;value == value) {
+            prev-&gt;next = cur-&gt;next;
+            unlock(prev-&gt;lock);
+            unlock(cur-&gt;lock);
+            delete cur;
+            return;
+        }
+
+        Node* old_prev = prev;
+        prev = cur;
+        cur = cur-&gt;next;
+        unlock(old_prev-&gt;lock);
+        if (cur) lock(cur-&gt;lock);
+    }
+    unlock(prev-&gt;lock);
+}</code></pre>
+        <p>
+            除了节点锁还有一把链表锁：不变式是要持有 cur 和 prev 的锁，删除第一个节点时要么有个哑的 prev，要么需要别处多一把锁。给学生的挑战：insert() 的实现还能进一步改进，怎么改？（可以更积极地提前解锁，留给课程论坛讨论。）
+        </p>
+        <p>
+            有同学问：线程 2 在线程 0、1 之后开始，要在 18 之后插入，也得等吗？是的，这不是最大并发。线程 2 走不过 T0、T1，即使它要操作的地方在很后面：它遍历时，T0、T1 不能在删或插它经过的节点，否则会丢链表。链表在某些方面是很顺序的数据结构，并发不如别的数据结构多。如果保证 T0、T1 不写那部分，可以考虑允许多读者的锁，今天没讲。
+        </p>
+
+        <h3>细粒度加锁</h3>
+        <ul>
+            <li>目标：让数据结构操作能并行，减少对全局数据结构锁的争用。上面的例子里，一把整体锁过于保守，链表不同部分的操作本可以并行。</li>
+            <li>挑战：难以保证正确：判断什么时候需要互斥；死锁？（自测：为什么能立刻知道前面链表例子的代码没有死锁？链表是单向的，总按同一方向拿锁，很难死锁。）活锁？</li>
+            <li>代价？每遍历一步都要拿锁的开销（多出的指令，而且遍历现在涉及内存写）；额外的存储代价（每个节点一把锁）。原来遍历链表只是追指针，现在每一步都拿锁，会大大变慢，也许一把粗锁限制并发、但做得快，反而更好，得做性能剖析。</li>
+            <li>有什么折中的方案，用一点并行换更少的开销？（提示：和选择任务粒度类似的问题。）同学答：每 5 个或 10 个节点一把锁。</li>
+        </ul>
+        <p>
+            课下练习：实现一个支持插入和删除的细粒度加锁的二叉搜索树（不做旋转）。Kayvon 说有一年考试出的是会旋转的二叉搜索树，很难，保证这次不出。
+        </p>
+        <pre><code>struct Tree {
+    Node* root;
+};
+
+struct Node {
+    int value;
+    Node* left;
+    Node* right;
+};
+
+void insert(Tree* tree, int value);
+void delete(Tree* tree, int value);</code></pre>
+    </section>
+
+    <section>
+        <h2>六、无锁数据结构</h2>
+        <p>
+            Kayvon 说这部分不考期中，期末会再提。atomic_min 就是一个线程安全却不用锁的例子。主要思想：投机地往前做该做的操作，最后一刻检查有没有东西变了，变了就从头再来。锁是说"我进去了别人都不许进"；无锁的思路是大家都走，最后一刻检查是否安全，安全就写，不安全就中止重试。Java 的并发容器都是无锁实现。
+        </p>
+
+        <h3>阻塞算法和数据结构</h3>
+        <ul>
+            <li>阻塞算法允许一个线程无限期地阻止其他线程完成对共享数据结构的操作。</li>
+            <li>例子：线程 0 锁住了链表的一个节点；线程 0 被操作系统换出，或者崩溃，或者就是很慢（发生缺页）等；现在其他线程都无法完成对数据结构的操作（虽然线程 0 并没有在积极地修改它）。</li>
+            <li>用锁的算法都是阻塞的，不管锁的实现是自旋还是抢占。</li>
+        </ul>
+        <p>
+            这门课里你的程序通常是机器上唯一的东西，用并行跑得快。但想想大数据库、Web 服务器，有几十万个线程，并发是用来隐藏网络延迟的，不一定为了并行。一个线程拿了锁，在临界区里被操作系统换出，所有可运行的线程都在自旋抢锁。这类情况推动了无锁数据结构：拿着锁却什么都不做，别人应该能进来做自己的事。
+        </p>
+
+        <h3>无锁算法</h3>
+        <ul>
+            <li>如果保证总有某个线程能取得进展（"系统范围的进展"），非阻塞算法就是无锁的。</li>
+            <li>无锁的情况下，不可能在不恰当的时刻抢占一个线程而阻止系统其余部分前进。</li>
+            <li>注意：这个定义不排除某个线程饥饿。</li>
+        </ul>
+
+        <h3>单读单写的有界队列</h3>
+        <pre><code>struct Queue {
+    int data[N];
+    int head;  // head of queue
+    int tail;  // next free element
+};
+
+void init(Queue* q) {
+    q-&gt;head = q-&gt;tail = 0;
+}
+
+// return false if queue is full
+bool push(Queue* q, int value) {
+    // queue is full if tail is element before head
+    if (q-&gt;tail == MOD_N(q-&gt;head - 1))
+        return false;
+
+    q-&gt;data[q-&gt;tail] = value;
+    q-&gt;tail = MOD_N(q-&gt;tail + 1);
+    return true;
+}
+
+// returns false if queue is empty
+bool pop(Queue* q, int* value) {
+    // if not empty
+    if (q-&gt;head != q-&gt;tail) {
+        *value = q-&gt;data[q-&gt;head];
+        q-&gt;head = MOD_N(q-&gt;head + 1);
+        return true;
+    }
+    return false;
+}</code></pre>
+        <ul>
+            <li>只有两个线程（一个生产者、一个消费者）同时访问队列。push 的线程只增加 tail，pop 的线程只增加 head，两个线程从不访问同一个变量，所以两个线程下这段代码是线程安全的。</li>
+            <li>线程从不相互同步或等待：队列空时 pop 失败，满时 push 失败。</li>
+            <li>暂且假设内存系统是顺序一致的（或者有适当的内存栅栏，或者用 C++11 的 atomic&lt;&gt;）。下面的例子都这样假设。</li>
+        </ul>
+
+        <h3>单读单写的无界队列</h3>
+        <pre><code>struct Node {
+    Node* next;
+    int   value;
+};
+
+struct Queue {
+    Node* head;
+    Node* tail;
+    Node* reclaim;
+};
+
+void init(Queue* q) {
+    q-&gt;head = q-&gt;tail = q-&gt;reclaim = new Node;
+}
+
+void push(Queue* q, int value) {
+    Node* n = new Node;
+    n-&gt;next = NULL;
+    n-&gt;value = value;
+
+    q-&gt;tail-&gt;next = n;
+    q-&gt;tail = q-&gt;tail-&gt;next;
+
+    while (q-&gt;reclaim != q-&gt;head) {
+        Node* tmp = q-&gt;reclaim;
+        q-&gt;reclaim = q-&gt;reclaim-&gt;next;
+        delete tmp;
+    }
+}
+
+// returns false if queue is empty
+bool pop(Queue* q, int* value) {
+    if (q-&gt;head != q-&gt;tail) {
+        *value = q-&gt;head-&gt;next-&gt;value;
+        q-&gt;head = q-&gt;head-&gt;next;
+        return true;
+    }
+    return false;
+}</code></pre>
+        <ul>
+            <li>tail 指向最后加入的元素（非空时）。</li>
+            <li>head 指向队首<em>之前</em>的那个元素。</li>
+            <li>节点的分配和删除都由同一个线程（生产者线程）完成。来源：Dr. Dobb's Journal。</li>
+        </ul>
+        <p>
+            过程：初始 head、tail、reclaim 都指向一个哑节点；push 3、push 10 后 tail 指向 10；pop 返回 3，head 前移到 3；pop 返回 10，head 和 tail 都在 10；再 pop 返回 false（队列空）；push 5 触发回收：reclaim 一路删到 head，释放哑节点和 3，reclaim、head 都在 10，tail 指向新的 5。
+        </p>
+
+        <h3>无锁栈（第一次尝试）</h3>
+        <pre><code>struct Node {
+    Node* next;
+    int   value;
+};
+
+struct Stack {
+    Node* top;
+};
+
+void init(Stack* s) {
+    s-&gt;top = NULL;
+}
+
+void push(Stack* s, Node* n) {
+    while (1) {
+        Node* old_top = s-&gt;top;
+        n-&gt;next = old_top;
+        if (compare_and_swap(&amp;s-&gt;top, old_top, n) == old_top)
+            return;
+    }
+}
+
+Node* pop(Stack* s) {
+    while (1) {
+        Node* old_top = s-&gt;top;
+        if (old_top == NULL)
+            return NULL;
+        Node* new_top = old_top-&gt;next;
+        if (compare_and_swap(&amp;s-&gt;top, old_top, new_top) == old_top)
+            return old_top;
+    }
+}</code></pre>
+        <p>
+            主要思想：只要没有其他线程修改过栈，这个线程的修改就能进行。和细粒度加锁的区别：细粒度加锁锁住数据结构的一部分；这里线程根本不持有数据结构上的任何锁。pop 时做完所有准备，最后一刻用 compare-and-swap 检查有没有人 pop 过。好处是：pop 到一半被换出，其他线程照样进来 pop；换回来完成操作时，会发现世界变了，就重试。
+        </p>
+
+        <h3>ABA 问题</h3>
+        <p>
+            注意：这一页的 A、B、C、D 是节点的<em>地址</em>，不是节点存的值！栈是 A → B → C。
+        </p>
+        <ol>
+            <li>线程 0 开始 pop()（局部变量 old_top = A，new_top = B）。</li>
+            <li>线程 1 开始并完成 pop()（返回 A），栈变成 B → C。</li>
+            <li>线程 1 修改节点 A，比如设 value = 42。</li>
+            <li>线程 1 开始并完成 push(D)，栈是 D → B → C。</li>
+            <li>线程 1 开始并完成 push(A)，栈是 A → D → B → C。</li>
+            <li>线程 0 的 CAS 成功（top 仍然是 A），把 top 设成 B！完成 pop()（返回 A）。</li>
+            <li>栈变成 B → C，栈结构损坏了（丢了 D）。</li>
+        </ol>
+        <p>
+            （课件注：不要和 ABBA 问题弄混，那个问题可以说更大。）
+        </p>
+
+        <h3>用计数器解决 ABA</h3>
+        <pre><code>struct Node {
+    Node* next;
+    int   value;
+};
+
+struct Stack {
+    Node* top;
+    int   pop_count;
+};
+
+void init(Stack* s) {
+    s-&gt;top = NULL;
+}
+
+void push(Stack* s, Node* n) {
+    while (1) {
+        Node* old_top = s-&gt;top;
+        n-&gt;next = old_top;
+        if (compare_and_swap(&amp;s-&gt;top, old_top, n) == old_top)
+            return;
+    }
+}
+
+Node* pop(Stack* s) {
+    while (1) {
+        int pop_count = s-&gt;pop_count;
+        Node* top = s-&gt;top;
+        if (top == NULL)
+            return NULL;
+        Node* new_top = top-&gt;next;
+        // test to see if either have changed
+        // (assume function returns true if no changes)
+        if (double_compare_and_swap(&amp;s-&gt;top,       top,       new_top,
+                                    &amp;s-&gt;pop_count, pop_count, pop_count+1))
+            return top;
+    }
+}</code></pre>
+        <ul>
+            <li>维护一个 pop 操作的计数器。</li>
+            <li>要求机器支持"双比较并交换"（DCAS）或双字 CAS。</li>
+            <li>也可以用小心的节点分配和/或元素重用策略来解决 ABA 问题。</li>
+        </ul>
+
+        <h3>x86 上的 compare-and-swap</h3>
+        <ul>
+            <li>x86 支持"双宽"的 compare-and-swap 指令。它不完全是上一页用的"双比较并交换"，但只要保证栈的 count 和 top 字段在内存里相邻，就可以用下面 64 位宽的单个 compare-and-swap。</li>
+            <li>cmpxchg8b："比较并交换 8 字节"，可用于两个 32 位值的 compare-and-swap。</li>
+            <li>cmpxchg16b："比较并交换 16 字节"，可用于两个 64 位值的 compare-and-swap。</li>
+        </ul>
+
+        <h3>另一个问题：引用已释放的内存</h3>
+        <pre><code>struct Node {
+    Node* next;
+    int   value;
+};
+
+struct Stack {
+    Node* top;
+    int   pop_count;
+};
+
+void init(Stack* s) {
+    s-&gt;top = NULL;
+}
+
+void push(Stack* s, int value) {
+    Node* n = new Node;
+    n-&gt;value = value;
+    while (1) {
+        Node* old_top = s-&gt;top;
+        n-&gt;next = old_top;
+        if (compare_and_swap(&amp;s-&gt;top, old_top, n) == old_top)
+            return;
+    }
+}
+
+int pop(Stack* s) {
+    while (1) {
+        Stack old;
+        old.pop_count = s-&gt;pop_count;
+        old.top = s-&gt;top;
+
+        if (old.top == NULL)
+            return NULL;
+
+        Stack new_stack;
+        new_stack.top = old.top-&gt;next;  // old top might have been freed at this point
+                                        // (by some other thread that popped it)
+        new_stack.pop_count = old.pop_count+1;
+
+        if (doubleword_compare_and_swap(s, old, new_stack)) {
+            int value = old.top-&gt;value;
+            delete old.top;
+            return value;
+        }
+    }
+}</code></pre>
+        <p>
+            现在 push/pop 自己分配和释放节点。读 old.top-&gt;next 的时候，旧的栈顶可能已经被别的 pop 了它的线程释放了。
+        </p>
+
+        <h3>【进阶】危险指针</h3>
+        <p>
+            在确知所有其他线程都不再引用一个节点之前，不释放它。
+        </p>
+        <pre><code>struct Node {
+    Node* next;
+    int value;
+};
+
+struct Stack {
+    Node* top;
+    int pop_count;
+};
+
+// per thread ptr (node that cannot
+// be deleted since the thread is
+// accessing it)
+Node* hazard;
+
+// list of nodes this thread must
+// delete (this is a per thread list)
+Node* retireList;
+int   retireListSize;
+
+// delete nodes if possible
+void retire(Node* ptr) {
+    push(retireList, ptr);
+    retireListSize++;
+
+    if (retireListSize &gt; THRESHOLD)
+        for (each node n in retireList) {
+            if (n not pointed to by any
+                thread's hazard pointer) {
+                remove n from list
+                delete n;
+            }
+        }
+}
+
+void init(Stack* s) {
+    s-&gt;top = NULL;
+}
+
+void push(Stack* s, int value) {
+    Node* n = new Node;
+    n-&gt;value = value;
+    while (1) {
+        Node* old_top = s-&gt;top;
+        n-&gt;next = old_top;
+        if (compare_and_swap(&amp;s-&gt;top, old_top, n) == old_top)
+            return;
+    }
+}
+
+int pop(Stack* s) {
+    while (1) {
+        Stack old;
+        old.pop_count = s-&gt;pop_count;
+        old.top = hazard = s-&gt;top;
+
+        if (old.top == NULL) {
+            return NULL;
+        }
+
+        Stack new_stack;
+        new_stack.top = old.top-&gt;next;
+        new_stack.pop_count = old.pop_count+1;
+
+        if (doubleword_compare_and_swap(s, old, new_stack)) {
+            int value = old.top-&gt;value;
+            retire(old.top);
+            return value;
+        }
+        hazard = NULL;
+    }
+}</code></pre>
+        <p>
+            每个线程用自己的危险指针声明"我正在访问这个节点，不能删"；pop 出的节点不立即删，放进本线程的待退役列表，列表超过阈值时，删掉其中没有被任何线程的危险指针指着的节点。
+        </p>
+
+        <h3>无锁链表插入</h3>
+        <pre><code>struct Node {
+    int value;
+    Node* next;
+};
+
+struct List {
+    Node* head;
+};
+
+// insert new node after specified node
+void insert_after(List* list, Node* after, int value) {
+    Node* n = new Node;
+    n-&gt;value = value;
+
+    // assume case of insert into empty list handled
+    // here (keep code on slide simple for class discussion)
+
+    Node* prev = list-&gt;head;
+
+    while (prev-&gt;next) {
+        if (prev == after) {
+            while (1) {
+                Node* old_next = prev-&gt;next;
+                n-&gt;next = old_next;
+                if (compare_and_swap(&amp;prev-&gt;next, old_next, n) == old_next)
+                    return;
+            }
+        }
+
+        prev = prev-&gt;next;
+    }
+}</code></pre>
+        <p>
+            为了简单，这一页假设链表上<em>只有</em>插入操作，删除复杂得多。和细粒度加锁的实现相比：没有拿锁的开销；没有每个节点的存储开销。
+        </p>
+
+        <h3>无锁链表删除</h3>
+        <p>
+            支持无锁删除让数据结构复杂得多。考虑删除 B 的同时在 B 后面插入 E：链表 A → B → C → D，删除 B 时对 A-&gt;next 的 CAS 成功（A 指向 C），插入 E 时对 B-&gt;next 的 CAS 也成功（B 指向 E）。现在 B 指向 E，但 B 已经不在链表里了！好奇的话可以看：Harris 2001，《A Pragmatic Implementation of Non-blocking Linked-Lists》；Fomitchev 2004，《Lock-free linked lists and skip lists》。
+        </p>
+
+        <h3>无锁和锁的性能比较</h3>
+        <p>
+            课件引用 Hunt 2011《Characterizing the Performance and Energy Efficiency of Lock-Free Data Structures》：队列、链表、双端队列上，无锁算法（lf）和细粒度锁（fg）的运行时间，归一化到用 pthread mutex 锁的运行时间。
+        </p>
+
+        <h3>实践中：为什么要无锁数据结构？</h3>
+        <ul>
+            <li>这门课优化并行程序时，常常假设只有你的程序在用这台机器，因为你在乎性能。这是科学计算、图形、机器学习、数据分析等领域的典型假设。</li>
+            <li>这些情况下，写得好的带锁代码有时和无锁代码一样快（甚至更快）。Kayvon 说大家谈论无锁大概比必要的多一点。</li>
+            <li>但有些情况下带锁代码会遇到棘手的性能问题：程序有很多线程（比如数据库、Web 服务器），线程在临界区里时可能发生缺页、抢占等；锁会带来优先级反转、护航（convoying）、在临界区里崩溃等问题，操作系统课里常讨论。</li>
+        </ul>
+
+        <h3>小结</h3>
+        <ul>
+            <li>用细粒度加锁减少共享数据结构操作上的争用（最大化并行），但细粒度会增加代码复杂度（错误）和执行开销。</li>
+            <li>无锁数据结构：避免锁开销的非阻塞方案。但可能很难实现（在无锁的设定下保证正确性也有它自己的开销）；在现代放松一致性的硬件上仍然需要适当的内存栅栏。</li>
+            <li>注意：无锁设计并不消除争用，compare-and-swap 在激烈争用下会失败，需要自旋。</li>
+        </ul>
+
+        <h3>预告：事务内存</h3>
+        <p>
+            问：前面的无锁实现里，compare-and-swap 起什么作用？答：判断在调用线程操作到一半时，有没有别的线程修改了数据结构。下一次讲事务内存：一种更通用的机制，让系统投机地假设操作能在别的线程试图修改结构之前成功完成，并且有机制在别的线程修改时"中止"操作。Kayvon 称它是这一切的现代版。
+        </p>
+
+        <h3>延伸阅读</h3>
+        <ul>
+            <li>Michael 和 Scott 1996，《Simple, Fast and Practical Non-Blocking and Blocking Concurrent Queue Algorithms》：多读多写的无锁队列。</li>
+            <li>Harris 2001，《A Pragmatic Implementation of Non-Blocking Linked-Lists》。</li>
+            <li>Michael Sullivan 的 Relaxed Memory Calculus（RMC）编译器：github.com/msullivan/rmc-compiler。</li>
+            <li>网上很多好的博文：Dr. Dobb's 的《Lock-free code: a false sense of security》；MemSQL 的《Common pitfalls in writing lock-free algorithms》。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS149: Parallel Computing &copy; Fall 2023</p>
+        <nav class="footer-nav">
+            <a href="12_内存一致性模型.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="14_期中复习.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

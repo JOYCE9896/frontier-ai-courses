@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十讲：高效执行深度神经网络 | Stanford CS149 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="09_Spark.html">&larr; 上一讲</a>
+    <span>Stanford CS149: Lecture 10</span>
+    <a href="11_缓存一致性.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十讲：高效执行深度神经网络</h1>
+        <p class="subtitle">作业 3 渲染器的问题设定；卷积神经网络速览：神经元就是点积加非线性、卷积层、滤波器、ResNet / Inception / MobileNet；提速的三条路：更好的网络拓扑、更好的实现、近似；卷积变成矩阵乘法（显式 GEMM、im2col）；分块矩阵乘法、多级分块和 SIMD 的几种写法；隐式 GEMM、CUTLASS；批大小与 GPU 利用率；Winograd 和 FFT；cuDNN 的算法选项；层间融合；FlashAttention 式的注意力融合；低精度；为什么 GPU 适合 DNN，又为什么不够好：Tensor Core</p>
+        <div class="author-meta">
+            主讲：Kayvon Fatahalian<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=qbKtU0X6-WU" target="_blank">课堂录像</a>（Stanford Online，2023 年秋季）、<a href="https://gfxcourses.stanford.edu/cs149/fall23/lecture/dnneval/" target="_blank">课件</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、开场：作业 3 的渲染器</h2>
+        <p>
+            Kayvon 说课程的工作量在加速，新概念的数量在放慢；这个阶段主要是写作业 3、做练习、巩固理解。作业 3 有三部分，前两部分是热身：给你一个算法，用 CUDA 写出来，学习怎样编译、怎样创建线程。真正的部分是最后的渲染器，它不只要求高性能实现，还要求想出能让它并行化的算法。
+        </p>
+        <p>
+            问题：渲染一张 1000×1000 的图片，因为这不是图形课，图里只能画圆。给你大量圆的圆心 x、y、半径和颜色。主循环（忽略每帧圆的移动）很简单：对每个圆，算出它的包围盒；遍历包围盒里的每个像素；如果像素中心在圆内，按圆的颜色更新像素。这是世界上最简单的绘图算法。
+        </p>
+        <p>
+            难点：这些圆是半透明的，像彩色玻璃。50% 透明的红圆叠在蓝圆上，和蓝圆叠在红圆上看起来不一样。规则是：圆按数组顺序给出，假设是从后往前的顺序，必须先加第一个圆再加下一个。这个顺序约束让问题从极其简单变得非常有趣。课件给了蓝在绿上在红上的例子，换个顺序结果就不同，算作错误。
+        </p>
+        <p>
+            给的起始代码并行化了"对每个圆"这一层循环，每个圆在不同线程上做，会算错。第一步是确认它确实错了，然后改。回忆数据并行思维那讲，这和"每个粒子在哪个格子"很像。要记住：虽然要按顺序处理所有圆，但只有在顺序错了、并且圆有重叠时才会出错，不重叠的话按什么顺序都无所谓。第一步几乎一定是把代码改对，那会是并行但很慢的；然后一点点改成又对、又并行、又快。换句话说，如果对每个像素都知道可能覆盖它的圆的列表，基本就做完了，因为每个像素都可以安全地并行处理。
+        </p>
+        <p>
+            这一讲放在这里主要是排课的原因（Kunle 出差），它对作业 4 很有用。今天讲 DNN 怎样映射到 GPU 和 CPU 上，最后提一下新兴的 DNN 专用硬件，那部分留到感恩节前的专用硬件一讲。课上大多数人上过要实现或使用现代深度网络的课；这学期还有一位新老师开的 CS229S，可能有重叠。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、卷积神经网络速览</h2>
+        <p>
+            给少数没接触过深度神经网络的同学介绍一下工作负载。在系统课里几乎不用数学就能思考这些。
+        </p>
+        <h3>一个表达式</h3>
+        <pre><code>max( max(0, (a*b) + (c*d)) + (e*f) + (g*h), i*j)</code></pre>
+        <p>
+            画成依赖图你马上就知道怎样执行。它是一些乘积再求和，也就是点积，后面再取 max。
+        </p>
+
+        <h3>什么是深度神经网络</h3>
+        <p>
+            基本单元："神经元"。有 n 个输入的单元由 n+1 个参数描述（权重加偏置）：输出 = f(Σ x<sub>i</sub>w<sub>i</sub> + b)。例子：修正线性单元（ReLU），f(x) = max(0, x)。学深度学习时为了感觉高级一点叫它修正线性单元，其实就是 max。机器学习的解释：一个二分类器，把输出解释为某一类的概率，比如 f(x) = 1/(1+e<sup>-x</sup>)。基本的计算解释：它只是一个电路！先不必关心权重的含义：一个点积，可选地加偏置，再过一个非线性函数。
+        </p>
+        <p>
+            拓扑：网络通常排得很规整，每层若干个单元，一层的输出是下一层的输入。全连接层：第 i 层的每个输出都是第 i+1 层的输入。稀疏（局部）连接层：每个单元只从三个输入节点接收输入，这其实是一维卷积层，三个输入的滑动窗口。用线性代数写：4 个神经元，每个 3 个权重，输入 3 个值，输出就是矩阵乘向量再过非线性 f。这些花哨的图很快就归结为稠密矩阵代数。
+        </p>
+
+        <h3>二维卷积：这段 C 代码做什么？</h3>
+        <pre><code>int WIDTH = 1024;
+int HEIGHT = 1024;
+float input[(WIDTH+2) * (HEIGHT+2)];
+float output[WIDTH * HEIGHT];
+
+float weights[] = {1.f/9, 1.f/9, 1.f/9,
+                   1.f/9, 1.f/9, 1.f/9,
+                   1.f/9, 1.f/9, 1.f/9};
+
+for (int j = 0; j &lt; HEIGHT; j++) {
+    for (int i = 0; i &lt; WIDTH; i++) {
+        float tmp = 0.f;
+        for (int jj = 0; jj &lt; 3; jj++)
+            for (int ii = 0; ii &lt; 3; ii++)
+                tmp += input[(j+jj)*(WIDTH+2) + (i+ii)] * weights[jj*3 + ii];
+        output[j*WIDTH + i] = tmp;
+    }
+}</code></pre>
+        <p>
+            有人会说它做二维卷积，那这又是什么意思？输出图像是什么样？变模糊了。每个输出像素是周围像素的平均：一个白像素周围都是暗像素，卷积会把白像素拉到平均值，周围的黑像素被拉高。这是一次 3×3 模糊。
+        </p>
+        <p>
+            卷积层：局部连接，并且层里所有单元共享同样的参数（同样的权重和偏置）。把每个输出像素看成一个神经元，它的输出是 9 个输入的加权组合（前面的网络图只画了一维卷积，即 ii 循环的一次迭代，三个输入）。
+        </p>
+        <p>
+            改变权重会得到很不同的输出。让一些权重为负，计算就变成"这边像素乘正数减去那边像素"，是有限差分，也就是梯度计算：有的滤波器响应水平梯度，有的响应垂直梯度。可以把滤波器想成某种模式的"检测器"，输出图像里像素的大小是滤波器对输入图像中该像素周围区域的"响应"。
+        </p>
+        <p>
+            ConvNet 基本就是一堆这样的卷积，只是权重不是人给的，是学出来的。经典的 ImageNet 例子：输入 RGB 图像（W×H×3），96 个 11×11×3 的滤波器（三维的，因为作用在 RGB 上），每个输出用到输入的 121×3 个元素，得到 96 个响应（归一化后），不同滤波器在图像不同部分"亮起来"，在检测不同的特征。
+        </p>
+        <p>
+            一次对图像施加很多滤波器：输入单通道图像 W×H；3×3 空间卷积，3×3×num_filters 个权重（把滤波器叠成一个张量）；输出 W×H×num_filters 的滤波器响应。每个滤波器由独特的一组权重描述，响应不同的图像现象。再加层：卷积 → ReLU（在 0 处截断）→ 池化（max pool，取每个 2×2 区域的最大响应，W/2×H/2×num_filters，注意池化带来的数据缩减）→ 卷积……
+        </p>
+        <p>
+            更新的图像理解网络：ResNet（34 层版本）、Inception（GoogLeNet）、用于图像分割的全卷积网络、上采样网络（U-Net 之类，先缩小再放大）。这些花哨的图里，每个块的计算主体基本都是这一串卷积，只是连法很不同。到这里只需要知道：对输入图像做一堆卷积得到一堆输出图像，再对它们做卷积，这就是工作负载。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、提速的第一条路：更高效的拓扑</h2>
+        <p>
+            效率的挑战：DNN 拓扑很多（常见骨干网络上的很多变体），目标设备也很多。怎样让它更快？三条路。第一条是算法创新，设计更好的网络，这和这门课教的技能无关，是去上机器学习课。比如 ResNet、Inception 的浮点运算比早期让深度学习走红的卷积网络少得多。ResNet 的一大创新是跳跃连接，让信息越过几层传递，有利于 SGD。Inception-ResNet 的块：设计者会想，要几条 3×3 卷积的路径来抓这么大范围的特征，要几级级联，也许再要一条范围更宽的路径。
+        </p>
+
+        <h3>MobileNet</h3>
+        <p>
+            Google 的人被要求让这些网络跑在手机上，花两年试各种组合（后来还尝试自动化），得到 MobileNet（2017，现在已经有点旧了）。它把 NUM_FILTERS 个 3×3×NUM_CHANNELS 的卷积分解为：
+        </p>
+        <ul>
+            <li>每个输入通道一个 3×3×1 卷积，共 NUM_CHANNELS 个（depthwise，逐通道卷积）；</li>
+            <li>NUM_FILTERS 个 1×1×NUM_CHANNELS 卷积把结果组合起来（pointwise，逐点卷积）。</li>
+        </ul>
+        <p>
+            MobileNet 论文的表：1×1 卷积占 94.86% 的乘加和 74.59% 的参数，全连接层占 0.18% 的乘加和 24.33% 的参数。1.0 MobileNet-224 的 ImageNet 准确率 70.6%，5.69 亿次乘加，420 万参数；GoogLeNet 69.8%、15.5 亿、680 万；VGG 16 71.5%、153 亿、1.38 亿。[Howard 等 2017]
+        </p>
+        <p>
+            Kayvon 问：看 MobileNet 的层表，以你在这门课学到的，有什么让人警觉的？有同学说对手机来说工作量很大。Kayvon 指出两点：每层输出看起来只是 28×28 之类的小图，但每个点不是 RGB 三个值，而是 256 或 512 个通道，层间输出不小，放不进缓存了；还有 7×7 这种尺寸，在现代 SIMD 处理器上怎么向量化？这些数很别扭，也许干脆用 8×8，多出来的那点几乎免费。
+        </p>
+
+        <h3>拓扑创新的效果</h3>
+        <p>
+            课件引用了 Canziani 等人的对比图：ImageNet top-1 准确率、浮点运算代价（圆的面积是参数量）、每 flop 的准确率。希望在准确率对代价图的左上角。早期的 VGG-19 在很远的地方。
+        </p>
+        <table>
+            <thead><tr><th>网络</th><th>年份</th><th>ImageNet top-1</th><th>参数</th><th>每张图代价（乘加）</th></tr></thead>
+            <tbody>
+                <tr><td>VGG-16</td><td>2014</td><td>71.5%</td><td>138M</td><td>15B</td></tr>
+                <tr><td>GoogleNet</td><td>2015</td><td>70%</td><td>6.8M</td><td>1.5B</td></tr>
+                <tr><td>ResNet-18</td><td>2016</td><td>73%（10-crop）</td><td>11.7M</td><td>1.8B</td></tr>
+                <tr><td>MobileNet-224</td><td>2017</td><td>70.5%</td><td>4.2M</td><td>0.6B</td></tr>
+            </tbody>
+        </table>
+        <p>
+            2014 到 2017，准确率相近，代价改进约 25 倍。硬件不会在四年里快 25 倍。为某个网络设计的算法，几年后可能离正确的算法差得很远。很多系统课把当时最好的架构当作给定，只去优化它；要记住算法一侧一直在大量创新和迭代，好的机器学习系统工程师必须跟踪最新进展。如今大语言模型因为缩放定律越做越大，有它的道理；但一旦有了效果满意的东西，工程师就会进来把它大幅缩小，过去六到十二个月的 LLaMA 等就是这样。很多芯片公司因为"今天的 LLM 很大"去造大芯片，这让"系统该为什么而设计"成了复杂的问题。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、第二条路：在现代硬件上高效实现各层</h2>
+        <p>
+            第二条路和这门课高度相关：架构定下来了，要让它在手上的机器（多核 CPU 或 GPU）上跑好，用 CS149 讲的很多技术。
+        </p>
+        <h3>卷积层的直接实现（批处理）</h3>
+        <pre><code>float input[IMAGE_BATCH_SIZE][INPUT_HEIGHT][INPUT_WIDTH][INPUT_DEPTH];
+float output[IMAGE_BATCH_SIZE][INPUT_HEIGHT][INPUT_WIDTH][LAYER_NUM_FILTERS];
+float layer_weights[LAYER_NUM_FILTERS][LAYER_FILTER_Y][LAYER_FILTER_X][INPUT_DEPTH];
+float layer_biases[LAYER_NUM_FILTERS];
+
+// assumes convolution stride is 1
+for (int img = 0; img &lt; IMAGE_BATCH_SIZE; img++)
+    for (int j = 0; j &lt; INPUT_HEIGHT; j++)
+        for (int i = 0; i &lt; INPUT_WIDTH; i++)
+            for (int f = 0; f &lt; LAYER_NUM_FILTERS; f++) {
+                float tmp = layer_biases[f];  // slide indexes [LAYER_NUM_FILTERS]
+                for (int kk = 0; kk &lt; INPUT_DEPTH; kk++)          // sum over filter responses of input channels
+                    for (int jj = 0; jj &lt; LAYER_FILTER_Y; jj++)    // spatial convolution (Y)
+                        for (int ii = 0; ii &lt; LAYER_FILTER_X; ii++)  // spatial convolution (X)
+                            tmp += layer_weights[f][jj][ii][kk] * input[img][j+jj][i+ii][kk];
+                output[img][j][i][f] = tmp;
+            }</code></pre>
+        <p>
+            原来四层循环，现在七层：对每个输出像素 (i, j)、每个滤波器 f，遍历滤波器覆盖的输入像素，而输入有深度（RGB 或 512 个通道），所以是在三维输入上的二维卷积；最外层是图像批，常常同时让多个输入通过网络，这就是批大小。七层循环里有大量输入数据复用：卷积时复用滤波器权重；不同滤波器之间复用输入值。写出来不难，正确但大概跑不快。
+        </p>
+
+        <h3>把 3×3 卷积写成矩阵乘向量（"显式 GEMM"）</h3>
+        <p>
+            在 NumPy、MATLAB、Torch 里调用矩阵乘矩阵，可以假设有人已经把它实现得很好。能把东西归结为矩阵运算，就处在不错的位置。早期的卷积层实现就是这样做的。
+        </p>
+        <p>
+            每个输出像素都是 9 个权重和输入某 9 个像素的点积。于是把对应的输入像素拷进一个矩阵：W×H 行、每行 9 个元素（比原图大 9 倍）。第一行对应输出像素 (0,0)，它需要的 9 个输入里越界的部分补 0：[0, 0, 0, 0, x00, x01, 0, x10, x11]；没有边界问题的地方，比如输出像素 (1,1)，就是 [x00, x01, x02, x10, x11, x12, x20, x21, x22]。这一行和权重向量 [w0, ..., w8] 的点积就是卷积的输出。经过适当的补零和数据复制，卷积就是矩阵乘向量。对 N 个元素的滤波器有 O(N) 的存储开销，而且必须构造输入数据矩阵。
+        </p>
+        <ul>
+            <li>多个滤波器：把每个滤波器的权重列向量并排成矩阵，9 × num_filters，变成矩阵乘矩阵。</li>
+            <li>多个输入通道：每个卷积现在是 3×3×C（比如 C = 512），输入矩阵每行变成 9 × num_input_channels 个元素（通道 0 的值、通道 1 的值、通道 2 的值……），权重矩阵是 (9 × 通道数) × num_filters。对每个滤波器，把各输入通道的响应加起来，等价于在 W×H×C 的输入数据上做 3×3×C 的卷积。</li>
+        </ul>
+        <p>
+            NVIDIA 的图：卷积层到显式 GEMM 的映射。符号：滤波器空间范围 R×S；输入通道 C；滤波器数 K；批大小 N。左边是你在 Torch 里想的张量（输入 X 是宽×高×C 通道×批 N），右边是矩阵 A、B、C，维度是这些参数的乘积，A × B = C，C 里是对 W×H×C 的输入用 K 个滤波器卷积得到的 P×Q×N 的输出。
+        </p>
+        <p>
+            高性能的 GEMM 实现已经有了，Intel、NVIDIA、越来越多的 AMD GPU，都能下载快速的矩阵乘法库，有疯狂的黑客一直在调优，你写不过他们。但要用"现成"的库，必须物化输入矩阵：DRAM 流量增加 R×S 倍（从激活张量读输入数据，组成"卷积矩阵"），还需要大量辅助存储。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、稠密矩阵乘法怎样写快</h2>
+        <pre><code>float A[M][K];
+float B[K][N];
+float C[M][N];
+
+// compute C += A * B
+#pragma omp parallel for
+for (int j = 0; j &lt; M; j++)
+    for (int i = 0; i &lt; N; i++)
+        for (int k = 0; k &lt; K; k++)
+            C[j][i] += A[j][k] * B[k][i];</code></pre>
+        <p>
+            比七层循环简单，只有三层。设所有维度都是 N：碰多少数据？3N²。做多少工作？N³。N 可能很大（比如 512 × 7 × 7），矩阵可能有 GB 级。这个实现有什么问题？同学说缓存局部性很差。具体看：沿着 A 的一行读，非常连贯，没问题；B 在内存里到处跳，行主序存放时每个元素在地址空间里都离得很远，各在不同的缓存行上；C 是最好的情况，一直读写同一个值。退一步看，这和作业里那个受带宽限制的问题差不多：读一个 A、读一个 B（访问 B 很糟），只做两次数学运算（乘、加）。矩阵乘法本该是 N³ 的工作对 N² 的数据，算术强度 O(N)，这个写法却是 O(1)。把 A、B、C 都放进缓存，算术强度就是 O(N)，但放不下，它们太大了。所以这个低算术强度不是根本的，只是写法的问题。
+        </p>
+
+        <h3>分块的稠密矩阵乘法</h3>
+        <p>
+            同学说把矩阵分成块，每块能放进内存。关键洞察：矩阵乘法不必表达为对单个元素的运算，可以层次化地表达为一堆子矩阵（块）的乘法。
+        </p>
+        <pre><code>float A[M][K];
+float B[K][N];
+float C[M][N];
+
+// compute C += A * B
+#pragma omp parallel for
+for (int jblock = 0; jblock &lt; M; jblock += BLOCKSIZE_J)
+    for (int iblock = 0; iblock &lt; N; iblock += BLOCKSIZE_I)
+        for (int kblock = 0; kblock &lt; K; kblock += BLOCKSIZE_K)
+            for (int j = 0; j &lt; BLOCKSIZE_J; j++)
+                for (int i = 0; i &lt; BLOCKSIZE_I; i++)
+                    for (int k = 0; k &lt; BLOCKSIZE_K; k++)
+                        C[jblock+j][iblock+i] += A[jblock+j][kblock+k] * B[kblock+k][iblock+i];</code></pre>
+        <p>
+            思路：在所需的 A 块和 B 块还留在缓存里的时候，算出 C 的一个块的部分结果（假设 BLOCKSIZE 选得让 A、B、C 的块都能驻留）。从内层往下看是两个子块的矩阵乘法，最外层是在块上的矩阵乘法：取 A 的一块、B 的一块装进缓存相乘，得到 C 的一块的一部分；A 右移一块、B 下移一块，再乘，加进 C 的同一块。每一步装入约 B² 的数据（这里 B 指块大小），做 B³ 的工作，算术强度是 B。
+        </p>
+        <p>
+            自测：你希望 BLOCKSIZE 尽可能大吗？为什么？块大小趋向 N，算术强度趋向 N；块大小降到 1，算术强度就是 1。所以想要尽可能大，"尽可能"是指不能大到出现容量未命中，要按缓存大小选块，让 A、B、C 的块都放得下。Kayvon 说上一页和这一页的代码 15 分钟就能用 C 写出来，矩阵弄到几百 MB 或 1 GB，速度会差上千倍。
+        </p>
+        <p>
+            有同学问块在缓存行里怎么存，按行还是按列。普通 CPU 上，缓存只是存地址空间里的行。比如块是缓存行大小 × 缓存行大小，A 的这个块需要的那些缓存行在地址空间里不连续，就把它们装进来，缓存自己找地方放；处理器对某个地址发 load 时，缓存把它映射到存这一行的位置。CPU 上缓存的全部意义就是软件程序员不用管它。如果 Intel 的地址到缓存位置的映射算法让两个很不同的缓存行落在缓存同一处，冲突会导致性能达不到预期，可能要改数据布局。GPU 的共享内存不同：你让 CUDA 线程把这个块从地址空间装进来，放进 CUDA 共享内存里一段连续的分配。CUDA 共享内存更像是"便笺存储"（scratchpad），是另一个地址空间；缓存只是同一地址空间的实现细节。
+        </p>
+
+        <h3>层次化的分块矩阵乘法</h3>
+        <pre><code>float A[M][K];
+float B[K][N];
+float C[M][N];
+
+// compute C += A * B
+#pragma omp parallel for
+for (int jblock2 = 0; jblock2 &lt; M; jblock2 += L2_BLOCKSIZE_J)
+    for (int iblock2 = 0; iblock2 &lt; N; iblock2 += L2_BLOCKSIZE_I)
+        for (int kblock2 = 0; kblock2 &lt; K; kblock2 += L2_BLOCKSIZE_K)
+            for (int jblock1 = 0; jblock1 &lt; L1_BLOCKSIZE_J; jblock1 += L1_BLOCKSIZE_J)
+                for (int iblock1 = 0; iblock1 &lt; L1_BLOCKSIZE_I; iblock1 += L1_BLOCKSIZE_I)
+                    for (int kblock1 = 0; kblock1 &lt; L1_BLOCKSIZE_K; kblock1 += L1_BLOCKSIZE_K)
+                        for (int j = 0; j &lt; BLOCKSIZE_J; j++)
+                            for (int i = 0; i &lt; BLOCKSIZE_I; i++)
+                                for (int k = 0; k &lt; BLOCKSIZE_K; k++)
+                                    ...</code></pre>
+        <p>
+            利用存储层次的多个级别：现代系统都有 L1、L2、L3 缓存，甚至可以为寄存器分块（图上没画最后一级为寄存器局部性的"分块"）。先取放得进 L3 的块，再把它划分成放得进 L2 的块的子矩阵乘法，以此类推。一级分块就能拿到大部分收益，再多分几级也许还有一两倍。多线程看起来很简单，大概就在最外层循环上并行；SIMD 就有点麻烦了。
+        </p>
+
+        <h3>块内的 SIMD 并行</h3>
+        <p>
+            <strong>写法 1：向量化 i 循环</strong>
+        </p>
+        <pre><code>...
+for (int j = 0; j &lt; BLOCKSIZE_J; j++) {
+    for (int i = 0; i &lt; BLOCKSIZE_I; i += SIMD_WIDTH) {
+        simd_vec C_accum = vec_load(&amp;C[jblock+j][iblock+i]);
+        for (int k = 0; k &lt; BLOCKSIZE_K; k++) {
+            // C = A*B + C
+            simd_vec A_val = splat(&amp;A[jblock+j][kblock+k]);  // load a single element in vector register
+            simd_muladd(A_val, vec_load(&amp;B[kblock+k][iblock+i]), C_accum);
+        }
+        vec_store(&amp;C[jblock+j][iblock+i], C_accum);
+    }
+}</code></pre>
+        <p>
+            从 B 取一个向量，把 A 的一个元素复制 SIMD_WIDTH 份（splat），相乘就同时得到 C 的多个输出。好处：也改善了访问 B 的空间局部性。坏处：工作集增大到 SIMD_WIDTH 倍，仍然以大步长在 B 上走；还要浪费一条 splat 指令。
+        </p>
+        <p>
+            <strong>写法 2：预先转置 B 的块，向量化最内层循环</strong>
+        </p>
+        <pre><code>...
+for (int j = 0; j &lt; BLOCKSIZE_J; j++)
+    for (int i = 0; i &lt; BLOCKSIZE_I; i++) {
+        float C_scalar = C[jblock+j][iblock+i];
+        // C_scalar += dot(row of A, row of B)
+        for (int k = 0; k &lt; BLOCKSIZE_K; k += SIMD_WIDTH) {
+            C_scalar += simd_dot(vec_load(&amp;A[jblock+j][kblock+k]), vec_load(&amp;Btrans[iblock+i][kblock+k]));
+        }
+        C[jblock+j][iblock+i] = C_scalar;
+    }</code></pre>
+        <p>
+            假设 i 维很小，写法 1 效果不好。把 B 的块以转置形式拷到临时缓冲区，就一直在做直接的 SIMD 点积。但每条指令依赖上一条，可能伤害 ILP。
+        </p>
+        <p>
+            <strong>写法 3：预先转置 A 和 C 的块</strong>
+        </p>
+        <pre><code>// assume blocks of A and C are pre-transposed as Atrans and Ctrans
+for (int j = 0; j &lt; BLOCKSIZE_J; j += SIMD_WIDTH) {
+    for (int i = 0; i &lt; BLOCKSIZE_I; i += SIMD_WIDTH) {
+
+        simd_vec C_accum[SIMD_WIDTH];
+        for (int k = 0; k &lt; SIMD_WIDTH; k++)  // load C_accum for a SIMD_WIDTH x SIMD_WIDTH chunk of C^T
+            C_accum[k] = vec_load(&amp;Ctrans[iblock+i+k][jblock+j]);
+
+        for (int k = 0; k &lt; BLOCKSIZE_K; k++) {
+            simd_vec bvec = vec_load(&amp;B[kblock+k][iblock+i]);
+            for (int kk = 0; kk &lt; SIMD_WIDTH; kk++)  // innermost loop items not dependent
+                simd_muladd(vec_load(&amp;Atrans[kblock+k][jblock+j]), splat(bvec[kk]), C_accum[kk]);
+        }
+
+        for (int k = 0; k &lt; SIMD_WIDTH; k++)
+            vec_store(&amp;Ctrans[iblock+i+k][jblock+j], C_accum[k]);
+    }
+}</code></pre>
+        <p>
+            算出转置的 C，最后再转置回来，最内层循环各项互不依赖。Kayvon 不展开细节：取决于 SIMD 指令集和机器，这完全可以是一个两周的编程作业。策略还可能取决于块大小或矩阵的维度。回看 MobileNet，每一层的输入矩阵大小都不同（注意这个网络里权重和激活的大小，再想想现代机器的 SIMD 宽度，对库的实现者来说很头疼！）。想要好的实现，各层可能用不同的矩阵乘法实现；只实现一种，遇到那些又长又窄的奇怪矩阵大概就不是最优的。所以人们在 cuBLAS 这些矩阵乘法例程上投入了大量工作。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、隐式 GEMM 和 GPU 上的实现</h2>
+        <p>
+            还有个大问题，Kayvon 奇怪没人举手：为了造这个矩阵，把每个元素复制了很多次，几百 MB 的数据集可能变成好几 GB 的矩阵，加上批大小更多。上过机器学习课的人知道，反向传播时还要留额外信息，内存很快就不够了，这些本来很小的矩阵一下膨胀到 16 GB。
+        </p>
+        <h3>优化：不物化整个矩阵（"隐式 GEMM"）</h3>
+        <p>
+            按矩阵乘法的方式想，但构造块的时候按需从原始数据取。NVIDIA 的示意：一个朴素的、不分块的实现，不访问那个造出来的矩阵，而是通过一个访问器（accessor）直接索引输入权重张量和激活张量，访问器做全部数学，算出这个矩阵位置的值存在原始输入张量的哪里。也就是在内层循环里花算术去算地址（是张量维度的函数），换取不把数据展开成大矩阵。循环结构像是在操作那么大的矩阵，实际上不是，所以叫隐式矩阵乘法。
+        </p>
+        <p>
+            有同学说这样的点积在原图上到处跳，缓存效率不好。对，但本来不分块也很糟。它会被分块：把数据从 DRAM 拷进缓存或共享内存的时候，访问器在内存里到处取；一旦进了共享内存或缓存，就把它摊平、弄成稠密的，再在稠密数据上做子块矩阵乘法。也就是在从 DRAM 拷到缓存时做拷贝，而不是先在 DRAM 里拷到新位置再装进来，差别很大。
+        </p>
+        <p>
+            更好的实现：每次只在 GPU 片上"共享内存"里物化卷积矩阵的一个子块。不需要额外的片外存储，也不增加所需的 DRAM 流量。用调优过的基于共享内存的 GEMM 例程做子块 GEMM（见 CUTLASS）。好的实现还会把从宽、高、张量数、批大小到地址的数学预先算好，做成查找表，用一点内存换回地址计算，对较大的张量这不容易忽略。
+        </p>
+
+        <h3>NVIDIA CUTLASS</h3>
+        <p>
+            实现自定义高性能 DNN 的基本原语和构件：快速的（共享内存内的）GEMM；快速的 warp 级 GEMM；快速装入块、张量索引的迭代器；张量归约等。介于自己写 GPU 汇编（PTX）的底层和用 TensorFlow 的高层之间。比如想在 NVIDIA GPU 上让一个很小的网络跑得尽可能快，现在可能会用它。这个库不太友好。
+        </p>
+
+        <h3>"更多工作"带来更高性能</h3>
+        <p>
+            回忆 V100：80 个 SM，很多处理单元和很多 Tensor Core，需要"大量并行工作"才能填满。每个 SM 核可能都在算一个子块矩阵乘法，仍然需要相当大的矩阵。所以机器学习里批大小为 1 时性能会下降，工作不够多。课件的图：改变 N（批大小）、P 和 Q（输出大小）、R 和 S（滤波器大小 1×1、3×3、5×5），纵轴是吞吐量（TFLOPS，越高越好）。
+        </p>
+        <ul>
+            <li>N=1、P=Q=64 时：64 × 64 × 128 × 1 = 524K 个输出 = 2 MB 输出数据（float32）；</li>
+            <li>N=32、P=Q=256 时：256 × 256 × 128 × 32 = 256M 个输出 = 1 GB 输出数据（float32）。</li>
+        </ul>
+        <p>
+            批大小、输出图像都要足够大，GPU 才有足够的工作让自己忙起来。人们说大网络只能跑批大小 2、3，不然内存不够，就会在性能上付出代价。右边那张图说的是用更宽的卷积做更多工作、更快填满 GPU，如今这么宽的卷积已不常见，左边那张更有现实意义。
+        </p>
+        <p>
+            当然也可以直接回到七层循环，自己分块那些循环。刚花 15 分钟讲了三层循环的矩阵乘法有多难优化，七层的可想而知。如今很多人希望把这些信息交给好的编译器，让它想出分块策略，比如 Google 的 XLA、OpenAI 新出的 Triton。但 Kayvon 认为这些核心内层循环仍然最好由人手工来做。
+        </p>
+
+        <h3>算法上的改进</h3>
+        <ul>
+            <li>直接卷积可以在傅里叶域高效实现（卷积 → 逐元素乘法）。开销：用 FFT 把输入变换到傅里叶域，再用逆 FFT 把响应变回空间域（N lg N）；逆变换在所有输入通道上分摊（因为要对输入求和）。</li>
+            <li>用工作高效的 Winograd 卷积做直接卷积。一维例子：用权重 w0、w1、w2 的 3 抽头一维卷积产生两个输出 y0、y1，输入 x0 到 x3。y0 = x0w0 + x1w1 + x2w2，y1 = x1w0 + x2w1 + x3w2。写成 m1 + m2 + m3 和 m2 - m3 - m4 的形式，其中 m1 = (x0 - x2)w0，m2 = (x1 + x2)(w0 + w1 + w2)/2，m3 = (x2 - x1)(w0 - w1 + w2)/2，m4 = (x1 - x3)w2，括号里只含 w 的部分依赖滤波器，可以预先算好。</li>
+            <li>Winograd 一维 3 元素滤波器：4 次乘法、8 次加法（4 次算 m，4 次合成最终结果）；直接卷积：6 次乘法、4 次加法。二维时能显著减少乘法（3×3 滤波器、2×2 输出块，乘法少 2.25 倍）。</li>
+        </ul>
+        <p>
+            利用公共子表达式先做一些数学，再用它们算输出：乘法少了很多，加法多了很多。是否划算取决于机器。学过信号处理的人知道卷积可以表示为傅里叶变换、逐点乘、反变换，FFT 用的就是这类利用公共子表达式减少工作的技巧。（课件上这几个 m 的公式符号在提取时损坏了，上面是按 Winograd F(2,3) 的标准形式补全的。）
+        </p>
+
+        <h3>厂商的底层库</h3>
+        <p>
+            各大厂商都有自己的深度学习库，比如 NVIDIA cuDNN、Intel 的 oneAPI。往上到 PyTorch、TensorFlow，你熟悉的那些层类型在底层会编译到 cuDNN 这类厂商专用库。看 cuDNN 的 API，cudnnConvolutionForward（卷积层的前向）不只是张量 X、权重 W、输出 Y，还有输入张量的描述符和算法选项。现在这些选项应该看得懂了：
+        </p>
+        <ul>
+            <li>IMPLICIT_GEMM（默认）：把卷积层当作大矩阵乘法，但从不真的造出大矩阵，在做矩阵乘法的循环索引时去查值。</li>
+            <li>DIRECT：直接做卷积，像分块的七层循环。</li>
+            <li>GEMM（非隐式）：把数据拷进大矩阵，按普通矩阵乘法做。</li>
+            <li>WINOGRAD、FFT 等：用 Winograd 或 FFT 变换。</li>
+        </ul>
+        <p>
+            你根据自己对问题的了解告诉 API 怎么做。分块的 MLP 或全连接层也是矩阵乘矩阵，同样适用。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、层间融合</h2>
+        <p>
+            到目前为止讲的是怎样实现矩阵乘矩阵，也就是怎样实现卷积层。还没讲的是层是一个接一个的，可能有上百层。一层的输出是一个很大的张量，几十到几百 MB。卷积层的基本序列：Conv → Scale/Bias → Max Pool。张量大小 N×H×W×C → N×H×W×K → N×H×W×K → N×H/2×W/2×K。
+        </p>
+        <ul>
+            <li>想想在每个操作之间把 1 GB 的卷积输出写到内存、再读回来的带宽代价！卷积可以分块，scale/bias 只是每个元素乘一个数，max pool 只是每个 2×2 区域取最大，都严重受带宽限制。</li>
+            <li>但逐元素的 [scale + bias] 操作，完全可以在卷积算出每个元素之后立刻做！</li>
+            <li>max pool 的输出也可以在输出的每个 2×2 区域算好之后立刻算。</li>
+            <li>融合成 Conv + Scale/Bias + Max Pool 一个操作：N×H×W×C → N×H/2×W/2×K。</li>
+        </ul>
+        <pre><code>// assumes convolution stride is 1
+for (int img = 0; img &lt; IMAGE_BATCH_SIZE; img++)
+    for (int j = 0; j &lt; INPUT_HEIGHT; j++)
+        for (int i = 0; i &lt; INPUT_WIDTH; i++)
+            for (int f = 0; f &lt; LAYER_NUM_FILTERS; f++) {
+                float tmp = 0.0f;
+                for (int kk = 0; kk &lt; INPUT_DEPTH; kk++)          // sum over filter responses of input channels
+                    for (int jj = 0; jj &lt; LAYER_FILTER_Y; jj++)    // spatial convolution (Y)
+                        for (int ii = 0; ii &lt; LAYER_FILTER_X; ii++)  // spatial convolution (X)
+                            tmp += layer_weights[f][jj][ii][kk] * input[img][j+jj][i+ii][kk];
+                output[img][j][i][f] = tmp*scale + bias;
+            }</code></pre>
+        <p>
+            课堂练习：怎样把紧跟这一层的 max pool（输出矩阵每个 2×2 块的最大值）也"融合"进来？同学答：块大小取 2 的倍数。如果分了块，就有一块输出留在缓存里，在把它写出去之前就做 max pool。不仅省了一次存和一次读，存出去的东西也比产生的小 4 倍。代码会很难看，但概念上不难。
+        </p>
+        <p>
+            这很重要，层类型也因此变得复杂。没有编译器支持的年代，TensorFlow 的 API 里出现了 Conv2DFusedBatchNorm 之类的入口，"某某序列很慢，就为它开个特例"，API 越来越大。老办法是库的作者硬编码几个"融合"操作，比如 FusedBatchNorm、FusedResizeAndPadConv2D。CUDA（cuDNN 后端）有模板化的融合能力：任何卷积算子后面跟一个逐点算子（像 map 那样的），再跟另一个逐点算子，只要符合这个模式，就试着把逐点操作融合进矩阵乘法。编译器生成把多个操作融合成一个节点执行的新实现（课件注：这就是 Halide 的 "compute at"）。也有很多基于编译器的工作在自动调度关键 DNN 操作。如今人们希望 JAX、Triton 这类编译器在知道这些操作的情况下替你做一些融合，JAX 已经相当成熟，开始分析张量循环嵌套并生成融合代码，但仍不算很好。难点不在想法本身（max pool 的方案五秒钟就有人提出了），而在对任意张量程序做这件事。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、注意力的融合技巧</h2>
+        <p>
+            Kayvon 讲了一个大约一年半前在斯坦福发明的小技巧，它显著提升了大语言模型里 Transformer 层的性能。他说退一步看，任何学过 CS149 的人看到 Transformer 层都会说"当然应该这样做"；要是一年半前你做了，你会成为机器学习推特圈的话题人物。（这就是 FlashAttention。）
+        </p>
+        <h3>Transformer 的工作负载</h3>
+        <p>
+            序列模型的 Transformer 架构：输入一串 token，输出一串 token，比如自回归地预测下一个词。应用不重要，重要的是网络关键部分"注意力"的工作负载。输入是三个张量 Q、K、V，每个是 N×d：N 是序列长度，每个位置一个 d 维嵌入。可以解释为：对输入序列的每个元素，像在一个数据库里查询哪些其他 token 匹配，匹配程度影响输出。
+        </p>
+        <ul>
+            <li>S = QK<sup>T</sup>：查询和键的所有两两交互，N×d 乘 d×N，得到 N×N 的矩阵。</li>
+            <li>对矩阵的每一行做 softmax，得到 P。</li>
+            <li>O = PV：N×N 乘 N×d，得到 N×d 的输出。</li>
+        </ul>
+        <p>
+            不懂 softmax 没关系，重要的是：一个行向量 x 的 softmax 就是对所有元素做缩放，但缩放依赖向量里的最大元素（以及指数的和）。在算出整个向量之前不知道最大元素是什么，计算上相当于"求出数组所有元素的和，再用和去归一化每个元素"。N 很大，几万个 token 的序列，N² 在 N = 10,000 时是好几 GB 的矩阵。可以用分块矩阵乘法高效算出这个矩阵，但还得存到内存，再一行行读回来算 softmax，再读回来做矩阵乘，还有掩码之类的步骤要读好几遍。Transformer 的代价就在这里，而且这里几乎没有计算，这才是问题。
+        </p>
+
+        <h3>分块计算 softmax</h3>
+        <p>
+            有没有办法逐块完成整个序列，像在卷积层中间做 max pool 一样融合穿过 softmax？softmax 看起来需要矩阵的每个元素才能继续。对向量 x，softmax 是每个元素取 e 的 (x<sub>i</sub> 减最大值) 次方，再除以所有这些项的和。把 x 分成前半 x1、后半 x2：
+        </p>
+        <pre><code>m(x)  = max(x_i)                          // max of the vector
+f(x)  = [exp(x_1 - m(x)), ..., exp(x_B - m(x))]
+l(x)  = sum_i f(x)_i
+softmax(x) = f(x) / l(x)
+
+// for x = [x1, x2], with m(x1), f(x1), l(x1), m(x2), f(x2), l(x2) already computed:
+m(x) = max(m(x1), m(x2))
+f(x) = [exp(m(x1) - m(x)) * f(x1), exp(m(x2) - m(x)) * f(x2)]
+l(x) = exp(m(x1) - m(x)) * l(x1) + exp(m(x2) - m(x)) * l(x2)</code></pre>
+        <p>
+            x 的最大值显然就是 x1 的最大值和 x2 的最大值中较大的那个；知道了新的最大值，前半部分算好的 f 只要乘一个已知的系数就能修正。Kayvon 说这十分钟的数学不指望实时跟上，要点是：只要维护一个运行中的最大值和和，softmax 就能分块计算，于是能融合穿过整个过程。
+        </p>
+
+        <h3>融合的注意力</h3>
+        <pre><code>// Q: N x d, K^T: d x N, V: N x d, O = PV: N x d
+for each j:          // blocks of K^T and V
+    for each i:      // blocks of Q and O
+        load block Q_i, KT_j, V_j, O_i
+        compute S_ij = Q_i * KT_j
+        compute M_ij = m(S_ij), P_ij = f(S_ij), l_ij = l(S_ij)   // all functions operate row-wise on row-vectors
+        multiply P_ij * V_j and accumulate into O_i with appropriate scalings</code></pre>
+        <ul>
+            <li>省内存占用：从不物化 N² 的矩阵。</li>
+            <li>省内存带宽（高算术强度）：读 3 个块（来自 Q、K、V），做两次矩阵乘法加几次行求和，累加进留在缓存里的 O 块。</li>
+            <li>注意比原版多了一些计算：i 循环的每一步都要重新缩放 O 之前的值。</li>
+        </ul>
+        <p>
+            内存需求从 N² 降到块大小的平方，GPU 片上能放下多得多的数据，能跑长得多的序列；在受带宽限制的情况下也跑得更快。Kayvon 说速度提升不大，几个小常数倍；内存占用的改善巨大，让序列长度从 8000 走到 32000 这样的量级，他相信 GPT-4 就得益于这类优化。这是典型的生产者消费者局部性优化。编译器很难做出"这样可行"的数学分析，但有人做到了；一旦知道怎样把 softmax 分块，剩下的就相当于重排几个循环，却是很大的变化。
+        </p>
+        <p>
+            结论：两样都需要。需要卷积层和矩阵乘法的出色实现，也需要足够聪明，不让网络里其他受带宽限制的部分拖慢一切。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、低精度和优化技术小结</h2>
+        <p>
+            另一个技巧：用低精度值。很多工作在 DNN 权重和中间激活上用低精度，16 位和 8 位很常见，极端情况是 1 位 ;-)。Kayvon 说 NVIDIA GPU 现在已经开始折腾 4 位精度的数学了。
+        </p>
+        <ul>
+            <li>更好的算法：手工设计更好的机器学习模型，常见的参数有网络深度、滤波器宽度、每层滤波器数、卷积步长等；也常常自动搜索高效的拓扑。如果系统人员无视算法创新，就会被甩在后面，很多初创公司因为只看到"什么都越来越大"的曲线而落后了，Kayvon 认为那样想很蠢。</li>
+            <li>软件优化：好好调度性能关键的操作，循环分块（tiling）、融合。通常由人手工优化（也有大量研究在自动化调度）。</li>
+            <li>近似的形式：压缩模型。更低的比特精度；自动稀疏化、剪枝（今天没讲）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>十、硬件：GPU 的好与不够好</h2>
+        <h3>为什么 GPU 可能是执行 DNN 的好平台？</h3>
+        <p>
+            考虑算术强度、SIMD、数据并行、内存带宽需求。同学们答：海量并行，这些是巨大的矩阵乘法；计算量大，算术强度高（只要排序方式做对），所以能用上所有计算；同样的权重作用于每个输入，很适合 SIMD。GPU 本来就为图形塞满了 ALU，十年前恰好在对的时间站在对的位置上。所以大家都爱 GPU。
+        </p>
+        <ul>
+            <li>高算术强度的计算（计算特征类似稠密矩阵乘矩阵）；</li>
+            <li>受益于浮点运算丰富的 GPU 架构；</li>
+            <li>有为 GPU 高度优化的内核库（cuDNN）。</li>
+        </ul>
+
+        <h3>为什么 GPU 可能不是最优的平台？</h3>
+        <p>
+            提示：需要通用处理器吗？GPU 是任意的通用处理器，而大部分工作是很简单的矩阵乘法，也许是矩阵乘向量。架构师为什么在处理器里放 SIMD 指令？为了把非数学的工作（指令流控制、数据访问等）分摊到同一个操作上。不必止于 SIMD 指令：
+        </p>
+        <ul>
+            <li>融合乘加（ax + b）；</li>
+            <li>4 分量点积 x = A dot B；</li>
+            <li>4×4 矩阵乘法：4×4 矩阵 A、B、C 的 AB + C。我知道怎样把大矩阵乘法分解成这种小矩阵乘法，所以会用它。</li>
+            <li>关键原则：把指令流处理的代价分摊到一条复杂指令的很多个操作上。</li>
+        </ul>
+
+        <h3>能效估计</h3>
+        <p>
+            可编程性（指令流、控制等）的估计开销（Bill Dally 用学术数据估计，SysML 演讲，2018 年 2 月）：
+        </p>
+        <ul>
+            <li>半精度 FMA（融合乘加）：2000%；</li>
+            <li>半精度 DP4（4 维向量点积）：500%；</li>
+            <li>半精度 4×4 MMA（矩阵乘加）：27%。</li>
+        </ul>
+        <p>
+            Kayvon 提醒这是 NVIDIA 的估计，它有让自己看起来不比 TPU 差的利益。意思是：在 NVIDIA 处理器上只用加法和乘法做矩阵乘法，比为它定制的硅片能效低很多倍；用 4 分量点积这样稍大的操作，差距小很多；给自己一条做 4×4 矩阵乘法的指令（一条指令 64 次运算），只比定制硬件差约 30%（课件写 27%）。
+        </p>
+
+        <h3>Ampere GPU 的 SM（A100）</h3>
+        <ul>
+            <li>每个 SM 核有：64 个 fp32 ALU（乘加）；32 个 int32 ALU；4 个"Tensor Core"，执行 8×4 × 4×8 的矩阵乘加指令：A × B + C，A、B 以 fp16 存储，用 fp32 的 C 累加。一条指令完成 2×8×4×8 次 FP16 运算加 8×8 次 TF32 运算。</li>
+            <li>GA100 GPU 有 108 个 SM 核：6912 个 fp32 乘加 ALU，432 个 Tensor Core，最高 1.4 GHz。</li>
+            <li>fp32 19.5 TFLOPS，Tensor Core 另有 312 TFLOPS（fp16/32 混合精度）。</li>
+        </ul>
+        <p>
+            Tensor Core 是个花哨的市场名字，其实就是对一条做小矩阵乘法的特殊指令的支持。如果数学能用矩阵乘法表达、能用 16 位浮点做，就能拿到 300 多 TFLOPS，比 CUDA 核心多一个数量级以上的峰值算力，而这些 ALU 只能做矩阵乘矩阵。这是 NVIDIA 对 TPU 等加速器的回应。
+        </p>
+
+        <h3>最大化效率：DNN 推理和训练的硬件加速</h3>
+        <p>
+            Google TPU3、华为麒麟 NPU、Apple Neural Engine、GraphCore IPU、带 Tensor Core 的 Ampere GPU、Intel 深度学习推理加速器、Cerebras 晶圆级引擎、SambaNova Cardinal SN10。专用硬件一讲再细讲。
+        </p>
+        <p>
+            Kayvon 的总结：这是现代网络优化的速成课，希望能帮大家在横跨多个领域的解决方案里找准位置：算法的人在贡献，软件、编译器、CS149 的人在贡献，硬件的人也在贡献，这是一个非常有意思的交叉领域。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS149: Parallel Computing &copy; Fall 2023</p>
+        <nav class="footer-nav">
+            <a href="09_Spark.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="11_缓存一致性.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

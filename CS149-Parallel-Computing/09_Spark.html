@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第九讲：Spark，集群上的分布式计算 | Stanford CS149 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="08_数据并行思维.html">&larr; 上一讲</a>
+    <span>Stanford CS149: Lecture 9</span>
+    <a href="10_GPU上的DNN.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第九讲：Spark，集群上的分布式计算</h1>
+        <p class="subtitle">为什么要用集群：I/O 带宽；仓库级计算机的结构和各级带宽；消息传递；分布式文件系统 GFS / HDFS；MapReduce 编程模型和它的实现：map 任务分配、按键分组、调度器怎样处理局部性、故障和慢节点；MapReduce 的局限；Spark：内存中的容错计算，RDD、变换和动作、血缘（lineage）、persist；RDD 怎样实现：窄依赖与融合、宽依赖、partitionBy，用血缘实现容错；Spark 的性能和"COST"的提醒</p>
+        <div class="author-meta">
+            主讲：Kunle Olukotun<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=jaMWmLq422U" target="_blank">课堂录像</a>（Stanford Online，2023 年秋季）、<a href="https://gfxcourses.stanford.edu/cs149/fall23/lecture/spark/" target="_blank">课件</a>；本讲课上讲到窄依赖与宽依赖为止，余下内容 Kunle 在第十一讲开头补完，这里按课件整理在一起
+        </div>
+    </header>
+
+    <section>
+        <h2>一、今天的主题</h2>
+        <p>
+            到目前为止，大家花了很多时间优化单核、多核加 SIMD 单元的单芯片上的性能（ISPC、线程编程），想过怎样用 CUDA 写几十万个线程的数据并行程序，也讲了怎样用数据并行的思路产生 GPU 需要的大量线程。今天想的是：怎样用数据并行编程的思路来编写<strong>分布式计算机</strong>，也就是由多个独立的操作系统实例组成的计算机。主要的编程模型是 Spark。
+        </p>
+        <ul>
+            <li>怎样为一万到十万个核编程？</li>
+            <li>系统的某个部件发生故障时，怎样保证不丢数据？分布式计算在这里主要用于数据处理，丢数据就失败了。</li>
+            <li>编程模型：数据并行操作（比如 map 和 reduce）。</li>
+            <li>让数据并行操作：可扩展（十万个核）；容错（出故障时不丢数据）；高效（高效利用内存来优化系统性能，内存是决定性能的关键部件）。</li>
+        </ul>
+
+        <h3>为什么要用集群？</h3>
+        <ul>
+            <li>想处理 100 TB 的日志数据（Facebook 一天的量）。</li>
+            <li>一个节点上以 50 MB/s 扫描：23 天。性能受限于 I/O 速率，即到磁盘的带宽。</li>
+            <li>1000 个节点上以 50 MB/s 扫描：33 分钟。存储系统的带宽提高了 1000 倍。</li>
+            <li>但要利用好一千个甚至十万个节点非常难：给一万六千个核编程很难；每小时就有东西坏掉（即使单台服务器的平均无故障时间是 25 年，一千台放在一起，每小时坏一台）；需要高效、可靠、好用的框架。</li>
+        </ul>
+        <p>
+            Kunle 指出，之前讲了计算、讲了内存，还没讲 I/O。用集群的一个很大原因就是获得 I/O 带宽。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、仓库级计算机</h2>
+        <p>
+            集群的思路后来被提升为"仓库级计算机"（warehouse-scale computers, WSC），它们是 Google、Facebook、Amazon 等大网站背后的计算基础设施，巨大的数据仓库里一排排机架上的计算机联网，组成一个计算环境。开创者是 Luiz Barroso，他提出把由几十万台计算机组成的整个仓库看成一台可以统一优化的计算机：一起考虑网络、供电、冷却和编程模型。Kunle 说 Barroso 是很出色的计算机架构师，最近去世了，是他的好朋友；推荐他的书《The Datacenter as a Computer》，是设计这类系统的很好入门。
+        </p>
+        <ul>
+            <li>标准架构：普通 Linux 节点（多核 x86）组成的集群；私有内存，所以是分开的地址空间、分开的操作系统；以太网，如今 10 到 40 Gb 以上。</li>
+            <li>便宜吗？用普通商用处理器、网络和存储搭建，几千个节点不到一千万美元。这个想法 2000 年代初刚出现时，人人桌上都有台 PC，联网起来就是大型可扩展计算机，比科学计算用的大型高性能计算机便宜。但后来 Google、Yahoo、Facebook 的人发现，集群和超级计算机最大的区别在网络，高带宽网络能大大简化应用开发。于是 WSC 的网络是定制的、昂贵的，借用了超级计算机的网络思路，在整个数据中心提供高带宽，WSC 的成本也逐渐接近超级计算机。</li>
+            <li>怎样在这种架构上组织计算？要屏蔽负载均衡、故障这类问题。</li>
+        </ul>
+
+        <h3>仓库级集群的节点（服务器）</h3>
+        <ul>
+            <li>每个机架顶部有一个机架顶交换机（top-of-rack switch），是通往其他机架的网络接口。</li>
+            <li>机架里放 20 到 40 台服务器，能放多少取决于能给机架供多少电（12 到 20 千瓦），取决于数据中心的基础设施。如今机器学习的机架里有 GPU，能放的计算机就少得多，GPU 很耗电。</li>
+            <li>同一机架内节点之间 1 到 2 GB/s；机架之间早期约 0.1 GB/s，如今可达 2 GB/s。</li>
+            <li>一个节点：可能是双路系统，两颗 CPU 芯片，每颗 16 到 32 核；DRAM 128 GB 到 1 TB（Kunle 课上说可到 2 TB），内存带宽约 100 GB/s（课上说 100 到 200 GB/s）；SSD 10 到 30 TB，带宽 1 到 4 GB/s；另一个 I/O 接口是网络。</li>
+        </ul>
+        <p>
+            节点和服务器是一个意思：一台运行操作系统的计算机。所有节点各自运行独立的操作系统。
+        </p>
+        <p>
+            课件问：出现了哪些新的系统部件？同学答：网络和固态存储，这两个 I/O 部件。看各处带宽能得出什么结论？
+        </p>
+        <ul>
+            <li>网络是主要瓶颈，尤其早期机架之间只有 0.1 GB/s，大约是访问本地磁盘带宽的十分之一。</li>
+            <li>内存带宽和网络、磁盘带宽相差两个数量级。</li>
+            <li>WSC 后来认真对待网络，带宽到了 2 GB/s 左右，差不多就是固态盘的带宽。这时从另一个节点的磁盘取数据，可能和从本地磁盘取一样快。早期 0.1 GB/s 时当然不是这样。</li>
+        </ul>
+
+        <h3>消息传递</h3>
+        <p>
+            节点各自运行不同的操作系统，能共享内存吗？不能，它们根本不碰同一个地址空间。所以需要另一种通信机制：消息传递（第六讲讲过），像给朋友寄信、递纸条。线程在自己的地址空间里有变量 X，用 send 把它发给不共享地址空间的另一个线程，给出 X 的地址、接收的线程、可选的消息 ID；消息走网络到达对方，对方的线程调用 receive，把消息放进自己地址空间的变量 Y。同一节点上的不同地址空间之间也能做消息传递，但这里假设走网络。
+        </p>
+        <p>
+            有消息传递还需要同步吗？有人点头有人摇头。说要的同学担心等一个永远不会到达的消息，会死锁。确实可能死锁，但不需要<em>显式</em>的同步，发消息这个动作本身就是同步。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、存储系统</h2>
+        <p>
+            第一个问题：节点会坏，怎样持久地存数据？可能有几十万个部件，可能坏掉一个节点，也可能因为机架顶网络坏了丢掉整个机架。答案：<strong>分布式文件系统</strong>。
+        </p>
+        <ul>
+            <li>提供全局的文件命名空间。</li>
+            <li>Google 首创了 GFS（Google File System），开源版本是 Hadoop 分布式文件系统 HDFS。</li>
+            <li>典型使用模式：巨大的文件（几百 GB 到 TB，Kunle 说可能几十上百 TB）；数据很少原地更新；读和追加最常见（比如日志文件，新条目产生就追加到日志末尾）。</li>
+        </ul>
+
+        <h3>GFS 的结构</h3>
+        <ul>
+            <li>块服务器（chunk server，HDFS 里叫 DataNode）：文件被切成连续的块（通常 64 到 256 MB）；每块复制（通常 2 份或 3 份）；尽量把副本放在不同机架上，这样丢了一个机架顶交换机也不会丢数据。</li>
+            <li>主节点（master node，HDFS 里叫 NameNode）：存元数据，即所有副本在哪儿的目录；通常也会复制。</li>
+            <li>访问文件的客户端库：先和主节点通信，找到数据块在哪些块服务器上；再直接连到块服务器访问数据。</li>
+        </ul>
+        <p>
+            HDFS：全局命名空间；文件分成块，通常每块 256 MB，每块复制到多个 DataNode；"聪明的客户端"：客户端从 NameNode 找到块的位置，直接从 DataNode 访问数据。读的客户端从某个副本取数据；写的客户端要更新所有副本。
+        </p>
+        <p>
+            课上问答：多个客户端同时写怎么保证一致？通常在应用层保证只有一个客户端在写。主节点只有一个吗？只有一个（可能复制），单个节点出故障的概率不高，问题出在几千个节点时；也可能为了承担负载、为了有备份而复制。存两三份副本，意味着整个集群存储只有一半或三分之一可用吗？是的。这和 FAT 文件分配表那种"先查地址表再去找文件"很像吗？像，只是分布式的。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、MapReduce</h2>
+        <p>
+            假设 CS149 变得更火了，学 CS 的人和外系的人都想学并行计算，课程网站页面访问量巨大。这是课程网站的页面访问日志，日志变得很大。假设 cs149log.txt 是存在 HDFS 这类分布式文件系统里的大文件：一个 4 节点的集群，每个节点有一块 10 TB SSD，日志切成 256 MB 的块，共 8 块，均匀分布在集群上（每节点 2 块）。
+        </p>
+        <p>
+            教授们想多了解一点这么多来访的学生，比如"这些学生都在用什么手机？"（现在谁还用别的设备上网呢）。可以用消息传递写这个应用，有个 API 叫 MPI（Message Passing Interface），有 send、receive 和所谓集合操作。有兴趣可以去看，但相信我，会很痛苦；而且它不一定处理容错。分布式文件系统保证数据进了文件系统就不会丢，但计算中途丢了一个节点，内存里的数据就没了，MPI 帮不上忙。
+        </p>
+
+        <h3>回到 map 和 reduce</h3>
+        <p>
+            map 把类型 a 的序列变成类型 b 的序列，对输入的每个元素生成输出的一个元素。map 有两点重要：一是容易并行，元素之间没有依赖，可以按任何顺序生成输出；二是没有副作用，不修改输入，所以可以在同一数据上一遍遍重跑。函数式编程模型的关键就是不修改输入，由此有了无副作用等好性质，对容错大有好处。reduce 用一个归约函数把类型 a 的序列变成一个类型 b 的值：<code>f :: (b,a) -&gt; b</code>，<code>reduce :: ((b,a) -&gt; b) -&gt; seq a -&gt; b</code>，比如 reduce + 作用于 [3, 8, 4, 6, 3, 9, 2, 8] 得到 43。
+        </p>
+
+        <h3>MapReduce 编程模型</h3>
+        <pre><code>// called once per line in input file by runtime
+// input: string (line of input file)
+// output: adds (user_agent, 1) entry to list
+void mapper(string line, multimap&lt;string,string&gt;&amp; results) {
+    string user_agent = parse_requester_user_agent(line);
+    if (is_mobile_client(user_agent))
+        results.add(user_agent, 1);
+}
+
+// called once per unique key (user_agent) in results
+// values is a list of values associated with the given key
+void reducer(string key, list&lt;string&gt; values, int&amp; result) {
+    int sum = 0;
+    for (v in values)
+        sum += v;
+    result = sum;
+}
+
+// iterator over lines of text file
+LineByLineReader input("hdfs://cs149log.txt");
+
+// stores output
+Writer output("hdfs://...");
+
+// do stuff
+runMapReduceJob(mapper, reducer, input, output);</code></pre>
+        <p>
+            这段代码统计每种手机的页面访问次数。mapper 对日志的每一行调用一次，解析这一行，判断是否来自移动客户端，是的话在结果映射里加一个键值对 (user_agent, 1)。reducer 对每个唯一的键调用一次，拿到这个键的所有值，加起来得到结果。输入从分布式文件系统读，输出写回分布式文件系统。有同学问 mapper 往 results 里加东西，不是在修改输入吗？可以把 results 看作 MapReduce 内部的东西，API 的输入是交给 runMapReduceJob 的数据，它没有被修改。
+        </p>
+
+        <h3>实现 runMapReduceJob</h3>
+        <p>
+            经典的 MapReduce 入门例子：词频统计。输入块 "the quick brown fox"、"the fox ate the mouse"、"how now brown cow"，每块一个 map 任务，读块里的行，为找到的每个词产生键值对 (词, 1)；两个 reduce 任务，最后得到 brown 2、fox 2、how 1、now 1、the 3、ate 1、cow 1、mouse 1、quick 1。数据流是 Input → Map → GroupByKey → Reduce → Output。课件说它应该叫 MapGroupByKeyReduce。
+        </p>
+        <p>
+            map 任务的并行很明显，来自各个输入块。reduce 任务的并行从哪来？把一些键分给每个 reduce 任务。有同学指出：随便给一个 reduce 函数，怎么知道能拆开做还得到一样的结果？要求 reducer 满足结合律，这是 MapReduce 想并行时的一个局限。那要并行，必须保证什么？同学答：同一个键的所有值都要到同一个 reduce 任务。所以 MapReduce 实际上是 map、按键分组、reduce，中间有一次大的排序或"洗牌"（shuffle），map 任务和 reduce 任务之间可能有大量通信。
+        </p>
+
+        <h3>第 1 步：运行 mapper</h3>
+        <p>
+            对文件的所有行运行 mapper。怎样把工作分给节点？
+        </p>
+        <ul>
+            <li>想法 1：用工作队列存放要处理的输入块列表，动态分配，空闲的节点取下一个可用的块。同学提出的：让一个节点当主节点，所有任务在那里排队，其他节点发消息要下一个任务。网络很强时可行，负载均衡也好。</li>
+            <li>想法 2：按数据分布分配，每个节点处理本地存储的输入块里的行。MapReduce 早期网络带宽比本地磁盘低得多，最先提出的就是这个。</li>
+        </ul>
+
+        <h3>第 2、3 步：准备中间数据，运行 reducer</h3>
+        <p>
+            mapper 产生了一批要归约的键（Safari iOS、Chrome、Safari iWatch、Chrome Glass……），每个节点上都有各个键的一部分值。两个问题：怎样分配 reducer 任务？怎样把一个键的所有数据送到正确的 reduce worker 节点？
+        </p>
+        <ul>
+            <li>分配：有一组节点做 reducer 节点，由调度器分配任务，比如看哪些节点空闲。</li>
+            <li>送数据：同学提出用键的哈希函数做分区器，把这个信息告诉 mapper 节点，它们就知道该把每个键的数据送到哪里。例子：把 Safari iOS 分给节点 0。</li>
+        </ul>
+        <pre><code>// gather all input data for key, then execute reducer
+// to produce final result
+void runReducer(string key, reducer, result) {
+    list&lt;string&gt; inputs;
+    for (n in nodes) {
+        filename = get_filename(key, n);
+        read lines of filename, append into inputs;
+    }
+    reducer(key, inputs, result);
+}</code></pre>
+        <p>
+            不同系统做法不同：有的事先决定，mapper 声明自己有哪些键值对时就知道送往哪里；有的等所有 mapper 任务完成后再决定。所有 map 任务完成前不能做任何归约，所以 map 和 reduce 之间有一道屏障。有同学说如果 Safari 的值大部分在节点 1，放在那里更高效。可以想象一个考虑局部性的调度机制：把 reducer 任务放在已有大部分键值对的地方，减少数据移动；网络很强的话可能无所谓。
+        </p>
+
+        <h3>规模上的其他实现挑战</h3>
+        <ul>
+            <li>节点可能在程序执行中途故障。文件系统容错，数据不会丢，但需要恢复计算、保证计算成功完成。</li>
+            <li>有些节点可能比别的慢（工作量不同、集群不同质等）。大数据中心不会所有节点都同一代，三到五年里陆续更新，有核少、频率低的旧节点，也有核多、频率高的新节点。</li>
+        </ul>
+
+        <h3>作业调度器的职责</h3>
+        <ul>
+            <li>利用数据局部性，"把计算移到数据那里"：在含有输入块的节点上运行 mapper 任务；在已经有某个键大部分数据的节点上运行 reducer 任务。</li>
+            <li>处理节点故障：调度器检测到任务失败，就在新机器上重跑。每个节点定期给做调度的主节点发心跳"我还活着"，心跳没了就宣布它死亡。这之所以可行，是因为输入存放在持久存储（分布式文件系统）里：mapper 节点坏了，就到别处启动它的任务，数据来自系统里复制过的块；函数式数据并行模型保证输入不被修改，所以这样做是安全的。reducer 坏了：如果 reduce 任务已经完成，无所谓；如果在中途，要重启，重新去文件系统取存好的键值对。调度器还会在多台机器上复制任务，减少节点故障带来的整体处理延迟。</li>
+            <li>处理慢机器：调度器在多台机器上复制任务。一台机器太慢，就再启动一个任务，然后比赛：慢机器先完成就用它的结果、杀掉复制的任务；复制的先完成就杀掉慢的。</li>
+        </ul>
+        <p>
+            有同学问能不能用元数据或启发式避免浪费的计算，比如知道哪台机器一般较慢。可以，但调度器更复杂，要跟踪机器的年代、负载等。作业调度器坏了呢？那就倒霉了；单个节点坏的几率不高，也可以复制它。
+        </p>
+
+        <h3>MapReduce 的好处</h3>
+        <p>
+            提供数据并行模型，MapReduce 大大简化了集群编程：
+        </p>
+        <ul>
+            <li>自动把作业拆分成任务；</li>
+            <li>考虑局部性的调度；</li>
+            <li>负载均衡（很多 map 任务和 reduce 任务）；</li>
+            <li>从故障和掉队者（straggler）中恢复。</li>
+        </ul>
+        <p>
+            Kunle 说他能向大多数 CS 本科生讲清楚 MapReduce，大家马上就懂；讲消息传递就费劲多了。它让很多人能为几十万个 CPU 写数据处理程序，影响很大，用途甚至超出分布式计算，GPU 计算里也见过它。但故事没有到此结束！
+        </p>
+
+        <h3>runMapReduceJob 的问题</h3>
+        <ul>
+            <li>只允许很简单的程序结构：程序必须是 map 后接按键 reduce，再 map、再 reduce，这种线性排列限制了能写的应用。推广到有向无环图的工作是 DryadLINQ，学术上有些影响，但据 Kunle 所知没怎么被采用，论文很有意思。</li>
+            <li>迭代算法每轮都要从磁盘装数据。例子是图处理，PageRank（Larry Page 发明，用来评估网站的重要性）：</li>
+        </ul>
+        <pre><code>void pagerank_mapper(graphnode n, map&lt;string,string&gt; results) {
+    float val = compute update value for n
+    for (dst in outgoing links from n)
+        results.add(dst.node, val);
+}
+
+void pagerank_reducer(graphnode n, list&lt;float&gt; values, float&amp; result) {
+    float sum = 0.0;
+    for (v in values)
+        sum += v;
+    result = sum;
+}
+
+for (i = 0 to NUM_ITERATIONS) {
+    input = load graph from last iteration
+    output = file for this iteration output
+    runMapReduceJob(pagerank_mapper, pagerank_reducer, result[i-1], result[i]);
+}</code></pre>
+        <p>
+            每一轮都是一次 HDFS 读、一次 HDFS 写，迭代很多轮就很低效。
+        </p>
+
+        <h3>MapReduce 的局限</h3>
+        <p>
+            MapReduce 大大简化了"大数据"分析，但用户很快需要更多：更复杂的多阶段应用（比如迭代的机器学习和图处理）；更多交互式的即席查询，同一份数据上一连串查询，每个都要访问文件系统。
+        </p>
+        <p>
+            回到带宽那张图：要更充分地利用图中带宽最高的接口，也就是内存。进一步的动机：2009 年的应用趋势，尽管数据量巨大，大数据集群里很多工作集能放进内存。论文《Disk-Locality in Datacenter Computing Considered Irrelevant》（Ananthanarayanan 等，HotOS 2011）的表：
+        </p>
+        <table>
+            <thead>
+                <tr><th>内存（GB）</th><th>Facebook（作业 %）</th><th>Microsoft（作业 %）</th><th>Yahoo!（作业 %）</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>8</td><td>69</td><td>38</td><td>66</td></tr>
+                <tr><td>16</td><td>74</td><td>51</td><td>81</td></tr>
+                <tr><td>32</td><td>96</td><td>82</td><td>97.5</td></tr>
+                <tr><td>64</td><td>97</td><td>98</td><td>99.5</td></tr>
+                <tr><td>128</td><td>98.8</td><td>99.4</td><td>99.8</td></tr>
+                <tr><td>192</td><td>99.5</td><td>100</td><td>100</td></tr>
+                <tr><td>256</td><td>99.6</td><td>100</td><td>100</td></tr>
+            </tbody>
+        </table>
+        <p>
+            64 GB 内存就能容纳 Facebook 97%、Microsoft 98%、Yahoo 99.5% 作业的工作集。磁盘局部性被认为无关紧要，一方面因为网络带宽越来越高，另一方面就是这张表。内存够大，编程模型却迫使你把数据在存储设备和内存之间来回搬。工作集指的是你正在频繁使用的那部分数据（操作系统课里的概念），大多数访问落在内存里，不是全部，仍有一些数据要从别处搬。用内存而不是存储系统保存计算的中间数据，问题在哪？同学说：断电就完了，计算就丢了。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、Spark：内存中的容错分布式计算</h2>
+        <p>
+            Apache Spark（spark.apache.org）[Zaharia 等，NSDI 2012]：内存中的、容错的分布式计算，重点在容错。断电时不想全完。
+        </p>
+        <h3>目标</h3>
+        <ul>
+            <li>为中间数据集有大量重用的集群级计算提供编程模型：迭代的机器学习和图算法；交互式数据挖掘，把大数据集装进集群的总内存，再做多次即席查询。</li>
+            <li>不想承担把中间结果写进持久的分布式文件系统的低效（想留在内存里），那是低带宽、低性能的数据通路，要充分利用 CPU 和内存之间高性能、高带宽的通路。挑战：为大规模分布式内存计算高效地实现容错。</li>
+        </ul>
+
+        <h3>内存计算的容错</h3>
+        <ul>
+            <li>复制所有计算：昂贵的方案，降低峰值吞吐量。</li>
+            <li>检查点和回滚：定期把程序状态存到持久存储，节点故障时从最近的检查点重启。但要分布到不同机架，可能很耗网络。</li>
+            <li>维护更新日志（命令和数据）：维护日志的开销很大。</li>
+        </ul>
+        <p>
+            回忆 MapReduce 的解法：每个 map/reduce 步骤后把结果写进文件系统，相当于检查点；调度器的未完成任务列表就是日志；程序的函数式结构允许以单个 mapper 或 reducer 调用为粒度重启，不用重启整个程序。但这是低性能的方案，Spark 想要依赖内存的高性能方案。
+        </p>
+
+        <h3>弹性分布式数据集（RDD）</h3>
+        <p>
+            Spark 的关键编程抽象：
+        </p>
+        <ul>
+            <li>只读的、有序的记录集合（不可变）。它天然是函数式的，想想函数式编程，RDD 是很自然的结构。</li>
+            <li>RDD 只能由对持久存储中数据、或对已有 RDD 的确定性变换创建。</li>
+            <li>对 RDD 的动作（action）把数据返回给应用。</li>
+        </ul>
+        <pre><code>// create RDD from file system data
+val lines = spark.textFile("hdfs://cs149log.txt");
+
+// create RDD using filter() transformation on lines
+val mobileViews = lines.filter((x: String) =&gt; isMobileClient(x));
+
+// another filter() transformation
+val safariViews = mobileViews.filter((x: String) =&gt; x.contains("Safari"));
+
+// then count number of elements in RDD via count() action
+val numViews = safariViews.count();</code></pre>
+        <p>
+            从分布式文件系统里的 CS149 日志取出各行，得到 RDD lines，这是从文件系统到 RDD 的变换；对 lines 用 filter 变换判断是否移动客户端，得到 mobileViews；再过滤是否含 Safari，得到 safariViews；最后对 safariViews 执行动作 count，这是一个归约，得到一个 int，不是 RDD。RDD 是 lines、mobileViews、safariViews。用 Spark 编程主要就是这样：从文件系统里的数据开始，用变换得到不同的 RDD 来表达程序逻辑。只读、有序、不可变，这些性质在构建容错系统时非常有用。
+        </p>
+
+        <h3>用 Spark 重写 MapReduce 的例子</h3>
+        <pre><code>// 1. create RDD from file system data
+// 2. create RDD with only lines from mobile clients
+// 3. create RDD with elements of type (String,Int) from line string
+// 4. group elements by key
+// 5. call provided reduction function on all keys to count views
+val perAgentCounts = spark.textFile("hdfs://cs149log.txt")
+                          .filter(x =&gt; isMobileClient(x))
+                          .map(x =&gt; (parseUserAgent(x),1))
+                          .reduceByKey((x,y) =&gt; x+y)
+                          .collect();</code></pre>
+        <p>
+            用 Scala 可以写得很函数式，不必显式给每个 RDD 起名。结果是 Array[String,int]。"<strong>血缘</strong>"（lineage）：计算输出所需的 RDD 操作序列。这里的操作是 filter、map、reduceByKey，collect 是动作不是变换。
+        </p>
+
+        <h3>另一个 Spark 程序：persist</h3>
+        <pre><code>// create RDD from file system data
+val lines = spark.textFile("hdfs://cs149log.txt");
+
+// create RDD using filter() transformation on lines
+val mobileViews = lines.filter((x: String) =&gt; isMobileClient(x));
+
+// instruct Spark runtime to try to keep mobileViews in memory
+mobileViews.persist();
+
+// create a new RDD by filtering mobileViews
+// then count number of elements in new RDD via count() action
+val numViews = mobileViews.filter(_.contains("Safari")).count();
+
+// 1. create new RDD by filtering only Chrome views
+// 2. for each element, split string and take timestamp of
+//    page view
+// 3. convert RDD to a scalar sequence (collect() action)
+val timestamps = mobileViews.filter(_.contains("Chrome"))
+                            .map(_.split(" ")(0))
+                            .collect();</code></pre>
+        <p>
+            mobileViews 用了两次：一次过滤 Chrome，取出各行的时间戳；一次过滤 Safari，数页面访问次数。persist 说"把这个 RDD 留在内存里"。有同学问为什么要显式 persist：不 persist 的话，mobileViews 可能被写到文件系统，算完一边再算另一边时还得取回来，很低效。哪些 RDD 留在内存？可以显式说明，调度器也会做一些决定。Spark 能不能自己看出 mobileViews 被用了两次而留在内存？有时要帮系统一把，有时系统能自己分析，Spark 运行时会做一些分析和优化。
+        </p>
+
+        <h3>RDD 的变换和动作</h3>
+        <ul>
+            <li>变换（数据并行算子，把输入 RDD 变成新 RDD）：课上提到 map、filter、flatMap、sample、reduceByKey、join、sort、partitionBy，前面还用过 groupByKey。</li>
+            <li>动作（把数据交回"host"应用）：count、collect、reduce、lookup、save。</li>
+        </ul>
+        <p>
+            用这些操作能写出很复杂的应用。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、RDD 怎样实现？</h2>
+        <pre><code>val lines = spark.textFile("hdfs://cs149log.txt");
+val lower = lines.map(_.toLower());
+val mobileViews = lower.filter(x =&gt; isMobileClient(x));
+val howMany = mobileViews.count();</code></pre>
+        <p>
+            特别是，RDD 应该怎样存储？该把 RDD 想成数组吗？lines、lower、mobileViews 是 RDD，howMany 不是。它们分区存放在各节点上，假设每节点两个分区：lines 的分区产生 lower 的分区，再产生 mobileViews 的分区。如果当作在内存里复制来复制去的数组，内存表示会非常大，比磁盘上的原文件还大！并行性能 = 并行 + 局部性。
+        </p>
+        <p>
+            同学的想法：用完的分区就不留，比如算完 lower 就不需要 lines 了。Kunle 说这是好的第一步，但可以做得更好。另一个想法：只用一个总数组，每次 filter 只改元素的引用。效率上不想让引用满天飞，希望数据连续、稠密。
+        </p>
+
+        <h3>RDD 的分区和依赖</h3>
+        <p>
+            依赖从文件系统里的数据出发，经过各 RDD 的各分区：block 0、1 经 load() 成为 lines 的 part 0、1，经 map() 成为 lower 的 part 0、1，经 filter() 成为 mobileViews 的 part 0、1（比如 1000 个元素过滤后剩 670 个、212 个）。图上的黑线表示 RDD 分区之间的依赖。利用这些依赖能不能优化 RDD 的实现？
+        </p>
+
+        <h3>回顾：融合和分块</h3>
+        <p>
+            回顾第六讲：程序 2（融合后的 E = D + (A + B) * C）比程序 1（三次 add/mul 库调用）好，因为减少了内存读写，提高了算术强度。把程序 1 变成程序 2 叫"<strong>循环融合</strong>"。
+        </p>
+        <pre><code>// Program 1: blur horizontally into a full-size tmp_buf, then vertically
+int WIDTH = 1024;
+int HEIGHT = 1024;
+float input[(WIDTH+2) * (HEIGHT+2)];
+float tmp_buf[WIDTH * (HEIGHT+2)];
+float output[WIDTH * HEIGHT];
+float weights[] = {1.0/3, 1.0/3, 1.0/3};
+
+// blur image horizontally
+for (int j = 0; j &lt; (HEIGHT+2); j++)
+    for (int i = 0; i &lt; WIDTH; i++) {
+        float tmp = 0.f;
+        for (int ii = 0; ii &lt; 3; ii++)
+            tmp += input[j*(WIDTH+2) + i+ii] * weights[ii];
+        tmp_buf[j*WIDTH + i] = tmp;
+    }
+
+// blur tmp_buf vertically
+for (int j = 0; j &lt; HEIGHT; j++) {
+    for (int i = 0; i &lt; WIDTH; i++) {
+        float tmp = 0.f;
+        for (int jj = 0; jj &lt; 3; jj++)
+            tmp += tmp_buf[(j+jj)*WIDTH + i] * weights[jj];
+        output[j*WIDTH + i] = tmp;
+    }
+}</code></pre>
+        <pre><code>// Program 2: process the image in chunks of rows; tmp_buf holds only CHUNK_SIZE+2 rows
+float tmp_buf[WIDTH * (CHUNK_SIZE+2)];
+
+for (int j = 0; j &lt; HEIGHT; j += CHUNK_SIZE) {
+    // blur region of image horizontally
+    for (int j2 = 0; j2 &lt; CHUNK_SIZE+2; j2++)
+        for (int i = 0; i &lt; WIDTH; i++) {
+            float tmp = 0.f;
+            for (int ii = 0; ii &lt; 3; ii++)
+                tmp += input[(j+j2)*(WIDTH+2) + i+ii] * weights[ii];
+            tmp_buf[j2*WIDTH + i] = tmp;
+        }
+
+    // blur tmp_buf vertically
+    for (int j2 = 0; j2 &lt; CHUNK_SIZE; j2++)
+        for (int i = 0; i &lt; WIDTH; i++) {
+            float tmp = 0.f;
+            for (int jj = 0; jj &lt; 3; jj++)
+                tmp += tmp_buf[(j2+jj)*WIDTH + i] * weights[jj];
+            output[(j+j2)*WIDTH + i] = tmp;
+        }
+}</code></pre>
+        <p>
+            （课件程序 2 的外层循环写成 <code>j+CHUNK_SIZE</code>，应为 <code>j += CHUNK_SIZE</code>。）程序 1 的 tmp_buf 是 W×(H+2)，程序 2 只要 W×(CHUNK_SIZE+2)。把程序 1 变成程序 2 叫"<strong>分块</strong>"（tiling），减少了模糊所需的内存。两个例子都是在全局上重构计算顺序，以改善生产者与消费者之间的局部性（提高程序的算术强度）。
+        </p>
+        <p>
+            Kunle 说，在任意的 C 程序上做这些变换很难，通常得程序员自己实现；但如果从 Spark、PyTorch 这种给出更多语义信息的高层表示出发，就能自动做一些。
+        </p>
+
+        <h3>RDD 的融合</h3>
+        <p>
+            为什么 map、filter 这类 RDD 变换能融合，而 groupByKey、sort 这类不能？
+        </p>
+        <p>
+            高效实现一串 RDD 操作。回忆循环融合的例子，上面的 Spark 程序可以变成：
+        </p>
+        <pre><code>int count = 0;
+while (!inputFile.eof()) {   // slide omits the "!"
+    string line = inputFile.readLine();
+    string lower = line.toLower;
+    if (isMobileClient(lower))
+        count++;
+}</code></pre>
+        <p>
+            这段代码内存里只存日志文件的一行，输入数据只从磁盘读一次（"流式"解法）。
+        </p>
+
+        <h3>窄依赖</h3>
+        <p>
+            "窄依赖"：父 RDD 的每个分区最多被一个子 RDD 分区引用。mobileViews 的 part 0 依赖 lower 的 part 0，lower 的 part 0 依赖 lines 的 part 0，lines 的 part 0 依赖 block 0。
+        </p>
+        <ul>
+            <li>允许融合操作（这里可以对一个输入元素一次完成 map 再 filter）。</li>
+            <li>这个例子里集群节点之间没有通信（只在最后为 count() 归约通信一个 int）。</li>
+        </ul>
+
+        <h3>宽依赖</h3>
+        <p>
+            <code>groupByKey: RDD[(K,V)] → RDD[(K,Seq[V])]</code>，"造一个新 RDD，每个元素是一个序列，包含父 RDD 里同一个键的所有值。"RDD_B 的每个分区可能要从 RDD_A 的多个分区取元素。
+        </p>
+        <p>
+            "宽依赖"：父 RDD 的每个分区被多个子 RDD 分区引用。挑战：
+        </p>
+        <ul>
+            <li>必须算完整个 RDD_A 才能算 RDD_B；</li>
+            <li>比如 groupByKey() 可能引起全对全的通信；</li>
+            <li>节点故障时可能触发对祖先血缘的大量重算（下面讲弹性时再说）。</li>
+        </ul>
+
+        <h3>操作的代价取决于分区方式</h3>
+        <p>
+            <code>join: RDD[(K,V)], RDD[(K,W)] → RDD[(K,(V,W))]</code>。例子：RDD_A 里有 ("Kayvon", 1)、("Teguh", 23)、("Randy", 1024)、("Ravi", 32)、("Alex", 50)、("Riya", 9)、("Kunle", 10)、("Junhong", 100)；RDD_B 里有 ("Kayvon", "fizz")、("Teguh", "buzz")、("Randy", "wham")、("Ravi", "pow")、("Alex", "splat")、("Riya", "pop")、("Kunle", "slap")、("Junhong", "bam")；join 得到 ("Kayvon", (1, "fizz")) 等。
+        </p>
+        <ul>
+            <li>RDD_A 和 RDD_B 的哈希分区不同：join 产生宽依赖，结果的每个分区要从两边的多个分区取数据。</li>
+            <li>RDD_A 和 RDD_B 的哈希分区相同（假设两者的数据都按键分区：把用户名哈希到分区号）：join 只产生窄依赖，同一个键在两边落在编号相同的分区里。</li>
+        </ul>
+
+        <h3>partitionBy() 变换</h3>
+        <p>
+            告诉 Spark 怎样给 RDD 分区，比如 HashPartitioner、RangePartitioner。
+        </p>
+        <pre><code>// create RDD from file system data
+val lines = spark.textFile("hdfs://cs149log.txt");
+val clientInfo = spark.textFile("hdfs://clientssupported.txt");  // (useragent, "yes"/"no")
+
+// create RDD using filter() transformation on lines
+val mobileViews = lines.filter(x =&gt; isMobileClient(x)).map(x =&gt; parseUserAgent(x));
+
+// HashPartitioner maps keys to integers
+val partitioner = spark.HashPartitioner(100);
+
+// inform Spark of partition
+// .persist() also instructs Spark to try to keep dataset in memory
+val mobileViewPartitioned = mobileViews.partitionBy(partitioner)
+                                       .persist();
+val clientInfoPartitioned = clientInfo.partitionBy(partitioner)
+                                      .persist();
+
+// join useragents with whether they are supported or not supported
+// Note: this join only creates narrow dependencies due to the explicit partitioning above
+val joined = mobileViewPartitioned.join(clientInfoPartitioned);</code></pre>
+        <ul>
+            <li><code>.persist()</code>：告诉 Spark 这个 RDD 的内容应保留在内存里。</li>
+            <li><code>.persist(RELIABLE)</code>：把内容存到持久存储（像检查点）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>七、用血缘实现弹性</h2>
+        <ul>
+            <li>RDD 变换是批量的、确定性的、函数式的。</li>
+            <li>含义：运行时总能根据血缘（创建它的变换序列）重建 RDD 的内容。</li>
+            <li>血缘就是变换的日志。</li>
+            <li>高效：日志记录的是批量的数据并行操作，日志开销很低（和数据库那样记录细粒度操作相比）。</li>
+        </ul>
+        <pre><code>// create RDD from file system data
+val lines = spark.textFile("hdfs://cs149log.txt");
+
+// create RDD using filter() transformation on lines
+val mobileViews = lines.filter((x: String) =&gt; isMobileClient(x));
+
+// 1. create new RDD by filtering only Chrome views
+// 2. for each element, split string and take timestamp of
+//    page view (first element)
+// 3. convert RDD to a scalar sequence (collect() action)
+val timestamps = mobileViews.filter(_.contains("Chrome"))
+                            .map(_.split(" ")(0));</code></pre>
+        <p>
+            血缘：load(...) → lines → filter(...) → mobileViews → filter(...) → Chrome views → map(_.split(" ")(0)) → timestamps。
+        </p>
+        <p>
+            <strong>节点故障时：根据血缘重算丢失的 RDD 分区。</strong>4 个节点，每个节点内存里有 mobileViews 和 timestamps 的两个分区。节点 1 崩溃，它内存里的 timestamps 分区 2 和 3 丢了。必须从磁盘重新装入所需的那部分数据，按血缘重算整个操作序列，才能重新生成 timestamps 的分区 2 和 3。（图上没画：文件系统的数据是复制过的，所以假设块 2 和 3 对所有节点仍然可以访问。）重算出的分区放在其他节点上。
+        </p>
+
+        <h3>Spark 的性能</h3>
+        <p>
+            课件引用 Spark 论文的图（100 个节点的集群、100 GB 数据，迭代算法每轮的时间）：Spark 比 Hadoop 快得多。HadoopBM = Hadoop Binary In-Memory（把文本输入转成二进制，存进内存版的 HDFS）。
+        </p>
+        <ul>
+            <li>还有什么令人费解的？问：基线在迭代算法的每一轮都重新解析文本输入？答：是的。</li>
+            <li>HadoopBM 第一轮慢，是因为要多跑一个 Hadoop 作业，把输入数据的二进制形式拷到内存 HDFS。</li>
+            <li>从 HDFS 访问数据，即使在内存里，开销也很高：文件系统里的多次内存拷贝加校验和；从序列化形式转成 Java 对象。</li>
+        </ul>
+
+        <h3>当心："横向扩展"不是全部</h3>
+        <ul>
+            <li>为云端执行设计的分布式系统解决了很多困难的挑战，在"大数据"计算和大规模分析的爆发中起了关键作用：横向扩展到很多机器的并行；面对故障的弹性；管理机器集群的复杂性。</li>
+            <li>但横向扩展不是故事的全部。McSherry 等人的《Scalability! But at what COST?》（HotOS 2015）比较了 20 轮 PageRank：一些分布式系统用很多核，单线程的实现却和它们差不多快甚至更快；对基线进一步优化后，时间降到 110 秒。另一组对比是标签传播、PageRank、LDA（Latent Dirichlet Allocation），BID Data Suite 在 1 个 GPU 加速节点上的结果 [Canny 和 Zhao, KDD 13]。</li>
+        </ul>
+        <p>
+            McSherry 2015 的原话（意译）："已发表的大数据系统工作把可扩展性奉为分布式数据处理平台最重要的特性。几乎所有这类论文都详述了系统令人印象深刻的扩展性，却很少直接拿绝对性能和合理的基准比较。这些系统在多大程度上真的提升了性能，而不是在并行化它们自己引入的开销？"
+        </p>
+        <p>
+            COST = "Configuration that Outperforms a Single Thread"，即能胜过单线程的配置。也许令人意外，很多已发表的系统 COST 是无界的，也就是在它们用过的所有问题上，没有任何配置能胜过最好的单线程实现。（这呼应第六讲：加速比要和最好的顺序程序比。）
+        </p>
+
+        <h3>对 Spark 的性能改进</h3>
+        <ul>
+            <li>DRAM 越来越大、持久存储（SSD）越来越快，人们开始关心提高 Spark 应用的 CPU 利用率，目标是降低"COST"。</li>
+            <li>在 Spark 生态里加入高效的代码生成（比如生成 SIMD 内核、面向 GPU 等加速器），缩小单节点性能的差距。RDD 的存储布局必须改变才能高效做 SIMD 处理（比如数组的结构体代替结构体的数组）。见 Spark 的 Project Tungsten、Weld [Palkar, CIDR '17]、IBM 的 SparkGPU。</li>
+            <li>高性能计算的思想正在影响未来面向性能的分布式系统的设计；反过来，科学计算社区在弹性和效用计算方面，有很多要向分布式计算社区学习的地方。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>八、Spark 小结</h2>
+        <ul>
+            <li>引入不透明的序列抽象（RDD）来封装集群计算的中间结果（以前 Hadoop/MapReduce 这类框架把中间结果存在文件系统里）。
+                <ul>
+                    <li>观察："对大规模数据并行程序的中间变量来说，文件是很差的抽象。"</li>
+                    <li>RDD 是只读的，由确定性的数据并行算子创建。</li>
+                    <li>跟踪血缘，用于考虑局部性的调度和容错（故障时重算 RDD 的分区，而不是从检查点恢复）。注意 <code>.persist(RELIABLE)</code> 允许程序员在血缘很长时请求做检查点。</li>
+                    <li>批量操作让跟踪血缘（记日志）的开销很低。</li>
+                </ul>
+            </li>
+            <li>简单、通用的抽象，很多领域专用的分布式计算框架建立在它之上。</li>
+        </ul>
+
+        <h3>现代 Spark 生态</h3>
+        <ul>
+            <li>Spark SQL：交错执行计算和数据库查询，可以对 SQL 查询产生的 RDD 施加变换。</li>
+            <li>MLlib：建立在 Spark 抽象之上的机器学习库。</li>
+            <li>GraphX：建立在 Spark 抽象之上的类 GraphLab 的图库。</li>
+            <li>吸引人的特性：能集成、组合多个领域专用框架（因为底层所有集合都用 RDD 实现，由 Spark 调度器调度）。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS149: Parallel Computing &copy; Fall 2023</p>
+        <nav class="footer-nav">
+            <a href="08_数据并行思维.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="10_GPU上的DNN.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

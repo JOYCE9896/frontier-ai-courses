@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第七讲：GPU 架构与 CUDA 编程 | Stanford CS149 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="06_性能优化二.html">&larr; 上一讲</a>
+    <span>Stanford CS149: Lecture 7</span>
+    <a href="08_数据并行思维.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第七讲：GPU 架构与 CUDA 编程</h1>
+        <p class="subtitle">GPU 怎样从加速 3D 游戏的芯片变成通用并行计算引擎：图形学一页讲完、着色器、GPGPU 的"画两个三角形"技巧、Brook、2007 年的计算模式；CUDA 的抽象：线程层次、线程块、host 与 device 代码、三种设备地址空间、一维卷积的两个版本、__syncthreads 和原子操作；CUDA 在 V100 上的实现：warp、SIMT、SM、线程块调度器；为什么一个块的所有线程必须同时驻留，块之间能做什么、不能做什么，持久线程风格</p>
+        <div class="author-meta">
+            主讲：Kayvon Fatahalian<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=qQTDF0CBoxE" target="_blank">课堂录像</a>（Stanford Online，2023 年秋季）、<a href="https://gfxcourses.stanford.edu/cs149/fall23/lecture/gpucuda/" target="_blank">课件</a>；持久线程一页是课件附加材料
+        </div>
+    </header>
+
+    <section>
+        <h2>一、这一讲讲什么</h2>
+        <ul>
+            <li>历史：最初为加速 3D 游戏设计的图形处理器，怎样演变成服务于深度学习、计算机视觉、科学计算等一大类应用的高度并行计算引擎。Kayvon 的说法：这些 NVIDIA 和 AMD 主要为了玩 Quake 而生产的芯片，怎样让 NVIDIA 成了比 Intel 大得多的万亿美元公司，人人抢着买。</li>
+            <li>用 CUDA 语言编写 GPU 程序。现在大多数人用 CUDA 写 GPU 代码。它和 ISPC 很像，读过 ISPC 那篇历史就知道，ISPC 本身是对 CUDA 的反应：大家用 CUDA 编 GPU，为什么不能同样地编 CPU？</li>
+            <li>更细地看 GPU 架构，以及它怎样运行 CUDA 代码。</li>
+        </ul>
+        <p>
+            Kayvon 一开始就说：今天没有任何新概念。多核、SIMD、多线程，和前几周一样，只是在现代 GPU 上以更大的规模部署。回忆第二讲的基本 GPU 架构：多核芯片，单个核内 SIMD 执行（很多执行单元执行同一条指令），单个核内多线程执行（一个核并发执行多个线程），后面接几 GB 的 DRAM，高端 GPU 带宽约 150 到 300 GB/s（这是课件的旧数字，后面会看到 V100 是 900 GB/s）。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、图形学 101 和 GPU 的历史</h2>
+        <h3>GPU 原本做什么：3D 渲染</h3>
+        <p>
+            输入：场景描述，3D 表面几何（比如三角形网格）、表面材质、灯光、相机等。输出：场景的图像。模拟光在场景里的反弹，模拟各种材质，给出一台真相机在那个位置会看到的画面。渲染任务的简单定义：计算 3D 网格里每个三角形对图像每个像素的外观有什么贡献。课件放了 Epic 的 Unreal Engine 风筝演示（2015 年，高端 GPU 上轻松 60 帧每秒）和 Nanite 演示：实时渲染很复杂的 3D 场景。
+        </p>
+        <p>
+            Kayvon 用 45 秒讲完 CS248：实时图形的基本元素是顶点（空间中的点）和图元（三角形、点、线），用 3D 三角形网格表示表面。整个工作负载一页讲完：
+        </p>
+        <ul>
+            <li>给定一个三角形和虚拟相机的位置，确定它落在屏幕上的什么位置；</li>
+            <li>对这个三角形覆盖的每个输出像素，计算该点表面的颜色。</li>
+        </ul>
+        <p>
+            表面颜色取决于材质。看看教室里，椅子、竹子纹理、门把手的金属光泽；鞋上的高光；光进入人的皮肤，在里面反弹很多次，再从别处出来。世界上的材质和灯光千差万别。于是 2000 年代初，人们开发了针对每个像素运行的小编程语言，不再说"颜色是红的"，而是写一个程序：
+        </p>
+        <pre><code>uniform sampler2D myTexture;
+uniform float3 lightDir;
+varying vec3 norm;
+varying vec2 uv;
+
+void myShader()
+{
+    vec3 kd = texture2D(myTexture, uv);
+    kd *= clamp(dot(lightDir, norm), 0.0, 1.0);
+    return vec4(kd, 1.0);
+}</code></pre>
+        <p>
+            这是 OpenGL 着色语言（GLSL）的着色器程序，定义片元处理阶段的行为。myTexture 是纹理贴图；uniform 是只读的全局变量；varying 是每个像素值都不同的输入，可以想成着色器函数的参数；输出是该像素的 RGBA 表面颜色。每个片元（三角形覆盖的每个像素）运行一次。语法细节对 CS149 不重要，重要的是：<strong>着色器是在一串输入上被调用的纯函数</strong>。对每个像素算一些输入，再在每个像素上运行这个完全独立的函数算出颜色，这就是数据并行计算。渲染结果的图像里，表面覆盖的每个像素都是 myShader() 的输出（被多个表面覆盖的像素取离相机最近的那个）。
+        </p>
+        <p>
+            为什么 GPU 有很多高吞吐的核？要处理几百万像素的 4K 图像，每秒 60 次以上，每秒要处理几亿到几十亿像素。很多 SIMD、多线程的核能高效执行着色器程序，于是 GPU 不断加核、加 ALU。现代 GPU 后面是几十 GB 的显存，高端 GPU 约 1 TB/s。
+        </p>
+
+        <h3>2001 到 2003 年的观察</h3>
+        <p>
+            回到第一讲：晶体管数（那条绿线）不断上升，但把晶体管变成更快单线程处理器的办法都不灵了，4 GHz 处理器功耗爆表，没法再提频率；线程里找不到 ILP，超标量也到头了。而 GPU 早已走向并行，晶体管翻一番就加更多核。有人注意到：GPU 是在大量数据集合（顶点流、片元流、像素流）上并行执行同样计算（着色器程序）的极快处理器。等等！这听起来很像数据并行，我记得 90 年代那些奇特的超级计算机上的数据并行。而且 GPU 每年都在变快，因为更多晶体管等于更多并行。
+        </p>
+
+        <h3>技巧！早期基于 GPU 的科学计算</h3>
+        <p>
+            想在 512×512 数组的所有元素上运行一个函数？把输出图像大小设成数组大小（512×512），渲染恰好覆盖整个屏幕的两个三角形（顶点 (0,0)、(512,0)、(512,512)、(0,512)），每个像素一次着色器计算对应输出数组的一个元素。在本该计算表面颜色的函数里做你想做的事，比如推进物理模拟里粒子的一个时间步、做蛋白质折叠，把 RGBA 输出当作流体模拟的 XYZ 位置。片元着色器函数被映射到 512×512 的元素集合上，GPU 就能当数据并行编程系统用了。斯坦福、北卡罗来纳大学等地的一些人这样做，发现比用 C++ 写线程代码快得多。
+        </p>
+        <p>
+            "GPGPU"（2002 到 2003 年），即在 GPU 上做通用计算：耦合映射格子模拟 [Harris 02]、可编程图形硬件上的光线追踪 [Purcell 02]、稀疏矩阵求解器 [Bolz 03]。
+        </p>
+
+        <h3>Brook 流编程语言（2004）</h3>
+        <p>
+            斯坦福图形实验室的研究项目，觉得这是个蠢办法：既然要把它们当并行处理器用，又都懂数据并行，能不能有一个正经的编程系统？Brook 把 GPU 硬件抽象成数据并行处理器：
+        </p>
+        <pre><code>kernel void scale(float amount, float a&lt;&gt;, out float b&lt;&gt;)
+{
+    b = amount * a;
+}
+
+float scale_amount;
+float input_stream&lt;1000&gt;;   // stream declaration
+float output_stream&lt;1000&gt;;  // stream declaration
+
+// omitting stream element initialization...
+
+// map kernel function onto streams
+scale(scale_amount, input_stream, output_stream);</code></pre>
+        <p>
+            scale 不是在标量上求值，而是在集合上求值，作用于有 1000 个数的流的每个元素。这叫流编程模型或数据并行编程模型（周四细讲）。Brook 编译器把通用的流程序源到源地翻译成图形命令（比如 drawTriangles）和一组当时 GPU 能跑的图形着色器程序 [Buck 2004]。对用户不再是技巧，但实现上完全是技巧。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、GPU 计算模式</h2>
+        <h3>回顾：在 CPU 上怎样运行代码</h3>
+        <p>
+            用户想在多核 CPU 上运行一个程序：
+        </p>
+        <ul>
+            <li>操作系统把程序文本装入内存；</li>
+            <li>操作系统选一个 CPU 执行上下文；</li>
+            <li>操作系统中断处理器，准备执行上下文（设置寄存器内容、程序计数器等）；</li>
+            <li>开始！处理器在执行上下文维护的环境里开始执行指令。</li>
+        </ul>
+        <p>
+            一次一个线程。
+        </p>
+
+        <h3>2007 年之前怎样在 GPU 上运行代码</h3>
+        <p>
+            用户想用 GPU 画一幅图：
+        </p>
+        <ul>
+            <li>应用（通过图形驱动）提供 GPU 着色器程序的二进制；</li>
+            <li>应用设置图形流水线参数（比如输出图像大小）；</li>
+            <li>应用给 GPU 一个顶点缓冲区；</li>
+            <li>应用给 GPU 发"绘制"命令：<code>drawPrimitives(vertex_buffer)</code>。</li>
+        </ul>
+        <p>
+            图形流水线：输入顶点缓冲区 → 顶点生成 → 顶点处理 → 图元生成 → 片元生成（"光栅化"）→ 片元处理 → 像素操作 → 输出图像缓冲区（像素）。这是 GPU 硬件唯一的接口，GPU 硬件只能执行图形流水线计算。软件给 GPU 一串三角形、一个算表面颜色的程序和相机位置，流水线就跑起来，需要算像素颜色时调用那个程序。发起计算的方式和 CPU 很不一样。
+        </p>
+
+        <h3>NVIDIA Tesla 架构（2007）</h3>
+        <p>
+            第一个替代的、不针对图形的（"计算模式"）GPU 硬件接口。NVIDIA 觉得画三角形来做和图形毫不相干的事很蠢；同时也不想让用户创建各种各样的线程，因为那些线程在 32 宽 SIMD、单线程性能很差的 GPU 上跑不好。用户想在 GPU 的可编程核上运行非图形程序：
+        </p>
+        <ul>
+            <li>应用可以在 GPU 内存里分配缓冲区，往里拷数据、从里面拷出数据；</li>
+            <li>应用（通过图形驱动）给 GPU 一个内核（kernel）程序二进制；</li>
+            <li>应用告诉 GPU 以 SPMD 方式运行这个内核（"运行这个内核的 N 个实例"）：<code>launch(myKernel, N)</code>。</li>
+        </ul>
+        <p>
+            有意思的是，这比图形操作 drawPrimitives() 简单得多。数据并行里运行的代码常叫 kernel。这是经典的 SPMD 编程，和 ISPC 的编程模型类似。
+        </p>
+
+        <h3>CUDA 编程语言</h3>
+        <ul>
+            <li>2007 年随 NVIDIA Tesla 架构推出；</li>
+            <li>一种"类 C"语言，用计算模式的硬件接口表达在 GPU 上运行的程序。现代 GPU 编程里它基本就是 C/C++，唯一的例外是你不创建线程，只说"这是我的程序，请运行它的 N 个副本"；</li>
+            <li>相对低层：CUDA 的抽象紧密贴合现代 GPU 的能力和性能特征（设计目标：保持较低的抽象距离）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>四、CUDA 的编程抽象</h2>
+        <p>
+            计划：先讲 CUDA 编程抽象，再讲 CUDA 在现代 GPU 上的实现，最后更细地看 GPU 架构。贯穿全讲要想的问题：CUDA 是数据并行编程模型吗？是共享地址空间模型的例子吗？还是消息传递模型？能和 ISPC 的实例与任务类比吗？pthreads 呢？
+        </p>
+        <p>
+            又要澄清一次：用 CUDA 的术语讲 CUDA 的抽象，尤其要注意"CUDA 线程"这个词。CUDA 线程和 pthread 提供的抽象相似，都对应逻辑控制线程，但 CUDA 线程的实现非常不同。ISPC 里的程序实例，在 CUDA 里叫 CUDA 线程。这一讲里说"线程"，除非特意说"硬件执行上下文"，都指 CUDA 线程，它由 NVIDIA 定义。
+        </p>
+
+        <h3>CUDA 程序由层次化的并发线程组成</h3>
+        <pre><code>const int Nx = 12;
+const int Ny = 6;
+
+dim3 threadsPerBlock(4, 3);
+dim3 numBlocks(Nx/threadsPerBlock.x, Ny/threadsPerBlock.y);
+
+// assume A, B, C are allocated Nx x Ny float arrays
+
+// this call will launch 72 CUDA threads:
+// 6 thread blocks of 12 threads each
+matrixAdd&lt;&lt;&lt;numBlocks, threadsPerBlock&gt;&gt;&gt;(A, B, C);</code></pre>
+        <p>
+            线程 ID 最多可以是三维的（这里是二维），多维线程 ID 对天然是 N 维的问题很方便。两个 12×6 的矩阵逐元素相加，每个 CUDA 线程负责一个元素，需要 72 个线程。这里不是直接说"创建 72 个线程"，而是创建 4×3 的线程块，每块 12 个线程，块数是 12/4 × 6/3 = 6。这样写是为了先介绍线程块的概念，后面会用到；真的只是加两个数组，也可以用一维的块，一块 72 个线程。
+        </p>
+        <p>
+            为什么要二维？有同学问。不是根本性的。图像处理、张量处理、图形里，线程 ID 是二维的就能直接用 i、j；如果是一维的，再去算自己在 N 维张量里的位置，要做很多除法。给出多维位置可以省掉很多除法，更高效地算内存地址。Kayvon 每年都考虑把入门例子改成一维，但后面还得介绍二维，就省点时间直接这样讲了。
+        </p>
+
+        <h3>基本 CUDA 语法</h3>
+        <pre><code>// kernel definition (runs on GPU)
+__global__ void matrixAdd(float A[Ny][Nx],
+                          float B[Ny][Nx],
+                          float C[Ny][Nx])
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+
+    C[j][i] = A[j][i] + B[j][i];
+}</code></pre>
+        <ul>
+            <li>"host" 代码：串行执行，作为普通 C/C++ 应用的一部分在 CPU 上运行。</li>
+            <li>批量启动很多 CUDA 线程："启动一个由 CUDA 线程块组成的网格（grid）"。所有线程都终止后调用才返回。</li>
+            <li>"CUDA device" 代码：内核函数（<code>__global__</code> 表示 CUDA 内核函数）在 GPU 上以 SPMD 方式执行。</li>
+            <li>每个线程根据它在块内的位置（threadIdx）和块在网格里的位置（blockIdx）算出自己在整个网格里的线程 ID。</li>
+        </ul>
+        <p>
+            和 ISPC 对照：没有 programCount 和 programIndex，而是内置变量 blockIdx、blockDim、threadIdx。块内的线程 ID 有点像 ISPC 的程序实例编号，块 ID 有点像 ISPC 的任务 ID。ISPC 把东西组织成任务、任务内是 gang；CUDA 组织成线程块，可以同时创建很多线程块。同样没有新概念，只是名字和小细节不同。
+        </p>
+        <p>
+            host 和 device 代码分得很清楚，划分由程序员静态完成：
+        </p>
+        <pre><code>__device__ float doubleValue(float x)
+{
+    return 2 * x;
+}
+
+// kernel definition
+__global__ void matrixAddDoubleB(float A[Ny][Nx],
+                                 float B[Ny][Nx],
+                                 float C[Ny][Nx])
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+
+    C[j][i] = A[j][i] + doubleValue(B[j][i]);
+}</code></pre>
+
+        <h3>SPMD "CUDA 线程"的数量在程序中显式给出</h3>
+        <p>
+            内核调用的次数不由数据集合的大小决定（内核启动不是像图形着色器编程那样用 map(kernel, collection) 指定的）。把矩阵改成 11×5，块大小仍是 4×3：
+        </p>
+        <pre><code>const int Nx = 11;  // not a multiple of threadsPerBlock.x
+const int Ny = 5;   // not a multiple of threadsPerBlock.y
+
+dim3 threadsPerBlock(4, 3);
+dim3 numBlocks((Nx+threadsPerBlock.x-1)/threadsPerBlock.x,
+               (Ny+threadsPerBlock.y-1)/threadsPerBlock.y);
+
+// assume A, B, C are allocated Nx x Ny float arrays
+
+// this call will cause execution of 72 threads
+// 6 blocks of 12 threads each
+matrixAdd&lt;&lt;&lt;numBlocks, threadsPerBlock&gt;&gt;&gt;(A, B, C);
+
+__global__ void matrixAdd(float A[Ny][Nx],
+                          float B[Ny][Nx],
+                          float C[Ny][Nx])
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // guard against out of bounds array access
+    if (i &lt; Nx &amp;&amp; j &lt; Ny)
+        C[j][i] = A[j][i] + B[j][i];
+}</code></pre>
+        <p>
+            只有 55 件事要做，但工作以 12 个线程为一组的粒度创建，块数向上取整，所以创建的线程多于 55 个，有些线程算出的 i、j 越界了，代码里的 if 让它们什么都不做。没有这个 if，就会读写数组末尾之外的内存，程序可能崩溃。这凸显了 CUDA 是 SPMD 编程模型：你创建线程，线程用程序来决定自己做什么；而不是"对数组的每个元素启动一个线程"。准确地说，你是在创建 CUDA 线程，但不是一个个创建，而是批量启动：想象一个 C++ 的线程创建 API，参数里写"我要 150 个块，每块 4×3"。
+        </p>
+
+        <h3>CUDA 的执行模型和内存模型</h3>
+        <p>
+            host（串行执行，实现是 CPU）和 CUDA device（SPMD 执行，实现是 GPU）。两个世界：一个运行 void main 那样的普通 C++ 代码，跑在 CPU 的一个线程上；另一个运行内核的所有实例。ISPC 里实例由同一线程内的 SIMD 指令实现；CUDA 线程由 GPU 执行，调用内核那一刻就是底层开始和 GPU 通信、在 GPU 上启动的时刻。
+        </p>
+        <p>
+            host 和 device 的地址空间是分开的：host 内存地址空间和 device 的"全局"内存地址空间。在 C 里分配的数组，到 CUDA 里解引用那个指针不会成功。用 memcpy 原语在地址空间之间移动数据：
+        </p>
+        <pre><code>float* A = new float[N];       // allocate buffer in host mem
+
+// populate host address space pointer A
+for (int i = 0; i &lt; N; i++)
+    A[i] = (float)i;
+
+int bytes = sizeof(float) * N;
+float* deviceA;                // allocate buffer in
+cudaMalloc(&amp;deviceA, bytes);   // device address space
+
+// populate deviceA
+cudaMemcpy(deviceA, A, bytes, cudaMemcpyHostToDevice);
+
+// note: directly accessing deviceA[i] is an invalid
+// operation here (cannot manipulate contents of deviceA
+// directly from host, since deviceA is not a pointer
+// into the host's address space)</code></pre>
+        <p>
+            调用内核时传的是 device 上的指针。在这段 C++ 代码里 printf deviceA[0] 应该会段错误。cudaMemcpy 让你想起什么？上一讲的消息传递：从一个地址空间发到另一个地址空间的消息。讲实现的话，对独立显卡（RTX、A100）而言，这次 memcpy 是把字节通过 PCI 总线搬进 GPU 自己的 DRAM，两块不同的 DRAM，这是很慢的拷贝。有同学问能不能预取：当然，可以异步地做来掩盖延迟。现在更新的系统上也可以直接把 C 指针传进 CUDA 内核，但那样 GPU 的访存可能要走 PCIe；先坚持最直接的"地址空间分开"。
+        </p>
+
+        <h3>CUDA 设备内存模型</h3>
+        <p>
+            内核能看到三种不同的地址空间：
+        </p>
+        <ul>
+            <li>每线程私有内存：线程自己可读写（局部变量、自己的栈）；</li>
+            <li>每块共享内存：块内所有线程可读写（有点像 ISPC 的 uniform 变量）；</li>
+            <li>设备全局内存：所有线程可读写。</li>
+        </ul>
+        <p>
+            不同的地址空间反映了程序里不同的局部性区域。这对 CUDA 在 GPU 上实现的效率有重要影响：如果事先知道某些线程访问同样的变量，你会怎样调度它们？这是在给 GPU 提示，怎样为了局部性把线程放在一起。
+        </p>
+
+        <h3>例子：一维卷积</h3>
+        <p>
+            <code>output[i] = (input[i] + input[i+1] + input[i+2]) / 3.f;</code> 输出是输入里相邻三个位置的平均。这是图像处理、信号处理里的基本操作，也是深度神经网络卷积层的一维版本。输入比输出多两个元素，不用考虑边界。
+        </p>
+        <p>
+            <strong>版本 1：每个输出元素一个线程</strong>
+        </p>
+        <pre><code>#define THREADS_PER_BLK 128
+
+__global__ void convolve(int N, float* input, float* output) {
+
+    int index = blockIdx.x * blockDim.x + threadIdx.x;  // thread local variable
+
+    float result = 0.0f;  // thread-local variable
+    for (int i = 0; i &lt; 3; i++)
+        result += input[index + i];
+
+    output[index] = result / 3.f;
+}
+
+// host code
+int N = 1024 * 1024;
+cudaMalloc(&amp;devInput, sizeof(float) * (N+2));  // allocate input array in device memory
+cudaMalloc(&amp;devOutput, sizeof(float) * N);     // allocate output array in device memory
+
+// properly initialize contents of devInput here ...
+
+convolve&lt;&lt;&lt;N/THREADS_PER_BLK, THREADS_PER_BLK&gt;&gt;&gt;(N, devInput, devOutput);</code></pre>
+        <p>
+            每个线程算一个元素，结果写到全局内存。这里其实没用到块的概念，Kayvon 说本来更想要一个"启动 N 个线程"就完事的模型。问题是：每个线程读三个元素，相邻线程读的元素有重叠，这个线程对某些数据发 load，那个线程又对同样的数据发 load，也许有缓存命中能缓解。想写高效的程序，可以这样：
+        </p>
+        <p>
+            <strong>版本 2：把输入数据暂存到每块的共享内存里</strong>
+        </p>
+        <pre><code>#define THREADS_PER_BLK 128
+
+__global__ void convolve(int N, float* input, float* output) {
+
+    __shared__ float support[THREADS_PER_BLK+2];        // per-block allocation
+    int index = blockIdx.x * blockDim.x + threadIdx.x;  // thread local variable
+
+    // all threads cooperatively load block's support region
+    // from global memory into shared memory
+    support[threadIdx.x] = input[index];
+    if (threadIdx.x &lt; 2) {
+        support[THREADS_PER_BLK + threadIdx.x] = input[index+THREADS_PER_BLK];
+    }
+
+    __syncthreads();  // barrier (all threads in block)
+
+    float result = 0.0f;  // thread-local variable
+    for (int i = 0; i &lt; 3; i++)
+        result += support[threadIdx.x + i];
+
+    output[index] = result / 3.f;
+}</code></pre>
+        <p>
+            块大小 128，算 128 个输出需要 130 个输入。<code>__shared__</code> 修饰符表示这不是每线程的分配，而是每块的分配。每个线程从输入数组拷一个值到共享数组；块内编号 0、1 的两个线程多干一点，把最后两个元素也搬进来（"有点丑"）。总共 130 条 load 指令，而不是 3 × 128 条。然后 __syncthreads()，CUDA 里块内的屏障。之后每个线程照常算卷积，但访问的是共享的 support 而不是全局内存。
+        </p>
+        <p>
+            为什么要花这么多心思编排？讲到实现：共享变量背后的存储可以想成高性能的 L1 缓存。CUDA 会把同一线程块的所有线程放在同一个核上，它们在有复用时访问这块快速的本地内存。没有哪个线程访问同一数据两次，但一个线程用的数据邻居也会用，于是大家合作把数据只搬一次，然后都从很快的共享内存里工作。
+        </p>
+        <p>
+            为什么需要 __syncthreads？不知道 GPU 会按什么顺序运行这段代码，线程可能都是并发的。一个线程装完自己的数据就可能立刻开始计算，但别的线程也许还没把数据搬进来。越过屏障时才能保证共享内存已正确初始化。
+        </p>
+        <p>
+            块里放多少线程由你决定，就像在 C++ 里开多少线程由你决定，但也要告诉系统怎样把它们组织成块。块的线程数不能多于一个核能运行的线程数，可以少，因为一个核可以放多个块。如果线程访问的不是连续地址（比如读矩阵的一列），程序仍然对，但内存系统的性能可能因为缓存局部性等原因变差。cudaMalloc 像 malloc 一样给你一段连续的地址空间，矩阵元素怎样摆放完全由你的程序决定，这里假设是连续的行主序。
+        </p>
+        <p>
+            有同学把 SPMD 和 SIMD 弄混了。SPMD 是编程模型的问题，与实现无关：写一个程序，系统用不同的线程 ID 运行它很多次。ISPC、CUDA 都是 SPMD 编程模型。怎样高效执行这些实例是实现的事：ISPC 用 SIMD 指令，GPU 也会用到 SIMD，但方式有点不同。
+        </p>
+
+        <h3>CUDA 的同步结构</h3>
+        <ul>
+            <li><code>__syncthreads()</code>：屏障，等块内所有线程到达这一点。</li>
+            <li>原子操作，比如 <code>float atomicAdd(float* addr, float amount)</code>。CUDA 对全局内存地址和每块共享内存地址都提供原子操作。</li>
+            <li>host/device 同步：内核返回时所有线程之间有隐含的屏障。</li>
+        </ul>
+        <p>
+            ISPC 用跨通道操作在实例间通信，CUDA 则有这些同步结构，作业 3 里都会用到。
+        </p>
+
+        <h3>小结：CUDA 的抽象</h3>
+        <ul>
+            <li>执行：线程层次。批量启动很多线程（这个说法不精确，后面澄清）；两级层次，线程组成线程块。</li>
+            <li>分布式地址空间：内置的 memcpy 原语在 host 和 device 地址空间之间拷贝；三种设备地址空间：每线程、每块（"shared"）、每程序（"global"）。</li>
+            <li>块内线程的屏障同步原语。</li>
+            <li>用于额外同步的原子原语（共享和全局变量）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>五、CUDA 的实现</h2>
+
+        <h3>语义的问题</h3>
+        <p>
+            同一个 convolve 程序，host 代码启动了一百多万个 CUDA 线程（八千多个线程块）。运行它会创建一百万份局部变量、每线程栈吗？八千份共享变量 support 吗？想想 pthread_create() 或 std::thread() 的实现：要分配线程状态，包括线程的栈空间，还要分配控制块让操作系统调度线程。NVIDIA 会去找一百万个线程上下文吗？大概根本没有这么多执行上下文。这个批量启动让你想起什么？同学说：任务。给你一大堆工作，做完所有这些线程块。ISPC 任务分解成程序实例，CUDA 线程块分解成 CUDA 线程。
+        </p>
+
+        <h3>分配工作</h3>
+        <p>
+            高端 GPU 有 16 个核，中端 GPU 有 6 个核，希望 CUDA 程序不加修改就能在这些 GPU 上运行（还有十万美元的 Grace Hopper）。注意前面的 CUDA 程序里根本没有核数的概念。CUDA 的线程启动在精神上类似数据并行模型里的 forall 循环。
+        </p>
+
+        <h3>CUDA 编译</h3>
+        <p>
+            编译出的 CUDA 设备二进制包括：程序文本（指令）；所需资源的信息：每块 128 个线程，每线程 B 字节局部数据，每个线程块 128 + 2 = 130 个 float（520 字节）的共享空间（Kayvon 课上有时说成 512 字节）。
+        </p>
+
+        <h3>线程块的分配</h3>
+        <p>
+            host 发来内核启动命令，比如 8K 个 convolve 线程块组成的网格。GPU 里有专门的硬件"线程块调度器"，每个核有共享内存（快速的片上内存），后面是设备全局内存（DRAM）。块的资源需求（写在编译出的内核二进制里）：128 个线程，520 字节共享内存，128 × B 字节局部内存。
+        </p>
+        <ul>
+            <li>CUDA 的一个主要假设：线程块可以按任何顺序执行（块之间没有依赖）。</li>
+            <li>GPU 实现用一个遵守资源需求的动态调度策略，把线程块（"工作"）映射到核上。</li>
+        </ul>
+        <p>
+            这又是那个常见的设计模式：一个 worker"线程"池。问题分解成子问题（任务、工作），分配给 worker 线程。其他例子：ISPC 启动任务的实现，为 CPU 上每个超线程创建一个 pthread，线程在程序剩余时间里一直活着；Web 服务器里的线程池，线程数取决于核数而不是待处理请求数，服务器启动时创建线程，等工作到来。作业 2 里你用软件决定哪个 worker 线程拿到哪份工作；在 GPU 上，这件事做在硅片里。"把这个任务运行这么多次"这个作业 2 要实现的 API，就是 GPU 的硬件接口：不是"这是程序、这是 PC，在这个线程上开始跑"，而是"这是一段指令流，请运行它的所有这些线程块"。GPU 最上面有个东西说：我要跑 8000 个线程块，有 4 个核，开工。（CUDA 里也可以在线程块之间设置一些依赖。）
+        </p>
+
+        <h3>NVIDIA V100 SM 的"子核"</h3>
+        <p>
+            用 Volta V100 的图（Kayvon 说之后会做几页现代 Grace Hopper 的，但变化不大）。一个小的 GPU 核：顶部是取指译码单元；旁边是一排 SIMD 功能单元：
+        </p>
+        <ul>
+            <li>SIMD fp32 功能单元，16 个单元共享控制（每周期 16 次乘加，即每两个周期一次 32 宽 SIMD 操作）；</li>
+            <li>SIMD int 功能单元，16 个单元共享控制（每周期 16 次乘法/加法）；</li>
+            <li>SIMD fp64 功能单元，8 个单元共享控制（每周期 8 次乘法/加法，即每四个周期一次 32 宽 SIMD 操作）；</li>
+            <li>load/store 单元；</li>
+            <li>Tensor Core 单元。</li>
+        </ul>
+        <p>
+            还有执行上下文存储：线程 0 的 R0、R1、R2……，线程 1 的，线程 2 的，一直到线程 31，再继续往下。注意这些是<strong>一个 CUDA 线程的标量寄存器</strong>，不是向量寄存器。NVIDIA 线程的执行上下文是一组标量寄存器。
+        </p>
+
+        <h3>warp</h3>
+        <ul>
+            <li>线程块里 32 个线程为一组，叫一个 warp。块里线程 0 到 31 在同一个 warp 里（32 到 63 也是，以此类推）。所以 256 个 CUDA 线程的线程块映射到 8 个 warp。</li>
+            <li>V100 的每个子核最多能调度、交错执行 16 个 warp。</li>
+            <li>warp 里的线程如果执行同一条指令，就以 SIMD 方式执行。NVIDIA 叫它 SIMT（single instruction multiple CUDA thread，单指令多 CUDA 线程）。</li>
+            <li>如果 32 个 CUDA 线程不执行同一条指令，发散执行会损害性能。</li>
+            <li>这种映射类似 ISPC 在 gang 里运行程序实例的方式。但 GPU 硬件是动态检查 32 个独立的 CUDA 线程是否在同一条指令上，如果是，就以 SIMD 方式执行全部 32 个。CUDA 程序不像 ISPC 的 gang 那样被编译成 SIMD 指令。</li>
+            <li>warp 不是 CUDA 编程模型的一部分，但它是现代 NVIDIA GPU 上 CUDA 的一个重要实现细节。</li>
+        </ul>
+        <p>
+            这是 CPU 和 GPU 上 SIMD 执行的一个主要区别。CPU 上，编译器生成 SIMD 指令；GPU 上，因为硬件接口是 SPMD，硬件知道自己在跑一个程序的 N 个副本。每个线程有自己的程序计数器（PC，指向下一条要执行的指令的寄存器），如果连续的 32 个线程在同一个 PC 上，这条指令就由 SIMD 单元一起执行。这叫隐式 SIMD。至少在这代较老的 GPU 上，只有编号连续的线程执行相同操作时才能 SIMD，NVIDIA 不会从这里拿一个线程、那里拿一个线程凑成 SIMD。实际效果上，32 个执行上下文一组，就像一个带向量寄存器的 CPU 线程。
+        </p>
+        <p>
+            warp 有 32 个线程，SIMD ALU 只有 16 个，怎么办？一条指令隔一个周期执行一次，在相邻两个周期上各做 16 宽。那取指译码单元每隔一个周期不就闲着吗？不会，多出的那个周期它去给其他单元派发指令。指令流例子（所有指令相互独立）：00 fp32 mul，01 int32 add，02 fp32 mul……整个 warp 的 CUDA 线程都在跑这条指令流，每条指令由 warp 里全部 32 个线程执行；有 16 个 ALU，所以对整个 warp 执行一条指令要两个周期。调度是：派发一条 warp 的 fp32 指令，占两个周期；下一个周期派发一条整数指令（比如所有线程的 i++）；两个周期后又回到 fp32 单元。这个调度不复杂，知道发了一条浮点指令、两个周期后才能再发一条就行，远没有 CPU 那么复杂。Kayvon 说这些是很底层的实现细节，对课程不重要，只是觉得大家会觉得酷。
+        </p>
+        <p>
+            每个 CUDA 线程确实有自己的 PC，但只有 warp 里所有 PC 相同时才得到 SIMD。99% 的时候它的行为像一台有 4 个不同 PC（每个子核一个在执行）的 32 宽 SIMD 机器，可以把 warp 想成带向量指令的普通线程；但严格说不是，芯片在动态地检查 PC 是否相同。PC 不同时，先跑 PC 相同的那些，再跑另一部分，和作业里的掩码一样，只是由硬件替你判断，而不是编译时断言谁和谁一起跑。NVIDIA 由此给自己留了余地：将来的芯片可以把 SIMD 宽度改成 64，代码照样能跑，因为全是标量指令；Intel 改 SIMD 宽度你就得重新编译，因为二进制里写着这是 8 宽的 AVX 指令。NVIDIA 也可以在底层重排操作，在有发散时提高一致性，最近在非常有限的条件下会这样做。但对大多数代码，把它想成你熟悉的直接的 SIMD，就能很好地理解它在现代 GPU 上怎样工作。
+        </p>
+        <p>
+            warp 和线程块的区别：线程块是编程模型的一部分；warp 你永远看不到，你只是创建了 128 个 CUDA 线程，NVIDIA 用 4 个 warp 的执行上下文来跑它。
+        </p>
+
+        <h3>NVIDIA V100 GPU 的 SM</h3>
+        <p>
+            把子核复制 4 份就是一个 SM（streaming multiprocessor，流式多处理器）：
+        </p>
+        <ul>
+            <li>4 个 warp 选择器和 4 个取指译码单元，4 组向量 ALU；</li>
+            <li>每个子核 64 KB 寄存器，每个 SM 共 256 KB，在最多 64 个 warp 之间划分；</li>
+            <li>"共享"内存加 L1 缓存存储 128 KB。</li>
+        </ul>
+        <p>
+            64 个 warp 就是 64 × 32 = 2048 个 CUDA 线程的执行上下文。可以想成 4 宽超标量：每个周期每个取指译码单元找一个 warp 来运行。实际上有限制：每个取指译码单元只从自己分区的 warp 里挑。所以几乎可以看成四个独立的核，但又不完全是，因为所有执行上下文共享同一块共享内存存储。可以在这块芯片上创建一个有 2048 个 CUDA 线程、用到 128 KB 共享存储的线程块，它会占满这个 SM，SM 就对这 2048 个 CUDA 线程做 2048 路多线程。每个周期它能在最多 4 个 warp 上前进，从 64 个可用 warp 中挑。延迟掩盖能力极强。仍然没有新概念：多线程、SIMD，还有来自多个取指单元的同时多线程和超标量。好比一个 Intel 处理器每周期能从 4 个线程各取向量指令执行，有 64 个超线程可选。
+        </p>
+        <p>
+            SM 每个周期的操作：每个子核从自己分区的 16 个 warp 里选一个可运行的 warp；每个子核为这个 warp 里的 CUDA 线程运行下一条指令（取决于发散情况，这条指令可能作用于 warp 里全部或一部分 CUDA 线程）。一个 convolve 线程块由 4 个 warp 执行（4 warp × 32 线程 = 每块 128 个 CUDA 线程），support 在共享内存里占 520 字节，4 个 warp 被聪明地分在不同的子核上，能并发运行。
+        </p>
+        <p>
+            你在程序里写进去的东西，就是在断言硬件必须能处理。在这块 GPU 上可以创建 2048 线程的块，因为一个 SM 能放 2048 个 CUDA 线程、都能访问同一块共享内存；早期 GPU 每个 SM 最多只有 256 个执行上下文，那这个程序在那里就跑不了。反过来，为旧架构写的每块 256 线程的程序，在新 GPU 上不用改，NVIDIA 可能每个核跑 4 个块。一旦自己手动调度，就在对硬件能力做假设；NVIDIA 更希望你别手动调度 SIMD，让它来做。
+        </p>
+
+        <h3>V100 的整体参数</h3>
+        <ul>
+            <li>1.245 GHz 时钟；</li>
+            <li>每块芯片 80 个 SM 核；</li>
+            <li>80 × 4 × 16 = 5,120 个 fp32 乘加 ALU，即 12.7 TFLOPS（乘加算 2 次浮点运算）；</li>
+            <li>每块芯片最多 80 × 64 = 5120 个交错的 warp（每块芯片 163,840 个 CUDA 线程）；</li>
+            <li>6 MB L2 缓存；16 GB GPU 内存（HBM），900 GB/s（4096 位接口）。</li>
+        </ul>
+        <p>
+            Intel 处理器支持两个超线程，这东西支持 16 万多个 CUDA 线程。它们不能同时执行，但同时都在芯片上。
+        </p>
+        <p>
+            共享内存这里，程序员开始对调度细节做断言。这是一种折中：CUDA 说你只告诉我们跑多少个块、我们随便怎么跑；但内存太重要了，所以允许你断言"我需要 520 字节存储"。为了运行一个线程块，NVIDIA 会在同一个核上选 warp 执行上下文，并分配让它们都能读写的存储。这些线程都在同一个核上，它们之间的屏障会很快；如果把块里一些线程放到机器别处，屏障就成了跨整个芯片的通信。所以写程序时，<strong>线程块是同步和数据局部性的粒度</strong>。（这是简化版 CUDA，现代文档里也可以动态分配共享内存，但更复杂。）
+        </p>
+    </section>
+
+    <section>
+        <h2>六、在 GPU 上运行一个 CUDA 程序</h2>
+        <p>
+            convolve 内核的执行需求：每个线程块必须执行 128 个 CUDA 线程；每个线程块需要 130 × sizeof(float) = 520 字节共享内存。假设 N 很大，host 端的内核启动产生几千个线程块。在一个虚构的双核 GPU 上跑（注意这个虚构的核比前面的 V100 SM 小得多，执行单元更少，支持的活跃 warp 更少，共享内存更少）：每个核有取指译码、384 个 CUDA 线程（12 个 warp）的执行上下文存储、1.5 KB 的"共享"内存存储，上面有 GPU 工作调度器。
+        </p>
+        <ol>
+            <li>host 给 CUDA 设备（GPU）发命令："执行这个内核"。EXECUTE: convolve；ARGS: N, input_array, output_array；NUM_BLOCKS: 1000。</li>
+            <li>调度器把块 0 映射到核 0：为 128 个线程保留执行上下文（上下文 0 到 127），保留 520 字节共享存储。NEXT = 1，TOTAL = 1000。</li>
+            <li>调度器继续把块映射到可用的执行上下文（图示为交错映射）：块 1 放到核 1（同学也说该放到另一个核），NEXT = 2；块 2 放到核 0 的上下文 128 到 255，共享内存在 0x520 处，NEXT = 3；块 3 放到核 1。多个块被调度到同一个处理器上。现在每个核只放得下两个线程块：第三个块放不下，因为共享存储不够，3 × 520 字节 &gt; 1.5 KB。执行上下文其实还有，但共享内存没了，NVIDIA 不会调度它知道放不下的东西，只能等。</li>
+            <li>线程块 0 在核 0 上完成。</li>
+            <li>块 4 调度到核 0（映射到执行上下文 0 到 127），NEXT = 5。</li>
+            <li>线程块 2 在核 0 上完成。</li>
+            <li>块 5 调度到核 0（执行上下文 128 到 255），NEXT = 6。如此继续。</li>
+        </ol>
+        <p>
+            因为是 SPMD，所有线程块用的资源一样多，谁一完成，正好空出启动一个新块所需的资源。资源需求非常同质，不用解分配问题。这就是事先知道资源需求的好处。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、更进一步的调度问题</h2>
+        <p>
+            课件说：如果你理解了下面几个例子，你就真正理解了 CUDA 程序怎样在 GPU 上运行，也很好地掌握了到目前为止课上讲的工作调度问题。
+        </p>
+
+        <h3>为什么 CUDA 必须为块里所有线程分配执行上下文？</h3>
+        <p>
+            想象一个有 256 个 CUDA 线程的线程块（同样的 convolve，只是 THREADS_PER_BLK 改成 256），和一个虚构的 SM 核，硬件只有 128 个线程（4 个 warp）的并行执行能力。为什么不先把线程 0 到 127 跑完，再跑 128 到 255，以此执行整个线程块？
+        </p>
+        <p>
+            有同学说因为程序员指定了数据局部性，这是编程模型的规则，但为什么规则要这样定？系统实现者很多时候会说"我知道得更好，只要做得对就行"。看程序：它有一个屏障，所有线程到达之前谁都不能继续。如果先跑 128 个线程，它们停在屏障上，仍然占着执行上下文，永远不会让出，另外 128 个线程永远没机会跑。除非用更高级的实现，把这些线程抢占下来、换上另一批，那性能会很差。所以在这台机器上运行这个程序会死锁。
+        </p>
+        <ul>
+            <li>CUDA 内核可能在块内的线程之间制造依赖，最简单的例子就是 __syncthreads()。</li>
+            <li>存在依赖时，系统不能按任意顺序执行块内的线程。</li>
+            <li>CUDA 的语义：块内的线程<em>确实</em>在并发运行。如果块里一个线程可以运行，它最终一定会被运行（不会死锁）。</li>
+        </ul>
+        <p>
+            NVIDIA 的立场：我们是高性能编程系统，程序员决定了的事要尊重，不为了让程序正确运行去做可能严重损害性能的疯狂事情。标准 CUDA 里应该认为没有抢占，那些"魔法"都不做。所以 CUDA 会拒绝这个程序。
+        </p>
+
+        <h3>CUDA 抽象的实现</h3>
+        <ul>
+            <li>线程块可以由系统按任何顺序调度：系统假设块之间没有依赖；逻辑上是并发的；很像 ISPC 的任务，对吧？</li>
+            <li>同一块里的 CUDA 线程并发运行（同时存活）：块开始执行时，所有线程都存在，都分配了寄存器状态（这个语义对系统施加了一个调度约束）；一个 CUDA 线程块本身是一个 SPMD 程序（像 ISPC 的一个程序实例 gang）；块内的线程是并发的、协作的 "worker"。</li>
+            <li>CUDA 的实现：NVIDIA GPU 的 warp 在性能特征上类似 ISPC 的实例 gang（但和 ISPC gang 不同，warp 这个概念不在编程模型里，例外是 swizzle、vote 等 warp 内的内置操作）；一个线程块的所有 warp 被调度到同一个 SM 上，可以通过共享内存变量进行高带宽、低延迟的通信；块里所有线程完成后，块的资源（共享内存分配、warp 执行上下文）就可供下一个块使用。</li>
+        </ul>
+
+        <h3>一个创建直方图的程序</h3>
+        <p>
+            统计数组里值的直方图：数组 A 是 0 到 9 之间的整数，所有 CUDA 线程用原子操作更新全局内存里的共享变量 <code>int counts[10]</code>，每个线程块里都执行 <code>atomicAdd(&amp;counts[A[i]], 1);</code>。
+        </p>
+        <p>
+            注意，Kayvon 从没说过 CUDA 线程块保证相互独立，只说 CUDA 保留按任何顺序调度它们的权利。这是有效的代码！这样使用原子操作不影响实现按任意顺序调度块的能力（原子操作只用于互斥，仅此而已）。不同块里的线程会争用一个原子变量，那又怎样。
+        </p>
+
+        <h3>但这是合理的 CUDA 代码吗？</h3>
+        <pre><code>// global memory: int myFlag (assume myFlag is initialized to 0)
+
+// thread block 0:
+// do stuff here
+atomicAdd(&amp;myFlag, 1);
+
+// thread block 1:
+while (atomicAdd(&amp;myFlag, 0) == 0)
+    { }
+// do stuff here</code></pre>
+        <p>
+            考虑一个只有一个 SM、每个 SM 只能放一个线程块的 GPU。如果实现先跑块 0，没问题；如果先跑块 1，它永远在等，块 0 永远轮不到。所以块之间可以交互，但不能对执行顺序做假设；而块内的线程可以假设它们同时在运行，可以用屏障等等。
+        </p>
+
+        <h3>附加：持久线程的 CUDA 编程风格</h3>
+        <pre><code>#define THREADS_PER_BLK 128
+#define BLOCKS_PER_CHIP 80 * (32*64/128)  // specific to V100 GPU
+
+__device__ int workCounter = 0;  // global mem variable
+
+__global__ void convolve(int N, float* input, float* output) {
+    __shared__ int startingIndex;
+    __shared__ float support[THREADS_PER_BLK+2];  // shared across block
+    while (1) {
+        if (threadIdx.x == 0)
+            startingIndex = atomicInc(workCounter, THREADS_PER_BLK);
+        __syncthreads();
+
+        if (startingIndex &gt;= N)
+            break;
+
+        int index = startingIndex + threadIdx.x;  // thread local
+        support[threadIdx.x] = input[index];
+        if (threadIdx.x &lt; 2)
+            support[THREADS_PER_BLK+threadIdx.x] = input[index+THREADS_PER_BLK];
+
+        __syncthreads();
+
+        float result = 0.0f;  // thread-local variable
+        for (int i = 0; i &lt; 3; i++)
+            result += support[threadIdx.x + i];
+        output[index] = result;
+
+        __syncthreads();
+    }
+}
+
+// host code
+int N = 1024 * 1024;
+cudaMalloc(&amp;devInput, N+2);  // allocate array in device memory
+cudaMalloc(&amp;devOutput, N);   // allocate array in device memory
+// properly initialize contents of devInput here ...
+
+convolve&lt;&lt;&lt;BLOCKS_PER_CHIP, THREADS_PER_BLK&gt;&gt;&gt;(N, devInput, devOutput);</code></pre>
+        <ul>
+            <li>思路：写的 CUDA 代码需要知道底层 GPU 实现支持多少个核、每核多少个块。</li>
+            <li>程序员启动的线程块恰好能填满 GPU。程序对 GPU 实现做了假设：GPU 确实会让所有块同时运行。（"呃！"）</li>
+            <li>现在工作到块的分配完全由应用实现（绕过了 GPU 的线程块调度器），用全局计数器做动态分配，就像第五讲的共享工作队列。</li>
+            <li>现在程序员的心智模型是：<em>所有</em> CUDA 线程同时在 GPU 上运行。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>八、CUDA 小结</h2>
+        <ul>
+            <li><strong>执行语义</strong>
+                <ul>
+                    <li>把问题划分成线程块，符合数据并行模型的精神（意在与机器无关：系统把块调度到任意数量的核上）。</li>
+                    <li>线程块里的线程确实并发运行（必须如此，因为它们要协作）。</li>
+                    <li>单个线程块内部：SPMD 共享地址空间编程。</li>
+                    <li>这几种执行模型之间有微妙但值得注意的区别，要搞清楚。每遇到一个并行编程系统，都问问自己它用的是什么语义。</li>
+                </ul>
+            </li>
+            <li><strong>内存语义</strong>
+                <ul>
+                    <li>分布式地址空间：host/device 内存。</li>
+                    <li>设备内存里的线程局部、块共享、全局变量。</li>
+                    <li>load/store 在它们之间移动数据（所以把局部、共享、全局内存看作不同的地址空间是对的）。</li>
+                </ul>
+            </li>
+            <li><strong>关键实现细节</strong>
+                <ul>
+                    <li>线程块里的线程被调度到同一个 GPU "SM" 上，以便通过共享内存快速通信。</li>
+                    <li>线程块里的线程被分组成 warp，在 GPU 硬件上 SIMT 执行。</li>
+                </ul>
+            </li>
+        </ul>
+        <p>
+            最后两点：这一讲讲的是为 GPU 的可编程核写 CUDA 程序，工作（由 CUDA 内核启动描述）通过硬件工作调度器映射到核上。别忘了还有驱动 GPU 执行的图形流水线接口，GPU 里很多有意思的不可编程功能是为加速图形流水线操作而存在的，运行 CUDA 程序时它们基本是"关闭"的；GPU 怎样高效实现图形流水线是图形课的话题（CS248A 或 CS348K）。另外，这一讲还完全没谈 SM 里"Tensor Core"提供的几百 TFLOPS（用于深度学习），那是本学期后面的话题。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS149: Parallel Computing &copy; Fall 2023</p>
+        <nav class="footer-nav">
+            <a href="06_性能优化二.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="08_数据并行思维.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
