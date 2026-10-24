@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十五讲：领域专用编程系统 | Stanford CS149 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="14_期中复习.html">&larr; 上一讲</a>
+    <span>Stanford CS149: Lecture 15</span>
+    <a href="16_事务内存一.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十五讲：领域专用编程系统</h1>
+        <p class="subtitle">性能、生产力、通用性三角；领域专用语言（DSL）的假设和代价；高性能图像处理速成：3×3 模糊、可分离滤波、两遍法的局部性问题、分块（chunk）融合和重算的权衡；Halide：函数式的算法描述、作为另一门语言的"调度"（tile、vectorize、parallel、compute_root、compute_at），它的哲学、约束和成果，自动调度器，直接生成硬件的 Darkroom；Liszt：网格上的偏微分方程，编译器推断"模板"（stencil），在集群上做网格划分加幽灵单元，在 GPU 上做冲突图着色；好的 DSL 设计三原则</p>
+        <div class="author-meta">
+            主讲：Kayvon Fatahalian<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=sRuyBNxCkGQ" target="_blank">课堂录像</a>（Stanford Online，2023 年秋季）、<a href="https://gfxcourses.stanford.edu/cs149/fall23/lecture/dsl/" target="_blank">课件</a>（课件标号为 Lecture 14）；Liszt 部分课件致谢 Pat Hanrahan 和 Zach DeVito
+        </div>
+    </header>
+
+    <section>
+        <h2>一、开场：剩下的课和今天的目标</h2>
+        <p>
+            Kayvon 介绍剩余安排：感恩节后两讲事务内存，分量很重，几乎肯定会考；另外三讲（今天的领域专用编程系统、最后一周的专用硬件和能效）更多是希望大家了解，考题会偏概念，不会让你推演细节。
+        </p>
+        <p>
+            今天的目标：到目前为止，大家用的都是相当低层的编程系统：C、C++，CUDA 基本也是，ISPC 基本也是。唯一真正省事的是 ISPC 和 CUDA 替你生成汇编指令，其余的主要决定都是你做的，这是有意为之。你知道线程池可能怎样实现，所以调用 ISPC 任务时知道它在做什么。现在的问题是：既然你知道怎样从零实现，那么对那些是领域专家、但没上过 CS149、也不想管实现的人，什么样的高层抽象是好的？用两个案例：一个是 Google Android 手机上整个拍照应用的图像处理都用它写的 Halide（据 Kayvon 所知，至少几年前，经过 Instagram 滤镜的每张图也都用它处理）；另一个是斯坦福的研究语言 Liszt，你大概永远不会碰到，但它很好地展示了高层抽象的价值。两者都和斯坦福有关。
+        </p>
+        <ul>
+            <li>更深入地看"为任务选择正确的抽象"这一想法；</li>
+            <li>什么是领域专用编程语言（DSL）？</li>
+            <li>两个具体例子：Halide 做图像处理；Liszt 做计算流体力学；</li>
+            <li>关键概念：用 DSL 开发面向性能的应用有什么优势。</li>
+        </ul>
+
+        <h3>理想的并行编程语言</h3>
+        <p>
+            受过 CS149 训练的程序员很难找；用 C++（线程）、ISPC、CUDA 这类语言做性能优化，生产力很低（以作业 1、2、3 为证，作业 4 大概也是）。即使在 CS149 学生之间，作业成绩的性能差别也很大，真正的优化高手更少。
+        </p>
+        <p>
+            Pat Hanrahan 设计的三角形：性能、生产力、通用性。计算机科学一直在找三者兼得的独角兽：想快速表达想写的程序，从想法到正确的程序越快越好（现在有了 LLM，大家很想"写个把一堆数加起来的程序"就吐出 Python 代码）；Python 很受欢迎就因为生产力高。又想要高性能，机器学习、数据科学、TB 级的图、千万像素的图像处理，要在 iPhone 上跑，要在数据中心跑。历史上还认为语言应该通用，想写什么都能写。
+        </p>
+        <p>
+            流行的语言大多落在某一条边上：Web 开发者写的 JavaScript，什么都能写、能很快拼出东西，但不快；C++、Rust，Kayvon 把 Java 和 CUDA 也放在这类（性能层次各不同），什么都能写，要快就用 C，要 GPU 加速就用 CUDA；还有 Ruby 等。今天关心的是三角形上空着的那条边：生产力和性能之间。
+        </p>
+
+        <h3>出路：领域专用语言</h3>
+        <p>
+            很在乎生产力，比如用 PyTorch 想很快拼出一个新网络；要极高的效率，不只是并行效率，还要用 GPU、TPU；但愿意放弃"什么都能表达"。PyTorch 不是用来写任何东西的语言，是用来表达张量运算的。SQL 是很受限的语言，但查询数据库很好用，你完全不用想大数据库上怎样并行执行查询，只说"找出所有名字叫 foobar 的记录"，希望 Oracle 或 Postgres 做对。MATLAB 也算。同学提到地理空间数据库的查询语言。图形学里的 OpenGL。机器学习里 PyTorch 之上还有好几层库，灵活性越来越少、越来越省事。Kayvon 说，过去五到十年 DSL 受到大量重视，现在看到成果了；十年前说"放弃 C、C++、Java 的灵活性，把大家逼到一条窄路上"还有点争议。高性能不只是并行，也可能是用 TPU、加速器、Apple Watch 里五种不同处理器之一。
+        </p>
+        <p>
+            DSL 的假设：可以写一个程序，并在一系列异构并行系统上高效运行它。
+        </p>
+        <ul>
+            <li>领域专用语言：针对某个领域、表达能力受限的编程语言；高层的，通常是声明式的、确定性的。</li>
+            <li>主要思想：提高表达程序的抽象层次。目标：写一个程序，在不同机器上高效运行。</li>
+            <li>引入针对某个应用领域的高层编程原语：
+                <ul>
+                    <li>有生产力：直观好用，可跨机器移植，原语对应该领域里解决问题常用的行为；</li>
+                    <li>高性能：系统利用领域知识提供高效、优化的实现。给定一台机器，系统知道这个领域该用什么算法、什么并行策略；</li>
+                    <li>优化不只是把软件高效地映射到硬件！硬件平台本身也可以针对这些抽象优化。</li>
+                </ul>
+            </li>
+            <li>代价：失去通用性和完备性。</li>
+        </ul>
+        <p>
+            系统知道你说的各个原语是什么意思：PyTorch 知道 N 维张量是什么，SQL 知道"选择"是什么意思，并利用这些知识在你用的系统上给出最好的实现。说"选出所有行"，数据怎样布局？用什么算法、什么索引结构，二叉树还是 B 树？作为程序员只说"给我一张表，包含这个过滤的所有结果"，在不同系统上实现可能截然不同。PyTorch 里说"让这个张量过一层卷积"，在 GPU 上是某个 CUDA 实现，在 Intel 上可能完全不同，在 Google TPU 上又可能完全不同。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、高性能图像处理速成</h2>
+        <p>
+            Halide 是图像处理的 DSL [Ragan-Kelley、Adams 等，SIGGRAPH 2012、PLDI 13]，用于实现 Google 手机上的相机处理流水线（HDR+、人像模式的一些部分等），工业界 Instagram、Adobe 等也在用。它起源于斯坦福，主要在 MIT 开发，后来到了 Google。用户不算多，但都是非常在乎性能的人。讲 Halide 提供什么原语之前，先要讲这个领域的人在写什么样的工作负载。
+        </p>
+        <p>
+            Kayvon 先放了一段代码：30 秒内能说出它做什么吗？有人说模糊，从函数名看出来的。但怎么模糊？滤波器多大？怎么并行化、向量化？很难看懂。如果在作业 1 的时候把 _mm_load_si128 之类的 SSE 内建函数换成 CS149 intrinsics，这就是你会写出来的东西。再看普通 C 代码：
+        </p>
+        <pre><code>int WIDTH = 1024;
+int HEIGHT = 1024;
+float input[(WIDTH+2) * (HEIGHT+2)];
+float output[WIDTH * HEIGHT];
+
+float weights[] = {1.f/9, 1.f/9, 1.f/9,
+                   1.f/9, 1.f/9, 1.f/9,
+                   1.f/9, 1.f/9, 1.f/9};
+
+for (int j = 0; j &lt; HEIGHT; j++) {
+    for (int i = 0; i &lt; WIDTH; i++) {
+        float tmp = 0.f;
+        for (int jj = 0; jj &lt; 3; jj++)
+            for (int ii = 0; ii &lt; 3; ii++)
+                tmp += input[(j+jj)*(WIDTH+2) + (i+ii)] * weights[jj*3 + ii];
+        output[j*WIDTH + i] = tmp;
+    }
+}</code></pre>
+        <p>
+            二维卷积，单通道（单色）图像，每个输出像素是同一位置周围邻居的平均，权重都是 1/9，做了一次 3×3 方框模糊。每个像素的工作量：9 次乘加再存一次，每张图 9 × WIDTH × HEIGHT；N×N 的滤波器是 N² × WIDTH × HEIGHT。
+        </p>
+
+        <h3>两遍模糊</h3>
+        <p>
+            二维可分离滤波器（比如方框滤波器）可以用两次一维滤波来计算：先对每一行做一维模糊（每个像素是左右邻居和自己的平均），再对结果做竖直方向的模糊。水平模糊后已经加了三个数，竖直模糊再把三个部分和加起来，做的是完全一样的数学。（课件的示意图把模糊夸大了，实际是 30×30 的模糊。）
+        </p>
+        <pre><code>int WIDTH = 1024;
+int HEIGHT = 1024;
+float input[(WIDTH+2) * (HEIGHT+2)];
+float tmp_buf[WIDTH * (HEIGHT+2)];
+float output[WIDTH * HEIGHT];
+
+float weights[] = {1.f/3, 1.f/3, 1.f/3};
+
+// 1D horizontal blur
+for (int j = 0; j &lt; (HEIGHT+2); j++)
+    for (int i = 0; i &lt; WIDTH; i++) {
+        float tmp = 0.f;
+        for (int ii = 0; ii &lt; 3; ii++)
+            tmp += input[j*(WIDTH+2) + i+ii] * weights[ii];
+        tmp_buf[j*WIDTH + i] = tmp;
+    }
+
+// 1D vertical blur
+for (int j = 0; j &lt; HEIGHT; j++) {
+    for (int i = 0; i &lt; WIDTH; i++) {
+        float tmp = 0.f;
+        for (int jj = 0; jj &lt; 3; jj++)
+            tmp += tmp_buf[(j+jj)*WIDTH + i] * weights[jj];
+        output[j*WIDTH + i] = tmp;
+    }
+}</code></pre>
+        <ul>
+            <li>每张图的工作量 = 6 × WIDTH × HEIGHT；N×N 滤波器是 2N × WIDTH × HEIGHT。从 9 降到 6 不算多，但 7×7 滤波器就是 49 对 14；Photoshop 里常用半径 100 的模糊，差距很快变大。</li>
+            <li>多了 WIDTH × HEIGHT 的额外存储。同学指出内存占用增加了约 33%（输入、输出之外又一个同样大的临时缓冲）。手机上 1200 万像素的图，RGBA 四通道，再分配约 50 MB，这在手机上可能很要紧。</li>
+            <li>算术强度比二维模糊低约一半。为什么？</li>
+        </ul>
+
+        <h3>两遍模糊的局部性</h3>
+        <ul>
+            <li>输入的数据被复用三次（第一次装入后紧接着在下两次 i 循环迭代里复用，之后再不装入）。完美的缓存行为：所需数据从不装入超过一次；完美利用缓存行：不装入不需要的数据。</li>
+            <li>tmp_buf 的数据也被复用三次（但中间隔了三行图像数据的访问）：只要缓存能放下三行图像，所需数据就从不装入超过一次；也完美利用缓存行。</li>
+            <li>两遍法里，对 tmp_buf 的 load/store 是开销：这部分内存流量是两遍实现方式的副产品，不是计算本身固有的。</li>
+            <li>模糊算法固有的带宽需求：应用必须读输入图像的每个元素，必须写输出图像的每个元素。</li>
+        </ul>
+        <p>
+            原来的单遍代码，只要缓存能放两行，每个输入元素只从内存读一次，每个输出元素写一次。两遍法读一遍输入、写一遍临时缓冲、再读一遍临时缓冲、写一遍输出。不只是内存占用增加了，算术强度也降了约一半：原来受带宽限制就更慢了，原来受计算限制也许才算改进。
+        </p>
+
+        <h3>分块的两遍模糊（版本 1）</h3>
+        <pre><code>int WIDTH = 1024;
+int HEIGHT = 1024;
+float input[(WIDTH+2) * (HEIGHT+2)];
+float tmp_buf[WIDTH * 3];
+float output[WIDTH * HEIGHT];
+
+float weights[] = {1.f/3, 1.f/3, 1.f/3};
+
+for (int j = 0; j &lt; HEIGHT; j++) {
+
+    // produce 3 rows of tmp_buf (only what's needed for one row of output)
+    for (int j2 = 0; j2 &lt; 3; j2++)
+        for (int i = 0; i &lt; WIDTH; i++) {
+            float tmp = 0.f;
+            for (int ii = 0; ii &lt; 3; ii++)
+                tmp += input[(j+j2)*(WIDTH+2) + i+ii] * weights[ii];
+            tmp_buf[j2*WIDTH + i] = tmp;
+        }
+
+    // combine them together to get one row of output
+    for (int i = 0; i &lt; WIDTH; i++) {
+        float tmp = 0.f;
+        for (int jj = 0; jj &lt; 3; jj++)
+            tmp += tmp_buf[jj*WIDTH + i] * weights[jj];
+        output[j*WIDTH + i] = tmp;
+    }
+}</code></pre>
+        <p>
+            Kayvon 让大家花 30 到 45 秒和邻座讨论。同学说：和上一页算法一样，只是分成很多块、对输出的不同块做很多次。最外层循环是每一行输出：先产生这一行输出需要的三行临时数据，再竖直模糊它们得到一行输出，然后从头再来。临时缓冲只要分配三行，这三行大概能放进缓存，对 tmp_buf 的读写会命中缓存，算术强度回来了，也没有额外的分配。代价呢？同学指出：重叠的行算了多次。每一行临时数据本可以复用三次，现在算三行、用一次、扔掉，再算三行。每行输出的工作：第 1 步 3 × 3 × WIDTH，第 2 步 3 × WIDTH，每张图 12 × WIDTH × HEIGHT。比开头的 9 还差，倒退了，但感觉接近了。
+        </p>
+        <p>
+            怎样既少做数学（接近 2N）、又有高算术强度和低占用？同学们的想法：
+        </p>
+        <ul>
+            <li>把那三行当滚动缓冲：往下挪两行，填一行新的。挪两行要付 memcpy 的代价；或者用间接下标引用数据，代码就难看了，而且 Kayvon 说多出的下标计算在几乎任何现代计算机上都比别的东西更拖慢你。更要紧的是，滑动窗口在每行之间制造了原来没有的依赖，以后并行化时可能反咬一口。</li>
+            <li>把缓冲拆成三个独立的变量：内存里一样，只是更分散，没解决"要么在缓冲之间拷贝，要么在里面索引"的问题。</li>
+            <li>按方块走，边缘有些重叠的重算，但缓冲更小：Kayvon 很喜欢这个思路。原方案的问题是每行输出都多算上下各一行，两行开销对一行产出；如果每 10 行输出算 12 行中间结果，开销就是两行对十行。</li>
+        </ul>
+
+        <h3>分块的两遍模糊（版本 2）</h3>
+        <pre><code>int WIDTH = 1024;
+int HEIGHT = 1024;
+float input[(WIDTH+2) * (HEIGHT+2)];
+float tmp_buf[WIDTH * (CHUNK_SIZE+2)];  // sized so entire buffer fits in cache
+float output[WIDTH * HEIGHT];
+
+float weights[] = {1.f/3, 1.f/3, 1.f/3};
+
+for (int j = 0; j &lt; HEIGHT; j += CHUNK_SIZE) {  // slide writes j+CHUNK_SIZE
+
+    // produce enough rows of tmp_buf to produce CHUNK_SIZE rows of output
+    for (int j2 = 0; j2 &lt; CHUNK_SIZE+2; j2++)
+        for (int i = 0; i &lt; WIDTH; i++) {
+            float tmp = 0.f;
+            for (int ii = 0; ii &lt; 3; ii++)
+                tmp += input[(j+j2)*(WIDTH+2) + i+ii] * weights[ii];
+            tmp_buf[j2*WIDTH + i] = tmp;
+        }
+
+    // produce CHUNK_SIZE rows of output
+    for (int j2 = 0; j2 &lt; CHUNK_SIZE; j2++)
+        for (int i = 0; i &lt; WIDTH; i++) {
+            float tmp = 0.f;
+            for (int jj = 0; jj &lt; 3; jj++)
+                tmp += tmp_buf[(j2+jj)*WIDTH + i] * weights[jj];
+            output[(j+j2)*WIDTH + i] = tmp;
+        }
+}</code></pre>
+        <p>
+            每块输出的工作（假设 CHUNK_SIZE = 16）：第 1 步 18 × 3 × WIDTH，第 2 步 16 × 3 × WIDTH，每张图 (34/16) × 3 × WIDTH × HEIGHT = 6.4 × WIDTH × HEIGHT。CHUNK_SIZE 越大越趋向理想的 6 × WIDTH × HEIGHT；缓冲按能整个放进缓存来定大小（捕获全部生产者消费者局部性）。CHUNK_SIZE 太大会放不进缓存，分块的好处就没了，和分块（blocking）是同一个道理。这和第九讲 Spark、第十讲矩阵乘法里的生产者消费者融合是同一招：重排计算以最大化算术强度。但这里还愿意多算一点来换取算术强度，这是前面没出现过的。
+        </p>
+        <p>
+            还没完：还没把循环并行化到多核执行；没用 SIMD 指令执行循环体；其他基本优化，比如循环展开等。怎样并行化？每个输出块都可以并行；还不够的话，可以把块再横向切开，每块只需要块宽加 2，不用整行。另一种方式：回到只有几行临时缓冲的算法，用滑动窗口，把输出按列切开，每列往下滑，靠列之间的并行。方法不止一种。
+        </p>
+
+        <h3>优化过的 C++ 代码：3×3 图像模糊</h3>
+        <p>
+            开头那段难懂的代码，做的正是我们想出来的：用 SIMD 向量内建函数；改过的迭代顺序，256×32 的分块迭代（最大化缓存命中率）；多核执行（把图像竖直切分）；两遍融合成一遍，临时数据从缓存读。对每个 256×32 的输出块，先算 (256+2)×(32+2) 的临时块（放得进缓存），再产生输出。好：在四核 CPU 上比原来的两遍代码快约 10 倍。坏：专用于 SSE（不是 AVX2），只能在 CPU 上跑，根本看不出在干什么！用英语解释很容易，代码却很难看出来。而且每次想试点不同的东西，比如换成滑动窗口，就算很熟练也可能要花一整天。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、Halide 语言</h2>
+        <p>
+            Halide 不像 PyTorch 那样让不懂并行编程的人得到好性能。Kayvon 说它是让 CS149 学生更快做完作业的语言：给那些已经知道"我想这样分块、在这个循环上向量化"、只是不想自己写代码的人。ISPC 说"我不想写这些内建函数"，Halide 对图像处理说"我连这些循环都不想管"。
+        </p>
+        <p>
+            它是嵌入在 C++ 里、用来描述一串图像处理操作的简单 DSL：
+        </p>
+        <pre><code>Var x, y;
+Func blurx, blury, bright, out;
+Halide::Buffer&lt;uint8_t&gt; in = load_image("myimage.jpg");
+Halide::Buffer&lt;uint8_t&gt; lookup = load_image("s_curve.jpg");  // 255-pixel 1D image
+
+// perform 3x3 box blur in two-passes
+blurx(x,y) = 1/3.f * (in(x-1,y)    + in(x,y)    + in(x+1,y));
+blury(x,y) = 1/3.f * (blurx(x,y-1) + blurx(x,y) + blurx(x,y+1));
+
+// brighten blurred result by 25%, then clamp
+bright(x,y) = min(blury(x,y) * 1.25f, 255);
+
+// access lookup table to contrast enhance
+out(x,y) = lookup(bright(x,y));
+
+// execute pipeline to materialize values of out in range (0:1024,0:1024)
+Halide::Buffer&lt;uint8_t&gt; result = out.realize(1024, 1024);</code></pre>
+        <ul>
+            <li>"函数"把整数坐标映射到值（比如对应像素的颜色）。Halide 函数：定义在 N 维域上的一个无限（但离散）的值的集合。</li>
+            <li>Halide 表达式：一个无副作用的表达式，描述怎样用其他函数的值计算一个函数在域中某一点的值。比如 blurx 在 (x, y) 的值由访问 in 的三个值的表达式给出。</li>
+        </ul>
+        <p>
+            完全函数式，代码里没有循环。可以把函数想成张量，但 Kayvon 说别这样想。in 严格说是一个缓冲区，从实际输入数据装入的特殊函数。bright 是 blury 的所有像素乘 1.25 再截断到 255；out 用 bright(x, y) 的值作下标去查 lookup，这是一次 gather；其余都是对所有 x、y 的 map。最后一行说：给我一个 C 风格的缓冲区，在 x、y 都从 0 到 1024 的范围内求出 out 的值，这是延迟求值。
+        </p>
+        <p>
+            有同学问 x、y 为 0 时 in(x-1, y) 的边界怎么办。Kayvon 不想在讲课里处理它，但因为 DSL 讲生产力，可以设一个边界条件（课件上没写），Halide 编译器会生成检测边界、输出正确值的代码；而且很可能不是在内层循环里放 if，而是生成一个从 1 到 n-1 没有 if 的循环，再为边界单独生成循环，自己写会很乱。这就是它的生产力：代码看起来像数学，像我们讨论算法的方式。讲模糊时我不会给你一个卷积，而是说"对每个像素，把周围的取平均"。
+        </p>
+        <p>
+            把应用看作一个 DAG：in → blurx → blury → bright；out 来自 bright 和 lookup（myimage.jpg、s_curve.jpg）。
+        </p>
+
+        <h3>表示的关键方面</h3>
+        <ul>
+            <li>直观的表达：采用局部的、"逐点"的算法表达视角。</li>
+            <li>Halide 语言是声明式的。它不规定迭代顺序，也不规定域里哪些值要存起来！只规定计算这些值需要什么。</li>
+            <li>对域上各点的迭代是隐含的（没有显式循环）。</li>
+        </ul>
+        <pre><code>Var x, y;
+Func blurx, out;
+Halide::Buffer&lt;uint8_t&gt; in = load_image("myimage.jpg");
+
+// perform 3x3 box blur in two-passes
+blurx(x,y) = 1/3.f * (in(x-1,y)    + in(x,y)    + in(x+1,y));
+out(x,y)   = 1/3.f * (blurx(x,y-1) + blurx(x,y) + blurx(x,y+1));
+
+// execute pipeline on domain of size 1024x1024
+Halide::Buffer&lt;uint8_t&gt; result = out.realize(1024, 1024);</code></pre>
+        <p>
+            整段 C 代码在 Halide 里就是这两行。真实的图像处理流水线是很复杂的函数序列，课件列出各基准的 Halide 函数数：两遍模糊 2、锐化蒙版 9、Harris 角点检测 13、相机 RAW 处理 30、非局部均值去噪 13、最大亮度滤波 9、多尺度插值 52、局部拉普拉斯滤波 103、合成景深 74、双边滤波 8、直方图均衡 7、VGG-16 深度网络 64。真实生产应用可能有成百上千个函数！Google HDR+ 流水线有 2000 多个 Halide 函数。
+        </p>
+
+        <h3>Halide 的一种（串行）实现</h3>
+        <pre><code>// equivalent "C-style" loop nest:
+allocate in(1024+2, 1024+2);  // (width,height)... initialize from image
+allocate blurx(1024,1024+2);  // (width,height)
+allocate out(1024,1024);      // (width,height)
+
+for y=0 to 1024:
+    for x=0 to 1024+2:
+        blurx(x,y) = ... compute from in
+
+for y=0 to 1024:
+    for x=0 to 1024:
+        out(x,y) = ... compute from blurx</code></pre>
+        <p>
+            如果你是 Halide 编译器，可以把每个函数变成一个数组（二维张量），把每个等式变成对输出数组每个像素运行的操作。这是对上面程序的一种有效编译，生成的是一个分配三个缓冲区的顺序 C 程序，正是前面写过的；也可能有其他有效的编译。
+        </p>
+
+        <h3>任何系统设计的关键：为任务选择"正确"的表示</h3>
+        <ul>
+            <li>好的表示用起来有生产力：体现思考问题的自然方式。</li>
+            <li>好的表示让系统能为应用提供有用的服务：验证、提供某些保证（正确性、资源界限、量的守恒、类型检查）；性能（并行化、向量化、使用专用硬件）。</li>
+        </ul>
+        <p>
+            要想清楚用户是谁、什么对他们难、你想让什么变容易。两行代码对比写 5 到 8 分钟的 C 代码，好处不大，有些语法糖，处理边界条件也许有点帮助，但不是关键。难的是想出那个优化过的版本：即使你懂 CS149，也不知道在某台机器上正确答案是什么，想想你在编程作业里的那些反复尝试。Halide 的作者们以前用汇编写过很多这种东西，他们想要的不只是紧凑的语法，而是能很快探索已知可能有效的优化选择。现在的任务不是表达图像处理计算，而是为某个 Halide 程序生成高效的实现。
+        </p>
+
+        <h3>第二套表示："调度"</h3>
+        <pre><code>Func blurx, out;
+Var  x, y, xi, yi;
+Halide::Buffer&lt;uint8_t&gt; in = load_image("myimage.jpg");
+
+// the "algorithm description" (declaration of what to do)
+blurx(x,y) = (in(x-1, y) + in(x,y) + in(x+1,y)) / 3.0f;
+out(x,y)   = (blurx(x,y-1) + blurx(x,y) + blurx(x,y+1)) / 3.0f;
+
+// "the schedule" (how to do it)
+out.tile(x, y, xi, yi, 256, 32).vectorize(xi,8).parallel(y);
+blurx.compute_at(x).vectorize(x, 8);  // later slides: blurx.compute_at(out, x)
+
+// execute pipeline on domain of size 1024x1024
+Halide::Buffer&lt;uint8_t&gt; result = out.realize(1024, 1024);</code></pre>
+        <p>
+            算法描述（做什么）之外，是一套叫"调度"的编程原语（怎样做），明确指示怎样生成代码。用英语读：计算 out 时用二维分块顺序（循环名为 x、y、xi、yi），块大小 256×32；对 xi 循环做 8 宽向量化；用线程并行化 y 循环。对 out 的每个块按需产生 blurx 的元素，对 x（最内层）循环做向量化。调度原语让程序员给出"怎样把算法调度到并行机器上"的高层"草图"，把生成底层平台专用代码的细节留给 Halide 编译器。觉得效果不好想改块大小，改参数就行，它会重新向量化；不想在 xi 上向量化、想在最外层做 SIMD，也只是改参数。
+        </p>
+
+        <h3>遍历 N 维域的原语</h3>
+        <p>
+            同时规定顺序和怎样并行化（多线程、用 SIMD 指令向量化）：行主序串行、列主序、y 方向串行而 x 方向向量化、各行在不同线程上并行而行内向量化、二维分块顺序（课件图里数字表示线程内的处理顺序，t0、t1 是两个线程）等，你想要的各种排列都能表达。
+        </p>
+
+        <h3>指定循环迭代顺序和并行</h3>
+        <pre><code>// default loop nest for blurx:
+for y=0 to HEIGHT
+    for x=0 to WIDTH
+        blurx(x,y) = ...
+
+// given this schedule for the function "out":
+//   out.tile(x, y, xi, yi, 256, 32).vectorize(xi,8).parallel(y);
+// Halide compiler will generate this parallel, vectorized loop nest for out:
+for y=0 to num_tiles_y:           // parallelize this loop with threads
+    for x=0 to num_tiles_x:
+        for yi=0 to 32:
+            for xi=0 to 256 by 8:  // vectorize this loop with SIMD instr
+                idx_x = x*256+xi;
+                idx_y = y*32+yi
+                out(idx_x, idx_y) = ... (simd arithmetic here)</code></pre>
+        <p>
+            out.tile 说：不按默认的行主序，而按 256×32 的块计算输出；分块后有四层循环，命名为 x、y、xi、yi，以后用这些名字引用。每条调度语句都是在操作程序里的一个循环嵌套：Halide 有一门描述算法的语言，还有一门命令式的语言，描述对循环嵌套做的一串变换。tile 返回新的循环嵌套，再说 xi 循环要向量化，y 循环不要串行，用线程池并行。
+        </p>
+
+        <h3>交错生产者和消费者的原语</h3>
+        <p>
+            另一大类是融合，把一些循环放进另一些循环里。
+        </p>
+        <pre><code>// out.tile(x, y, xi, yi, 256, 32);
+// blurx.compute_root();
+// do not compute blurx within out's loop nest: compute all of blurx, then all of out
+
+allocate buffer for all of blurx(x,y)
+for y=0 to HEIGHT:                 // all of blurx is computed here
+    for x=0 to WIDTH:
+        blurx(x,y) = ...
+
+for y=0 to num_tiles_y:            // values of blurx consumed here
+    for x=0 to num_tiles_x:
+        for yi=0 to 32:
+            for xi=0 to 256:
+                idx_x = x*256+xi;
+                idx_y = y*32+yi
+                out(idx_x, idx_y) = ...</code></pre>
+        <p>
+            compute_root() 表示在层次的根部计算，不在任何别人的循环嵌套里计算：先算出整个临时缓冲，再分块访问它。是有效程序，但没什么道理这样做。
+        </p>
+        <pre><code>// out.tile(x, y, xi, yi, 256, 32);
+// blurx.compute_at(out, xi);
+// compute necessary elements of blurx within out's xi loop nest
+
+for y=0 to num_tiles_y:
+    for x=0 to num_tiles_x:
+        for yi=0 to 32:
+            for xi=0 to 256:
+                idx_x = x*256+xi;
+                idx_y = y*32+yi
+                allocate 3-element buffer for tmp_blurx
+                // compute 3 elements of blurx needed for out(idx_x, idx_y) here
+                for (blur_x=0 to 3)
+                    tmp_blurx(blur_x) = ...
+                out(idx_x, idx_y) = ...</code></pre>
+        <p>
+            compute_at(out, xi) 把它塞进最内层循环。Halide 编译器做分析，得出 xi 循环每次迭代的输出需要 blurx 的 3 个元素：每个输出像素算 3 个临时像素再用掉。
+        </p>
+        <pre><code>// out.tile(x, y, xi, yi, 256, 32);
+// blurx.compute_at(out, x);
+// compute necessary elements of blurx within out's x loop nest
+// (all necessary elements for one tile of out)
+
+for y=0 to num_tiles_y:
+    for x=0 to num_tiles_x:
+        allocate 258x34 buffer for tile blurx
+        for yi=0 to 32+2:              // tile of blurx is computed here
+            for xi=0 to 256+2:
+                tmp_blurx(xi,yi) = // compute blurx from in
+        for yi=0 to 32:                // tile of blurx is consumed here
+            for xi=0 to 256:
+                idx_x = x*256+xi;
+                idx_y = y*32+yi
+                out(idx_x, idx_y) = ...</code></pre>
+        <p>
+            这才是前面讨论的方案：compute_at(out, x) 塞进 x 循环，每个块先算 258×34 个元素再用掉，扔掉再算下一块。
+        </p>
+
+        <h3>3×3 方框模糊的调度小结</h3>
+        <pre><code>// the "algorithm description" (declaration of what to do)
+blurx(x,y) = (in(x-1, y) + in(x,y) + in(x+1,y)) / 3.0f;
+out(x,y)   = (blurx(x,y-1) + blurx(x,y) + blurx(x,y+1)) / 3.0f;
+
+// "the schedule" (how to do it)
+out.tile(x, y, xi, yi, 256, 32).vectorize(xi,8).parallel(y);
+blurx.compute_at(out, x).vectorize(x, 8);
+
+// equivalent parallel loop nest:
+for y=0 to num_tiles_y:   // iters of this loop are parallelized using threads
+    for x=0 to num_tiles_x:
+        allocate 258x34 buffer for tile blurx
+        for yi=0 to 32+2:
+            for xi=0 to 256+2 BY 8:
+                tmp_blurx(xi,yi) = ...  // compute blurx from in using 8-wide
+                                        // SIMD instructions here
+                                        // compiler generates boundary conditions
+                                        // since 256+2 isn't evenly divided by 8
+        for yi=0 to 32:
+            for xi=0 to 256 BY 8:
+                idx_x = x*256+xi;
+                idx_y = y*32+yi
+                out(idx_x, idx_y) = ... // compute out from blurx using 8-wide
+                                        // SIMD instructions here</code></pre>
+        <p>
+            两行调度就得到那个汇编代码的循环嵌套：先给 out 搭好循环嵌套，再决定生产者放在里面的哪儿。
+        </p>
+
+        <h3>Halide 的哲学</h3>
+        <ul>
+            <li>程序员负责描述图像处理算法。</li>
+            <li>程序员知道怎样在机器上高效调度应用（但又慢又繁琐），所以 Halide 给程序员一门表达高层调度决定的语言：代码的循环结构；展开、向量化、多核并行化。两门相互配合的领域专用语言做两件事。</li>
+            <li>系统（Halide 编译器）并不聪明，它提供的服务是用目标机器上可用的机制（pthreads、AVX 内建函数等）机械地执行调度的细节。在 ARM 上生成这些内建函数和线程代码，在 x86 上生成那些，适当处理边界条件和分配。</li>
+        </ul>
+        <p>
+            因为知道所有依赖，因为是函数式的（没有追指针之类），编译器知道可以随意挪动循环嵌套、改掉你所有的下标，而绝不改变程序的正确性。修改调度永远不会改变输出，它只是优化。
+        </p>
+
+        <h3>语言的约束（为了让编译器能提供想要的服务）</h3>
+        <ul>
+            <li>应用领域范围：规则 N 维域上的计算。</li>
+            <li>只有前馈流水线（对归约和固定递归深度有特殊支持）。</li>
+            <li>所有依赖都能被编译器推断出来。</li>
+        </ul>
+
+        <h3>早期的学术成果 [Ragan-Kelley 2012]</h3>
+        <ul>
+            <li>应用 1：相机 RAW 处理流水线（把 RAW 传感器数据转成 RGB 图像）。原版：463 行手调的 ARM NEON 汇编；Halide：代码少 2.75 倍，快 5%。</li>
+            <li>应用 2：双边滤波（很多应用里常用的图像滤波操作）。原版：122 行 C++；Halide：34 行算法加 6 行调度；CPU 实现快 5.9 倍；GPU 实现比手写 CUDA 快 2 倍。</li>
+        </ul>
+        <p>
+            即使编译器生成的汇编不如高手手写的好，程序员能更快地迭代高层设计空间、试更多东西，全局结构更好，哪怕代码本身可能比高手的慢 10% 到 30%。后来部分作者去了 Google 全职做这件事（长期保持开源），它稳定到成为 Google 图像处理流水线的编译器。
+        </p>
+
+        <h3>退一步看：Halide 是什么？</h3>
+        <ul>
+            <li>Halide 是帮助专家开发者更快优化图像处理代码的 DSL。</li>
+            <li>Halide 不替新手程序员决定怎样优化程序。没上过 CS149 的人怎么写调度？什么概念都不懂。</li>
+            <li>Halide 为（对代码优化很在行的）程序员提供原语，快速表达系统该应用哪些优化。</li>
+            <li>Halide 编译器负责把这个策略映射到机器的琐碎细节。</li>
+        </ul>
+
+        <h3>自动生成 Halide 调度</h3>
+        <ul>
+            <li>问题：结果发现很少有程序员能写出好的 Halide 调度。Google 有 80 多个程序员写 Halide，只有极少数被信任来写调度。Kayvon 说大概三个人，其中一个休陪产假时，Halide 有一阵没人写调度。</li>
+            <li>近来的工作：编译器分析 Halide 程序，替程序员自动生成高效的调度 [Adams 2019]。到 [Adams 2019] 为止，对图像处理应用，要手写出比 Halide 自动调度器更好的调度，得下很大功夫。参见 Adams 等，《Learning to Optimize Halide with Tree Search and Random Programs》，SIGGRAPH 2019。</li>
+        </ul>
+        <p>
+            调度这套抽象给出了一个非常结构化、有组织的设计空间：优化程序就是选循环嵌套、选把东西放在嵌套的哪里。这个结构化的空间后来对引导自动搜索非常有用。2019 年那篇由 Halide 的共同创造者之一 Andrew Adams 主导（Kayvon 帮了些忙），用 AI 课里的博弈方法（树搜索等）搜索调度空间，得到的调度相当好，你们得很努力才能做到那么好。
+        </p>
+        <p>
+            自动调度器为专家节省时间（早期结果 [Mullapudi 2016]，比 2019 年那篇差，但有这张图）：横轴是时间（分钟），纵轴是吞吐量（每秒像素，越高越好），三个图像处理应用（最大值滤波、非局部均值去噪、镜头模糊）。请了 Google 里三个全世界最会写调度的人中的两位（Andrew、Dillon），给他们从没见过的程序的 Halide 算法，让他们写调度。他们的做法是写调度、objdump 看汇编，"这不是对的汇编"，看汇编但从不写汇编，比如知道有时这样做 LLVM 不会展开某个循环。绿线是自动调度器一毫秒算出来的，所以是平的；他们的曲线随时间上下，是在探索设计空间，Andrew 不笨，他创造了 Halide，45 分钟后说"不太顺，我不干了"。自动调度器三局赢两局。当然只给了他们一小时，继续下去他们肯定会赢；但新的自动调度器更好，调度一个卷积比大多数人强。
+        </p>
+
+        <h3>Darkroom / Rigel / Aetherling</h3>
+        <p>
+            既然这么多人关心高性能图像处理，为什么还要编译到 CPU？目标：从一个高层的算法描述（受限的"类 Halide"语言）直接综合出 ASIC 或 FPGA 实现 [Hegarty 2014、Hegarty 2016、Durst 2020]。课件放了 Darkroom 论文（《Darkroom: Compiling High-Level Image Processing Code into Hardware Pipelines》，斯坦福，作者包括 Hegarty、DeVito、Ragan-Kelley、Horowitz、Hanrahan 等）的首页：编译器把高层图像处理语言（一种模板语言）写的程序翻译成仿照优化过的图像信号处理器（ISP）硬件的行缓冲流水线，再自动编译成 ASIC 设计，或 FPGA、CPU 的代码；实现了相机流水线、边缘和角点检测、去模糊等例子。目标：极高效率的图像处理。跳过可编程处理器，直接从高层表示生成硬件。最后一周会更一般地讨论：指令集是硬件实现和软件实现之间的接口，如果用高层 DSL 写程序，为什么还需要这个接口？为什么不让编译器了解硬件实现、直接生成它？
+        </p>
+
+        <h3>其他近来的领域专用编程系统</h3>
+        <ul>
+            <li>基于图的机器学习计算的 DSL；另见 Ligra（描述图上操作的 DSL）；</li>
+            <li>没那么领域专用、但仍专门为大数据在分布式系统上的数据并行计算设计的（"Map-Reduce"）；</li>
+            <li>Web 应用的模型-视图-控制器范式；</li>
+            <li>物理模拟语言：Simit [MIT]、Ebb [Stanford]；</li>
+            <li>Opt：非线性最小二乘优化的语言 [Stanford]；</li>
+            <li>实时 3D 图形的语言；</li>
+            <li>定义深度神经网络及其训练、推理计算的 DSL；</li>
+            <li>数值计算；很多领域都在进行。</li>
+        </ul>
+        <p>
+            TensorFlow、PyTorch 大概是大家最常用的 DSL，其次可能是 SQL。和 C、Java 能写的程序空间比，在这些语言里能做的很少，但编译器和系统知道关键操作的语义，能替你做很聪明的事，有些可能是很多人自己都做不到的。在处理器类型这么多的时代，世界正往这个方向走：为 x86 写好一个 Halide 调度，到 ARM 上大概还得再写一个，你需要一个足够了解你所写程序类型的东西来替你分担。
+        </p>
+
+        <h3>小结</h3>
+        <ul>
+            <li>现代机器是并行的、异构的：这是在能耗受限的世界里提高计算能力的唯一途径。</li>
+            <li>大多数软件只用到机器峰值能力的一小部分：针对这些机器调优程序非常困难；调优的努力不能跨机器移植。</li>
+            <li>领域专用编程环境牺牲通用性，换取生产力、性能和可移植性。今天的案例是 Halide：利用显式的依赖、领域限制、领域知识，让系统综合出高效的实现。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>四、Liszt：网格上求解偏微分方程的语言</h2>
+        <p>
+            Liszt（liszt.stanford.edu）[DeVito 等，Supercomputing 11、SciDAC '11]，大约 12 年前斯坦福的项目，和 Halide 差不多同时。早期目标是模拟喷气发动机，需要流体力学、有限元分析等。做过物理模拟的人知道，发动机会表示为一个网格，在网格上做运算。这里的领域不是像素，而是网格上的操作。DSL 的一个标志是系统或编译器知道你的数据结构：Halide 里一切都是函数，编译器负责分配；PyTorch 里一切都是稠密张量；Liszt 和各种图处理 DSL 里只能操作图。表示一个图的方式有上千种，就像表示 N 维张量一样；Halide 从不分配整个张量，只分配需要的块，图也可以这样。所以 Liszt 从不给你一个图结构，只给你一组访问结构中元素的函数。
+        </p>
+        <p>
+            Liszt 程序在网格上运行：计算定义在网格的面、边或顶点上的<strong>场</strong>（field）的值。课件的网格例子：顶点 A 到 H，边 0 到 11。
+        </p>
+
+        <h3>Liszt 程序：网格上的热传导</h3>
+        <pre><code>var i = 0;
+while ( i &lt; 1000 ) {
+    Flux(vertices(mesh)) = 0.f;
+    JacobiStep(vertices(mesh)) = 0.f;
+    for (e &lt;- edges(mesh)) {
+        val v1 = head(e)
+        val v2 = tail(e)
+        val dP = Position(v1) - Position(v2)
+        val dT = Temperature(v1) - Temperature(v2)
+        val step = 1.0f/(length(dP))
+        Flux(v1) += dT*step
+        Flux(v2) -= dT*step
+        JacobiStep(v1) += step
+        JacobiStep(v2) += step
+    }
+    i += 1
+}</code></pre>
+        <p>
+            颜色标注：场、网格、拓扑函数、对集合的迭代。把所有顶点的 flux 设为 0；对网格里的每条边独立地做；访问网格顶点 v2 处的场值；给定一条边，循环体访问、修改相邻网格顶点上的场值。时间步进 1000 次，对网格的每条边做这些事。我们不知道网格怎样表示，是带指针的图，还是压缩稀疏行，还是这台计算机想要的别的什么；只知道能查询边，对每条边能查询两端的顶点，对每个顶点能查询周围的边。还能在网格的各部分存数据：每个顶点上存位置、温度。可以写成 v1.temperature，但他们选了物理学家更熟悉的写法，像一个场：定义在所有点上的温度函数，给它一个点作参数就得到温度。这个算法取一条边两端顶点的位置和温度，算出这条边上的热通量，分配给两端的顶点，具体计算不重要。
+        </p>
+
+        <h3>Liszt 编程</h3>
+        <ul>
+            <li>Liszt 程序描述对一个抽象网格表示的场的操作。只能描述对网格场的读写，但写这类科学代码的科学家就是这样想的。</li>
+            <li>应用指定网格的类型（规则、不规则）和它的拓扑。</li>
+            <li>网格表示由 Liszt 选择（不是程序员）：基于网格类型、程序行为和目标机器。</li>
+        </ul>
+        <p>
+            课件旁白：有意思，我写一个程序，编译器根据我的代码做了哪些操作，来决定它该用什么数据结构。
+        </p>
+
+        <h3>编译到并行计算机</h3>
+        <p>
+            回想作业里面对的挑战：1. 找出并行；2. 找出数据局部性；3. 推理需要什么同步。现在考虑怎样在 Liszt 编译器里自动化这个过程。
+        </p>
+        <ul>
+            <li>关键是确定程序的依赖。没有依赖意味着可以并行执行；根据依赖划分数据；需要同步来遵守依赖（必须等到计算所依赖的值已知）。</li>
+            <li>对一般程序，编译器无法在全局范围推断依赖。比如 <code>a[f(i)] += b[i];</code>，必须执行 f(i) 才知道循环迭代之间是否有依赖。C++ 甚至 Java 做不了复杂分析就是因为这种代码。在 Liszt 里写不出这种代码，读写值的唯一方式是从网格的位置查询。</li>
+        </ul>
+        <p>
+            Liszt 的约束让依赖分析成为可能：静态分析代码，找出每个顶层 for 循环的"模板"（stencil）。提取嵌套的网格元素读取，提取在网格元素上的数据操作。"模板" = 循环一次迭代访问的网格元素 = 这次迭代的依赖。比如边 6 的读模板是 D 和 F。对 edges(mesh) 里的 e：head(e)、tail(e) 写 Flux、JacobiStep，读 Position、Temperature；对 vertices(mesh)：读写 Flux、写 Temperature、读写 JacobiStep。编译器看出这是对所有边的并行循环，每次迭代只访问边两端顶点的信息，所有依赖都知道了，还知道会读哪些值、写哪些值。难点：每条边都要更新顶点上的值，而每个顶点连着不止一条边，这个场有多个写者，编译器知道这里需要保护或原子操作。
+        </p>
+
+        <h3>可移植的并行：编译器利用依赖知识实现不同的并行执行策略</h3>
+        <p>
+            两种策略：策略 1，网格划分（自己拥有的单元和幽灵单元）；策略 2，网格着色（为每种颜色调度一批互不冲突的线程，批 1 到批 4）。
+        </p>
+
+        <h3>编译到集群（多个节点，分布式地址空间）</h3>
+        <ul>
+            <li>必须相对某个输入的顶点、边、面等访问网格元素；注意很多算子返回集合（比如"这个面的所有边"）。</li>
+            <li>Liszt 怎样把一个图分布到这些节点上？网格加模板 → 图 → 划分。</li>
+        </ul>
+        <pre><code>for (f &lt;- faces(mesh)) {
+    rhoOutside(f) =
+        calc_flux(f, rho(outside(f))) +
+        calc_flux(f, rho(inside(f)))
+}</code></pre>
+        <p>
+            考虑分布式内存实现：每个节点存网格的一个区域，初始划分用 ParMETIS（划分网格的工具）。程序说："Liszt，这是我的网格拓扑（可能有一千亿个节点），你想办法放到集群上；我要对每条边（或每个面）做工作，碰这些顶点。"Liszt 把网格分布到集群上，每个节点的网格元素数相等。维护一层幽灵单元：每个处理器还需要相邻单元的数据才能计算（"幽灵单元"），Liszt 分配幽灵区域的存储，并生成实现拓扑算子所需的通信。每一步都要和其他节点交换这些数据。在集群上运行时，消息传递由 Liszt 编译器生成，那可不是好玩的代码。
+        </p>
+
+        <h3>编译到 GPU（单一地址空间，大量细小的线程）</h3>
+        <p>
+            不必把网格分成小块，更自然的是每条边一个 CUDA 线程。
+        </p>
+        <ul>
+            <li>GPU 实现：并行归约。前面的例子里每个处理器（或集群节点）分到网格的一个区域；GPU 上自然的并行化是每条边一个 CUDA 线程。不同的边共享一个顶点：需要原子地更新每个顶点的场数据。编译器可以直接生成原子写。</li>
+            <li>GPU 实现：冲突图。但原子操作可能很慢，Liszt 认为太慢了。预处理依赖：找出有冲突写的网格边（图上的连线表示有冲突）。边 1 和边 5 都写顶点 C，所以冲突图里 1 和 5 之间有一条边；8 和 2 不写同一个值，之间没有边。跑一次程序就能得到这个信息（只要网格不变，结果在之后的执行中一直有效）。</li>
+            <li>给冲突图的节点"着色"，使相连的节点颜色不同。把同一颜色的所有节点放在一次 CUDA 启动里，就能在 GPU 上并行执行，不需要原子操作。对边的 for 循环被拆成（比如四种颜色）四个并行 for 循环：先完全并行地处理所有蓝色边，不用锁不用原子；再处理所有橙色边，以此类推。</li>
+        </ul>
+
+        <h3>Liszt 程序在集群上的性能</h3>
+        <p>
+            256 个节点，每节点 8 核（消息传递）。Euler（2300 万单元的网格）和 Navier-Stokes（2100 万单元）两个程序，Liszt 和 C++ 的加速比曲线随核数（32 到 1024）上升，Liszt 和手写 C++ 相当。重要的是性能可移植性！同一个 Liszt 程序在 GPU 上也很高效（结果没展示），但编译到 GPU 时用的是不同的算法（图着色）。机械工程系的人完全不用上 CS149，不改一行代码，就能在集群和 GPU 上都得到相当好的性能。
+        </p>
+
+        <h3>Liszt 小结</h3>
+        <ul>
+            <li>生产力：网格的抽象表示，顶点、边、面、场（科学家本来就在想的概念！）；直观的拓扑算子。</li>
+            <li>可移植性：同样的代码在大型 CPU 集群和 GPU 上运行（以及它们的组合！）。</li>
+            <li>高性能：语言受约束，让编译器能跟踪依赖；用于考虑局部性的划分（分布式内存实现）；用于图着色以避免同步（GPU 实现）；编译器为不同平台选不同的并行策略；系统可以根据应用和平台定制网格表示（比如代码不需要的话就不存边指针）。</li>
+        </ul>
+        <p>
+            模式一再重复：系统处理数据结构，给你访问它的方式，但不让你对它的格式做任何假设；你用访问器写程序，系统因为知道依赖和数据结构的细节就能放手去做。PyTorch 里数据结构是张量，你不管分配，只要张量，告诉它你访问什么。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、好的领域专用编程系统设计的要素</h2>
+        <h3>1. 好的系统找出最重要的情况，在这些情况下提供最大的好处</h3>
+        <ul>
+            <li>代码结构模仿领域里问题的自然结构：Halide 的逐像素视角，pixel(x, y) 由输入像素值的表达式算出；图处理算法：逐顶点的操作。物理学家按网格上的操作思考，图像处理的人按像素思考，机器学习的人按张量思考，要让操作和思维过程对齐。</li>
+            <li>高效的表达：常见操作容易而直观地表达。</li>
+            <li>高效的实现：领域里最重要的优化由系统替程序员完成。</li>
+            <li>课件作者的经验：一个抽象"方便"、却排除了已知最好实现策略的并行编程系统，几乎总会失败。</li>
+        </ul>
+        <p>
+            Kayvon 说他们开发这类东西的方式：先按用户想怎样写把代码写下来，再按想怎样在真实机器上执行把代码写一遍，然后想编译器能不能从 A 走到 B、需要知道什么，再在前端加一点东西，让用户能声明这些信息。
+        </p>
+
+        <h3>2. 好的系统是简单的系统</h3>
+        <ul>
+            <li>只有少数关键原语和操作：Halide 是描述循环嵌套的几个调度原语；Hadoop 是 map + reduce。</li>
+            <li>让编译器或运行时能专注于优化这些原语：提供并行实现，利用合适的硬件。</li>
+            <li>好的架构师常问："我们真的需要这个吗？"（这个概念能不能归结为已有的原语？）系统里每个领域专用原语，都最好有充分的性能或表达力理由才存在。</li>
+        </ul>
+        <p>
+            设计这类东西时总会有人来说"能不能加这个？加那个？"好的架构师其实很倔，会说"不，给我看看为什么用现有的做不到"，因为他们知道原语一多就失控了，让少数东西变快的美感就消失了。
+        </p>
+
+        <h3>3. 好的原语能组合</h3>
+        <ul>
+            <li>原语的组合让适用范围很宽，即使范围限于一个领域：比如今天讨论的框架支持各种各样的图算法；Halide 的循环顺序和循环交错调度原语能表达很广的调度。</li>
+            <li>组合常常让优化可以推广：系统能优化 A、能优化 B，就能优化组合 A 和 B 的程序。</li>
+            <li>一个特性不该加（或该换种方式加）的常见信号：新特性不能和系统里所有现有特性组合。有人说"要是有这个原语，我的东西能快 10 倍"，好的架构师会想：加了它就和另外四个不组合了，我想想能不能换种方式做。</li>
+            <li>好设计的标志：系统最终被用于原设计者从未预料的应用。</li>
+        </ul>
+        <p>
+            几乎每个能流行十年以上的好设计，创造者都会说"我完全没想到大家会这样用它"："我本来是写个处理网格的东西"；图形学里"我本来是写个渲染图片的程序，斯坦福和 UNC 那帮怪人拿它来做蛋白质折叠"。这说明系统好：原语少、能组合，人们用出了你从没想过的方式。Kayvon 说 LLM 也让人印象深刻，它们本来设计来做一件事，人们找到的用法大概连 OpenAI 等地的人都没想到。当别人教你一种用你自己系统的方法、你心想"我都不知道还能这么用"，就知道你做出了强大的东西。他说今天更多是哲学性的内容。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS149: Parallel Computing &copy; Fall 2023</p>
+        <nav class="footer-nav">
+            <a href="14_期中复习.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="16_事务内存一.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

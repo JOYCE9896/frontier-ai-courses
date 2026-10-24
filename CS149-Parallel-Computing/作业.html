@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>作业 | Stanford CS149 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="19_访存与课程总结.html">&larr; 上一讲</a>
+    <span>Stanford CS149: Assignments</span>
+    <a href="index.html">返回主目录 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>作业：五个编程作业和五份书面作业</h1>
+        <p class="subtitle">评分构成和规则；PA1 四核 CPU 上的性能分析（线程、SIMD、ISPC）；PA2 从零写任务执行库（线程池、任务图）；PA3 CUDA 圆形渲染器；PA4 NanoGPT149（分块、融合、FlashAttention）；PA5 可选的大图 BFS；五份书面作业的题目主题</p>
+        <div class="author-meta">
+            资料来源：<a href="https://gfxcourses.stanford.edu/cs149/fall23/" target="_blank">课程主页</a>（2023 年秋季）、作业仓库 <a href="https://github.com/stanford-cs149/asst1" target="_blank">asst1</a>、<a href="https://github.com/stanford-cs149/asst2" target="_blank">asst2</a>、<a href="https://github.com/stanford-cs149/asst3" target="_blank">asst3</a>、<a href="https://github.com/stanford-cs149/cs149gpt" target="_blank">cs149gpt</a>、<a href="https://github.com/stanford-cs149/biggraphs-ec" target="_blank">biggraphs-ec</a>；书面作业 <a href="https://gfxcourses.stanford.edu/cs149/fall23content/static/pdfs/written_asst1.pdf" target="_blank">WA1</a>、<a href="https://gfxcourses.stanford.edu/cs149/fall23content/static/pdfs/written_asst2.pdf" target="_blank">WA2</a>、<a href="https://gfxcourses.stanford.edu/cs149/fall23content/static/pdfs/written_asst3.pdf" target="_blank">WA3</a>、<a href="https://gfxcourses.stanford.edu/cs149/fall23content/static/pdfs/written_asst4.pdf" target="_blank">WA4</a>、<a href="https://gfxcourses.stanford.edu/cs149/fall23content/static/pdfs/written_asst5.pdf" target="_blank">WA5</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、评分和规则</h2>
+        <ul>
+            <li>编程作业（4 个）：13% + 15% + 15% + 15% = 58%。</li>
+            <li>书面作业（5 份）：每份 1.6%，共 8%。按投入评分，不按对错。</li>
+            <li>期中考试 16%（2023 年 11 月 15 日晚上），期末考试 16%。</li>
+            <li>异步参与 2%：在课件网站上给课件写评论。</li>
+            <li>编程作业和书面作业都可以一人或两人组队，一人队和两人队按同一标准评分，每年都有学生全程单干。</li>
+            <li>整个学期每人 8 个迟交日，编程和书面作业都能用，不用通知助教；用完之后每迟一天扣 15%。</li>
+        </ul>
+        <p>
+            课程主页提醒：编程作业很考验调试能力，因为并行代码难调试，学生在 CS149 里吃力的首要原因是调试经验不足。
+        </p>
+        <p>
+            说明：下面编程作业的细节来自 GitHub 上的作业仓库。asst1、asst2、asst3 仓库现在是后来学期的版本（截止日期、评测机器写的是新学期的，比如 PA2 改在 AWS 的 ARM 实例 c7g.4xlarge 上评测），题目结构和 2023 年基本一致；cs149gpt 是 2023 年秋季那一版。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、PA1：四核 CPU 上的性能分析</h2>
+        <p>
+            100 分加 6 分额外加分。目标是理解现代多核 CPU 的两种并行执行：单核里的 SIMD 执行，和多核并行（还会看到 Intel 超线程的效果），同时练习测量和推理并行程序的性能。代码不多，分析很多。在 myth 机器上做：四核 4.2 GHz Intel Core i7（可睿频到 4.5 GHz），每核两个硬件线程，AVX2 八宽单精度 SIMD。对应第二、三讲。
+        </p>
+        <h3>程序 1：用线程并行生成分形（20 分）</h3>
+        <ul>
+            <li>用 std::thread 并行计算 Mandelbrot 图像。先用两个线程，上半张图给线程 0，下半张给线程 1，这叫空间分解。</li>
+            <li>扩展到 2 到 8 个线程，每个线程拿一块图像，画出 view 1 的加速比随线程数的曲线。加速比是线性的吗？提出假设解释。</li>
+            <li>在 workerThreadStart() 首尾计时，看每个线程花多久，用测量验证假设。原因是图像不同区域的计算量差别很大，按块分配会负载不均。</li>
+            <li>改变工作到线程的映射，让两个视图都达到约 7 到 8 倍加速。不许线程间同步，也不许为每种线程数硬编码；提示有一种很简单的静态分配就能做到。</li>
+            <li>再用 16 个线程跑，比 8 个快很多吗？为什么？</li>
+        </ul>
+        <h3>程序 2：用 SIMD 内建函数向量化（20 分）</h3>
+        <ul>
+            <li>把 clampedExpSerial（对每个元素求 values[i] 的 exponents[i] 次方，结果截断在 9.999999）向量化。用的是课程自己的"假向量内建函数" CS149intrin.h，库里模拟这些操作并给出调试反馈。</li>
+            <li>每条向量指令都可以带掩码，掩码为 0 的通道不被写入。解法要用多个掩码寄存器和掩码操作；要处理循环次数不是向量宽度倍数的情况（用 ./myexp -s 3 测）。</li>
+            <li>性能以"向量指令总数"计。把 VECTOR_WIDTH 从 2、4、8 扫到 16，记录向量利用率，解释它为什么变化。</li>
+            <li>额外加分 1 分：向量化 arraySumSerial，目标是 N / VECTOR_WIDTH + log2(VECTOR_WIDTH) 的时间。</li>
+        </ul>
+        <h3>程序 3：用 ISPC 生成分形（20 分）</h3>
+        <ul>
+            <li>第一部分（10 分）：ISPC 基础。讲义里助教插了一句"停。我是你们友好的教授。请把上一段再读一遍。相信我。"那段讲的是：从 C 调用一个 ISPC 函数，相当于派生出一组（gang）并发的程序实例，个数是 programCount，每个实例用 programIndex 认出自己，一组跑完控制才回到 C。还对比了 sum（命令式，说明怎样把工作映射到实例）和用 foreach 的 sum2（声明式，只说明要做哪些工作）。任务：编译运行，ISPC 生成 8 宽 AVX2 指令，你预期最大加速比多少？为什么实测比理想低？图像哪些部分对 SIMD 执行是挑战？</li>
+            <li>第二部分（10 分）：ISPC 任务。用 --tasks 运行，看 launch[2] 带来的加速；只改 mandelbrot_ispc_withtasks() 里任务的个数，达到比串行快 32 倍以上，并解释为什么这个个数最好。</li>
+            <li>额外加分 2 分：线程抽象和 ISPC 任务抽象有什么区别？思考实验：启动 10000 个 ISPC 任务会怎样？启动 10000 个线程会怎样？</li>
+            <li>讲义里"聪明学生的问题"：为什么 ISPC 有 foreach 和 launch 两种机制？系统不能把 foreach 的迭代分到所有核上、同时生成 SIMD 代码吗？回答："好问题，可能的答案很多，来办公时间聊。"</li>
+        </ul>
+        <h3>程序 4：迭代求平方根（15 分）</h3>
+        <ul>
+            <li>ISPC 程序，用牛顿法对 2000 万个 0 到 3 之间的随机数求平方根，初始猜测 1.0，收敛速度取决于初值多准。</li>
+            <li>报告单核（无任务）和全部核（有任务）的加速比，分别算出 SIMD 带来的和多核带来的加速。</li>
+            <li>构造一个输入，让相对串行版的加速比最大；再构造一个输入，让无任务 ISPC 版的加速比最小，解释效率损失的原因（提醒：用的是 8 宽 SIMD）。</li>
+            <li>额外加分最多 2 分：手写 AVX2 内建函数版本，要接近或超过 ISPC 生成的代码。</li>
+        </ul>
+        <h3>程序 5：BLAS saxpy（10 分）</h3>
+        <ul>
+            <li>saxpy 计算 result = scale*X + Y，N 为 2000 万，每用三个元素只做两次运算（一乘一加），可以轻松并行，访问规则可预测。</li>
+            <li>用任务的 ISPC 版加速多少？能不能改写到接近线性加速？讲义说以前有学生在这题上想得太多，期望的答案很简单（每次运算要搬的数据太多，程序受内存带宽限制）。</li>
+            <li>额外加分 1 分：代码里算带宽用的是 TOTAL_BYTES = 4 * N * sizeof(float)，明明只读 X、Y、写 result，为什么乘 4 是对的？（提示：想想 CPU 缓存怎样工作。写 result 之前要先把那一行读进缓存。）</li>
+        </ul>
+        <h3>程序 6：让 K-Means 更快（15 分）</h3>
+        <ul>
+            <li>对一百万个数据点做 K-Means 聚类，代码正确但不够快。要练的是找出性能热点：用 CycleTimer::currentSeconds() 计时，找出时间花在哪。</li>
+            <li>目标加速 2.1 倍以上。只能改 kmeansThread.cpp，不能改变算法功能，且 dist、computeAssignments、computeCentroids、computeCost 只能并行化其中一个。参考解只改了约 20 到 25 行。要弄清 K、M、N 的相对大小，想想问题里有哪几个并行维度。</li>
+            <li>即使没达到目标，报告里展示出好的调试过程也能拿大部分分。</li>
+        </ul>
+        <p>
+            另外：有 ARM 架构 Mac 的同学可以按 README_aarch64.md 在 Mac 上跑这些程序并报告 SIMD 加速，助教很好奇结果。推荐阅读 ISPC 作者之一 Matt Pharr 的博客系列 "The story of ispc"。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、PA2：从零写一个任务执行库</h2>
+        <p>
+            100 分。用 C++ 写一个库，在多核 CPU 上尽量高效地执行应用提交的任务。要做的事：用线程池管理任务执行；用互斥锁和条件变量协调工作线程；实现一个尊重任务图依赖的调度器；理解负载特征来做好调度决策。讲义说你可能在 CS107、CS111 里写过线程池，但这次要写好几种实现并在不同负载上比较，以理解并行系统关键设计选择的影响。对应第四到六讲。
+        </p>
+        <h3>A 部分：同步的批量任务启动（50 分）</h3>
+        <p>
+            接口 ITaskSystem 的 run(IRunnable* runnable, int num_total_tasks) 执行 num_total_tasks 个任务实例，叫一次批量任务启动，类似 PA1 里 ISPC 的 launch[N]。run() 对调用线程是同步的：返回时所有任务必须已完成。测试负载特性各不相同：有的每个任务工作很少，有的很多；有的一次启动很多任务，有的很少；有的任务开销一致，有的差异很大。
+        </p>
+        <ol>
+            <li><strong>TaskSystemParallelSpawn</strong>：在 run() 开始时创建工作线程，返回前 join。正确，但频繁创建线程开销大。要想：静态还是动态分配任务？哪些共享变量要保护？</li>
+            <li><strong>TaskSystemParallelThreadPoolSpinning</strong>：构造时就创建所有工作线程，线程不停循环检查有没有活干（自旋）。现在要保证 run() 的同步语义就不简单了：怎样判断这次启动的任务都完成了？</li>
+            <li><strong>TaskSystemParallelThreadPoolSleeping</strong>：没活干时让线程睡眠，用条件变量，不占 CPU。会有棘手的竞态，要考虑很多种交错。</li>
+        </ol>
+        <p>
+            评分：Spawn 正确性 5 分加性能 5 分；Spinning 和 Sleeping 各正确性 10 分加性能 10 分。性能在参考实现 20% 以内拿满分。评分脚本还会用没给出的负载测正确性。每个人至少要写一个自己的测试。
+        </p>
+        <h3>B 部分：支持任务图（40 分）</h3>
+        <p>
+            扩展 Sleeping 版本，实现 runAsyncWithDeps(runnable, num_total_tasks, deps) 和 sync()：
+        </p>
+        <ul>
+            <li>异步：runAsyncWithDeps() 立即返回一个唯一的 TaskID，任务之后再执行；sync() 只有在之前所有批量启动都完成后才返回。</li>
+            <li>显式依赖：deps 是之前启动的 TaskID 列表，当前启动的任何任务都要等这些启动的所有任务完成才能开始。任务图是有向无环图，节点是批量启动，X 到 Y 的边表示 Y 依赖 X 的输出。</li>
+        </ul>
+        <pre><code>std::vector&lt;TaskID&gt; noDeps;  // empty vector
+std::vector&lt;TaskID&gt; depOnA;
+std::vector&lt;TaskID&gt; depOnBC;
+
+ITaskSystem *t = new TaskSystem(num_threads);
+
+TaskID launchA = t-&gt;runAsyncWithDeps(taskA, 128, noDeps);
+depOnA.push_back(launchA);
+
+TaskID launchB = t-&gt;runAsyncWithDeps(taskB, 2, depOnA);
+TaskID launchC = t-&gt;runAsyncWithDeps(taskC, 6, depOnA);
+depOnBC.push_back(launchB);
+depOnBC.push_back(launchC);
+
+TaskID launchD = t-&gt;runAsyncWithDeps(taskD, 32, depOnBC);
+t-&gt;sync();</code></pre>
+        <p>
+            B 和 C 都只依赖 A，单独哪一个都填不满机器的执行资源，能把它们并行调度就很有用。讲义的提示：把 runAsyncWithDeps() 想成往"工作队列"里压一条记录然后返回；难点是依赖的记账，一次批量启动的任务全部完成时要做什么（这时新任务可能变为可运行）；可以用两个数据结构，一个放还在等依赖的启动，一个是"就绪队列"。评分：正确性 30 分，性能 10 分（在参考实现 50% 以内拿满分，只看 Sleeping 版）。
+        </p>
+        <h3>报告（10 分）</h3>
+        <ul>
+            <li>描述实现：怎样管理线程？静态还是动态分配任务？B 部分怎样跟踪依赖？</li>
+            <li>A 部分里简单实现（完全串行、每次都创建线程）有时和高级实现一样快甚至更快，为什么？举具体测试为例。</li>
+            <li>描述自己写的一个测试：做什么、检查什么、结果有没有让你改实现。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>四、PA3：一个简单的 CUDA 渲染器</h2>
+        <p>
+            100 分加最多 10 分额外加分。在 AWS 的 NVIDIA T4 GPU 上做。讲义说这个作业有挑战，"认真的，早点开始"。对应第七、八讲。
+        </p>
+        <h3>第一部分：热身 SAXPY（5 分）</h3>
+        <p>
+            用 CUDA 重写 PA1 的 SAXPY：分配设备内存，把数据拷到 GPU，算完拷回。放两组计时器，一组包括整个拷入、计算、拷出过程，一组只计内核执行。注意内核启动对 CPU 是异步的，只在调用前后计时会得到"惊人地快"的结果，因为只量到了 API 调用本身，要在内核后调 cudaDeviceSynchronize()。问题：和 CPU 版相比性能如何？两组计时差别多大？观察到的带宽和机器各部件的标称带宽大致吻合吗？
+        </p>
+        <h3>第二部分：热身并行前缀和（10 分）</h3>
+        <p>
+            按第八讲的算法在 CUDA 里实现排他前缀和 exclusive_scan（例如 A = {1,4,6,8,2} 得到 {0,1,5,11,19}），每个 parallel_for 一次内核启动，输入长度不是 2 的幂时要处理。再用它实现 find_repeats：给定整数列表 A，返回所有满足 A[i] == A[i+1] 的下标 i。重点是练 CUDA 和数据并行思维，直接移植伪代码就能拿满性能分。能和 Thrust 库实现比肩的最多加 2 分。
+        </p>
+        <pre><code>void exclusive_scan_iterative(int* start, int* end, int* output) {
+    int N = end - start;
+    memmove(output, start, N*sizeof(int));
+
+    // upsweep phase
+    for (int two_d = 1; two_d &lt;= N/2; two_d*=2) {
+        int two_dplus1 = 2*two_d;
+        parallel_for (int i = 0; i &lt; N; i += two_dplus1) {
+            output[i+two_dplus1-1] += output[i+two_d-1];
+        }
+    }
+
+    output[N-1] = 0;
+
+    // downsweep phase
+    for (int two_d = N/2; two_d &gt;= 1; two_d /= 2) {
+        int two_dplus1 = 2*two_d;
+        parallel_for (int i = 0; i &lt; N; i += two_dplus1) {
+            int t = output[i+two_d-1];
+            output[i+two_d-1] = output[i+two_dplus1-1];
+            output[i+two_dplus1-1] += t;
+        }
+    }
+}</code></pre>
+        <h3>第三部分：圆形渲染器（85 分）</h3>
+        <p>
+            渲染器接收一组圆（三维位置、速度、半径、颜色），每帧清空图像，然后对每个圆算出屏幕上的包围盒，对盒内每个像素判断像素中心是否在圆内，在的话算出颜色并混合进图像。圆是半透明的，像素颜色是所有覆盖它的圆按顺序混合的结果：
+        </p>
+        <pre><code>result_r = C_alpha * C_r + (1.0 - C_alpha) * P_r
+result_g = C_alpha * C_g + (1.0 - C_alpha) * P_g
+result_b = C_alpha * C_b + (1.0 - C_alpha) * P_b</code></pre>
+        <p>
+            混合不满足交换律，X 叠在 Y 上和 Y 叠在 X 上看起来不一样。给的 CUDA 实现按圆并行，每个 CUDA 线程一个圆，数学是对的，但有两个大错，结果图像上会出现每帧都变的水平条纹。渲染器必须满足两个不变式：
+        </p>
+        <ol>
+            <li><strong>原子性</strong>：所有图像更新必须是原子的。临界区包括读出像素的四个 32 位浮点数（rgba）、和当前圆混合、写回。</li>
+            <li><strong>顺序</strong>：对同一个像素的更新必须按圆的输入顺序进行。关键是顺序只约束同一个像素，不覆盖同一像素的圆之间没有顺序要求，可以独立处理。</li>
+        </ol>
+        <p>
+            不满足这两条的解法第三部分最多 12 分。讲义建议：先把代码改成逻辑上正确的并行版本（推荐不需要锁和同步的做法），再找出它的性能问题，"到这里真正的思考才开始"。提示：
+        </p>
+        <ul>
+            <li>有两个并行维度：跨像素和跨圆（尊重重叠圆的顺序）。解法需要两者都用上，可能在计算的不同阶段。</li>
+            <li>circleBoxTest.cu_inl 里的圆与方框相交测试是你的朋友。</li>
+            <li>exclusiveScan.cu_inl 里给了一个共享内存前缀和，只支持 2 的幂长度，而且要求线程块的线程数等于数组大小。有一种常见解法就用它。</li>
+            <li>shadePixel 做了很多全局内存操作，可以改成在寄存器里累加像素值，最后写一次。</li>
+            <li>渲染器里有数据复用吗？怎样利用？</li>
+            <li>CUDA 没有能原子地完成整个像素更新的原语。用全局内存原子操作造锁是一种办法，但即使更新是原子的，也还要按要求的顺序。</li>
+            <li>rand1M 和 micro2M 圆很多，在全局内存分配临时结构要小心，分太多会耗尽显存；要检查 cudaError_t 返回值。</li>
+        </ul>
+        <p>
+            评分：8 个场景（rgb、rand10k、rand100k、pattern、snowsingle、biglittle、rand1M、micro2M）每个 9 分，正确性 2 分，性能 7 分。时间 T 不超过参考时间的 1.2 倍拿满分，超过 10 倍得 0 分，中间按 7 × T<sub>ref</sub> / T 算。报告要写怎样分解问题、怎样把工作分给线程块和线程、同步在哪、怎样减少通信、试过哪些做法。额外加分：性能显著超过要求最多 5 分；高质量的纯 CPU 并行渲染器（用满所有核和 SIMD）最多 5 分。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、PA4：NanoGPT149</h2>
+        <p>
+            100 分加 12 分额外加分。实现并优化一个生成莎士比亚风格文本的 Transformer 里的关键部分，模型很小，但组件和大语言模型一样。目标：体会实现 DNN 层的底层细节，也就是 cuDNN 之类厂商库的"内脏"；看到循环分块、循环融合这类保持局部性的优化有多大价值。在课程提供的共享集群上用 CPU 做，代码编译成 PyTorch 模块。对应第十讲和第五、六讲的局部性内容。
+        </p>
+        <h3>注意力的数学</h3>
+        <p>
+            输入 Q、K、V 都是 N × d 矩阵，N 是序列里的词元数，每行是一个词元的 d 维嵌入。由于多头和批次，实际是 4D 张量，只关心其中两维。先算 S = QK<sup>T</sup>，再对 S 每一行做 softmax 得到 P，最后 O = PV。作业用的 softmax 没有减去行最大值（课上讲的数值稳定版会减），这样后面实现 FlashAttention 更容易；所以 shakes1024、shakes2048 这些大模型会溢出，想跑它们就得自己实现"安全"的 softmax。
+        </p>
+        <h3>各部分</h3>
+        <ul>
+            <li><strong>热身：访问张量（3 分）</strong>：写 4D 张量的读写访问函数 fourDimRead、fourDimWrite。</li>
+            <li><strong>第一部分：朴素注意力（10 分）</strong>：对每个批次、每个头，算 QK<sup>T</sup>（不显式转置 K，调整循环顺序即可），对每行求 exp 再除以行和，最后乘 V。参考实现约 230 ms。</li>
+            <li><strong>第二部分：分块矩阵乘法加非融合 softmax（20 分）</strong>：朴素矩阵乘法每算 C 的一个元素都要载入 A、B 的多条缓存行，矩阵比缓存大得多，下一个元素用到时这些行已被换出。把矩阵分成缓存大小的子块，QK<sup>T</sup> 和 PV 两处都要分块；矩阵不是方的，块大小也不一定整除 N，剩余的块只遍历 min(tile_size, N - tileIndex*tileSize)。参考约 156 ms。报告：N=1024 时试了哪些块大小、哪个最好、为什么；假设 4 字节浮点数、64 字节缓存行、N 和 d 很大，第二部分和第一部分的 DRAM 访问次数之比是多少。</li>
+            <li><strong>第三部分：融合注意力（25 分）</strong>：算出 QK<sup>T</sup> 的一行就可以对这一行做 softmax，再立即乘 V 得到输出的一行，只需要一个 N × 1 的临时向量，不必生成 N × N 矩阵。融合后批次、头、行都可以独立计算，用 OpenMP 的 #pragma omp parallel for collapse() 并行；每个线程有自己那份临时向量，避免竞态。参考约 32 ms。报告：为什么内存用量大幅减少？注释掉 pragma，CPU 时间怎样变？为什么融合让多线程更好用？</li>
+            <li><strong>第四部分：FlashAttention（35 分）</strong>：难以按块融合，是因为 softmax 要作用于整行。把 softmax 拆成块：对两个块向量 x、y，softmax([x y]) 可以由各自块的指数和与和值组合出来。于是对每个块，Q 的 Br × d 块乘 K<sup>T</sup> 的 d × Bc 块，算局部 softmax，乘 V 的 Bc × d 块，累加进 O。内存占用从 O(N<sup>2</sup>) 降到 O(N)。Br、Bc 由缓存大小 M = 131072 个浮点数决定，实现要能处理给定的任意 Br、Bc。这一部分只按正确性评分，并人工检查是否按伪代码实现。它比第三部分慢（参考约 436 ms），报告要解释为什么、内存用量相比如何、还能怎样优化。</li>
+            <li><strong>额外加分（每部分 3 分，共 12 分）</strong>：用 ISPC 向量化第一到四部分。</li>
+            <li>报告题共 7 分。</li>
+        </ul>
+        <pre><code>// Part 3 sketch: one row of QK^t at a time, never materializing N x N
+#pragma omp parallel for collapse(3)
+for (int b = 0; b &lt; B; b++)
+  for (int h = 0; h &lt; H; h++)
+    for (int i = 0; i &lt; N; i++) {
+      // each thread uses its own N x 1 slice of the preallocated temp buffer
+      // 1) row[j] = dot(Q[b][h][i], K[b][h][j]) for all j
+      // 2) row[j] = exp(row[j]) / sum_j exp(row[j])
+      // 3) O[b][h][i] = sum_j row[j] * V[b][h][j]
+    }</code></pre>
+    </section>
+
+    <section>
+        <h2>六、PA5（可选）：OpenMP 大图处理</h2>
+        <p>
+            84 分，额外加分作业，不允许迟交。得 x 分就给之前任意一个编程作业加 (x/84) × 10 分，最多加到 100 分。实现广度优先搜索（BFS），好的实现能在多核机器上几秒内跑完有几亿条边的图。在 myth 机器上评分，用 OpenMP 并行（parallel for、critical、atomic、schedule(dynamic, 100) 之类）。图用边数组表示（outgoing_edges 和 incoming_edges），数据集有 com-orkut_117m、soc-livejournal1_68m 这样的真实社交图，也有 random_500m、rmat_200m 这样的大合成图。对应第四到六讲和第十三讲。
+        </p>
+        <ul>
+            <li><strong>第一部分：并行"自顶向下" BFS（20 分）</strong>：并行化给出的串行 bfs_top_down()，它计算所有顶点到顶点 0 的距离。要找出并行、加入适当同步，提示要想到 compare-and-swap；有没有事先知道比较必然失败、可以省掉 CAS 的情况？讲义提醒不要指望接近完美的加速，原因留给你想。</li>
+            <li><strong>第二部分："自底向上" BFS（25 分）</strong>：不再遍历前沿、标记它的邻居，而是让每个未访问的顶点检查自己有没有一条入边来自前沿上的顶点，有就把自己加入前沿。叫自底向上，是因为每个顶点"向上"在 BFS 树里找祖先。先写串行版再并行化。想想怎样表示未访问顶点集合，同步需求有什么变化。</li>
+            <li><strong>第三部分：混合 BFS（25 分）</strong>：有些步自底向上快得多，有些步自顶向下快得多，于是每步动态选择。两种实现的前沿表示不同的话，要在它们之间高效转换。</li>
+            <li>评分：BFS 性能 70 分，报告 14 分。报告要写每种实现的同步在哪、怎样限制同步开销、混合版怎样决定用哪种、为什么你的代码（和参考解）达不到完美加速：负载不均、通信同步，还是数据移动？</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>七、书面作业</h2>
+        <p>
+            大约每两周一份，按投入评分。每份有几道正式题（Problem），后面附若干练习题（Practice Problem），练习题多是往年考题，用来备考。下面列出各题主题。
+        </p>
+        <h3>WA1：多核架构</h3>
+        <ul>
+            <li>题 1：一个 2 GHz、4 核、每核每时钟一条 8 宽 SIMD、每核 4 个硬件执行上下文的处理器，最大标量浮点吞吐是多少？再给一个完美并行、算术强度为 4（每字节 4 次运算）的程序，内存带宽 64 GB/s，是计算受限还是带宽受限？以及一个 32 KB 全相联 LRU 缓存、4 字节缓存行，为什么反复求和 64K 个浮点数的循环每次访问都缺失。</li>
+            <li>题 2：依赖图、ILP、超标量和多线程执行。给一段 10 条标量指令（一次 load、三组 ADD 和 MUL、最后 store），画指令依赖图；求最大 ILP（ILP 只是程序的性质）；在每时钟最多两条指令、且必须恰好一条是 MUL 的超标量核上最少几个周期；改成循环、迭代分给多个线程，load 延迟 25 个周期时要交错多少个线程才能 100% 效率。</li>
+            <li>题 3："图案很漂亮，SIMD 效率可能不"：一段 ISPC 代码对 16 × 16 图像按白、灰、黑分支调用不同函数。算对角线图案和竖条图案下 4 宽 SIMD 的效率；用 transpose 改写来消除竖条图案的分歧；内存带宽每时钟 8 字节时，转置的开销是否值得。</li>
+            <li>练习题：硬件基础、缓存基础、超标量和硬件多线程、多核多线程 CPU 上的任务队列、为任务挑对 CPU、当一回并行处理器架构师、SPMD 树搜索。</li>
+        </ul>
+        <h3>WA2：杂项短题</h3>
+        <ul>
+            <li>题 1：短题。机器人每 1 ms 要发一次力矩指令，串行计算要 10 ms，20% 代码固有串行，32 核 1 GHz 和 8 核 4 GHz 两个处理器哪个能解决（阿姆达尔定律）；为什么 Cilk 故意不规定被调用函数相对调用者何时运行；从 roofline 图读出处理器带宽；把阻塞发送换成异步非阻塞发送后，复用同一个缓冲区为什么出错。</li>
+            <li>题 2：理解缓存行为。64 字节行、128 KB 全相联 LRU 缓存，顺序读写大数组的缺失比例；数组能放进缓存时重复遍历的缺失比例；32 KB 缓存下改写二维数组循环（分块）以减少缺失。</li>
+            <li>题 3：在 GPU 上运行 CUDA 代码。每个线程按线程 ID 的二进制位在深 16 的完全二叉树上走一条根到叶的路径，按深度奇偶调用 f() 或 g()，warp 宽 32，会不会因 SIMD 分歧导致利用率低？</li>
+            <li>题 4：数据并行思维练习。给一个类似 CUDA 的批量启动语法和 exclusive_scan，用它们写数据并行算法。</li>
+            <li>练习题：评分流水线（五个助教排成流水线批改期中卷）、杂题（ISPC foreach 和 Cilk spawn 语义相似、实现不同等）、"一个屏障抵得上一千把锁"（并行直方图）、Cardinal 处理器流水线、粒子模拟、"ALU 最多的教授（有时）赢"、发送消息（用阻塞收发实现屏障）。</li>
+        </ul>
+        <h3>WA3：Spark、GPU 设计和 MSI</h3>
+        <ul>
+            <li>题 1：实现 CS149Spark。用 C++ 写一个极简的 Spark 库，基类 RDD 加各个变换的子类，只支持少数几个算子。</li>
+            <li>题 2：PKPU2.0，"为元宇宙设计的 GPU"（PKPU 是 Prof. Kayvon/Kunle Processing Unit），和 CUDA 程序在 GPU 上的执行方式相关的设计分析。</li>
+            <li>题 3：MSI 一致性协议热身。</li>
+            <li>练习题：把局部性带回来（一个 1 TB 输入的 Spark 程序）、融合融合再融合、缓存一致性和伪共享、愤怒的学生（两个线程分别更新同一组学生的位置和愤怒值）。</li>
+        </ul>
+        <h3>WA4：一致性模型和细粒度同步</h3>
+        <ul>
+            <li>题 1：放松一致性。三个线程在允许写写重排的缓存一致系统上运行，分析可能的结果。</li>
+            <li>题 2：理解指令交错（其中有些是放松的）。对给定的程序片段数出所有可能的最终状态，给出内存和各线程寄存器的值。</li>
+            <li>题 3：一致性、内存模型和锁。基于 CAS 的简单自旋锁在一致性协议下的行为。</li>
+            <li>题 4：细粒度同步。很多线程并行模拟点球，用 atomicCAS 维护共享的"目前最低高度"，注意 atomicCAS 在一致性协议里算作写。</li>
+            <li>练习题：两个线程加一个双向链表等于麻烦、LL/SC 和缓存一致性、用 LL/SC 实现读写锁、再来一道 Spark 题。</li>
+        </ul>
+        <h3>WA5：事务内存</h3>
+        <ul>
+            <li>题 1：树上的事务。二叉搜索树的 insert 和 sum 实现为事务，分析冲突和执行情况。</li>
+            <li>题 2：实现事务。一个乐观读、悲观写、延迟版本管理、按对象粒度跟踪读写的 STM 实现的分析。</li>
+            <li>练习题：哈希表并行化（分析两个线程的加锁解锁序列）、再谈并发链表（hand-over-hand 加锁）、棘手的小图、并发二叉搜索树、一致性和事务内存、双向链表上的事务、控制 DRAM。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS149: Parallel Computing &copy; Fall 2023</p>
+        <nav class="footer-nav">
+            <a href="19_访存与课程总结.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="../index.html">全部课程 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

@@ -16,7 +16,7 @@ Stanford、CMU 和 Harvard 2025–2026 学年 AI 课程的中文笔记，附一�
 
 **零基础** → AI 基础 → CS224N → 11-711 → CS336 → 11-664 → CS329A / 11-768 / CS2680 / CS146S
 
-非技术类课程（MS&E 435、CS153）不需要数学基础，可以直接读。想补计算机系统基础，读 CMU 15-213，会一点 C 就能开始；想知道程序怎样被编译成机器代码，接着读 Stanford CS143。
+非技术类课程（MS&E 435、CS153）不需要数学基础，可以直接读。想补计算机系统基础，读 CMU 15-213，会一点 C 就能开始；想知道程序怎样被编译成机器代码，接着读 Stanford CS143；想知道多核 CPU 和 GPU 怎样并行、为什么 FlashAttention 快，读 Stanford CS149。
 
 ## 课程
 
@@ -33,6 +33,7 @@ Stanford、CMU 和 Harvard 2025–2026 学年 AI 课程的中文笔记，附一�
 | :-- | :-- |
 | [CMU 15-213 (CS:APP)](https://joyce9896.github.io/frontier-ai-courses/15-213-CSAPP/) | 计算机系统入门，CS:APP 两位作者亲授的 2015 年秋季版全部 27 讲：数据表示、x86-64 机器代码、高速缓存、链接、进程与信号、虚拟内存、malloc、网络、并发 |
 | [Stanford CS143](https://joyce9896.github.io/frontier-ai-courses/CS143-Compilers/) | 编译器：2026 年春季课件加 Aiken 公开课，18 讲覆盖词法分析、LL 和 LR 语法分析、类型检查、代码生成、操作语义、数据流分析、寄存器分配、垃圾回收，附 Cool 编译器项目和书面作业梳理 |
+| [Stanford CS149](https://joyce9896.github.io/frontier-ai-courses/CS149-Parallel-Computing/) | 并行计算：2023 年秋季全部 19 讲，多核、SIMD、ISPC、CUDA、局部性与调度、Spark、DNN 与 FlashAttention、缓存与内存一致性、无锁编程、事务内存、DSL、专用硬件与 DRAM，附五个编程作业和书面作业梳理 |
 
 ### 技术
 
