@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>补充四：Spark | MIT 6.5840 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="24_Frangipani.html">&larr; 上一篇</a>
+    <span>MIT 6.824 (2020): Lecture 15</span>
+    <a href="26_COPS.html">下一篇 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>补充四：Spark 与弹性分布式数据集</h1>
+        <p class="subtitle">2020 年第 15 讲。为什么看 Spark：把 MapReduce 推广成数据流，更好地支持迭代应用；三个主题：编程模型、执行策略、容错；PageRank 的代码逐行解读，在 Spark shell 里一步步运行；变换是惰性的，collect 这样的动作才触发计算；血缘图；驱动程序和 worker；窄依赖和宽依赖，shuffle；cache 和 persist；基于整张图的优化；机器崩溃后按血缘重算，宽依赖时要检查点；局限和总结</p>
+        <div class="author-meta">
+            主讲：Robert Morris（2020 年春季 6.824 第 15 讲）<br>
+            资料来源：<a href="http://nil.csail.mit.edu/6.824/2020/notes/l-spark.txt" target="_blank">2020 讲义</a>、<a href="http://nil.csail.mit.edu/6.824/2020/papers/spark-faq.txt" target="_blank">FAQ</a>、<a href="https://www.youtube.com/watch?v=mzIoSW-cInA" target="_blank">课堂录像</a>、论文 Resilient Distributed Datasets: A Fault-Tolerant Abstraction for In-Memory Cluster Computing（Zaharia 等，NSDI 2012）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、为什么看 Spark</h2>
+        <ul>
+            <li>在数据中心计算里被广泛使用；</li>
+            <li>把 MapReduce 推广成数据流（dataflow）；</li>
+            <li>比 MapReduce 更好地支持迭代应用；</li>
+            <li>成功的研究：获得了 ACM 博士论文奖（FAQ：博士生做出这种规模的东西很不寻常，Matei Zaharia 因此获奖）。</li>
+        </ul>
+        <p>三个主题：编程模型；执行策略；容错。</p>
+        <p>
+            FAQ：Spark 和 MapReduce 相似吗？有相似之处，但 Spark 能表达很难在 MapReduce 里高效表达的计算，比如迭代算法，可以把它看成"MapReduce 加更多"，作者认为它强大到能表达一系列以前的计算框架，包括 MapReduce（7.1 节）。也有系统比 Spark 更擅长接入流式进来的新数据，而不是批处理，比如 Naiad；Spark 也支持流，但用"微批"的计算实现（Spark Streaming，SOSP 2013）。还有允许机器之间更细粒度共享的系统（比如 DSM 系统），或者针对类似应用的 Piccolo。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、PageRank</h2>
+        <p>这是 Spark 源码仓库里的 SparkPageRank.scala，和论文 3.2.2 节的代码类似，细节更多：</p>
+        <pre><code> 1      val lines = spark.read.textFile("in").rdd
+ 2      val links1 = lines.map{ s =&gt;
+ 3        val parts = s.split("\\s+")
+ 4        (parts(0), parts(1))
+ 5      }
+ 6      val links2 = links1.distinct()
+ 7      val links3 = links2.groupByKey()
+ 8      val links4 = links3.cache()
+ 9      var ranks = links4.mapValues(v =&gt; 1.0)
+10
+11      for (i &lt;- 1 to 10) {
+12        val jj = links4.join(ranks)
+13        val contribs = jj.values.flatMap{
+14          case (urls, rank) =&gt;
+15            urls.map(url =&gt; (url, rank / urls.size))
+16        }
+17        ranks = contribs.reduceByKey(_ + _).mapValues(0.15 + 0.85 * _)
+18      }
+19
+20      val output = ranks.collect()
+21      output.foreach(tup =&gt; println(s"${tup._1} has rank:  ${tup._2} ."))</code></pre>
+        <p>
+            PageRank 的输入每行一个链接，从一次大规模网页爬取中提取出来："源 URL 目标 URL"，输入是海量的。输出是每个网页的"重要性"，取决于其他重要的网页是否指向它，实际上是在估计有人访问每个网页的概率。用户模型：85% 的概率跟随当前页上的一个链接，15% 的概率访问一个随机页面。算法是迭代的，相当于模拟多轮用户点链接，排名（概率）逐渐收敛。用 MapReduce 写 PageRank 会很别扭、很慢。
+        </p>
+        <p>讲义的例子输入，文件 "in"：</p>
+        <pre><code>u1 u3
+u1 u1
+u2 u3
+u2 u2
+u3 u1</code></pre>
+        <p>在本机（不是集群）上运行 PageRank：</p>
+        <pre><code>./bin/run-example SparkPageRank in 10
+u2 has rank:  0.2610116705534049 .
+u3 has rank:  0.9999999999999998 .
+u1 has rank:  1.7389883294465944 .</code></pre>
+        <p>看来 u1 是最重要的页面。</p>
+        <h3>在 Scala 解释器里一步步跑（./bin/spark-shell）</h3>
+        <pre><code>val lines = spark.read.textFile("in").rdd
+  -- what is lines? does it contain the content of file "in"?
+lines.collect()
+  -- lines yields a list of strings, one per line of input
+  -- if we run lines.collect() again, it re-reads file "in"
+val links1 = lines.map{ s =&gt; val parts = s.split("\\s+"); (parts(0), parts(1)) }
+links1.collect()
+  -- map, split, tuple -- acts on each line in turn
+  -- parses each string "x y" into tuple ( "x", "y" )
+val links2 = links1.distinct()
+  -- distinct() sorts or hashes to bring duplicates together
+val links3 = links2.groupByKey()
+  -- groupByKey() sorts or hashes to bring instances of each key together
+val links4 = links3.cache()
+  -- cache() == persist in memory
+var ranks = links4.mapValues(v =&gt; 1.0)
+
+-- now for first loop iteration
+val jj = links4.join(ranks)
+  -- the join brings each page's link list and current rank together
+val contribs = jj.values.flatMap{ case (urls, rank) =&gt; urls.map(url =&gt; (url, rank / urls.size)) }
+  -- for each link, the "from" page's rank divided by number of its links
+ranks = contribs.reduceByKey(_ + _).mapValues(0.15 + 0.85 * _)
+  -- sum up the links that lead to each page
+
+-- second loop iteration
+val jj2 = links4.join(ranks)
+  -- join() brings together equal keys; must sort or hash
+val contribs2 = jj2.values.flatMap{ case (urls, rank) =&gt; urls.map(url =&gt; (url, rank / urls.size)) }
+ranks = contribs2.reduceByKey(_ + _).mapValues(0.15 + 0.85 * _)
+  -- reduceByKey() brings together equal keys
+
+-- the loop &amp;c just creates a lineage graph.
+-- it does not do any real work.
+
+val output = ranks.collect()
+  -- collect() is an action.
+  -- it causes the whole computation to execute!
+output.foreach(tup =&gt; println(s"${tup._1} has rank:  ${tup._2} ."))</code></pre>
+        <p>
+            直到最后的 collect()，这段代码只是在构建一张血缘图（lineage graph），并不处理数据。FAQ：既然允许变换，为什么说 RDD 是不可变的？变换产生一个<strong>新的</strong> RDD，但它可能不会被显式地物化出来，因为变换是惰性计算的；PageRank 的每次循环都产生新的 contribs 和 ranks RDD。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、血缘图和执行</h2>
+        <h3>血缘图长什么样（图 3）</h3>
+        <p>
+            一张由变换阶段组成的图，即数据流图，是整个计算的完整配方。注意循环被展开进了图里，图里并没有真正的环，每次循环迭代都有一个<strong>新的</strong> ranks/contribs。对多步计算，这种编程模型比 MapReduce 方便。
+        </p>
+        <p>
+            Scala 代码运行在图 2 的"驱动程序"（driver）机器上：驱动程序构建血缘图；编译 Java 字节码，发给 worker 机器；然后管理执行和数据移动。FAQ：为什么用 Scala 开发？部分因为项目开始时 Scala 新潮；一个好理由是 Scala 能把用户定义的代码（"闭包"）序列化并发送出去（5.2 节），这在 JVM 语言（Java、Scala）里相当直接，在 C、C++ 或 Go 里很棘手，部分因为共享内存（指针、互斥锁等），部分因为闭包要捕获内部引用到的所有变量，没有语言运行时的帮助很难做到。应用怎样知道一个 RDD 在哪？应用在 Scala 里用变量名指代 RDD，每个 RDD 的元数据里有位置信息（表 3），调度器用这些信息把计算放在数据旁边；一个 RDD 可能由多个节点生成，但那是它的不同分区。
+        </p>
+        <h3>执行长什么样</h3>
+        <pre><code>[driver]
+[partitioned input file in HDFS] --&gt; [worker] [worker] [worker] ...</code></pre>
+        <ul>
+            <li>输入在 HDFS（类似 GFS）里；</li>
+            <li>输入数据文件已经"分区"到很多存储服务器上：前一百万行在一个分区，接下来的在另一个，等等；</li>
+            <li>分区比机器多，以便负载均衡；</li>
+            <li>每台 worker 机器拿一个分区，按顺序应用血缘图；</li>
+            <li>当不同分区上的计算互相独立（"窄"依赖）时：第一次读之后不需要机器之间的通信，worker 对输入流应用一连串变换。</li>
+        </ul>
+        <p>
+            这已经比 MapReduce 高效：数据直接从一个变换转给下一个；MapReduce 需要多轮 Map+Reduce，每轮之间要昂贵地存到 GFS 再读回来。
+        </p>
+        <h3>distinct()、groupByKey()、join()、reduceByKey() 呢</h3>
+        <p>
+            它们需要看<strong>所有</strong>分区的数据，而不只是一个，因为同一个键的所有记录要放在一起考虑。这就是论文的"宽"依赖（相对于"窄"依赖）。
+        </p>
+        <h3>宽依赖怎样实现</h3>
+        <ul>
+            <li>很像 MapReduce 里 Map 的中间输出；</li>
+            <li>驱动程序知道宽依赖在哪，比如 PageRank 里 map() 和 distinct() 之间，分上游变换和下游变换；</li>
+            <li>数据必须被"洗牌"（shuffle）到新的分区，比如把某个键的所有记录放到一起；</li>
+            <li>上游变换之后：按洗牌的标准（通常是某个键）把输出切开，在内存里放进桶，每个下游分区一个桶；</li>
+            <li>下游变换之前：（等上游变换完成，由驱动程序管理）每个 worker 从每个上游 worker 取回自己的桶，现在数据换了一种分区方式；</li>
+            <li>宽依赖很贵！所有数据都要过网络；它是一个屏障，所有 worker 都要等所有人完成。</li>
+        </ul>
+        <h3>数据被复用呢</h3>
+        <p>
+            比如 PageRank 里的 links4。默认情况下必须重新计算，比如重新读输入文件。persist() 和 cache() 让 links 保存在内存里以便复用。复用持久化的数据是相对 MapReduce 的又一大优势。
+        </p>
+        <h3>Spark 能根据它对整张血缘图的了解做优化</h3>
+        <ul>
+            <li>让记录一条一条流过一串窄变换：提高局部性，对 CPU 数据缓存有好处；避免要把一个分区的所有记录都存在内存里；</li>
+            <li>注意到某些时候不需要洗牌，因为输入已经以相同的方式分区了，比如 links4.join(ranks)。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>四、容错</h2>
+        <p>
+            一台机器崩溃了怎么办？它的内存和计算状态都丢了。驱动程序在其他机器上重新运行崩溃机器那些分区的变换：通常每台机器负责很多分区，所以负载可以分散，重新计算相当快。对窄依赖，只有丢失的分区需要重新执行。
+        </p>
+        <p>
+            有宽依赖时的故障呢？重新计算一个失败的分区需要<strong>所有</strong>分区的信息，所以<strong>所有</strong>分区可能都要从头重新执行！即使它们没坏。Spark 支持把检查点写到 HDFS（类似 GFS）来应对这一点：驱动程序只需从最近的检查点沿血缘重新计算。对 PageRank，也许每 10 次迭代给 ranks 做一次检查点。
+        </p>
+        <p>
+            FAQ：Spark 怎样实现容错？持久化一个 RDD 时，程序员可以指定把它复制到几台机器上。Spark 不需要 Raft 这样复杂的协议，因为 RDD 是不可变的，总能用血缘图重新计算出来。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、局限和总结</h2>
+        <p>局限：</p>
+        <ul>
+            <li>面向大批量数据的批处理；</li>
+            <li>所有记录都以同样的方式处理；</li>
+            <li>变换是"函数式"的，把输入变成输出，没有原地修改数据的概念。</li>
+        </ul>
+        <p>
+            总结：Spark 相对 MapReduce 提高了表达能力和性能；让框架看到完整的数据流很有帮助，既能做性能优化，也能做故障恢复。性能的关键是什么？在变换之间把数据留在内存里，而不是写到 GFS 再读回来；在内存里复用数据（比如 PageRank 里的 links）。Spark 很成功，被广泛使用（FAQ：见 Databricks 的客户列表）。
+        </p>
+        <p>
+            FAQ：既然 Spark 看起来严格更好，还有人用 MapReduce 吗？如果计算很适合 MapReduce 范式，用 Spark 也没有优势，比如对大数据集做一次扫描（map 阶段）再聚合（reduce 阶段），计算由 I/O 主导，没有 RDD 被复用，Spark 的内存缓存就没用；Spark 在有大量内部复用的迭代计算上表现很好，但对只扫描并聚合的简单作业（用 Spark 的话说只有 map() 和 reduceByKey()）没有架构上的优势，当然也没理由更慢，两者都可以。RDD 的概念在 Spark 之外实现过吗？Spark 和 RDD 接口绑得很紧，但 RDD 背后的两个关键想法，确定性的基于血缘的重新执行、面向集合的 API，在很多系统里都被广泛使用，比如 DryadLINQ、FlumeJava、Cloud Dataflow 提供类似的面向集合的 API，Dryad 和 Ciel 也跟踪数据是怎样计算出来的并在故障时重新执行。事实上 Spark 里的 RDD 现在有些过时了，Spark 转向了 DataFrame，用更面向列的表示，同时保留 RDD 的好想法。分布式系统设计者关心能效吗？能耗是整个计算机科学的大问题，但集群计算的能效工作大多集中在数据中心、计算机和冷却的设计上；芯片设计者很关注能耗，比如处理器会动态调整时钟频率以免过热；分布式系统设计里关注得少一些，大概因为大的收益不在那里，不过也有一些工作，比如 CMU 的 FAWN。
+        </p>
+        <p>
+            （2026 年课前问题页里保留了 Spark 的问题：Spark 能很好地支持哪些 MapReduce/Hadoop 支持不了的应用？答案就是上面说的迭代、需要在内存里复用数据的计算。）
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>MIT 6.824: Distributed Systems &copy; Spring 2020</p>
+        <nav class="footer-nav">
+            <a href="24_Frangipani.html">&larr; 上一篇</a>
+            <a href="index.html">返回主目录</a>
+            <a href="26_COPS.html">下一篇 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

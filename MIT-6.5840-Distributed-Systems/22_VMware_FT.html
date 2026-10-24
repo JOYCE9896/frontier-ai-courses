@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>补充一：主备复制与 VMware FT | MIT 6.5840 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="21_拜占庭容错.html">&larr; 上一讲</a>
+    <span>MIT 6.824 (2020): Lecture 4</span>
+    <a href="23_Aurora.html">下一篇 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>补充一：主/备复制与 VMware FT</h1>
+        <p class="subtitle">2026 年的课程没有这一讲，但第六讲和第九讲反复提到 VMware FT 和它的 test-and-set 服务器，这里按 2020 年的录像整理。复制能对付哪些故障；状态转移和复制状态机两种做法；复制到哪一层；VMware FT 的结构、日志通道和共享磁盘；哪些事件会让主备分叉；时钟中断、网络包、非确定性指令怎样处理，弹跳缓冲区，备份为什么落后一个日志条目；输出规则；切换时的重复输出；用 test-and-set 防止脑裂；性能和适用场景</p>
+        <div class="author-meta">
+            主讲：Robert Morris（2020 年春季 6.824 第 4 讲）<br>
+            资料来源：<a href="http://nil.csail.mit.edu/6.824/2020/notes/l-vm-ft.txt" target="_blank">2020 讲义</a>、<a href="http://nil.csail.mit.edu/6.824/2020/papers/vm-ft-faq.txt" target="_blank">FAQ</a>、<a href="https://www.youtube.com/watch?v=M_teob23ZzY" target="_blank">课堂录像</a>、论文 The Design of a Practical System for Fault-Tolerant Virtual Machines（Scales 等，SIGOPS OSR 2010）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、主题：用复制容错</h2>
+        <p>
+            目标仍然是容错：在服务器和网络故障面前提供可用性，手段是复制。今天讲主/备复制，案例 VMware FT 是这个想法的极端版本。
+        </p>
+        <p>复制能对付哪些故障？</p>
+        <ul>
+            <li>单个副本的"故障即停"：风扇坏了，CPU 过热自己关机，有人绊到电源线或网线，软件发现磁盘满了就停下。</li>
+            <li>也许不能对付硬件缺陷、软件 bug、人为配置错误：它们常常不是故障即停的，而且可能相关（让所有副本同时崩溃），不过有时能被检测出来（比如校验和）。</li>
+            <li>地震或全城停电呢？只有副本在物理上分开时才行。</li>
+        </ul>
+        <p>值得花 N 倍的代价复制吗？Morris：GFS 每个块存三份，今天的论文要两倍的计算机、CPU 和内存，这很贵；值不值得不是技术能回答的，是一个经济问题，取决于服务可用的价值，比如银行的计算机一坏就没法服务客户、没有收入，那多花些钱很可能值得。</p>
+        <h3>两种主要的复制方法</h3>
+        <ul>
+            <li><strong>状态转移</strong>（state transfer）：主副本执行服务，把（新的）状态发给备份。更简单，但状态可能很大，通过网络传输很慢。</li>
+            <li><strong>复制状态机</strong>（replicated state machine）：客户端把操作发给主，主排好顺序发给备份，所有副本执行所有操作。起始状态相同、操作相同、顺序相同、确定性的，结束状态就相同。通常网络流量更少，操作往往比状态小得多，但要做对很复杂。VM-FT 用复制状态机，Lab 2/3/4 也是。</li>
+        </ul>
+        <p>大问题：复制什么状态？主要不要等备份？什么时候切换到备份？切换时有没有可见的异常？怎样让新换上的备份赶上进度？</p>
+        <h3>希望副本在哪一层相同</h3>
+        <ul>
+            <li>应用状态，比如数据库的表？GFS 就这样做。可以很高效，主只把高层操作发给备份；但应用代码（服务器）必须了解容错，比如要转发操作流。</li>
+            <li>机器层，比如寄存器和内存内容？也许能不加修改地复制任何现有服务器！但要转发机器事件（中断、DMA 等），要修改"机器"来收发事件流。</li>
+        </ul>
+        <p>今天的论文（VMware FT）复制机器层的状态：透明，可以运行任何现有的操作系统和服务器软件！对客户端来说看起来就像一台服务器。</p>
+    </section>
+
+    <section>
+        <h2>二、VMware FT 的结构</h2>
+        <pre><code>[app]                 [app]
+[O/S]                 [O/S]
+[VM-FT hypervisor] --logging channel--&gt; [VM-FT hypervisor]
+   primary                                 backup
+        \                                   /
+         --------- [shared disk server] ----
+clients ---- network ----</code></pre>
+        <ul>
+            <li>术语：hypervisor = monitor = VMM（虚拟机监控器）；操作系统加应用是运行在虚拟机里的"客户机"（guest）。</li>
+            <li>两台机器，主和备份。主通过网络把所有外部事件（客户端的包等）发给备份，这条连接叫"日志通道"（logging channel），承载日志条目。</li>
+            <li>平时，备份的输出被 FT 压掉。</li>
+            <li>如果任何一方无法再通过网络和另一方通信，就"上线"（go live），独自提供服务；如果是主上线，它就停止给备份发日志条目。</li>
+        </ul>
+        <p>
+            VMM 模拟一个本地磁盘接口，但实际存储在一台网络服务器上，处理方式很像一个客户端：通常只有主和磁盘服务器通信（备份的 FT 丢弃它的磁盘请求）；如果备份上线，它就和磁盘服务器通信。外部磁盘让创建新备份更快，不必拷贝主的磁盘。FAQ：在虚拟机上比在物理服务器上更容易保证确定性执行，因为 hypervisor 模拟并控制了很多在主备之间可能不同的硬件方面，比如中断交付的精确时机。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、会让主备分叉的事件</h2>
+        <p>
+            主什么时候必须把信息发给备份？只要发生了可能让它们的执行分叉的事，即任何不是执行指令的确定性结果的事。FT 必须处理哪些分叉来源？
+        </p>
+        <ul>
+            <li>大多数指令在主和备份上执行结果相同，只要内存和寄存器相同（按归纳法假设如此）。</li>
+            <li>来自外部世界的输入，只有网络包，表现为 DMA 进来的数据加一个中断。</li>
+            <li>中断的时机。</li>
+            <li>结果不是状态函数的指令，比如读当前时间。</li>
+            <li>不是多核竞争，因为只支持单处理器。</li>
+        </ul>
+        <h3>为什么分叉是灾难</h3>
+        <p>
+            因为备份的状态会和主不同，如果主随后坏了，客户端会看到不一致。例子：GFS 的租约到期。设想我们在复制 GFS 的 master；chunkserver 必须在 60 秒租约到期前发"请续约"消息；时钟中断驱动 master 的时间概念；假设 chunkserver 恰好在 60 秒附近发出"请续约"。在主上，时钟中断恰好在请求到达之后发生，主上的 master 给同一台 chunkserver 续了约；在备份上，时钟中断恰好在请求之前发生，备份上的 master 让租约过期了。如果主坏了、备份接管，它会认为没有租约，把它给另一台 chunkserver，于是两台 chunkserver 拥有同一个块的租约。所以：备份必须以同样的顺序、在指令流里同样的位置看到同样的事件。
+        </p>
+        <p>每个日志条目：指令编号、类型、数据。</p>
+        <h3>时钟中断</h3>
+        <p>目标：主和备份在指令流里同一个点看到中断。</p>
+        <pre><code>Primary:
+  FT fields the timer interrupt
+  FT reads instruction number from CPU
+  FT sends "timer interrupt at instruction X" on logging channel
+  FT delivers interrupt to primary, and resumes it
+  (relies on CPU support to interrupt after the X'th instruction)
+Backup:
+  ignores its own timer hardware
+  FT sees log entry *before* backup gets to instruction X
+  FT tells CPU to interrupt (to FT) at instruction X
+  FT mimics a timer interrupt to backup</code></pre>
+        <p>FAQ：很多 CPU 支持"性能计数器"，VMM 告诉 CPU 一个指令数，CPU 执行这么多条指令后就中断到 VMM。</p>
+        <h3>网络包到达（输入）</h3>
+        <pre><code>Primary:
+  FT tells NIC to copy packet data into FT's private "bounce buffer"
+  at some point NIC does DMA, then interrupts
+  FT gets the interrupt
+  FT pauses the primary
+  FT copies the bounce buffer into the primary's memory
+  FT simulates a NIC interrupt in primary
+  FT sends the packet data and the instruction # to the backup
+Backup:
+  FT gets data and instruction # from log stream
+  FT tells CPU to interrupt (to FT) at instruction X
+  FT copies the data to backup memory, simulates NIC interrupt in backup</code></pre>
+        <p>
+            为什么要弹跳缓冲区（bounce buffer）？我们希望数据在主和备份执行中完全相同的时刻出现在内存里，否则可能分叉。FAQ：没有 FT 时，硬件在软件执行的同时把数据拷进内存，客户机指令可能在 DMA 进行中读那块内存，看没看到取决于精确时机；如果主恰好在 DMA 之后读、备份恰好在之前读，它们就分叉了。FT 先拷进客户机访问不到的私有缓冲区，拷完后中断客户机，在它不执行时再拷进它的内存，备份在同一条指令处做同样的事，于是不管什么时候读内存，两边看到的数据都一样。
+        </p>
+        <h3>备份必须落后一个日志条目</h3>
+        <p>
+            假设主在指令 X 之后收到中断或输入，如果备份已经执行过了 X，就无法正确处理这个输入。所以备份的 FT 在看到第一个日志条目之前根本不能开始执行，然后执行到那个日志条目里的指令编号为止，等到下一个日志条目再让备份继续。（录像里有同学问备份跑到主前面怎么办，就是这个答案。）
+        </p>
+        <h3>非确定性指令</h3>
+        <p>
+            有些指令即使主备状态相同，结果也不同，比如读当前时间、周期计数或处理器序列号。主：FT 让 CPU 在主执行这类指令时中断，FT 执行指令并记录结果，把结果和指令编号发给备份。备份：FT 读日志条目，设好在那个指令编号处中断，然后提供主得到的那个值。FAQ：应用调用随机数生成器会不会让两边不同？不会，所有随机来源（当前时间、硬件周期计数、精确的中断时机）都由 hypervisor 控制，它截获相关指令，保证两边产生同样的值。作者怎么确定抓住了所有非确定性来源？FAQ 作者猜：公司里很多人深入了解 hypervisor、微处理器和客户机操作系统内部，而且 VM-FT 利用了此前"确定性重放"项目的日志和重放支持，那个项目一定已经处理过各种非确定性来源，并做了大量测试。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、输出和输出规则</h2>
+        <p>
+            输出（发网络包）呢？主和备份都执行产生输出的指令，主的 FT 真的发出输出，备份的 FT 丢弃输出。有同学问能不能输入给主、输出由备份发出：那样也要面对同样的时序问题。
+        </p>
+        <h3>例子：数据库服务器</h3>
+        <p>
+            客户端可以发"加一"请求，数据库把存的值加一并回复新值。假设值从 10 开始；网络把客户端请求交给主上的 FT；主的 FT 通过日志通道发给备份；两边的 FT 把请求交给主和备份；主执行，值变成 11，发出 "11" 的回复，FT 真的发出去；备份执行，值变成 11，发出 "11"，FT 丢掉。客户端收到一个 "11"，符合预期。
+        </p>
+        <p>
+            但是：假设主在发出回复后立刻崩溃，客户端收到了 "11"；<strong>而且</strong>日志通道丢掉了带客户端请求的那个日志条目，主已经死了，不会重发；备份上线，但它内存里的值是 10！现在客户端再发一个加一请求，会再次得到 "11"，而不是 "12"。糟了。
+        </p>
+        <h3>解法：输出规则（第 2.2 节）</h3>
+        <p>主发出输出之前，必须等备份确认了之前的所有日志条目。</p>
+        <p>
+            再看一遍：主收到客户端的加一请求；通过日志通道发出请求；准备给客户端发 "11"；先等备份确认之前的日志条目；然后才发 "11"。如果主在收到备份确认之前崩溃，备份也许没看到请求、没加一，但主也不会回复过；如果在收到确认之后崩溃，客户端可能看到了 "11"，但备份保证已经收到了带请求的日志条目，会加到 11。
+        </p>
+        <p>
+            输出规则是件大事：它以某种形式出现在所有复制系统里；是对性能的严重约束；是应用特定巧思的用武之地，比如只读操作也许主不必等就能回复；FT 没有应用层的知识，只能保守。FAQ：遵守输出规则会损失多少性能？表 2 给出了一些线索，发送速率降低了，但降得不多。
+        </p>
+        <p>
+            问：如果主在收到备份确认之后、发出输出之前崩溃，输出就永远不会产生了吗？答：主坏了、备份上线时，备份收到了主的一些日志条目，它继续执行这些日志条目，<strong>输出照样被丢弃</strong>；执行完最后一个日志条目后，备份上线，不再丢弃输出。在我们的例子里，最后一个日志条目是客户端请求的到达，所以请求到达后备份就开始产生输出，于是会发出给客户端的回复。
+        </p>
+        <p>
+            问：如果主是在发出输出<strong>之后</strong>崩溃的呢？备份会再发一次吗？答：会。对 TCP 没问题，接收方会忽略重复的序号；对写盘也没问题，备份会把同样的数据写到同样的块号上（FAQ：磁盘 I/O 是幂等的，同样的数据写到同样的位置，中间没有别的 I/O）。切换时的重复输出在复制系统里相当常见，客户端需要保存足够的状态来忽略重复，或者设计成重复无害。FAQ 还解释了 3.4 节说的"上线时重发挂起的 I/O"：日志里有某个磁盘 I/O 开始的条目，却没有它的完成中断，备份就重新发起这个 I/O；有完成中断就不必。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、网络分区和脑裂</h2>
+        <p>
+            问：FT 能应对网络分区吗？会不会脑裂，比如主和备份都以为对方坏了，都上线？答：由磁盘服务器打破平局。磁盘服务器支持原子的 test-and-set：主或备份认为对方死了时，就尝试 test-and-set；只有一方活着，它会赢得 test-and-set 并上线；两边都尝试，一方会输，然后停机。
+        </p>
+        <pre><code>test-and-set() {
+  acquire_lock()
+  if flag == true:
+    release_lock()
+    return false
+  else:
+    flag = true
+    release_lock()
+    return true
+}</code></pre>
+        <p>
+            （FAQ 给出的大致代码。）只有 test-and-set 返回真，主（或备份）才上线。如果只有一方能和磁盘服务器通信，就只有它上线；两边都能通信，磁盘服务器当裁判，只有第一次调用返回真。
+        </p>
+        <p>
+            磁盘服务器可能是单点故障：它宕了，服务就宕了。他们大概设想的是一个复制的磁盘服务器。录像里有同学问 test-and-set 服务器和主或备份同时坏了怎么办，Morris 的回答是："那就完了。"这就是第六讲 Raft 要解决的问题：把这个决定交给一个不会脑裂、本身也容错的服务。
+        </p>
+        <p>问：为什么不支持多核？（讲义留作问题。讲义末尾提到 VMware 的知识库文章讲了多 CPU 支持，VM-FT 可能从复制状态机改成了状态转移的做法，但不清楚是否属实。）</p>
+    </section>
+
+    <section>
+        <h2>六、性能和适用场景</h2>
+        <p>
+            性能（表 1）：FT 对非 FT，令人印象深刻，几乎没有变慢。日志带宽直接反映磁盘读速率加网络输入速率，MySQL 是 18 Mbit/s。讲义作者觉得这些数字偏低：应用读磁盘至少能到每秒 400 兆位，所以他们的应用不怎么磁盘密集。
+        </p>
+        <p>
+            FT 什么时候有吸引力？关键但强度低的服务，比如名字服务器；软件不方便修改的服务。高吞吐的服务怎么复制？人们对比如数据库用应用层的复制状态机：状态只是数据库，不是全部内存和磁盘；事件是数据库命令（put 或 get），不是包和中断。结果是同步粒度更粗、开销更小。GFS 用应用层复制，Lab 2 等也是。
+        </p>
+        <p>
+            FAQ：GFS 和 VMware FT 都提供容错，怎么判断哪个更好？FT 复制的是计算，可以给任何现有的网络服务器透明地加上容错，一致性相当严格，对服务器和客户端都透明，比如可以用它把一个现有的邮件服务器变成容错的。GFS 只为存储提供容错，因为专门针对一种简单服务（存储），它的复制比 FT 高效，比如不需要让中断在所有副本的同一条指令处发生。GFS 通常只是构成完整容错服务的大系统的一部分，比如 VMware FT 本身就依赖主备共享的容错存储服务（图 1 里的共享磁盘），可以用类似 GFS 的东西实现（虽然细节上 GFS 并不完全合适）。安全性：作者假设主和备份遵守协议、不是恶意的（比如攻击者没有攻破 hypervisor），系统不能处理被攻破的 hypervisor；另一方面 hypervisor 大概能保护自己免受恶意或有 bug 的客户机操作系统和应用的伤害。只处理故障即停合理吗？合理，很多真实故障本质上是故障即停的，比如很多网络和电源故障；更难的是看起来正常却算错的计算机，最坏情况是恶意攻击，这叫拜占庭故障，课程最后会讲（第二十一讲）。
+        </p>
+        <h3>总结</h3>
+        <p>
+            主/备复制，VM-FT 是一个清楚的例子。怎样在没有单点故障的情况下应对分区？下一讲（Raft）。怎样获得更好的性能？应用层的复制状态机。
+        </p>
+            </section>
+
+    <footer class="document-footer">
+        <p>MIT 6.824: Distributed Systems &copy; Spring 2020</p>
+        <nav class="footer-nav">
+            <a href="21_拜占庭容错.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="23_Aurora.html">下一篇 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

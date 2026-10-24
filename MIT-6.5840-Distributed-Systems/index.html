@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MIT 6.5840: Distributed Systems | MIT 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <span><a href="../index.html">&larr; 全部课程</a></span>
+    <span>MIT 6.5840 (Spring 2026)</span>
+</nav>
+
+<article>
+    <header>
+        <h1>MIT 6.5840（原 6.824）：Distributed Systems</h1>
+        <p class="subtitle">MIT 的分布式系统研究生课：多台计算机怎样在机器崩溃、网络丢包和分区时仍然像一台可靠的计算机那样工作。容错、复制和共识（Paxos、Raft），一致性模型（线性一致、因果一致、最终一致），分布式事务（两阶段锁、两阶段提交、Spanner、FaRM），工业界的案例（GFS、ZooKeeper、Memcache、Lambda、Ray），以及面对不可信参与者的系统（SUNDR、比特币、拜占庭容错）；五个 Go 实验从 MapReduce 一直搭到容错的分片键值存储</p>
+        <div class="author-meta">
+            主讲：Frans Kaashoek、Robert Morris（2026 年春季）<br>
+            整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）
+        </div>
+    </header>
+
+    <section>
+        <h2>这门课讲什么</h2>
+        <p>
+            分布式系统是一组通过网络协作、对外提供一个服务的计算机。要它们的理由有几个：一台机器装不下或算不完（性能、扩展），一台机器坏了服务不能停（容错），数据和用户本来就在不同地方（地理分布），以及有时参与者互不信任（安全）。难处在于部分故障：某台机器停了、某条消息丢了、网络被切成两半，而其余部分还在运行，并且没法确切知道发生了什么。
+        </p>
+        <p>
+            课程围绕几个反复出现的主题展开。一是容错：用复制让服务在少数机器故障时继续运行，关键是怎样防止"脑裂"，答案是多数派和共识协议（第四讲 Paxos、第六七讲 Raft）。二是一致性：复制之后客户端到底能看到什么，第八讲给出线性一致的精确定义，之后每篇论文都要问"它提供哪种一致性、为此付出了什么"。三是性能：分片、缓存、只读优化、RDMA，以及一致性和性能之间的取舍。四是事务：怎样让跨多台服务器的一组操作原子、可串行化地执行（第十一讲到第十四讲）。最后几讲把"所有参与者都诚实"这个假设也去掉了。
+        </p>
+        <p>
+            怎样读：会读 Go 或任何一种 C 系语言的代码就能读，最好知道线程、锁、RPC 是什么（第二讲会讲）。操作系统和网络的基础可以先看本站的 <a href="../15-213-CSAPP/index.html">CMU 15-213</a>。建议按顺序读前十一讲，它们是后面的基础，也是期中考试的范围；第十二讲之后的案例相对独立，可以挑感兴趣的读。实验页面汇总了五个实验的完整要求和提示，做实验之前先读第六、七、十讲。和 AI 系统的关系：第一讲的 MapReduce、补充四的 Spark、第十八讲的 Ray 是一条线，Ray 正是今天很多大模型训练和推理框架的底座；第十七讲讲 AWS Lambda 怎样秒级加载 10 GB 的容器镜像，和模型权重的分发是同一类问题。
+        </p>
+        <p>
+            资料说明：MIT 没有公开 2026 年的课堂录像。笔记以 <a href="https://pdos.csail.mit.edu/6.824/schedule.html" target="_blank">2026 年春季课程网站</a>公开的讲义（每讲的 notes）、FAQ、课前问题、Paxos 和 Lambda、PBFT 的课件为主，并对照 Robert Morris 主讲的 <a href="https://www.youtube.com/watch?v=cQP8WApzIQQ" target="_blank">2020 年春季课堂录像</a>补充讲解和课堂问答。两年的讲义大部分相同，能对上的讲次是：第 1、2、3、6、7 讲对应 2020 年同号录像，第 8 讲对应 2020 年第 7 讲末尾和第 8 讲开头，第 9 讲对应 2020 年第 8、9 讲，第 10 讲对应 2020 年第 5 讲（Go、线程和 Raft 的助教讲座），第 11 讲对应 2020 年第 12 讲，第 12 讲对应第 13 讲，第 13 讲对应第 9 讲（链式复制和 CRAQ），第 14 讲对应第 14 讲，第 16 讲对应第 16 讲，第 20 讲对应第 19 讲。第 4、5、15、17、18、19、21 讲在 2020 年没有对应的录像，只依据讲义、课件和 FAQ。2020 年有、2026 年已经去掉的七个主题（VMware FT、Aurora、Frangipani、Spark、COPS、证书透明、Blockstack）整理成补充一到补充七，因为 2026 年的讲义和课前问题还在多处引用它们。
+        </p>
+    </section>
+
+    <section>
+        <h2>笔记目录（21 讲、7 篇补充和实验）</h2>
+
+        <h3>第一部分：基础和 MapReduce</h3>
+
+        <h3><a href="01_导论与MapReduce.html">01. 导论与 MapReduce</a></h3>
+        <p>为什么要分布式系统、为什么难；容错、一致性、性能三个主题；MapReduce 的抽象、执行过程、网络瓶颈和容错。</p>
+
+        <h3><a href="02_RPC与线程.html">02. 线程与 RPC</a></h3>
+        <p>为什么用 Go；竞态、协调、死锁；网页爬虫的三种写法；投票计数的六个版本；RPC 的结构和"至多一次"。</p>
+
+        <h3><a href="03_GFS.html">03. GFS（Google 文件系统）</a></h3>
+        <p>存储为什么难；coordinator 和 chunkserver；主/从复制、版本号和租约；并发写和记录追加的一致性。</p>
+
+        <h3>第二部分：容错、共识和 Raft</h3>
+
+        <h3><a href="04_Paxos.html">04. 容错的共识：Paxos</a></h3>
+        <p>脑裂和多数派；提议者和接受者的伪代码；"被选定"是全系统的性质；逐步推演并发提议者；用 Paxos 构建复制日志。</p>
+
+        <h3><a href="05_Go模式.html">05. Go 并发的模式与提示（Russ Cox 客座讲座）</a></h3>
+        <p>用 goroutine 保存状态；发布/订阅服务器；工作调度器的七次改写；复制服务的客户端；取消和超时。</p>
+
+        <h3><a href="06_Raft一.html">06. 复制状态机与 Raft（一）：领导者选举</a></h3>
+        <p>复制状态机；坏掉的 test-and-set 服务器和脑裂；Raft 的软件结构；任期、选举、随机化超时；日志分歧。</p>
+
+        <h3><a href="07_Raft二.html">07. Raft（二）：日志、持久化与快照</a></h3>
+        <p>修复日志分歧和快速回退；选举限制；图 7 和图 8；哪些状态要持久化；快照和 InstallSnapshot；只读操作和租约。</p>
+
+        <h3><a href="08_线性一致性.html">08. 一致性与线性一致性</a></h3>
+        <p>历史和线性化点；六个例子；用"先于"图找环；线性一致排除了哪些设计；最终一致性和它的异常。</p>
+
+        <h3><a href="09_ZooKeeper.html">09. ZooKeeper 案例</a></h3>
+        <p>只把状态放进容错存储；znode 和 API；选举、临时 znode 和隔离；ready znode；跟随者读和 ZooKeeper 的一致性保证。</p>
+
+        <h3><a href="10_Lab3答疑.html">10. Lab 3 答疑：怎样组织和调试 Raft</a></h3>
+        <p>多线程加锁和单线程状态机两种结构；持锁不发 RPC；Go 内存模型、条件变量、两个常见的 Raft bug；调试技巧。</p>
+
+        <h3>第三部分：分布式事务</h3>
+
+        <h3><a href="11_分布式事务.html">11. 分布式事务：两阶段锁与两阶段提交</a></h3>
+        <p>ACID 和可串行化；两阶段锁和死锁；两阶段提交的流程，各方在各个时刻崩溃时要记住什么；2PC 和 Raft 的结合。</p>
+
+        <h3><a href="12_Spanner.html">12. Spanner</a></h3>
+        <p>每个分片一个 Paxos 组，Paxos 上跑 2PC；无锁的只读事务和快照隔离；TrueTime、开始规则和提交等待；外部一致性。</p>
+
+        <h3><a href="13_链式复制.html">13. 链式复制</a></h3>
+        <p>配置服务器加主/备；写从头走到尾、读找尾；各个位置的故障恢复；和多数派系统比较；CRAQ 从任意副本读。</p>
+
+        <h3><a href="14_FaRM与乐观并发控制.html">14. FaRM 与乐观并发控制</a></h3>
+        <p>电池供电的非易失内存；内核旁路和单边 RDMA；乐观并发控制；LOCK、VALIDATE、COMMIT 的提交协议逐步推演。</p>
+
+        <h3>第四部分：验证与工业系统</h3>
+
+        <h3><a href="15_IronFleet.html">15. 分布式系统的验证：IronFleet</a></h3>
+        <p>霍尔逻辑和 Dafny；用状态机描述分布式系统；精化和不变式；实现、协议、规范三层；安全性和活性。</p>
+
+        <h3><a href="16_Memcached.html">16. Facebook 怎样扩展 Memcache</a></h3>
+        <p>旁路缓存；区域、集群和区域池；惊群和租约；Gutter；写时删除；"过时的 set"竞态；跨区域的一致性。</p>
+
+        <h3><a href="17_AWS_Lambda.html">17. AWS Lambda 的容器按需加载（Marc Brooker 客座讲座）</a></h3>
+        <p>10 GB 容器镜像不能让冷启动变慢；按需加载和去重；三级缓存；纠删码和尾延迟；SnapStart 的快照恢复。</p>
+
+        <h3><a href="18_Ray.html">18. Ray：基于所有权的分布式 future</a></h3>
+        <p>future、actor 和借用；中心化协调者的瓶颈；按所有权分片；分布式调度和对象存储；血缘重建和命运共享。</p>
+
+        <h3>第五部分：不可信的参与者</h3>
+
+        <h3><a href="19_SUNDR.html">19. 不可信服务器上的可信存储：SUNDR</a></h3>
+        <p>哈希树和签名；服务器能伪造吗、能隐藏吗；被分叉的日志为什么合不回去；fork 一致性；版本向量。</p>
+
+        <h3><a href="20_比特币.html">20. 比特币</a></h3>
+        <p>双花和公共账本；区块链、挖矿和工作量证明；分叉怎样被解决；51% 攻击；激励和难度调整；设计的弱点。</p>
+
+        <h3><a href="21_拜占庭容错.html">21. 拜占庭容错（PBFT）</a></h3>
+        <p>为什么要 3f+1 台；PRE-PREPARE、PREPARE、COMMIT 三个阶段；视图变更；扩展成完整的复制状态机。</p>
+
+        <h3>补充：2020 年有、2026 年去掉的主题</h3>
+
+        <h3><a href="22_VMware_FT.html">补充一：主/备复制与 VMware FT</a></h3>
+        <p>状态转移和复制状态机；日志通道；非确定性事件怎样处理；输出规则；用 test-and-set 防止脑裂。</p>
+
+        <h3><a href="23_Aurora.html">补充二：Amazon Aurora</a></h3>
+        <p>事务数据库怎样使用存储；多数派写入，存储服务器只收日志；N=6、W=4、R=3；VCL 和 VDL；保护组。</p>
+
+        <h3><a href="24_Frangipani.html">补充三：Frangipani</a></h3>
+        <p>缓存一致性协议；用锁做原子操作；每个工作站一份预写日志；替崩溃的工作站恢复和版本号；租约。</p>
+
+        <h3><a href="25_Spark.html">补充四：Spark</a></h3>
+        <p>PageRank 逐行解读；惰性的变换和血缘图；窄依赖和宽依赖；cache；按血缘重算和检查点。</p>
+
+        <h3><a href="26_COPS.html">补充五：COPS 与因果一致性</a></h3>
+        <p>地理复制下的本地写；Lamport 时钟和写冲突；sync 屏障；客户端上下文和依赖；get_trans。</p>
+
+        <h3><a href="27_证书透明.html">补充六：证书透明</a></h3>
+        <p>CA 体系的问题；审计代替预防；Merkle 树、包含证明和一致性证明；分叉攻击、gossip 和 fork 一致性。</p>
+
+        <h3><a href="28_Blockstack.html">补充七：Blockstack</a></h3>
+        <p>去中心化应用；Zooko 三角；把名字嵌进比特币；Atlas 和 Gaia；注册名字的两笔交易；一组讨论题。</p>
+
+        <h3><a href="实验.html">实验、期末项目与课程安排</a></h3>
+        <p>Lab 1 MapReduce，Lab 2 键值服务器和锁，Lab 3 Raft（3A 到 3D），Lab 4 容错键值服务（4A 到 4C），Lab 5 分片键值服务（5A 到 5D）；期末项目；时间线、评分和合作规则。</p>
+    </section>
+
+    <footer class="document-footer">
+        <p>MIT 6.5840: Distributed Systems &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="../index.html">&larr; 返回全部课程</a>
+            <a href="01_导论与MapReduce.html">从第一讲开始 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

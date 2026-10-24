@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>补充五：COPS 与因果一致性 | MIT 6.5840 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="25_Spark.html">&larr; 上一篇</a>
+    <span>MIT 6.824 (2020): Lecture 17</span>
+    <a href="27_证书透明.html">下一篇 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>补充五：因果一致性与 COPS</h1>
+        <p class="subtitle">2020 年第 17 讲。地理复制的大网站：读是本地的，写呢；已经看过的 Spanner 和 Facebook Memcache 都不能在本地独立写；稻草人一：最终一致，相片管理器的例子和异常；怎样决定哪个写最新：挂钟时间的问题，Lamport 时钟，最后写者胜和写冲突；稻草人二：sync 屏障；每个数据中心一条日志；COPS：客户端上下文、依赖、远端服务器等依赖到达再安装；因果一致性的定义和它不保证什么；上下文的优化；ACL 和相册的例子与 get_trans；性能、局限和影响</p>
+        <div class="author-meta">
+            主讲：Robert Morris（2020 年春季 6.824 第 17 讲）<br>
+            资料来源：<a href="http://nil.csail.mit.edu/6.824/2020/notes/l-cops.txt" target="_blank">2020 讲义</a>、<a href="https://www.youtube.com/watch?v=fR_NB714EAI" target="_blank">课堂录像</a>、论文 Don't Settle for Eventual: Scalable Causal Consistency for Wide-Area Storage with COPS（Lloyd 等，SOSP 2011）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、背景：大网站的地理复制</h2>
+        <pre><code>[datacenter 1]   [datacenter 2]   [datacenter 3]
+ users, web servers, sharded storage servers in each</code></pre>
+        <ul>
+            <li>多个数据中心，每个都有所有数据的完整拷贝；</li>
+            <li>读是本地的，常见情况很快；</li>
+            <li>写呢？一致性呢？</li>
+        </ul>
+        <p>我们已经看过两种地理复制的方案：</p>
+        <ul>
+            <li><strong>Spanner</strong>：写涉及 Paxos，也许还有两阶段提交；写的 Paxos 多数派必须等一些远程站点；没有哪个站点能独自写；但有读事务，一致、相当快。</li>
+            <li><strong>Facebook / Memcache</strong>：写必须去主站点的 MySQL；同样，非主站点不能独自写；但读快得惊人（每台 memcache 服务器每秒一百万次）。</li>
+        </ul>
+        <p>
+            能不能有一个允许从任何数据中心写的系统？即写不必和任何其他数据中心通信、不必等它们就能继续？这对容错、性能、在慢速广域网面前的稳健性都有帮助。这些本地的读和写才是真正的目标，一致性模型是次要的考虑，我们会编出一个和本地读写设计必须做的事相匹配的模型。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、稻草人一：最终一致</h2>
+        <ul>
+            <li>三个数据中心，每个里面一组分片；</li>
+            <li>客户端的读写只联系本地分片；</li>
+            <li>每个分片异步地把写推给其他数据中心，分片对分片；</li>
+            <li>大量并行；</li>
+            <li>这个设计偏向读；也可以让写纯本地、读去检查其他数据中心；或者像 Dynamo/Cassandra 那样用有重叠的多数派。</li>
+        </ul>
+        <p>稻草人一是一个"最终一致"（eventually consistent）的设计：</p>
+        <ol>
+            <li>客户端可能以不同顺序看到更新；</li>
+            <li>如果足够长时间没有写，所有客户端看到同样的数据。</li>
+        </ol>
+        <p>规范很松，实现方式很多，容易获得好性能，在部署的系统里使用，比如 Dynamo 和 Cassandra，但对应用程序员可能很棘手。</p>
+        <h3>例子：相片管理器</h3>
+        <pre><code>C1 uploads photo, adds reference to public list:
+  C1: put(photo) put(list)
+C2 reads:
+  C2:                       get(list) get(photo)
+C3 also sees new photo, adds to their own list:
+  C3: get(list) put(list2)
+C4 sees photo on C3's list:
+  C4:                       get(list2) get(photo)</code></pre>
+        <p>
+            C2 能看到什么？C4 能看到什么？在稻草人一里，list 和 photo 是不同的键、可能在不同的分片，各自异步推送，C2 可能看到新的 list 却读不到 photo，C4 也一样。应用代码会看到不直观的行为，即"异常"。这不算错，因为没承诺过更好；也能为这样的系统编程，比如在值里带上版本等，或者等期待的数据（相片）出现；但我们可以希望有更直观、更好编程的行为。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、插一句：怎样决定哪个写最新</h2>
+        <p>
+            同一个键的写可能从多个远程数据中心到达，为了最终一致，所有人都要选出同样的最终值。
+        </p>
+        <h3>为什么不给每个 put 附上当前挂钟时间作为版本号</h3>
+        <ul>
+            <li>本地分片服务器收到客户端 put() 时分配 v# = 时间；</li>
+            <li>远程数据中心收到 put(k, -, v#)：如果 v# 大于当前存的 k 值的版本，就换成新值/v#；否则忽略新值。</li>
+            <li>（注意"版本"这个词不太准，"时间戳"更好。）</li>
+        </ul>
+        <p>
+            挂钟时间几乎能行！如果两个 put(k) 在不同数据中心恰好同时发生呢？用 v# 低位里的唯一 ID 打破平局。如果某个数据中心（或服务器）的时钟快了一小时呢？会让那个数据中心的值总是胜出；更糟的是，一小时内阻止任何其他更新！
+        </p>
+        <h3>COPS 用 Lamport 时钟分配 v#</h3>
+        <pre><code>each server implements a "Lamport clock" or "logical clock":
+  Tmax = highest v# seen (from self and others)
+  T = max(Tmax + 1, wall-clock time)
+v# for a new put() is current T</code></pre>
+        <p>所以如果某台服务器的时钟快，看到它那里版本的每个人都会推进自己的 Lamport 时钟。</p>
+        <h3>并发写时，只保留一个、丢掉其余的可以吗</h3>
+        <p>
+            这就是论文的"最后写者胜"（last-writer-wins）。有时可以：比如只有一个可能的写者，问题就不会出现，大概只有我能写我的相册列表或个人资料。有时很别扭：如果 put() 是想给计数器加一呢？或者往购物车里加一个新商品？问题在于"冲突的写"。我们常常希望有更聪明的办法来检测和合并：真正的事务；迷你事务，原子的加一操作，而不只是 get()/put()；为购物车定制的冲突解决（集合并？）。冲突写的解决是最终一致和因果一致的一个难题：没有单一的"串行化点"来实现原子操作或事务。论文基本忽略了写冲突的解决，但这对真实系统是个问题。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、稻草人二：sync 屏障</h2>
+        <p>回到最终一致和稻草人一：存储系统能提供更直观的结果，同时保留本地读、从任何数据中心写吗？</p>
+        <ul>
+            <li>提供一个 sync(k, v#) 操作：直到每个数据中心至少有了 k 的 v# 版本才返回；</li>
+            <li>put(k) 返回新的 v#，客户端可以把它传给 sync()；</li>
+            <li>可以称之为"最终一致加屏障"；</li>
+            <li>注意 sync() 很慢：要和所有数据中心通信、等它们。</li>
+        </ul>
+        <p>稻草人二的客户端调用 sync() 来强制读者看到数据的顺序：</p>
+        <pre><code>C1: v# = put(photo), sync(photo, v#), put(list)
+C2:                                             get(list) get(photo)</code></pre>
+        <p>
+            C2 可能看不到新的 list，但如果看到了，也一定会看到 photo。稻草人二的应用必须仔细安排 put() 和 get() 的顺序，通常 get() 的顺序和 put() 相反。sync() 保证"如果你看到了新的 list，你<strong>之后</strong>就会看到新的 photo"。sync() 也强制了新鲜度：sync() 返回后，读一定会看到我们的数据。
+        </p>
+        <p>
+            稻草人二也许没那么糟：直接、高效的设计；如果不需要事务，语义相当不错，能让相册例子正常工作，虽然要想清楚顺序和 sync() 放在哪；读性能极好；如果写得不多、或者不介意等，写性能也还行，毕竟 Facebook/Memcache 论文说所有写都发到主数据中心，Spanner 的写也要等多数副本站点。
+        </p>
+        <h3>能不能有 sync() 的语义、却没有它的代价</h3>
+        <p>
+            能不能不像 sync 那样等待，就把正确的顺序告诉远程数据中心？一种可能：每个数据中心一条写日志，每个数据中心一个"日志服务器"；put() 追加到本地服务器的日志，但不等；没有 sync()；日志服务器把日志按顺序发给其他数据中心，远程站点按顺序应用，所以 put(photo)、put(list) 在各处都以这个顺序出现。这不是完整的解决方案，但可以做成；但分片很多时日志服务器可能成为瓶颈，所以 COPS 没有采用这种做法。
+        </p>
+        <p>所以我们想要：异步地转发 put（不要 sync()、不要等待）；每个分片独立地转发 put（不要中心化的日志服务器）；足够的顺序，让例子里的应用代码能正常工作。</p>
+    </section>
+
+    <section>
+        <h2>五、COPS</h2>
+        <h3>客户端上下文</h3>
+        <p>每个 COPS 客户端维护一个"上下文"（context），反映客户端操作的顺序。每次 get() 和 put() 之后，客户端往上下文里加一项；客户端让 COPS 把每个 put() 排在它上下文里的一切之后。</p>
+        <pre><code>get(X) -&gt; v2
+  context: Xv2
+get(Y) -&gt; v4
+  context: Xv2, Yv4
+put(Z, -) -&gt; v3
+  client sends Xv2, Yv4 to shard server along with new Z
+  context: Xv2, Yv4, Zv3
+  (COPS optimizes this to just Zv3)</code></pre>
+        <p>
+            COPS 把 "Zv3 在 Yv4 之后" 这样的关系叫作一个依赖：Yv4 → Zv3。依赖让 COPS 做什么？如果 C2 看到了 Zv3，然后要读 Y，它应该看到至少 Yv4。这种依赖的概念是为了符合程序员对"get(Y) 然后 put(Z)"或者"put(Z) 然后 put(Q)"的直觉。
+        </p>
+        <h3>每个 COPS 分片服务器</h3>
+        <ul>
+            <li>收到客户端的 put(Z, -, Yv4) 时：为 Z 选一个新的 v# = 3，存下 Z, -, v3；把 Z/-/v3/Yv4 发给每个数据中心里对应的分片服务器，但不等回复。</li>
+            <li>远程分片服务器收到 Z/-/v3/Yv4：和本地负责 Y 的分片服务器通信，等 Yv4 到达；然后更新数据库，存下 Z/-/v3。</li>
+        </ul>
+        <p>
+            要点：如果远程数据中心的读者看到了 Zv3，然后读 Y，它看到的版本不会早于 Yv4。这让相册例子能正常工作：put(list) 到达时带着 photo 作为依赖，远程服务器会等 photo 出现，再安装更新后的 list。
+        </p>
+        <h3>因果一致性</h3>
+        <p>这种一致性语义叫"因果一致性"（causal consistency，论文图 2）。客户端用两种方式在版本之间建立依赖：</p>
+        <ol>
+            <li>它自己的 put 和 get 序列（第 3 节的"执行线程"）；</li>
+            <li>读另一个客户端写的数据。</li>
+        </ol>
+        <p>
+            依赖是可传递的（如果 A → B，B → C，那么 A → C）。系统保证：如果 A → B，并且一个客户端读到了 B，那么这个客户端之后一定会看到 A（或更晚的版本）。
+        </p>
+        <ul>
+            <li>好处：更新有因果关系时，读者以写者看到它们的顺序看到更新。</li>
+            <li>好处：更新<strong>没有</strong>因果关系时，COPS 没有顺序上的义务。例如：</li>
+        </ul>
+        <pre><code>C1: put(X)                  put(Z)
+C2:            put(Y)</code></pre>
+        <p>X 必须在 Z 之前出现（这需要 COPS 付出努力）；Y 不必在 Z 之前出现。这种自由是论文声称可扩展的基础。</p>
+        <ul>
+            <li>注意：读者可能看到比因果依赖要求的更新的数据，所以我们得到的不是事务或快照。</li>
+            <li>注意：COPS 只看到某些因果关系，即它能从客户端的 get() 和 put() 中观察到的那些。如果有别的通信渠道，它就只是最终一致的。比如我 put(k)，打电话告诉你，你 get(k)，也许看不到我的数据。COPS 不是外部一致的。</li>
+        </ul>
+        <h3>避免上下文无限增长的优化</h3>
+        <ul>
+            <li>put(K) → vN 发出上下文，然后清空上下文，换成 KvN。所以下一个 put()，比如 put(L)，只依赖 KvN；远程站点会等 KvN 到达再写 L；而 KvN 本身在等（被清掉的）上下文；所以 L 实际上也在等（被清掉的）上下文。（2026 年课前问题页保留了这个问题：第 4.3 节最后一句说客户端在 put 之后清空上下文、只留下这次 put，为什么这样做有道理？看起来客户端之后的 put 需要带着之前 get 的依赖信息，到底是谁使用上下文信息，为什么它不需要最后一次 put 之前那些 get 的信息？答案就在这一条里：远程服务器使用依赖，而最后那次 put 本身就依赖于它们，可传递。）</li>
+            <li>垃圾回收：看到所有数据中心都有了某个版本，这个版本就不用再记在上下文里，它已经对所有人可见了。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>六、只靠有序的 put/get 不够的情形：get_trans</h2>
+        <p>
+            论文的例子：一个带访问控制列表（ACL）的相册。先 get(ACL)，再 get(list)？如果在两次 get() 之间，有人把你从 ACL 里删掉，然后加了一张相片呢？先 get(list)，再 get(ACL)？如果有人删掉了一张相片，然后把你加进 ACL 呢？需要一个多键的 get，返回彼此一致的版本。
+        </p>
+        <h3>COPS-GT 的 get_trans() 做法</h3>
+        <ul>
+            <li>服务器为每个值存储完整的依赖集合；</li>
+            <li>服务器存几个旧版本；</li>
+            <li>get_trans(k1, k2, ...)：客户端库独立地做各个 get()，get() 除了值和 v# 还返回依赖；</li>
+            <li>客户端检查依赖：对每个 get() 结果 R，对 R 的依赖里提到的每个其他 get 结果 S，S 的 v# 是否 &gt;= R 的依赖里提到的版本？</li>
+            <li>全都是，就能用这些结果；有不是的，就要第二轮 get()，取那些太旧的值，每个取依赖里提到的那个版本；可能是旧版本，以免依赖层层传递。</li>
+        </ul>
+        <pre><code>C1: get_trans(ACL, list)
+C1: get(ACL) -&gt; v1, no deps
+    C2: put(ACL, v2)
+    C2: put(list, v2, deps=ACL/v2)
+C1: get(list) -&gt; v2, deps: ACL/v2
+(C1 checks dependencies against value versions)
+C1: get(ACL) -&gt; v2
+(now C1 has a causally consistent pair of get() results)</code></pre>
+        <p>
+            为什么 COPS-GT 的 get 事务只需要两个阶段？一个新值在它所有依赖都安装好之前不会被安装，所以如果一个 get() 返回了某个依赖，这个依赖一定已经在本地安装了。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、性能、局限和影响</h2>
+        <p>
+            性能？每秒大约 50000 次操作，还行，像一个传统数据库。没有和其他系统比较，性能上没有，易编程性上也没有。可惜，因为论文的中心论点是 COPS 在易编程性和性能之间有更好的权衡。
+        </p>
+        <h3>COPS 和因果一致性的局限和缺点</h3>
+        <ul>
+            <li>冲突的写是严重的难题；</li>
+            <li>让客户端跟踪因果关系很别扭，比如用户和浏览器、多次页面浏览、多台服务器；</li>
+            <li>COPS 看不到外部的因果依赖，软件和人确实会在 COPS 世界之外通信；</li>
+            <li>"事务"的概念有限：只针对读（不过后来的工作做了一些推广）；定义比可串行化的事务更微妙；</li>
+            <li>跟踪、传递、遵守因果依赖有显著的开销：远程服务器必须检查并推迟更新；更新的推迟可能层层连锁。</li>
+        </ul>
+        <h3>影响</h3>
+        <p>
+            因果一致性是一个流行的研究想法，理由很充分：它同时承诺性能和有用的一致性；COPS 之前就有很多工作，之后也有（Eiger、SNOW、Occult）。但因果一致性在部署的存储系统里很少使用。实际在用的是什么？完全不做地理复制，只在本地；主站点（PNUTS、Facebook/Memcache）；最终一致（Dynamo、Cassandra）；强一致（Spanner）。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>MIT 6.824: Distributed Systems &copy; Spring 2020</p>
+        <nav class="footer-nav">
+            <a href="25_Spark.html">&larr; 上一篇</a>
+            <a href="index.html">返回主目录</a>
+            <a href="27_证书透明.html">下一篇 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
