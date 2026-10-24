@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十三讲：操作语义 | Stanford CS143 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="12_代码生成.html">&larr; 上一讲</a>
+    <span>Stanford CS143: Lecture 13</span>
+    <a href="14_中间代码与局部优化.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十三讲：操作语义</h1>
+        <p class="subtitle">为什么要单独定义求值规则，汇编描述带来的无关细节；操作语义、指称语义、公理语义；求值判断 so, E, S ⊢ e : v, S'，环境、存储和 Cool 的值；常量、变量、self、赋值、加法、语句块、if、while、let 的规则和一个推导例子；new 的语义、默认值和属性的初始化顺序；动态分派的语义；类型检查排除了哪些情况，哪些运行时错误仍然存在</p>
+        <div class="author-meta">
+            主讲：Fredrik Kjolstad（2026 年春季）；录像主讲：Alex Aiken<br>
+            资料来源：<a href="https://web.stanford.edu/class/cs143/lectures/lecture13.pdf" target="_blank">课件</a>（2026 年 5 月 14 日）、<a href="https://www.youtube.com/playlist?list=PLxoiCo5tGquBZzK0E_-JVLSV3b3o_2OnX" target="_blank">录像第 13 周</a>（13-01 Semantics Overview 到 13-04 Cool Semantics II，按小节转载的播放列表）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、为什么需要语义</h2>
+        <p>
+            我们要说清楚运行一个 Cool 程序时期望什么行为：对每一种 Cool 表达式，规定它被求值时发生什么，这就是表达式的"意义"。回顾一门编程语言的定义是怎样一层层给出的：
+        </p>
+        <ul>
+            <li>token，用正则表达式，对应词法分析；</li>
+            <li>文法，用上下文无关文法，对应语法分析；</li>
+            <li>类型规则，用推理规则，对应语义分析；</li>
+            <li>求值规则，对应代码生成和优化。它们决定程序该做什么，也决定能对程序做哪些变换，让它更快、更省空间或做别的优化。</li>
+        </ul>
+        <p>
+            到目前为止，求值规则是间接给出的：给出一个完整的、到栈机器代码的编译策略，再给出栈机器的求值规则（或者把栈机器代码翻译成汇编）。这是一个完整的描述，拿生成的汇编去机器上跑，就能看到程序做了什么。为什么还不够？
+        </p>
+        <p>
+            Aiken 说，没写过几个编译器可能不太容易体会，但人们从惨痛的经验中学到：用汇编描述语言实现，会带进很多无关的细节。这种完整的可执行描述里有很多东西，对"程序怎样执行"其实是不必说的：
+        </p>
+        <ul>
+            <li>是否用栈机器。栈机器不是任何语言实现的内在要求，还有别的代码生成策略。</li>
+            <li>栈朝哪个方向增长。</li>
+            <li>整数怎样表示。</li>
+            <li>体系结构的具体指令集。</li>
+        </ul>
+        <p>
+            这些都只是一种实现方式，我们不希望它们被当成唯一的方式。我们要的是一个完整、但不过度限制的描述，允许多种不同的实现。没有这样一个高层描述的语言，最后都落到这个地步：想知道一个程序做什么，只能去参考实现上跑一下。这很不令人满意，因为参考实现本身往往不完全正确，有 bug，有一些并非有意成为语言一部分的实现细节，因为没有更好的定义，就被固定下来，成了"第一次怎样实现"的偶然产物。
+        </p>
+
+        <h3>三种语义</h3>
+        <p>
+            描述语义的方法有很多，表达能力都一样，只是各自适合不同的任务。
+        </p>
+        <ul>
+            <li><strong>操作语义</strong>：用在一台抽象机器上的执行规则描述程序的求值，可以看作一种很高层的代码生成。最适合描述实现，Cool 用的就是它。</li>
+            <li><strong>指称语义</strong>：程序的意义是一个数学函数，把程序文本映射到一个从输入到输出的、数学意义上真实存在的函数。很优雅，但要定义合适的函数空间，引入了我们描述实现时用不着的复杂性。</li>
+            <li><strong>公理语义</strong>：用逻辑公式描述程序行为，基本陈述形如"如果执行开始时的状态满足 X，那么结束时的状态满足 Y"，X、Y 是某种逻辑里的公式。很多程序验证系统以它为基础，用来自动证明程序正确或发现 bug。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>二、记号</h2>
+        <p>
+            和词法分析、语法分析、类型检查一样，第一步是引入形式记号。这里用的仍是逻辑推理规则，和类型检查很像。类型判断是 $\text{Context} \vdash e : C$（在给定上下文中，e 的类型是 C）；求值判断类似：
+        </p>
+        <p>
+            $$\text{Context} \vdash e : v$$
+        </p>
+        <p>
+            在给定上下文中，表达式 e 求值得到值 v。这里的上下文是求值上下文，里面装的东西和类型上下文不同。
+        </p>
+        <p>
+            $$\frac{\text{Context} \vdash e_1 : 5 \quad \text{Context} \vdash e_2 : 7}{\text{Context} \vdash e_1 + e_2 : 12}$$
+        </p>
+        <p>
+            表达式的求值结果可以依赖子表达式的求值结果；规则规定了求值一个表达式所需的一切。上下文在类型检查里的作用是给自由变量提供类型，这里则要给出 e1、e2 中变量的值。
+        </p>
+
+        <h3>环境和存储</h3>
+        <p>
+            考虑求值 <code>y &lt;- x + 1</code>：要跟踪变量的值，还要允许变量在求值过程中改变值。为此用两层映射：
+        </p>
+        <ul>
+            <li><strong>环境</strong>（environment）：从变量名到内存位置的映射，告诉我们变量的值存在哪个位置，也记录了哪些变量在作用域内（只有当前作用域里的变量出现在环境中）。例如 $E = [a : l_1, b : l_2]$，$E(a)$ 在 E 中查变量 a。Aiken 提醒，"环境"这个词前面用过别的意思，讲操作语义时它专指变量到位置的映射；文献里常把判断左边的整个东西都叫环境，这套笔记里整体叫上下文，环境只是其中第二部分。</li>
+            <li><strong>存储</strong>（store）：从内存位置到值的映射，告诉我们内存里有什么。例如 $S = [l_1 \to 5, l_2 \to 7]$，$S(l_1)$ 是位置 $l_1$ 的内容。写法上用箭头，和环境的冒号区分开。</li>
+        </ul>
+        <p>
+            存储的更新：$S' = S[12/l_1]$ 定义一个新存储 S'，使 $S'(l_1) = 12$，而对 $l \neq l_1$ 有 $S'(l) = S(l)$。存储在这个模型里就是函数，在旧函数的一个点上修改就得到新函数。
+        </p>
+
+        <h3>Cool 的值</h3>
+        <p>
+            Cool 的值是对象，所有对象都是某个类的实例。$X(a_1 = l_1, \ldots, a_n = l_n)$ 表示一个 Cool 对象：X 是对象的类，$a_i$ 是属性（包括继承来的），$l_i$ 是 $a_i$ 的值存放的位置。知道了位置，再用存储就能查出每个属性的值。
+        </p>
+        <p>
+            没有属性的类有特殊写法：
+        </p>
+        <ul>
+            <li>$\text{Int}(5)$：整数 5。</li>
+            <li>$\text{Bool}(\text{true})$：布尔值 true。</li>
+            <li>$\text{String}(4, \text{"Cool"})$：长度为 4 的字符串 "Cool"。</li>
+        </ul>
+        <p>
+            还有一个类型为 Object 的特殊值 <strong>void</strong>。除了 isvoid 测试，不能对它做任何操作，尤其是不能对它分派（虽然它的类型是 Object），那会产生运行时错误。具体实现里可能用 NULL 表示它。
+        </p>
+
+        <h3>求值判断</h3>
+        <p>
+            $$so, E, S \vdash e : v, S'$$
+        </p>
+        <p>
+            读作：给定 self 的当前值 so，当前环境 E，当前存储 S，如果 e 的求值终止，那么返回值是 v，新的存储是 S'。
+        </p>
+        <ul>
+            <li>求值的"结果"是一个值和一个存储，新存储模拟了副作用。e 可能是一大段代码，里面有赋值，求值后内存状态会变。</li>
+            <li>环境和 self 的值不变。在 Cool 里不能修改 self 是哪个对象，也无法以任何形式访问变量所在的位置。注意 self 对象里属性的内容可能被更新（那是存储的一部分），但属性所在的位置不变，对象的布局和位置不变。这些不变的东西对编译很重要，可以利用它们生成高效代码。</li>
+            <li>操作语义允许不终止的求值。如果 e 陷入死循环，就得不到值和新存储，判断只在 e 终止的前提下成立。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>三、简单表达式的规则</h2>
+
+        <h3>常量</h3>
+        <p>
+            没有副作用，存储不变：
+        </p>
+        <p>
+            $$\frac{}{so, E, S \vdash \texttt{true} : \text{Bool}(\text{true}), S} \qquad \frac{}{so, E, S \vdash \texttt{false} : \text{Bool}(\text{false}), S}$$
+        </p>
+        <p>
+            $$\frac{i \text{ 是整数字面量}}{so, E, S \vdash i : \text{Int}(i), S} \qquad \frac{s \text{ 是字符串字面量} \quad n \text{ 是 } s \text{ 的长度}}{so, E, S \vdash s : \text{String}(n, s), S}$$
+        </p>
+
+        <h3>变量和 self</h3>
+        <p>
+            $$\frac{E(\text{id}) = l_{\text{id}} \quad S(l_{\text{id}}) = v}{so, E, S \vdash \text{id} : v, S} \qquad \frac{}{so, E, S \vdash \texttt{self} : so, S}$$
+        </p>
+        <p>
+            注意变量要查两次：先从名字查到位置，再从位置查到值。这只是读内存，可以看作装入变量的值，存储不变。self 直接求值为上下文里的 self 对象。
+        </p>
+
+        <h3>赋值</h3>
+        <p>
+            $$\frac{so, E, S \vdash e : v, S_1 \quad E(\text{id}) = l_{\text{id}} \quad S_2 = S_1[v/l_{\text{id}}]}{so, E, S \vdash \text{id} \leftarrow e : v, S_2}$$
+        </p>
+        <p>
+            三步：求右边的值，得到值 v 和可能更新过的存储 S1（e 可以是任意代码，自己就可能有赋值）；查出被赋值变量的位置；在 S1 里把那个位置更新为 v，得到 S2。结果是值 v 和存储 S2。
+        </p>
+
+        <h3>加法</h3>
+        <p>
+            $$\frac{so, E, S \vdash e_1 : v_1, S_1 \quad so, E, S_1 \vdash e_2 : v_2, S_2}{so, E, S \vdash e_1 + e_2 : v_1 + v_2, S_2}$$
+        </p>
+        <p>
+            e1 在和整个表达式相同的上下文里求值；e2 的 self 和环境相同，但在新存储 S1 里求值，也就是说 e2 里的赋值和变量引用必须作用在 e1 运行后的存储上，e1 的副作用要对 e2 可见。存储告诉你求值的顺序：e1 在原存储里求值，所以先算；e2 在 e1 产生的存储里求值，所以后算；结果是 S2，说明 e2 是最后求值的。
+        </p>
+
+        <h3>语句块</h3>
+        <p>
+            $$\frac{so, E, S \vdash e_1 : v_1, S_1 \quad so, E, S_1 \vdash e_2 : v_2, S_2 \quad \cdots \quad so, E, S_{n-1} \vdash e_n : v_n, S_n}{so, E, S \vdash \{ e_1; \ldots; e_n; \} : v_n, S_n}$$
+        </p>
+        <p>
+            存储的"穿线"（S → S1 → S2 → …）再次表达了要求的求值顺序：必须先 e1、再 e2、再 e3……，副作用才按正确的顺序发生。只用最后一个值，其他值在规则里不出现在任何别的地方，但所有副作用都被收集起来。
+        </p>
+
+        <h3>一个推导例子</h3>
+        <p>
+            求值 <code>{ X &lt;- 7 + 5; 4; }</code>。上下文：self 对象是什么无所谓，程序里没用到 self；环境要给出所有自由变量的位置，$E = [X : l]$；存储里 l 初始为 0，$S = [l \to 0]$。
+        </p>
+        <ol>
+            <li>块的第一条语句是赋值，先求右边 7 + 5：7 求值为 Int(7)，5 求值为 Int(5)，存储都不变，于是 7 + 5 求值为 Int(12)，存储仍是 $[l \to 0]$（这个表达式碰巧没有赋值）。</li>
+            <li>做赋值：新存储 $[l \to 0][12/l] = [l \to 12]$。赋值的结果是 Int(12) 和 $[l \to 12]$。</li>
+            <li>第二条语句 4 在存储 $[l \to 12]$ 里求值，得到 Int(4)，存储不变。</li>
+            <li>整个块的结果是 Int(4) 和存储 $[l \to 12]$。</li>
+        </ol>
+
+        <h3>if</h3>
+        <p>
+            $$\frac{so, E, S \vdash e_1 : \text{Bool}(\text{true}), S_1 \quad so, E, S_1 \vdash e_2 : v, S_2}{so, E, S \vdash \texttt{if}\ e_1\ \texttt{then}\ e_2\ \texttt{else}\ e_3\ \texttt{fi} : v, S_2}$$
+        </p>
+        <p>
+            $$\frac{so, E, S \vdash e_1 : \text{Bool}(\text{false}), S_1 \quad so, E, S_1 \vdash e_3 : v, S_2}{so, E, S \vdash \texttt{if}\ e_1\ \texttt{then}\ e_2\ \texttt{else}\ e_3\ \texttt{fi} : v, S_2}$$
+        </p>
+        <p>
+            条件为真时只求 then 分支，规则里根本不提 e3。条件可能有副作用，所以分支在 e1 产生的存储里求值。课件问：为什么 e1 的结果一定是 Bool？因为类型检查保证了这一点。
+        </p>
+
+        <h3>while</h3>
+        <p>
+            $$\frac{so, E, S \vdash e_1 : \text{Bool}(\text{false}), S_1}{so, E, S \vdash \texttt{while}\ e_1\ \texttt{loop}\ e_2\ \texttt{pool} : \text{void}, S_1}$$
+        </p>
+        <p>
+            条件为假，循环终止，带着求条件产生的副作用，结果值是 void。类型检查保证 e1 求值为 Bool。
+        </p>
+        <p>
+            $$\frac{so, E, S \vdash e_1 : \text{Bool}(\text{true}), S_1 \quad so, E, S_1 \vdash e_2 : v, S_2 \quad so, E, S_2 \vdash \texttt{while}\ e_1\ \texttt{loop}\ e_2\ \texttt{pool} : \text{void}, S_3}{so, E, S \vdash \texttt{while}\ e_1\ \texttt{loop}\ e_2\ \texttt{pool} : \text{void}, S_3}$$
+        </p>
+        <p>
+            条件为真，执行一次循环体，然后在新存储里把整个循环再求值一遍。注意顺序 S → S1 → S2 → S3。循环是这样表达的："while …"的求值用它自己在另一个状态下的求值来表达，可能跑零次或多次迭代，如果终止，就产生 S3。循环体的结果被丢弃，只保留副作用；while 总是产生 void。
+        </p>
+
+        <h3>let</h3>
+        <p>
+            求 <code>let id : T &lt;- e1 in e2</code>：先在原存储里求初始值 e1，得到 v1 和 S1。那么 e2 应该在什么上下文里求值？显然要基于 S1，因为它有 e1 的所有更新，但还必须有这个新变量。所以要用一个像 E 的环境，但 id 绑定到一个<strong>新的</strong>位置 $l_{\text{new}}$（不能和已用的位置冲突）；存储像 S1，但 $l_{\text{new}}$ 映射到 v1。这是环境被扩展的一种情况：环境要记录所有自由变量。
+        </p>
+        <p>
+            记 $l_{\text{new}} = \text{newloc}(S)$，表示 $l_{\text{new}}$ 是 S 中还没用过的位置。存储有一个定义域（它是位置到值的映射），newloc 挑一个不在当前位置列表里的。可以把 newloc 看作运行时系统的内存分配函数。
+        </p>
+        <p>
+            $$\frac{so, E, S \vdash e_1 : v_1, S_1 \quad l_{\text{new}} = \text{newloc}(S_1) \quad so, E[l_{\text{new}}/\text{id}], S_1[v_1/l_{\text{new}}] \vdash e_2 : v_2, S_2}{so, E, S \vdash \texttt{let}\ \text{id} : T \leftarrow e_1\ \texttt{in}\ e_2 : v_2, S_2}$$
+        </p>
+    </section>
+
+    <section>
+        <h2>四、new</h2>
+        <p>
+            new T 的非形式语义：
+        </p>
+        <ol>
+            <li>为 T 类对象的所有属性分配位置，也就是分配一个新对象。</li>
+            <li>把属性初始化为默认值。</li>
+            <li>求各个属性的初始化表达式，把结果设为属性值。</li>
+            <li>返回新分配的对象。</li>
+        </ol>
+        <p>
+            可见在 Cool 里分配一个新对象不只是分配一点内存，还有相当多的计算。
+        </p>
+
+        <h3>默认值和 class 函数</h3>
+        <p>
+            每个类 A 有一个默认值 $D_A$：$D_{\text{Int}} = \text{Int}(0)$，$D_{\text{Bool}} = \text{Bool}(\text{false})$，$D_{\text{String}} = \text{String}(0, \text{""})$，其他任何类 $D_A = \text{void}$。
+        </p>
+        <p>
+            对类 A，记
+        </p>
+        <p>
+            $$\text{class}(A) = (a_1 : T_1 \leftarrow e_1, \ldots, a_n : T_n \leftarrow e_n)$$
+        </p>
+        <p>
+            $a_i$ 是属性（包括继承来的），$T_i$ 是声明类型，$e_i$ 是初始化表达式。属性的顺序很重要，它决定了初始化的语义：按"最远祖先优先"排列。比如 B 继承 A，C 继承 B，A 定义 a1、a2，B 定义 b1、b2，C 定义 c1、c2，那么 class(C) 的顺序是 a1、a2、b1、b2、c1、c2：先是离类层次根最近的 A 的属性，再沿继承链往下，每个类内部按属性在类定义里出现的文本顺序。
+        </p>
+
+        <h3>规则</h3>
+        <p>
+            $$\frac{\begin{gathered}
+            T_0 = \text{if } (T == \text{SELF\_TYPE and } so = X(\ldots)) \text{ then } X \text{ else } T \\
+            \text{class}(T_0) = (a_1 : T_1 \leftarrow e_1, \ldots, a_n : T_n \leftarrow e_n) \\
+            l_i = \text{newloc}(S) \text{ for } i = 1, \ldots, n \qquad v = T_0(a_1 = l_1, \ldots, a_n = l_n) \\
+            S_1 = S[D_{T_1}/l_1, \ldots, D_{T_n}/l_n] \qquad E' = [a_1 : l_1, \ldots, a_n : l_n] \\
+            v, E', S_1 \vdash \{ a_1 \leftarrow e_1; \ldots; a_n \leftarrow e_n; \} : v_n, S_2
+            \end{gathered}}{so, E, S \vdash \texttt{new}\ T : v, S_2}$$
+        </p>
+        <ul>
+            <li>先确定要分配什么类的对象。SELF_TYPE 不是真正的类名：如果 T 不是 SELF_TYPE，就分配 T；如果是，就看 self 对象的动态类型 X，分配一个 X。new SELF_TYPE 分配一个和 self 动态类型相同的对象。</li>
+            <li>查出 T0 的属性、类型和初始化表达式。</li>
+            <li>为 n 个属性分配 n 个新位置，造出类标签为 T0、第 i 个属性绑定到第 i 个新位置的对象 v。</li>
+            <li>在原存储 S 上把这些新位置设为各属性类型的默认值，得到 S1。</li>
+            <li>求初始化表达式。环境 E' 只含这个类的属性，因为属性的初始化表达式里，类的所有属性都在作用域内（和类型检查的规则一致）。按 class 函数给出的顺序把初始化当作一个语句块来求值，所以先初始化最远祖先的属性，一路往下到类自己声明的属性。块的值没有用，最终的存储 S2 是分配对象的结果存储。</li>
+            <li>new T 的结果是新对象 v 本身。</li>
+        </ul>
+        <p>
+            几个要点：
+        </p>
+        <ul>
+            <li>前三步分配对象，剩下的步骤通过求一串赋值来初始化它。</li>
+            <li>E' 和 new T 所在处的环境 E 毫无关系。调用 new T 的那个函数里有哪些变量在作用域内，和这里完全无关。</li>
+            <li>求初始化表达式时，self 是新对象 v 本身，初始化表达式里用 self 指的就是正在初始化的对象。</li>
+            <li>为什么需要默认值？正因为属性在自己的初始化表达式里也在作用域内。在 Cool 里写 <code>a &lt;- a</code> 这样的初始化完全合法，右边可以读到 a，所以 a 必须先有某个初始值：可能在算完自己的初始化表达式之前就读到了某个属性。</li>
+        </ul>
+        <p>
+            new 的语义这么复杂可能有点出人意料，但不只 Cool 这样，每门面向对象语言的对象初始化语义都相当复杂，原因是继承加上初始化表达式可以引用属性这些特性的组合。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、动态分派</h2>
+        <p>
+            <code>e0.f(e1, ..., en)</code> 的非形式语义：
+        </p>
+        <ol>
+            <li>按顺序求实参 e1, …, en。</li>
+            <li>求 e0，得到目标对象。</li>
+            <li>设 X 是目标对象的动态类型（看它的类标签）。</li>
+            <li>从 X 里取出（有 n 个参数的）f 的定义，也就是到 X 的方法表里查 f。</li>
+            <li>创建 n 个新位置，以及一个把 f 的形参映射到这些位置的环境。</li>
+            <li>用实参初始化这些位置。</li>
+            <li>把 self 设为目标对象，求 f 的方法体。</li>
+        </ol>
+        <p>
+            记号：对类 A 和 A 的一个方法 f（可能是继承来的），$\text{impl}(A, f) = (x_1, \ldots, x_n, e_{\text{body}})$，$x_i$ 是形参名，$e_{\text{body}}$ 是方法体。
+        </p>
+        <p>
+            $$\frac{\begin{gathered}
+            so, E, S \vdash e_1 : v_1, S_1 \quad so, E, S_1 \vdash e_2 : v_2, S_2 \quad \cdots \quad so, E, S_{n-1} \vdash e_n : v_n, S_n \\
+            so, E, S_n \vdash e_0 : v_0, S_{n+1} \qquad v_0 = X(a_1 = l_1, \ldots, a_m = l_m) \\
+            \text{impl}(X, f) = (x_1, \ldots, x_n, e_{\text{body}}) \qquad l_{x_i} = \text{newloc}(S_{n+1}) \text{ for } i = 1, \ldots, n \\
+            E' = [a_1 : l_1, \ldots, a_m : l_m][l_{x_1}/x_1, \ldots, l_{x_n}/x_n] \qquad S_{n+2} = S_{n+1}[v_1/l_{x_1}, \ldots, v_n/l_{x_n}] \\
+            v_0, E', S_{n+2} \vdash e_{\text{body}} : v, S_{n+3}
+            \end{gathered}}{so, E, S \vdash e_0.f(e_1, \ldots, e_n) : v, S_{n+3}}$$
+        </p>
+        <ul>
+            <li>每个实参的求值都可能有副作用，存储一路穿下去。</li>
+            <li>求 e0 得到对象 $v_0$，要看它里面是什么：类标签 X 是 $v_0$ 运行时真正的类型，用它去查 f 的定义；属性的位置 $l_1, \ldots, l_m$ 也要用到。</li>
+            <li>在存储里为实参分配 n 个新位置。</li>
+            <li>建方法体的环境：方法里哪些名字在作用域内？类的所有属性，它们的位置就是 $v_0$ 的属性位置，$v_0$ 将是 self，属性名指的就是 self 的属性；此外还有形参，位于新位置。</li>
+            <li>环境的写法有个细节：先建一个只含属性的环境，再对它做更新，用 $x_i \mapsto l_{x_i}$ 替换掉原来可能有的定义。为什么？方法的形参可能和某个属性同名，比如类 A 有属性 a，它的方法 f 又有一个叫 a 的形参，那么方法体里的 a 指哪个？总得给一个答案。Cool 的答案是指形参，形参遮住外层的名字，规则里的更新就是在强制这一点。</li>
+            <li>存储：把每个实参的值存到为它分配的位置上。</li>
+            <li>求方法体：self 是被分派的对象 $v_0$，环境是新建的 E'。这又是一次彻底的上下文切换，E' 完全从零构建，只用了被调方法的信息，不从调用处的环境 E 借任何东西。存储反映了求实参、求 e0、为形参分配位置的所有副作用。方法体得到的值和存储，就是整个分派的结果。</li>
+        </ul>
+        <p>
+            总结：方法体在这样的上下文里执行，E' 给出形参和 self 的属性的定义，存储和调用者的一样，只是多了为形参分配的位置上的实参值。注意活动记录（帧）的概念在规则里是隐含的：只是为实参分配了新位置，并没有真的建一个把所有参数、返回地址等等放在一起的数据结构，也不必说东西分配在栈上还是堆上。这是好事，允许多种实现都正确地实现这套语义。静态分派的语义很类似，区别只在于怎样查找被分派的类，规则里多一行指明分派到哪个类，详见 Cool 手册。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、运行时错误</h2>
+        <p>
+            操作规则虽然很细，却有意省略了一些你可能觉得它应该覆盖的情况。还是看分派规则：它查出 $v_0$ 的类 X，然后在 X 里查 f。如果 $\text{impl}(X, f)$ 没有定义呢？规则只是假设 f 在 X 里有定义，没说没有时怎么办。这在类型正确的程序里不可能发生，类型检查的目的之一就是保证动态分派永远不会分派到一个没有定义的方法。正因为已经做过类型检查，有些情况可以省略，有些检查不用做；如果没有类型检查，规则就得说明所有类型不正确的情况下会发生什么，会复杂得多。
+        </p>
+        <p>
+            但有些运行时错误是类型检查器防止不了的，Cool 里有四种：
+        </p>
+        <ul>
+            <li>对 void 分派；</li>
+            <li>除以零；</li>
+            <li>子串下标越界；</li>
+            <li>堆溢出（分配新对象时内存不够）。</li>
+        </ul>
+        <p>
+            遇到这些情况，执行必须得体地终止：给出错误信息，而不是段错误或别的硬崩溃。Cool 手册里有正确的实现在这四种情况下该做什么的指引。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、结论</h2>
+        <ul>
+            <li>操作规则很精确、详细，什么都没有留下不说。如果你理解了它们，就真正理解了怎样实现一个正确的 Cool 编译器，照着规则做就不会错。但要很仔细地读，规则里有相当多的东西，写成那样是为了达到特定的效果，前面指出了几处微妙的地方。细读这些规则，也是学习编程语言设计中的形式化思维、理解"一门语言有语义""一个实现是正确的"这些概念的好办法。</li>
+            <li>大多数语言没有严格定义的操作语义。有一些相当规模、相当实用的语言有形式语义，但你熟悉的大多数语言没有。</li>
+            <li>当可移植性很重要时，操作语义就变得必不可少：要让同一个程序换到不同机器、不同操作系统上仍然保证行为相同，就需要一个独立于任何实现的、关于程序应该怎样行为的定义。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS143: Compilers &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="12_代码生成.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="14_中间代码与局部优化.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
