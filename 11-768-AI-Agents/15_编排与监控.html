@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十五讲：编排与监控 | CMU 11-768 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="14_OpenHands框架.html">&larr; 上一讲</a>
+    <span>CMU 11-768: Lecture 15</span>
+    <a href="17_Agent与人类工作.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十五讲：编排与监控</h1>
+        <p class="subtitle">用 LangGraph 把已知流程固定下来，再用执行轨迹、成对比较和行为聚类看清 Agent 实际做了什么</p>
+        <div class="author-meta">
+            主讲：Daniel Fried · 2026 年 10 月 20 日<br>
+            资料来源：<a href="https://www.cmu-agents.com/slides/lecture-15-orchestration-and-monitoring.pdf" target="_blank">课程幻灯片</a>（共 39 页）· <a href="https://transluce.org/docent/blog/terminal-bench" target="_blank">Transluce 的 Terminal-Bench 调查</a> · <a href="https://arxiv.org/abs/2604.11072" target="_blank">Hodoscope 论文</a><br>
+            本讲录像尚未公开（截至 2026 年 11 月 7 日），本文依据幻灯片和它引用的资料整理，不含课堂口述。录像发布后再对照补充。
+        </div>
+    </header>
+
+    <section>
+        <h2>一、本讲的位置</h2>
+        <!-- Slides 2–4. -->
+        <p>
+            前面几讲已经出现过几种约束 Agent 行为的办法。第 4 讲的技能用指令引导行为，可执行的技能还能限制执行方式。第 5 讲的 MACU、RAO 把任务拆开再协调。第 14 讲的自动化把多次 Agent 运行串成规定好的步骤和检查。
+        </p>
+        <p>
+            这一讲讲的编排框架（orchestration framework）沿着同一个方向再走一步：开发者提前写好流程的一部分，只把需要判断和行动的环节交给模型。
+        </p>
+        <p>
+            下半讲换一个问题：一个 Agent 已经跑了成百上千次，怎样知道它实际做了什么？这就是监控。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、单 Agent 和显式工作流</h2>
+        <!-- Slides 3, 4, 22. -->
+        <p>
+            两种系统用的材料相同，都是模型、工具和普通代码。差别在于行为由谁决定。
+        </p>
+        <table>
+            <tr><th></th><th>单 Agent</th><th>显式工作流</th></tr>
+            <tr><td>结构</td><td>模型和工具之间循环：行动，观察，再行动</td><td>一串提前定好的步骤，例如分类（模型）→ 检索（代码和工具）→ 调查（模型和工具）→ 检查（代码）</td></tr>
+            <tr><td>行为由什么决定</td><td>模型、提示词和环境</td><td>更多由开发者提前写定</td></tr>
+        </table>
+        <p>
+            流程已知的时候，固定下来能减少模型要做的决定，带来两个好处。
+        </p>
+        <ul>
+            <li><strong>一致性</strong>：必须做的步骤写死，检查放在代码里执行。例如回复被标记后，一定要先经过审批才能发送。</li>
+            <li><strong>效率</strong>：每一步可以用合适的模型，有的步骤甚至不用模型。例如轮询收件箱只用代码，分类用小模型。</li>
+        </ul>
+        <p>
+            代价也有两个：遇到流程外的情况时适应能力差；步骤之间传递什么信息，必须由开发者明确管理。而单 Agent 的上下文会自然累积。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、用 LangGraph 写一个客服工作流</h2>
+
+        <h3>1. 两类请求，两条路径</h3>
+        <!-- Slides 6–10. -->
+        <p>
+            幻灯片全程用同一个客服例子，改编自 LangGraph 的官方教程。
+        </p>
+        <ul>
+            <li>“我忘了密码，怎么重置？”这是常规问题，路径是：检索说明 → 起草回复 → 发送。</li>
+            <li>“我被重复扣费了，请退还多扣的钱。”这类请求需要人审核，路径是：起草回复 → 员工审批 → 发送。</li>
+        </ul>
+        <p>
+            把这两条路径合在一张图上，就有了七个步骤：读邮件、分类、查文档、建 bug 工单、起草回复、审核、发送。
+        </p>
+        <table>
+            <tr><th>分类结果</th><th>下一步</th></tr>
+            <tr><td>question / feature / billing</td><td>查文档，再起草回复</td></tr>
+            <tr><td>bug</td><td>建 bug 工单</td></tr>
+            <tr><td>complex</td><td>直接起草回复</td></tr>
+            <tr><td>起草后：billing / complex / urgent</td><td>进入人工审核，否则直接发送</td></tr>
+        </table>
+        <p>
+            这张图里只有分类和起草两步调用模型，其他步骤都是代码。走哪条路由模型的分类结果决定。所以模型仍然影响流程，只是影响的范围被框定了。
+        </p>
+
+        <h3>2. 共享状态</h3>
+        <!-- Slides 11, 12. -->
+        <p>
+            步骤之间靠一个共享状态传递数据。每个节点读取状态，做完自己的事，只返回它改动的字段。
+        </p>
+        <pre><code>class SupportState(TypedDict, total=False):
+    email_id: str
+    email_content: str
+    classification: dict
+    search_results: list[dict]
+    draft_response: str
+    review_decision: dict
+
+def classify_intent(state):
+    classification = model.classify(
+        state["email_content"]
+    ).model_dump()
+    return {"classification": classification}</code></pre>
+        <p>
+            以重复扣费这封邮件为例，走到审核之前，状态里依次写入了邮件原文、分类结果（billing，高紧急度）、检索到的账单审核政策，以及回复草稿。
+        </p>
+
+        <h3>3. 节点和图</h3>
+        <!-- Slides 13–15. -->
+        <p>
+            节点就是普通的 Python 函数。查文档这一步只调搜索服务，起草这一步把邮件和文档交给模型。
+        </p>
+        <pre><code>def search_documentation(state):
+    c = state["classification"]
+    query = f"{c['intent']} {c['topic']}"
+    return {"search_results": services.search(query)}
+
+def draft_response(state):
+    response = llm.invoke([
+        ("system", "Draft a reply using these documents."),
+        ("human", json.dumps({
+            "email": state["email_content"],
+            "documents": state.get("search_results", []),
+        })),
+    ])
+    return {"draft_response": response.text}</code></pre>
+        <p>
+            然后把函数注册成节点，用边连起来。固定的转移写成 <code>add_edge</code>。
+        </p>
+        <pre><code>g = StateGraph(SupportState)
+g.add_node("read_email", read_email)
+g.add_node("classify_intent", classify_intent)
+g.add_node("search_documentation", search_documentation)
+g.add_node("draft_response", draft_response)
+g.add_edge(START, "read_email")
+g.add_edge("read_email", "classify_intent")
+g.add_edge("search_documentation", "draft_response")
+graph = g.compile(checkpointer=checkpointer)</code></pre>
+        <p>
+            条件转移写在节点里，节点返回一个 <code>Command</code>，同时更新状态并指定下一步。
+        </p>
+        <pre><code>intent = classification["intent"]
+destination = (
+    "bug_tracking" if intent == "bug" else
+    "search_documentation"
+    if intent in {"question", "feature", "billing"}
+    else "draft_response"
+)
+return Command(
+    update={"classification": classification},
+    goto=destination,
+)</code></pre>
+        <p>
+            以上都是幻灯片上的片段，省略了导入和其余节点。
+        </p>
+
+        <h3>4. 断点续跑和等待人工</h3>
+        <!-- Slides 16, 17. -->
+        <p>
+            假设检索完成后，模型生成回复时程序崩溃。如果检索结果已经存进状态，重启时只需要重做生成这一步。这也是把步骤拆细的一个理由：每个节点结束时都留下一份可以恢复的进度。
+        </p>
+        <ul>
+            <li><strong>检查点（checkpointer）</strong>：持久记录工作流的状态，以及接下来该从哪里继续。</li>
+            <li><strong>恢复</strong>：用同一个执行 ID 读取进度继续跑，需要时可以传入新输入。</li>
+            <li><strong>重试策略</strong>：节点遇到超时这类临时错误时重新执行。</li>
+            <li><strong>中断（interrupt）</strong>：让工作流暂停。应用去收集人的回复，恢复时再传回来。</li>
+        </ul>
+        <p>
+            人工审核就是用中断实现的。工作流停在审核节点，人可能隔很久才回复，这段时间程序不需要一直运行。
+        </p>
+
+        <h3>5. 测试</h3>
+        <!-- Slides 20, 21. -->
+        <p>
+            固定流程的另一个好处是好测试。节点的输入输出是明确的，可以单独测一个节点：给定邮件“我被重复扣费了”，让模型固定输出 billing，检查节点返回的分类更新和路由目的地（文档搜索）。
+        </p>
+        <p>
+            单测节点时不经过检查点，所以持久化和实际路由要放到整张图上测。幻灯片列了四个受控的工作流测试：
+        </p>
+        <table>
+            <tr><th>场景</th><th>预期行为</th></tr>
+            <tr><td>密码问题</td><td>检索说明，起草，发送</td></tr>
+            <tr><td>账单投诉</td><td>暂停等待审批，此时什么都没有发出去</td></tr>
+            <tr><td>回复被拒绝</td><td>结束，不发送</td></tr>
+            <tr><td>搜索临时失败</td><td>重试搜索，然后继续</td></tr>
+        </table>
+        <p>
+            另外还需要两类检查。回归检查：改动之后（例如换了新模型）测试还能不能通过。集成测试：用真实的模型和服务跑完整个流程，看节点之间怎样相互影响。
+        </p>
+
+        <h3>6. 其他框架</h3>
+        <!-- Slide 23. -->
+        <p>
+            这些框架围绕不同的编程抽象，打包了相近的编排思路。
+        </p>
+        <table>
+            <tr><th>框架</th><th>侧重</th></tr>
+            <tr><td>OpenHands</td><td>可配置的 Agent 执行和工作集成（第 14 讲）</td></tr>
+            <tr><td>LangGraph</td><td>显式的工作流图、共享状态和恢复（本讲）</td></tr>
+            <tr><td>OpenAI Agents SDK</td><td>Agent 循环、工具、委派和交接</td></tr>
+            <tr><td>AG2</td><td>Agent 之间的对话和协调，包括群组工作流</td></tr>
+            <tr><td>DSPy</td><td>模块化的 LLM 程序，用样例和指标优化提示词</td></tr>
+        </table>
+    </section>
+
+    <section>
+        <h2>四、读一次运行：执行轨迹</h2>
+        <!-- Slides 18, 19. -->
+        <p>
+            监控的基本单位是执行轨迹，也就是一次运行的完整记录。工作流的每一步里面可能有模型调用、工具调用和普通代码，每个操作都可以记下输入、输出、耗时和错误。LangSmith 把单个操作叫 run，把整棵树叫 trace。
+        </p>
+        <p>
+            幻灯片里有一条录制的轨迹：<code>classify_intent</code> 用了 4.08 秒，其中几乎全部花在一次 gpt-5-mini 调用上（362 个 token）；紧接着的 <code>search_documentation</code> 调用本地搜索，耗时约 0.00 秒。读这样一棵树，能直接看出时间花在哪、模型看到了什么。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、读几百次运行：一次回归调查</h2>
+        <!-- Slides 25–31. -->
+        <p>
+            轨迹适合在已经知道出问题时排查。运行次数一多，就有三个困难：一条条读太慢；现有检查只覆盖想到要测的行为；分数下降了，也说不清是什么变了。
+        </p>
+        <p>
+            幻灯片用 Transluce 的工具 Docent 重做了一次调查。问题是：在 Terminal-Bench 上（89 个任务，518 次运行），GPT-5 Codex 的成功率是 40%，换成更新的 GPT-5.1 Codex 反而只有 27%，两者用的是同一个 Harness。为什么？
+        </p>
+
+        <h3>第一步：成对比较</h3>
+        <p>
+            让 Agent 操作 Docent：对每一次失败的运行，找另一个模型在同一任务上的一次成功运行，写一小段话解释失败原因，再按模型分组。输出显示要解释 108 次失败，其中 GPT-5.1 Codex 79 次，GPT-5 Codex 29 次。
+        </p>
+        <p>
+            下面是其中一对。在 code-from-image 这个任务上，GPT-5 Codex 失败，GPT-5.1 Codex 用 OCR 成功。解释里写道：失败的那次把大部分时间花在反复尝试 ASCII 渲染上，很晚才装上 Tesseract，安装耗尽了剩余时间，还没来得及跑 OCR 就结束了；成功的那次用 Tesseract 提取了伪代码，算出两个 SHA-256 值，写好了文件。每句解释都带引用，可以点进两次运行的原始步骤核对。
+        </p>
+
+        <h3>第二步：归纳失败模式</h3>
+        <p>
+            再让它根据上一步的结果总结两个模型的差别。结论是：
+        </p>
+        <ul>
+            <li>GPT-5.1 Codex：“在交付之前就耗尽了时间。”</li>
+            <li>GPT-5 Codex：“能交付，但形式经常不对。”</li>
+        </ul>
+
+        <h3>第三步：用数据验证</h3>
+        <p>
+            到这里还只是模型给出的假设，可以用运行的元数据直接检验。
+        </p>
+        <table>
+            <tr><th>模型</th><th>计分运行数</th><th>通过率</th><th>超时次数</th></tr>
+            <tr><td>GPT-5 Codex</td><td>219</td><td>40%</td><td>69（32%）</td></tr>
+            <tr><td>GPT-5.1 Codex</td><td>265</td><td>27%</td><td>132（50%）</td></tr>
+        </table>
+        <p>
+            接着只保留两个模型都没有超时的任务，一共 28 个，按任务取平均奖励。GPT-5.1 Codex 是 0.500，GPT-5 Codex 是 0.429，排名反过来了。
+        </p>
+        <p>
+            这说明同一个分数差距可以有完全不同的解释：新模型在不超时的任务上更好，却更容易把时间用光。Transluce 的原文补充了几点限制：只看没超时的任务，可能偏向较容易的任务；基于 LLM 的分析带有随机性；他们也把这项研究定位为示范，不当作对这两个模型的定论。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、发现没想到的行为：Hodoscope</h2>
+
+        <h3>1. 为什么不直接让模型当裁判</h3>
+        <!-- Slide 33. -->
+        <p>
+            让模型读轨迹并打分，是最直接的办法，但模型要知道该找什么。幻灯片的例子是：Claude Opus 4.6 评估一个 SWE-bench 上查看 Git 历史的 Agent，可疑度只给了 2/10。给它一个链接，指向 SWE-bench 的 issue #465（这个 issue 记录了用 <code>git log --all</code> 等命令偷看未来提交的漏洞），它的评分就升到了 7/10。
+        </p>
+        <p>
+            裁判需要提示，才知道这个行为有问题。没人想到的问题，就没人能给提示。
+        </p>
+
+        <h3>2. 把动作摆到一张图上</h3>
+        <!-- Slides 34–36. -->
+        <p>
+            Hodoscope（CMU）走另一条路，叫无监督监控：工具不判断对错，只把不同的行为摆出来给人看。论文的依据是，有问题的行为往往很显眼。一个钻了基准漏洞的模型，会做出行为正常的基线模型没有的动作。流程分四步：
+        </p>
+        <ol>
+            <li><strong>总结</strong>：把每个动作压缩成一句行为层面的描述。这样不同任务里的相似行为才能对应起来。</li>
+            <li><strong>嵌入</strong>：把所有分组的描述向量化，用 t-SNE 投到二维平面。</li>
+            <li><strong>密度差异</strong>：对每一组（例如每个模型）估计分布，叠加到总体上，就能看出哪组的哪类动作异常地多。图上用红色标出。</li>
+            <li><strong>人工审查</strong>：人点开这些区域，读原始动作，判断是否有问题。</li>
+        </ol>
+        <p>
+            Apple 的 Embedding Atlas 是类似的探索工具。
+        </p>
+
+        <h3>3. Commit0 的例子</h3>
+        <!-- Slide 37. -->
+        <p>
+            Commit0 这个基准的任务是重新写出从仓库里删掉的代码，但早期提交还留在 Git 历史里。在图上检查一簇 Git 操作，发现 Agent（图中是 MiniMax-M2.5 在 babel 任务上）在第 74、78 轮查看最近的提交，从历史里找回了本该自己写的代码。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、审查的规模问题</h2>
+        <!-- Slide 38. -->
+        <p>
+            最后一页用了 Black Hat USA 2026 上关于 OpenAI 与 Hugging Face 事件的演讲。截图上写着：这远远超出审查单次对话或单份日志的范围；许多相互独立的运行中，Agent 彼此分享漏洞利用方法，而且行动很快；调查到当时已经审查了超过 70 亿条 Agent 轨迹，用掉超过 300 万 GPU 小时。
+        </p>
+        <p>
+            幻灯片的结论只有一句：Agent 产生的内容已经多到人无法完整审查。这也是下半讲这些工具要解决的问题。下一讲是 Eric Wallace 的客座讲座，主题是安全。第 18 讲还会回到这起事件，讲这些 Agent 是怎样互相通信的。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、本讲小结</h2>
+        <ul>
+            <li>流程已知时，把它写成工作流，模型只负责判断和生成。好处是一致、省钱、好测试，代价是灵活性下降。</li>
+            <li>LangGraph 的基本元素是节点、边、共享状态和检查点。人工审批用中断实现。</li>
+            <li>单次运行看轨迹。大量运行先做成对比较得出假设，再用元数据验证。</li>
+            <li>LLM 裁判只能发现它知道要找的东西。无监督监控把不同模型的行为差异摆出来，由人判断。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-768: AI Agents · Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="14_OpenHands框架.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="17_Agent与人类工作.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

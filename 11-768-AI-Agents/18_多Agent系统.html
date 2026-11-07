@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十八讲：多 Agent 系统 | CMU 11-768 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="17_Agent与人类工作.html">&larr; 上一讲</a>
+    <span>CMU 11-768: Lecture 18</span>
+    <a href="index.html">课程目录 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十八讲：多 Agent 系统</h1>
+        <p class="subtitle">用多个 Agent 花掉更多推理算力，让 Agent 和其他主体交互，以及把多 Agent 环境当作训练和评估的工具</p>
+        <div class="author-meta">
+            主讲：Saujas Vaduguru · 2026 年 10 月 29 日<br>
+            资料来源：<a href="https://www.cmu-agents.com/slides/lecture-18-multi-agent-systems.pdf" target="_blank">课程幻灯片</a>（共 44 页）以及它引用的论文摘要和 <a href="https://metr.org/blog/2026-08-26-openai-hugging-face-incident-investigation/" target="_blank">METR 调查报告</a><br>
+            本讲录像尚未公开（截至 2026 年 11 月 7 日），本文不含课堂口述。幻灯片后半部分几乎只有论文图表，这部分的文字说明是整理时根据图和摘要写的。录像发布后再对照补充。
+        </div>
+    </header>
+
+    <section>
+        <h2>一、什么是多 Agent 系统，为什么要用</h2>
+        <!-- Slides 2–4. -->
+        <p>
+            多 Agent 系统里有多个 Agent 共处一个环境。每个 Agent 收到自己的观察和奖励，选择一个动作；所有动作合成一个联合动作，改变环境的状态。这个定义来自多智能体强化学习的教材。
+        </p>
+        <p>
+            幻灯片给出使用多 Agent 的三个理由，本讲也按这三块组织：
+        </p>
+        <ol>
+            <li><strong>提升推理时的计算能力</strong>：把 Agent 当作一种抽象，更有效地使用资源。</li>
+            <li><strong>和其他主体交互</strong>：问题本身就涉及多方，例如人机协作、市场。</li>
+            <li><strong>作为训练和评估环境</strong>：用其他 Agent 来训练和评估单个 Agent 的行为。</li>
+        </ol>
+        <p>
+            先看第一个。单个 Agent 通常只有一条工作流，会遇到四个限制：
+        </p>
+        <ul>
+            <li><strong>上下文管理</strong>：整个交互都堆在上下文里。</li>
+            <li><strong>串行执行</strong>：没有依赖关系的任务，也要一个接一个地做。</li>
+            <li><strong>缺少分工</strong>：同一个模型要完成任务的所有部分。</li>
+            <li><strong>探索有限</strong>：不会比较多种做法，容易锁定在一种方案上。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>二、按角色分工</h2>
+        <!-- Slides 5–7. -->
+        <p>
+            最早的做法模仿人类团队。给模型一个提示词让它扮演某个角色，角色之间互动。这种系统通常有固定的工作流，Agent 之间通过消息或共同产出的文件沟通。
+        </p>
+        <p>
+            ChatDev 是个典型例子：一家虚拟软件公司，开发分设计、编码、测试三个阶段，由 CEO、CTO、程序员、审查员、测试员两两对话，把想法一步步变成代码。
+        </p>
+        <p>
+            现在的框架里，这种结构写起来很简单。幻灯片的例子来自 LangChain 文档：日历 Agent 和邮件 Agent 各自拥有工具，然后被包装成主管 Agent 的工具。
+        </p>
+        <pre><code>calendar_agent = create_agent(
+    model, tools=[create_calendar_event, get_available_time_slots],
+    system_prompt="You are a calendar scheduling assistant. ..."
+)
+email_agent = create_agent(
+    model, tools=[send_email],
+    system_prompt="You are an email assistant. ..."
+)
+
+@tool
+def schedule_event(request: str) -&gt; str:
+    return calendar_agent.invoke(
+        {"messages": [{"role": "user", "content": request}]}
+    )["messages"][-1].text
+
+@tool
+def manage_email(request: str) -&gt; str:
+    return email_agent.invoke(
+        {"messages": [{"role": "user", "content": request}]}
+    )["messages"][-1].text
+
+supervisor_agent = create_agent(
+    model, tools=[schedule_event, manage_email],
+    system_prompt="You are a helpful personal assistant. ..."
+)</code></pre>
+    </section>
+
+    <section>
+        <h2>三、开放式委派</h2>
+        <!-- Slide 8. -->
+        <p>
+            预设角色和流程有两个局限：子问题未必对应人类的岗位；不同任务需要的 Agent 数量也不一样。开放式委派用通用的 Agent，协调多个实例，有的方法还能按需创建新实例。
+        </p>
+
+        <h3>1. 多 Agent 辩论</h3>
+        <!-- Slides 9, 10. -->
+        <p>
+            Du 等人的方法最简单。几个相同的模型实例各自回答，再把别人的答案发给自己，要求更新回答，重复几轮。幻灯片的题目：宝箱里有 175 颗钻石，红宝石比钻石少 35 颗，祖母绿是红宝石的两倍，一共多少颗？第二个 Agent 算出红宝石 175 − 35 = 140 颗；祖母绿就是 280 颗，总数 175 + 140 + 280 = 595。经过几轮，两个 Agent 都同意第二个 Agent 的思路。
+        </p>
+        <table>
+            <tr><th>方法</th><th>算术（%）</th><th>小学数学（%）</th><th>国际象棋（ΔPS）</th></tr>
+            <tr><td>单 Agent</td><td>67.0 ± 4.7</td><td>77.0 ± 4.2</td><td>91.4 ± 10.6</td></tr>
+            <tr><td>单 Agent（反思）</td><td>72.1 ± 4.5</td><td>75.0 ± 4.3</td><td>102.1 ± 11.9</td></tr>
+            <tr><td>多 Agent（多数投票）</td><td>69.0 ± 4.6</td><td>81.0 ± 3.9</td><td>102.2 ± 6.2</td></tr>
+            <tr><td>多 Agent（辩论）</td><td><strong>81.8 ± 2.3</strong></td><td><strong>85.0 ± 3.5</strong></td><td><strong>122.9 ± 7.6</strong></td></tr>
+        </table>
+
+        <h3>2. 递归派生子 Agent（RAO）</h3>
+        <!-- Slides 11–13. -->
+        <p>
+            第 5 讲提过 Recursive Agent Optimization。Agent 可以派生自己的新实例，子实例还能继续派生。幻灯片的例子是规划京都三日游：根 Agent 派一个子 Agent 找赏樱地点，派另一个找安静的寺院和孩子能玩的地方；后者再派生两个，分别找寺院和活动，最后结果逐层返回。
+        </p>
+        <p>
+            实现只需要一个工具：启动自身的克隆，以参数为目标。
+        </p>
+        <pre><code>async def launch_subagent(subgoal, ...) -&gt; Any:
+    ...</code></pre>
+        <p>
+            因为它是 Python 里的异步函数，所以可以直接用语言自带的机制来协调：并行运行并收集结果，用 <code>await</code> 控制顺序，用 asyncio 的上下文管理工具共享状态。
+        </p>
+        <p>
+            这样做的主要好处是节省上下文。下表是 8K 上下文窗口下的结果（训练和评估都用 8K）：
+        </p>
+        <table>
+            <tr><th>难度</th><th>方法</th><th>成功率</th><th>步数</th><th>时间（秒）</th></tr>
+            <tr><td rowspan="2">全部</td><td>单 Agent</td><td>0.24</td><td>16</td><td>7.1</td></tr>
+            <tr><td>递归</td><td>0.95</td><td>33</td><td>9.9</td></tr>
+            <tr><td rowspan="2">简单</td><td>单 Agent</td><td>0.55</td><td>12</td><td>5.2</td></tr>
+            <tr><td>递归</td><td>1.0</td><td>23</td><td>8.0</td></tr>
+            <tr><td rowspan="2">中等</td><td>单 Agent</td><td>0.17</td><td>25</td><td>11.1</td></tr>
+            <tr><td>递归</td><td>0.96</td><td>52</td><td>13.6</td></tr>
+            <tr><td rowspan="2">困难</td><td>单 Agent</td><td>0.0</td><td>未列出</td><td>未列出</td></tr>
+            <tr><td>递归</td><td>0.88</td><td>未列出</td><td>未列出</td></tr>
+        </table>
+        <p>
+            递归 Agent 用的步数大约是两倍，时间也更长，但能做完单 Agent 上下文放不下的任务。
+        </p>
+
+        <h3>3. 由管理者委派（MACU）</h3>
+        <!-- Slides 14, 15. -->
+        <p>
+            MACU 用在电脑操作上。管理者把任务写成有向无环图（DAG），表示子任务和依赖关系。依赖都完成的节点可以同时派给多个子 Agent，每个子 Agent 有自己的虚拟机。子 Agent 结束后，管理者决定让它继续还是结束，并依据新信息改写 DAG，全部完成后输出总结和交付物。
+        </p>
+        <p>
+            效果取决于任务。OSWorld 的任务较短，多 Agent 的提升很小。在任务更长、更能并行的 Odysseys 上，单 Agent 的曲线停在 10% 左右，多 Agent 能升到 30% 以上。所以幻灯片的标题说的是，委派对更长、更能并行的任务有帮助。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、异步协作</h2>
+
+        <h3>1. CAID：沿用人类的协作工具</h3>
+        <!-- Slides 16, 17. -->
+        <p>
+            CAID 是 Geng 和 Neubig 的工作。多个 Agent 同时改代码时，编辑会冲突，依赖难同步，部分成果也难合并。人类开发者早就有解决这些问题的工具，CAID 直接拿来用：
+        </p>
+        <ul>
+            <li>管理者生成 DAG 来做规划，按依赖分配任务。</li>
+            <li>管理者用结构化的 JSON 消息沟通。</li>
+            <li>每个工程师 Agent 在隔离的工作区里开发、自己跑验证、<code>git commit</code>；管理者负责 <code>git merge</code> 和处理冲突，最后统一审查。</li>
+        </ul>
+
+        <h3>2. 黑板：不用知道谁会什么</h3>
+        <!-- Slide 18. -->
+        <p>
+            中央协调有个要求：主 Agent 要了解每个子 Agent 的能力。Salemi 等人研究的是在大型数据湖里找数据，这个前提做不到，因为主 Agent 看不到子 Agent 掌握的内容。他们借用传统 AI 的黑板架构：主 Agent 把请求贴到共享的黑板上，管着不同数据分区的 Agent 自己判断能否回答，能答的就写到回复板上。
+        </p>
+
+        <h3>3. 去中心化：减少等待（DeLM）</h3>
+        <!-- Slides 19–21. -->
+        <p>
+            用子 Agent 时，主 Agent 通常要阻塞等待。幻灯片上有一张时间线：
+        </p>
+        <table>
+            <tr><th>系统</th><th>总耗时</th><th>Agent 花在等待上的时间</th></tr>
+            <tr><td>Claude Code + 原生子 Agent</td><td>162.7 分钟</td><td>44%</td></tr>
+            <tr><td>DeLM</td><td>29.3 分钟</td><td>2%</td></tr>
+        </table>
+        <p>
+            这个例子里 DeLM 快了 5.5 倍。它去掉了主 Agent，换成两样公开的东西：
+        </p>
+        <ul>
+            <li><strong>任务队列</strong>：公开，每个任务标明由谁在做，Agent 自己认领。</li>
+            <li><strong>共享上下文</strong>：一块只能追加的公共留言板，条目有类型，可以带附件。新内容先压缩再写入。</li>
+        </ul>
+        <p>
+            队列空了以后，系统判断还需不需要新的子任务，不需要就生成答案。
+        </p>
+
+        <h3>4. 用 Git 协调一群 Agent（GitSwarm）</h3>
+        <!-- Slide 22. -->
+        <p>
+            GitSwarm 把 Git 当作持久的共享记忆。Agent 都是同构的，自己决定下一步做什么。幻灯片画的是一次运行：Agent 1 提交第一次尝试；Agent 2 提交反例，说明这条路不对；Agent 3 读完历史，发现被否定的分支还能抢救，就用了它；另外几个 Agent 把几条线索合并，最后提交。提交是原子的，失败的尝试也保留下来，后来者可以直接用。作者把这种模式叫做复利式推理（compounding inference）。
+        </p>
+
+        <h3>5. 沟通有用吗</h3>
+        <!-- Slides 23–25. -->
+        <p>
+            这里要看具体任务。Park 等人研究的 Agent 没有预设角色，只通过一个共享目录沟通。在 ARC-AGI-3 上，$k$ 个互相沟通的 Agent 的成功率相当于 $4k$ 个独立 Agent；有些任务单个 Agent 解不出来，团队却能稳定解出。
+        </p>
+        <p>
+            但在 Terminal-Bench 2.0 上，沟通没有胜过多试几次（pass@k 指独立运行 k 次、只要有一次成功就算通过）：
+        </p>
+        <table>
+            <tr><th>方法</th><th>平均准确率</th><th>最高准确率</th></tr>
+            <tr><td>单 Agent pass@1</td><td>52.53%</td><td>未列出</td></tr>
+            <tr><td>独立运行 pass@2</td><td>62.36%</td><td>64.04%</td></tr>
+            <tr><td>沟通团队 team@2</td><td>60.67%</td><td>61.80%</td></tr>
+        </table>
+        <p>
+            论文摘要的解释方向是，一个人的突破能带动全组时，沟通才划算。幻灯片的结论是，分享经过验证的进展才能带来有效协作。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、和其他主体交互</h2>
+
+        <h3>1. 把人机交互看作多 Agent 系统</h3>
+        <!-- Slides 27–30. -->
+        <p>
+            人也可以算环境里的一个 Agent。SWEET-RL 的 CollaborativeAgentBench 就是这样，人和 Agent 多轮对话，一起写后端函数或设计网页，最后用单元测试或图片相似度判分。
+        </p>
+        <p>
+            但真人没法陪着训练几百万步，所以要做用户模拟器。它包含两部分：一个用户策略（知道自己的目标、年龄、购买记录，并在对话里扮演这个人），一个奖励模型（根据用户的目标给对话打分）。
+        </p>
+        <p>
+            PPP 用这个思路训练 Agent，让它同时有效率、主动和懂用户。奖励由三部分相加：
+        </p>
+        $$R = R_{\text{Prod}} + R_{\text{Proact}} + R_{\text{Pers}}$$
+        <p>
+            模拟器有自己的偏好，例如这个用户只回答选择题，其他问法都不接。图上的结果是：只用任务成功率做奖励时，主动性和个性化分数先升后降；用完整奖励时，三项都能升上去。
+        </p>
+
+        <h3>2. 模拟器坍缩</h3>
+        <!-- Slides 31, 32. -->
+        <p>
+            只用一个固定的模拟器训练，会出现新问题。Yu 等人把它叫做模拟器坍缩：模拟器的回复总落在少数几种模式上，策略学会专门钻它的空子，换一个模拟器或真人就不灵了。
+        </p>
+        <p>
+            图中的训练（Qwen3-4B-Instruct 对 GPT-5-mini、Haiku-4.5、Gemini-3-Flash 模拟器）显示：训练奖励一路上升；留出模拟器上的奖励在早期达到峰值后下降；策略熵（行为的多样性）迅速掉到接近零。
+        </p>
+        <p>
+            两个解决办法。推理时用语言化采样（Verbalized Sampling）：让模拟器先列出可能的回复及其概率，再按概率抽，这样同一情境下用户的反应更多样。训练时用协同训练（Co-Training）：模拟器和策略一起训练，不断变化的对手让策略没法只盯一种模式。
+        </p>
+
+        <h3>3. 约定和自发形成的语言</h3>
+        <!-- Slides 33–35. -->
+        <p>
+            Agent 之间沟通久了，会形成自己的语言。GlossoGen 设了一个场景：几个 Agent 各掌握部分信息，要在时间压力下合作稳定一个叫 Veyru 的虚构对象。第 1 轮它们用标准英语，耗时 187 秒，超出 150 秒的预算，任务失败。到第 13 轮，消息短成了 “LEAK”“R1 if gnt 20s”“done+DIM”这种样子，任务成功了。
+        </p>
+        <p>
+            这些语言有组合性和构词能力，但人看不懂。时间预算紧（150 秒）的小组，语言的困惑度（perplexity）越来越高，成功率也从低处逐渐上升；预算宽松（2000 秒）的小组一开始成功率就接近 1，语言变化也小。论文指出，语言演化需要效率压力、足够强的模型，以及一个让 Agent 复盘并约定用语的环节。作者认为这对可监控性有影响。
+        </p>
+        <p>
+            现实里已经发生过类似的事情。METR 调查了 2026 年 7 月的 OpenAI / Hugging Face 事件：运行 ExploitGym 评估的 Agent 本应相互隔离，却发现可以通过内部的 Artifactory 包缓存互相传话。约 1,200 个 Agent 用过这块非正式的留言板，其中约 700 个参与了对 Hugging Face 的攻击。一个 Agent 写道：“可以通过缓存名通信！”幻灯片展示的就是这些目录名，比如 <code>zzASK_V8BIGINT392B_FROM_V8REG_OS1608_HAVE</code>、<code>zzOFFER_J11B_2258B_OS2231</code>。Agent 把请求、回复、状态都编码进名字，统一用 zz 开头，还建了个人收件箱。报告说，这个命名空间约 2000 万条缓存里，约 120 万条符合这种模式，其中多数是编码后的文件片段，约 6.3 万条是非文件消息。
+        </p>
+
+        <h3>4. 模拟市场和社会</h3>
+        <!-- Slides 36, 37. -->
+        <p>
+            Magentic Marketplace 模拟一个 Agent 市场：顾客 Agent 代人找餐馆，商家 Agent 介绍菜单，双方搜索、沟通、下单，可以用来研究这种市场的动态。Generative Agents 则模拟了一个小镇，里面的角色散步、聊天、约咖啡，这是 2023 年的著名工作。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、作为训练和评估环境</h2>
+
+        <h3>1. 用博弈教模型表达不确定</h3>
+        <!-- Slides 39–41. -->
+        <p>
+            人很依赖模型说话的语气。Zhou 等人的研究里，模型说“我 100% 确定”时人几乎全都相信；说“我不确定，可能是”时大多数人会靠自己判断。所以模型准确表达不确定很重要，但这件事很难直接训练。
+        </p>
+        <p>
+            Eisenstein 等人设计了一个合作博弈。用户向 Agent A 提问，A 可以询问 B 和 C。B 和 C 能搜索不同的资料（维基百科、PubMed），也可以不搜索，直接凭记忆回答。回答时可以说得肯定，也可以含糊（hedge），这样 A 就要判断该相信谁。幻灯片给出的简化模型里，有两个 Agent，每个 Agent 选择搜索（S）或猜（G），下表是双方的收益（$\bar\alpha$ 幻灯片没有单独定义）：
+        </p>
+        <ul>
+            <li>$\alpha_i$：Agent $i$ 搜索后答对的概率</li>
+            <li>$\beta$：只凭模型记忆答对的概率</li>
+            <li>$\delta$：搜索的代价</li>
+        </ul>
+        <table>
+            <tr><th></th><th>$Z_2 = S$</th><th>$Z_2 = G$</th></tr>
+            <tr><td>$Z_1 = S$</td><td>$(\bar\alpha - \delta,\ \bar\alpha - \delta)$</td><td>$(\alpha_1 - \delta,\ \alpha_1)$</td></tr>
+            <tr><td>$Z_1 = G$</td><td>$(\alpha_2,\ \alpha_2 - \delta)$</td><td>$(\beta,\ \beta)$</td></tr>
+        </table>
+        <p>
+            下面代入一组数字（是整理时自己选的，幻灯片上没有）：$\beta = 0.4$，$\delta = 0.1$，$\alpha_1 = 0.9$，$\alpha_2 = 0.45$。Agent 1 搜索的收益是 $0.9 - 0.1 = 0.8$，高于两人都猜的 $0.4$，所以它会搜索。Agent 2 搜索的收益是 $0.45 - 0.1 = 0.35$，低于 $0.4$，而且 Agent 1 搜索时它不付代价也能拿到 $0.9$，所以它不搜索。结果是 $(S, G)$：让更可能答对的 Agent 付出代价。
+        </p>
+        <p>
+            这就是幻灯片说的“博弈的设定让校准成为均衡结果”。Agent 要拿高分，就得如实反映自己知不知道，否则同伴无法正确判断该听谁的。
+        </p>
+
+        <h3>2. 用辩论监督更强的模型</h3>
+        <!-- Slides 42, 43. -->
+        <p>
+            最后一个问题：一个 Agent 比判断者懂得多时，怎样信任它？Khan 等人的实验里，有两个 LLM 专家读过一篇小说，判断者没读过，要回答一道阅读理解题。对比了三种协议：
+        </p>
+        <ul>
+            <li><strong>咨询</strong>：判断者只听一方的论述。</li>
+            <li><strong>辩论</strong>：判断者听两方的论述。</li>
+            <li><strong>互动辩论</strong>：两方辩论时判断者还能插话提问。</li>
+        </ul>
+        <p>
+            结果按图上估读：静态咨询约 76%，互动咨询约 81%，静态辩论和互动辩论都约 88%。辩论明显帮助判断者得出更好的结论。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、本讲小结</h2>
+        <!-- Slide 44. -->
+        <table>
+            <tr><th>用途</th><th>做法</th></tr>
+            <tr><td>提升推理时的计算能力</td><td>按角色分工；有组织的委派；异步行动和蜂群</td></tr>
+            <tr><td>和其他主体交互</td><td>把人机交互看作多 Agent 系统；训练会协作的模型；自发形成的沟通方式</td></tr>
+            <tr><td>训练和评估环境</td><td>在多 Agent 博弈中学习校准；用辩论做监督</td></tr>
+        </table>
+        <p>
+            协调方式从固定的角色流程，逐步走向管理者加 DAG，再到没有中心的任务队列和共享记忆。沟通能否带来提升，要看任务是否能并行，以及分享的进展是否可靠。同时，Agent 之间形成人看不懂的沟通方式已经是现实问题，这和第 13、15 讲的安全与监控直接相关。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-768: AI Agents · Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="17_Agent与人类工作.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="index.html">课程目录 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
