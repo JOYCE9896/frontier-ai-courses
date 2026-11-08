@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>工具使用 | 吴恩达 Agentic AI 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="02_反思模式.html">&larr; 上一篇</a></span>
+    <span>吴恩达 Agentic AI · 模块 3</span>
+    <span><a href="04_评测与错误分析.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>模块 3：工具使用</h1>
+        <p class="subtitle">让 LLM 自己决定什么时候请你调用一个函数，从查时间、查数据库，到写代码执行，再到 MCP 这个共享工具的标准</p>
+        <div class="author-meta">
+            主讲：吴恩达（Andrew Ng）· 出品：DeepLearning.AI · 本模块 5 节视频，约 29 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.deeplearning.ai/courses/agentic-ai" target="_blank">Agentic AI（DeepLearning.AI）</a> Module 3: Tool Use（依据课程官方英文字幕整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一模块讲什么</h2>
+        <p>模块 1 里吴恩达列了四种 Agentic 设计模式，模块 2 讲了第一种反思（Reflection）。这一模块讲第二种：工具使用（Tool Use）。工具就是开发者写好、交给 LLM 的函数；LLM 在需要的时候请求调用它们，去拿信息或者做事情。和前面研究 Agent 里“到这一步一定去搜网页”那种写死的流程不同，这里由 LLM 自己判断要不要用工具、用哪个。</p>
+        <p>五节课的顺序是：工具是什么；在模型还没学会用工具的年代，怎么靠提示词让它“用”工具；现在的标准写法（AISuite 和 JSON Schema）；最特别的一种工具，代码执行；最后是 MCP 协议。下一模块转到评测和错误分析。</p>
+        <ol>
+            <li><a href="#l14">14. 工具是什么</a>（What are tools? · 6 分钟）</li>
+            <li><a href="#l15">15. 自己动手做一个工具</a>（Creating a tool · 6 分钟）</li>
+            <li><a href="#l16">16. 工具调用的语法</a>（Tool syntax · 6 分钟）</li>
+            <li><a href="#l17">17. 代码执行</a>（Code execution · 6 分钟）</li>
+            <li><a href="#l18">18. MCP</a>（MCP · 5 分钟）</li>
+        </ol>
+    </section>
+
+    <section id="l14">
+        <h2>14. 工具是什么</h2>
+        <p><em>英文原题 What are tools? · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/3s0czq/what-are-tools%3F" target="_blank">课程页</a> · 6:24</em></p>
+
+        <h3>从“现在几点”说起</h3>
+        <p>LLM（大语言模型）是根据大量文本训练出来、按上文预测下一个词的模型。吴恩达的开场例子：问一个几个月前训练好的 LLM “现在几点”，它并不知道，好的情况下会回答“抱歉，我无法获取当前时间”。</p>
+        <p>如果你写一个函数 <code>getCurrentTime</code> 并让 LLM 能用它，它就能给出有用的回答。他对工具使用的定义是：让 LLM 请求调用函数。工具就是我们提供给 LLM、它可以请求调用的函数。他也拿人做比：人手里有锤子、扳手、钳子能做的事比空手多得多，LLM 有了函数可用，也一样。</p>
+
+        <h3>一次工具调用的步骤</h3>
+        <ol>
+            <li>输入提示词（Prompt）“现在几点？”</li>
+            <li>LLM 查看可用的工具集合（这里只有一个），决定调用 <code>getCurrentTime</code>。</li>
+            <li>函数返回当前时间，这个值被放回对话历史，交给 LLM。</li>
+            <li>LLM 输出最终回答，比如“下午 3:20”。</li>
+        </ol>
+        <p>要不要用工具，可以交给 LLM 自己定。同样的设置下问“绿茶里有多少咖啡因”，它不需要时间，就直接回答，不会去调 <code>getCurrentTime</code>。</p>
+        <p>吴恩达在幻灯片里用一个画在 LLM 上方的虚线框表示“给了 LLM 一组工具，由它在合适的时候选用”。这和前面视频里的做法不一样：那时是开发者写死“研究 Agent 到这一步一定做网页搜索”，现在是否调用由 LLM 决定。</p>
+
+        <h3>更多例子</h3>
+        <ul>
+            <li>“帮我找 Mountain View, California 附近的意大利餐厅”：有网页搜索工具的话，LLM 可能去搜 “restaurants near Mountain View, California”，再根据结果作答。</li>
+            <li>零售店想回答“哪些顾客买了白色太阳镜”：给 LLM 一个查询数据库的工具，它去销售表里查卖出白色太阳镜的记录，再生成回答。</li>
+            <li>利息计算：“存 500 美元，年利率 5%，10 年后有多少？”如果有利息计算工具，它就调用这个函数。另一种做法后面会讲：让 LLM 写出一个数学表达式的代码，然后执行它。</li>
+        </ul>
+        <p>他的建议是，开发者要先想清楚应用到底要做哪些事，再去写出相应的函数或工具交给 LLM。餐厅推荐、零售问答、理财助手需要的工具各不相同。</p>
+
+        <h3>多个工具：日历助手</h3>
+        <p>前面的例子都只给了一个工具，很多场景要给好几个，由 LLM 选。他举的是日历助手 Agent，请求是“在我周四的日历上找个空档，和 Alice 约个会”。可用工具有三个：发日历邀请（make appointment）、查日历看什么时候有空（check calendar）、删除预约（delete appointment，用来取消已有日程）。</p>
+        <ol>
+            <li>LLM 判断第一步应该用 check calendar，函数返回周四哪些时间空闲。</li>
+            <li>结果回到 LLM，它选一个时间，比如下午 3 点，再调用 make appointment 给 Alice 发邀请并写进我的日历。</li>
+            <li>这个调用的输出（最好是“已成功发送”的确认）再回到 LLM。</li>
+            <li>LLM 告诉我：已和 Alice 约在周四下午 3 点。</li>
+        </ol>
+        <p>吴恩达说，给 LLM 工具是件大事，会让你的应用强大很多。</p>
+    </section>
+
+    <section id="l15">
+        <h2>15. 自己动手做一个工具</h2>
+        <p><em>英文原题 Creating a tool · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/79cpry/creating-a-tool" target="_blank">课程页</a> · 5:44</em></p>
+
+        <h3>为什么要讲旧办法</h3>
+        <p>LLM 只会生成文本，或者说生成一个个 token（模型处理文字的最小单位），它怎么“调用函数”？一开始看着有点神秘。吴恩达说，现在的主流 LLM 都经过专门训练，能直接使用工具。但他想先演示一下早期的做法：在模型还没有这种训练的时候，开发者要自己写提示词告诉它何时、如何用工具。现在已经不这么做了，过一遍能帮你看清整个过程，下一节再讲现代语法。</p>
+
+        <h3>用提示词约定一个输出格式</h3>
+        <p>幻灯片上的系统提示词（System Prompt，在对话开始前给模型的总体指示）是这样的：</p>
+        <pre><code>You have access to a tool called get_current_time. To use it,
+return the following exactly:
+
+FUNCTION:
+get_current_time()</code></pre>
+        <p>对应的函数：</p>
+        <pre><code>from datetime import datetime
+
+def get_current_time():
+    """Returns the current time as a string"""
+    return datetime.now().strftime("%H:%M:%S")</code></pre>
+        <p>用户问“现在几点”，LLM 明白需要这个工具，于是按约定输出 <code>FUNCTION: get_current_time()</code>。接下来的事全靠开发者自己的代码：</p>
+        <ol>
+            <li>检查 LLM 的输出里有没有全大写的 <code>FUNCTION</code>（幻灯片上写的是 <code>if "FUNCTION" in output:</code>）。</li>
+            <li>如果有，从中解析出它想调用哪个函数。</li>
+            <li>真正去调用 <code>get_current_time</code>，拿到结果，比如 08:00:00。</li>
+            <li>把这个时间放回对话历史再交给 LLM。对话历史里包括用户最初的问题、LLM 请求了函数调用这件事，以及函数返回的结果。</li>
+            <li>LLM 看到这一切，生成最终回答“现在是早上 8 点”。</li>
+        </ol>
+        <p>他特别说明：<strong>LLM 并不直接调用函数</strong>。它只是按特定格式输出一段文字，告诉你“请帮我调这个函数”，然后由你把结果告诉它。如果给它三四个函数，也可以约定它输出 FUNCTION 加上函数名，甚至带上参数。</p>
+
+        <h3>带参数的例子：新西兰现在几点</h3>
+        <p>第二个例子里，函数多了一个时区参数：</p>
+        <pre><code>from datetime import datetime
+from zoneinfo import ZoneInfo
+
+def get_current_time(timezone):
+    """Returns current time for the given time zone"""
+    timezone = ZoneInfo(timezone)
+    return datetime.now(timezone).strftime("%H:%M:%S")</code></pre>
+        <p>吴恩达说他自己给新西兰那边打电话前，确实会先查一下那边几点。系统提示词改成“你可以用 get_current_time 查某个时区的时间，用法是返回 <code>FUNCTION: get_current_time("timezone")</code>”。他提醒这是缩写版，实际可能要写更多细节，说明函数是做什么的、怎么用。</p>
+        <p>用户问“新西兰现在几点”，LLM 输出 <code>FUNCTION: get_current_time("Pacific/Auckland")</code>（Auckland 是新西兰的主要城市，这是新西兰的时区名）。开发者的代码找到 FUNCTION，取出函数名和 LLM 生成的参数，调用后得到比如凌晨 4 点，再交回 LLM，LLM 回答“新西兰现在是凌晨 4 点”。</p>
+
+        <h3>流程归纳</h3>
+        <ol>
+            <li>把工具提供给 LLM：实现函数，并告诉 LLM 它可用。</li>
+            <li>LLM 决定调用时，生成一段特定格式的输出，让你知道该调用函数了。</li>
+            <li>你调用函数，拿到输出，交回 LLM。</li>
+            <li>LLM 据此决定下一步。本节例子里下一步是直接给出最终回答，有时它也会决定再去调另一个工具，循环继续。</li>
+        </ol>
+        <p>他说这种全大写 FUNCTION 的写法有点笨拙，是模型原生学会请求工具之前的做法。现代 LLM 被训练成用一种特定语法，清楚地表明自己想调用工具，不需要你再约定格式、再去搜索 FUNCTION。</p>
+    </section>
+
+    <section id="l16">
+        <h2>16. 工具调用的语法</h2>
+        <p><em>英文原题 Tool syntax · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/154qpw/tool-syntax" target="_blank">课程页</a> · 5:40</em></p>
+
+        <h3>先说一个用词</h3>
+        <p>上一节说过，技术上 LLM 不调用工具，只是请求你去调用。吴恩达说做 Agentic 工作流的开发者平时还是常说“LLM 调用了工具”，只是因为这样说更短。</p>
+
+        <h3>用 AISuite 写工具调用</h3>
+        <p>AISuite 是一个开源库，吴恩达说是他和几个朋友一起做的，用来方便地调用多家 LLM 提供商的模型。它的语法和 OpenAI 的调用语法很像。幻灯片上的代码：</p>
+        <pre><code>import aisuite as ai
+client = ai.Client()
+
+response = client.chat.completions.create(
+    model="openai:gpt-4o",
+    messages=messages,
+    tools=[get_current_time],
+    max_turns=5
+)</code></pre>
+        <ul>
+            <li><code>model</code>：这里选 OpenAI 的 GPT-4o。</li>
+            <li><code>messages</code>：事先放进一个数组的、要传给 LLM 的消息。</li>
+            <li><code>tools</code>：LLM 可以使用的工具列表，这里只有 <code>get_current_time</code>。</li>
+            <li><code>max_turns</code>：一个工具调用返回后，LLM 可能再调另一个，再返回后可能又调一个。这个参数是连续请求工具次数的上限，用来跳出可能的死循环。他说实际中除非代码做的事异常复杂，几乎碰不到这个上限，他一般设成 5，设多少影响不大。</li>
+        </ul>
+        <p>他说如果这段代码看着有点多也不用担心，实验里会有更多练习。</p>
+
+        <h3>背后发生了什么：JSON Schema</h3>
+        <p>用 AISuite 时，你不需要手写一大段提示词去介绍 <code>get_current_time</code>，它会自动把函数描述给 LLM。做法是读取函数的 docstring（Python 函数开头三引号里的说明文字），据此生成一份 JSON Schema。JSON Schema 是一种用 JSON 格式描述数据结构的规范，这里用来描述“这个函数叫什么、做什么、要哪些参数”。真正传给 LLM 的就是这份 Schema。</p>
+        <p>无参数版本里，它取出函数名 <code>get_current_time</code>，再从 docstring 取出描述，让 LLM 知道函数做什么、何时该调用。带时区参数的版本，生成的 Schema 是这样（照幻灯片）：</p>
+        <pre><code>tools = [{
+    "type": "function",
+    "function": {
+        "name": "get_current_time",
+        "description": "Returns current time for the given timezone.",
+        "parameters": {
+            "timezone": {
+                "type": "string",
+                "description": "The IANA time zone string, e.g., 'America/New_York' or 'Pacific/Auckland'."
+            }
+        }
+    }
+}]</code></pre>
+        <p>除了名字和描述，它还会识别参数并描述给 LLM，这样 LLM 生成调用参数时就知道应该填 America/New_York、Pacific/Auckland 这一类时区字符串。吴恩达提到，有些 API 要求你手动构造这份 JSON Schema 再传进去，AISuite 替你自动做了。</p>
+
+        <h3>一行调用包办整个循环</h3>
+        <p>执行上面那段代码，它会用 GPT-4o 看 LLM 是否想调用函数；如果想，就替你调用、拿到输出、交回 LLM，最多来回 5 轮，然后返回结果。你不需要自己去执行函数。他提醒，有些别的 LLM 接口需要你手动完成这一步，而这个库把它都包在 <code>client.chat.completions.create</code> 这一次调用里了。</p>
+        <p>他说如果你还没试过，给 LLM 几个函数、看它自己决定去行动或去获取更多信息，会觉得很酷。他接着预告：所有工具里有一个比较特别，代码执行。告诉 LLM“你可以写代码，我有工具帮你执行”，因为代码能做的事太多，这会是很强的一个工具。</p>
+    </section>
+
+    <section id="l17">
+        <h2>17. 代码执行</h2>
+        <p><em>英文原题 Code execution · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/a4gs14/code-execution" target="_blank">课程页</a> · 5:40</em></p>
+
+        <h3>他的体会</h3>
+        <p>吴恩达说，在他做过的几个 Agentic 应用里，他给 LLM 写代码来完成任务的选项，有好几次都被它想出的代码方案的巧妙程度惊喜到。如果你还没怎么用过代码执行，他觉得你也会有同样的感受。</p>
+
+        <h3>为什么不给每种运算都做一个工具</h3>
+        <p>例子是一个解数学应用题的应用。你可以做加、减、乘、除四个工具，用户说“13.2 加 18.9”，就触发加法工具。可如果用户问“2 的平方根是多少”？可以再写一个开方工具，接着又会需要乘方……看看科学计算器上那么多按键，难道每个键都做一个工具？另一种办法是让 LLM 写代码并执行。</p>
+
+        <h3>具体做法</h3>
+        <p>幻灯片上的系统提示词：</p>
+        <pre><code>Write code to solve the user's query.
+
+Return your answer as python code delimited with
+&lt;execute_python&gt; and &lt;/execute_python&gt; tags.</code></pre>
+        <p>问“2 的平方根是多少”，LLM 的输出是：</p>
+        <pre><code>&lt;execute_python&gt;
+import math
+print(math.sqrt(2))
+&lt;/execute_python&gt;</code></pre>
+        <ol>
+            <li>用模式匹配，比如正则表达式（Regular Expression，一种描述文本模式的匹配语法），找到开头和结尾的 execute_python 标签，取出中间的代码。</li>
+            <li>替 LLM 执行这两行代码，得到 1.4142……</li>
+            <li>把数值结果交回 LLM，由它写出一段格式整齐的回答。</li>
+        </ol>
+        <p>执行代码有几种方式。一种是 Python 内置的 <code>exec</code> 函数，传进去的代码它都会执行。这让 LLM 写的代码真的能跑起来，威力很大，但有安全上的问题，后面会讲。也有工具可以在更安全的沙箱环境里运行代码。开方只是个简单例子，LLM 也能准确写出利息计算之类、难得多的数学计算代码。</p>
+
+        <h3>结合反思：报错就交回去改</h3>
+        <p>一个改进和反思模块讲过的思路一样：如果代码执行失败，说明 LLM 写的代码不太对，就把错误信息交回 LLM，让它反思、修改代码，再试一两次。他说这有时能让答案更准确。</p>
+
+        <h3>风险和沙箱</h3>
+        <p>执行 LLM 生成的任意代码，有小概率出事。吴恩达讲了一个真实的例子：他团队的一位成员在用一个自主性很高的编程 Agent，它自己选择删掉了项目目录里的 <code>*.py</code>。后来这个 Agent 道歉了，说“对，这是一个极其愚蠢的错误”。他说很高兴它这么诚恳，可 Python 文件已经删掉一堆了。好在那位同事在 GitHub 上有备份，没造成真正的损失；要是没有备份，就不太妙了。</p>
+        <p>所以他说的最佳做法是在沙箱里执行代码。沙箱（Sandbox）是和你的真实系统隔离开的运行环境，代码在里面出错不会波及外面。他也坦白讲，单独一行代码的风险其实不高，很多开发者执行 LLM 的代码时并不怎么检查。想更安全一些，就建个沙箱，LLM 写出坏代码时，数据丢失或敏感数据泄露的风险会低一些。他提到的沙箱有 Docker，以及轻量的 E2B。</p>
+
+        <h3>模型厂商也重视它</h3>
+        <p>他说代码执行重要到很多训练 LLM 的团队会专门下功夫，确保它在自家模型上好用。他希望你把它当作又一个可以交给 LLM 的工具，让应用更强。</p>
+        <p>结尾他引出下一节：到目前为止，工具都得自己一个个做好交给 LLM，而许多团队在重复做相似的工具。最近出现的 MCP（Model Context Protocol）标准，让开发者更容易用上大量现成的工具。</p>
+    </section>
+
+    <section id="l18">
+        <h2>18. MCP</h2>
+        <p><em>英文原题 MCP · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/x7jowg/mcp" target="_blank">课程页</a> · 5:10</em></p>
+
+        <h3>MCP 是什么，解决什么问题</h3>
+        <p>MCP（Model Context Protocol，模型上下文协议）是 Anthropic 提出的标准，吴恩达说现在已经被很多公司和开发者采用，用来让 LLM 获取更多上下文（Context，模型生成回答时能看到的全部输入信息）和更多工具。围绕 MCP 生态做开发的人很多，学会它能让你的应用接触到更多资源。</p>
+        <p>他讲的痛点是：一个开发者的应用想接入 Slack、Google Drive、GitHub 的数据，或者读 Postgres 数据库，就得分别为 Slack API、Google Drive API 等写封装代码，做成函数交给应用。另一个团队做另一个应用，又要自己再接一遍 Slack、Google Drive、GitHub。大家都在为同样的数据源写各自的封装。</p>
+        <p>如果有 M 个应用、N 个工具，整个社区要做的工作量是 M × N。MCP 提出一个标准，规定应用如何访问工具和数据源，工作量就变成 M + N。</p>
+
+        <h3>客户端、服务器和资源</h3>
+        <ul>
+            <li>MCP 最初的设计更多在于给 LLM 提供上下文、获取数据，所以早期很多工具只是取数据。MCP 文档里把这类东西叫作 resources（资源）。现在它既提供数据，也提供应用可能想调用的更一般的函数。</li>
+            <li>MCP 客户端（client）：想要访问工具或数据的应用。</li>
+            <li>MCP 服务器（server）：通常是一层软件封装，让客户端能访问 Slack、GitHub、Google Drive 里的数据，或在这些地方执行操作。</li>
+        </ul>
+        <p>他说客户端和服务器的数量都在快速增长。你的应用也许哪天就是一个 MCP 客户端；如果想把资源提供给别的开发者，也可以自己做一个 MCP 服务器。</p>
+
+        <h3>演示：Claude Desktop 连 GitHub</h3>
+        <p>他演示的是连上了 GitHub MCP 服务器的 Claude Desktop 应用，它在这里就是 MCP 客户端。</p>
+        <ol>
+            <li>输入“总结这个 GitHub 仓库里的 README.md”，给的网址是 AISuite 的仓库。客户端通过 GitHub MCP 服务器发出请求：从 aisuite 仓库获取 README.md 文件。返回的内容很长，全部放进 LLM 的上下文，LLM 再生成摘要。</li>
+            <li>再输入“最新的 pull request 有哪些”。这次 LLM 用 GitHub MCP 服务器提供的另一个工具，列出 pull request，请求里带着仓库名 aisuite、排序方式、列出 20 条等参数。返回结果交回 LLM，LLM 写出一段最新 PR 的文字摘要。</li>
+        </ol>
+        <p>他说 MCP 是重要的标准，DeepLearning.AI 另有一门专讲 MCP 协议的短课程，学完本课后有兴趣可以去看。</p>
+
+        <h3>进入下一模块</h3>
+        <p>这是工具使用的最后一节。下一模块讲评测（Eval）和错误分析（Error Analysis）。吴恩达说，他观察到能把 Agentic 工作流做好的人和效率不高的团队之间，一个区别在于能不能推行一套有纪律的评测流程。他认为下一模块可能是整门课最重要的一个模块。</p>
+    </section>
+
+    <section>
+        <h2>本模块的实验</h2>
+        <p>课程页上本模块列了四项。实验和测验需要 DeepLearning.AI PRO 会员，视频可以免费旁听；这份笔记只覆盖视频内容。</p>
+        <ul>
+            <li><strong>Ungraded Lab: Turning functions into tools</strong>：把函数变成工具。视频里吴恩达说 AISuite 的工具调用代码在实验里会有更多练习，也希望大家在实验里体验让 LLM 自己去调用函数。</li>
+            <li>Ungraded Lab: Email Assistant Workflow：邮件助手工作流。视频里没有具体介绍。</li>
+            <li>Module 3 quiz：本模块测验。</li>
+            <li>M3 Graded Lab：本模块计分实验，视频里没有具体介绍。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer"><p>Andrew Ng · Agentic AI · Module 3 · Notes curated by Joyce</p></footer>
+</article>
+</body>
+</html>

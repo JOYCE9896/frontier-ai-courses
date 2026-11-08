@@ -51,6 +51,7 @@ Stanford、CMU、Harvard 和 MIT 2025-2026 学年 AI 课程的中文笔记，附
 | [Stanford CS25](https://joyce9896.github.io/frontier-ai-courses/CS25-Transformers-United/) | Transformer 前沿研讨 |
 | [Stanford CME296](https://joyce9896.github.io/frontier-ai-courses/CME296-Diffusion-and-Large-Vision-Models/) | 扩散模型与视觉生成 |
 | [Andrej Karpathy YouTube](https://joyce9896.github.io/frontier-ai-courses/Andrej-Karpathy-YouTube/) | Karpathy 全部 17 条视频，每条一篇：micrograd、makemore、从零构建 GPT、分词器、复现 GPT-2、LLM 原理与日常用法，外加一篇讲法拆解 |
+| [吴恩达 Agentic AI](https://joyce9896.github.io/frontier-ai-courses/Andrew-Ng-Agentic-AI/) | DeepLearning.AI 的 Agent 构建课，5 个模块 31 节视频：反思、工具使用与 MCP、评测与错误分析、规划、多 Agent 协作 |
 | [AI Engineer 大会直播](https://joyce9896.github.io/frontier-ai-courses/AI-Engineer-Livestreams/) | AI Engineer 大会 YouTube 全部 36 条直播（2023–2026），35 篇、613 节演讲笔记，每节附直播时间点链接：RAG、Agent、MCP、评测、编程 Agent、Harness 工程 |
 
 ### 产业与系统

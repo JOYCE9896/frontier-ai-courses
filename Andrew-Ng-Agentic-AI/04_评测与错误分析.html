@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>评测与错误分析 | 吴恩达 Agentic AI 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="03_工具使用.html">&larr; 上一篇</a></span>
+    <span>吴恩达 Agentic AI · 模块 4</span>
+    <span><a href="05_规划与多Agent.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>模块 4：构建 Agentic AI 的实用方法：评测与错误分析</h1>
+        <p class="subtitle">先快速搭一个能跑的系统，再用评测和错误分析决定下一步该改哪一块</p>
+        <div class="author-meta">
+            主讲：吴恩达（Andrew Ng）· 出品：DeepLearning.AI · 本模块 7 节视频，约 51 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.deeplearning.ai/courses/agentic-ai" target="_blank">Agentic AI（DeepLearning.AI）</a> Module 4: Practical Tips for Building Agentic AI（依据课程官方英文字幕整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一模块讲什么</h2>
+        <p>前三个模块讲的是怎么搭 Agentic 工作流（Agentic Workflow，让 LLM 分多步、配合工具完成任务的流程）：反思、工具使用这些设计模式。这个模块换了个角度，讲搭好之后怎么让它变好。吴恩达的看法是，做 Agentic 系统时很难事先知道哪里会出问题，所以与其花几周空想，不如先快速搭一个粗糙但负责任的版本，然后看输出、建评测（Eval）、做错误分析（Error Analysis），用这些结果决定把力气花在哪个组件上。</p>
+        <p>他在模块里反复用到前面出现过的几个例子：发票处理、营销文案助手、研究 Agent、客服邮件回复。最后两节分别讲延迟和成本优化，以及整个开发过程是什么感觉。下一个模块（模块 5）会讲更高自主度的 Agent 设计模式。</p>
+        <ol>本模块每节视频：
+            <li><a href="#l19">19. 评测（Evals）</a>（Evaluations (evals) · 15 分钟）</li>
+            <li><a href="#l20">20. 错误分析与确定下一步优先级</a>（Error analysis and prioritizing next steps · 9 分钟）</li>
+            <li><a href="#l21">21. 更多错误分析的例子</a>（More error analysis examples · 5 分钟）</li>
+            <li><a href="#l22">22. 组件级评测</a>（Component-level evaluations · 3 分钟）</li>
+            <li><a href="#l23">23. 怎么解决找到的问题</a>（How to address problems you identify · 10 分钟）</li>
+            <li><a href="#l24">24. 延迟和成本优化</a>（Latency, cost optimization · 4 分钟）</li>
+            <li><a href="#l25">25. 开发流程小结</a>（Development process summary · 4 分钟）</li>
+        </ol>
+    </section>
+
+    <section id="l19">
+        <h2>19. 评测（Evals）</h2>
+        <p><em>英文原题 Evaluations (evals) · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/pu5xbl/evaluations-(evals)" target="_blank">课程页</a> · 15:05</em></p>
+
+        <h3>先搭一个粗糙的系统再说</h3>
+        <p>吴恩达开场给的建议是：Agentic 系统哪里能用、哪里不好用，很难提前判断，所以常见的做法是先搭一个 quick and dirty（快速、粗糙）的版本，试一试、看一看，找到效果不好的地方，再集中力气改进。他觉得花好几周坐着推演该怎么搭，往往不如直接动手。前提是做得安全、合理，比如不泄露数据。</p>
+
+        <h3>例一：发票处理，到期日抽错了</h3>
+        <p>这是前面模块出现过的发票处理工作流：从发票里抽出四个必填字段，存进数据库。搭好之后，他的做法是找 10 到 20 张发票，逐张看输出。</p>
+        <ul>
+            <li>发票 1 没问题。</li>
+            <li>发票 2 把开票日期和到期日弄混了。这个任务要的是到期日（due date），这样才能按时付款。他会在文档或表格里记一笔：发票 2，日期搞混。</li>
+            <li>发票 3、4 没问题……看下去发现很多张都是日期搞混。</li>
+        </ul>
+        <p>看了一批之后就能得出结论：一个常见的错误类型是日期处理不好。这时除了想办法改进系统，还可以专门写一个评测（Eval，用一组样例和打分方法衡量系统表现）来测到期日的准确率。他补充说，如果看下来发现问题出在开票方地址上（比如开票方名字少见，或者是国际开票方，名字不全是英文字母），那就该给地址建评测。先搭粗糙系统、看输出，有一个好处就是帮你决定最该评测什么。</p>
+
+        <h3>怎么建日期抽取的评测</h3>
+        <p>他说方法不止一种，这是他自己会用的做法（幻灯片上列成三步）：</p>
+        <ol>
+            <li>人工从 10 到 20 张发票里把到期日抄下来。比如一张发票写着 "August 20, 2025"，记成标准格式 "2025/08/20"。这份人工标注叫 ground truth（标准答案，人确认过的正确输出），而且每张发票各不相同，幻灯片上叫 per example ground truth（逐例标准答案）。</li>
+            <li>在提示词（Prompt）里规定输出格式：Format the due date as YYYY/MM/DD。这样后面用代码判分方便。</li>
+            <li>用代码从 LLM 的回复里抽出日期。他用的是正则表达式（regular expression，一种按模式匹配文本的写法）：4 位年、2 位月、2 位日。</li>
+        </ol>
+<pre><code>date_pattern = r'\d{4}/\d{2}/\d{2}'
+extracted_date = re.findall(date_pattern, llm_response)</code></pre>
+        <p>然后写代码判断抽出的日期是否等于人工标注的日期，算出正确率。有了这 20 张左右的评测集，每次改提示词或改系统的其他部分，就看这个百分比有没有往上走。</p>
+        <p>他把这个过程总结成：搭系统，看输出找到不满意的地方（比如到期日错了），放一个小评测（大约 20 个例子）跟踪进度，然后回头改提示词、试不同算法，看能不能把"到期日准确率"推上去。如果你知道怎么修，就直接修；如果需要较长的改进过程，再上评测。用了一段时间后，如果觉得最初那 20 个例子不够好、覆盖不全或者太少，可以随时往评测集里加例子，让它更贴近你自己对"系统够不够好"的判断。</p>
+
+        <h3>例二：营销文案助手，字数超了</h3>
+        <p>第二个例子是给 Instagram 写配图文案的营销助手。市场团队要求文案最多 10 个词。输入是一张产品图（比如一副太阳镜）加上用户请求（"写一句文案来卖这副太阳镜"），由 LLM 或大型多模态模型（能同时理解图片和文字的模型）分析图片和请求，生成描述。</p>
+        <p>假设看下来，文字大体还行，就是有时太长：太阳镜生成了 17 个词，咖啡机还行，蓝衬衫 14 个词，搅拌机 11 个词。看来模型很难遵守长度要求。营销助手出错的方式有很多，但既然发现的问题是长度，就针对长度建评测：</p>
+        <ul>
+            <li>准备 10 到 20 个测试任务，比如太阳镜、咖啡机，每个配一句 "Create an Instagram post"。</li>
+            <li>每个任务都跑一遍系统，用代码数输出的词数。</li>
+            <li>和 10 个词的上限比较，符合就计一次正确。</li>
+        </ul>
+<pre><code>if len(text) &lt;= 10:
+    num_correct += 1</code></pre>
+        <p>（上面这段是他在后面的二乘二表格里写在幻灯片上的代码。）和发票例子的区别在于，这里没有逐例标准答案。目标对每个例子都一样，就是 10；而发票例子要给每张发票单独标出正确的到期日，再拿输出去比。他还说，这里用的生成流程很简单，但同类评测也能用在复杂得多的生成工作流上。</p>
+
+        <h3>例三：研究 Agent，漏掉要点</h3>
+        <p>第三个例子回到前面一直在用的研究 Agent（Research Agent，会自己搜网页、读资料、写报告的 Agent）。在不同题目上看它的输出：</p>
+        <ul>
+            <li>让它写黑洞科学的最新突破，它漏掉了一个受到大量新闻报道的重要结果。不满意。</li>
+            <li>西雅图租房还是买房，写得不错。</li>
+            <li>水果采摘机器人，它没提到一家领先的设备公司。</li>
+        </ul>
+        <p>看起来它有时会漏掉人类专家作者一定会写的重要内容。于是他会建一个评测，测它抓住要点的频率：</p>
+        <ol>
+            <li>准备若干题目（黑洞、机器人采摘等），每个题目定 3 到 5 个"金标准讨论要点"（gold standard talking points）。幻灯片上的例子是：黑洞对应 Event horizon、radio telescope；机器人采摘对应 RoboPick、pinchers。这些要点每个题目都不一样，所以这也是逐例标准答案。</li>
+            <li>用 LLM-as-a-judge（让另一个 LLM 当裁判，按给定标准给输出打分）去数文章里提到了几个金标准要点。</li>
+            <li>每个题目得到一个分数。</li>
+        </ol>
+        <p>幻灯片上的裁判提示词大致如下：</p>
+<pre><code>Determine how many of the 5 gold-standard talking points are present in the provided essay.
+Original Prompt
+{original_prompt}
+Essay to Evaluate
+{essay_text}
+Gold Standard Talking Points
+{gold_standard_points}
+Output Format
+Return a json object with two keys: score (a single number between 0 and 5),
+and explanation (a string that lists the talking points present)</code></pre>
+        <p>为什么这里用 LLM 当裁判，不用代码？吴恩达的解释是，同一个要点可以有太多种说法，正则表达式或简单的模式匹配不太管用，所以把它当成一个稍微主观的评测，比如"事件视界有没有被充分提到"，交给 LLM 判断。</p>
+
+        <h3>评测的两条轴：二乘二表格</h3>
+        <p>他说你建的评测通常要反映你在自己应用里看到的、或担心的问题。大致上评测可以按两条轴来分：</p>
+        <ul>
+            <li>横轴：怎么判输出。用代码判（客观评测），还是用 LLM 当裁判（主观评测）。</li>
+            <li>纵轴：有没有逐例标准答案。</li>
+        </ul>
+        <p>四个格子各放一个本课程里出现过的例子：</p>
+        <table>
+            <thead><tr><th></th><th>用代码判（客观）</th><th>LLM 当裁判（主观）</th></tr></thead>
+            <tbody>
+                <tr><td>有逐例标准答案</td><td>检查发票日期抽取：<code>if (extracted_date == actual_date): num_correct += 1</code></td><td>数金标准讨论要点："Count the number of gold standard points in the following text…"</td></tr>
+                <tr><td>无逐例标准答案</td><td>检查营销文案长度：<code>if len(text) &lt;= 10: num_correct += 1</code></td><td>按评分细则（rubric）给图表打分："Grade this chart according to (i) whether it has clear axes labels, (ii) …."</td></tr>
+            </tbody>
+        </table>
+        <p>右下角那个例子来自模块 2 的咖啡机销量图表：用 LLM 按同一份评分细则（比如坐标轴标签是否清楚）给每张图打分，每张图用的细则都一样，所以没有逐例标准答案。</p>
+        <p>他还提到，这些评测有时叫端到端评测（end-to-end eval）：一端是输入，也就是用户的请求；另一端是最终输出。所以它们衡量的是整个系统从头到尾的表现。</p>
+
+        <h3>设计端到端评测的几条建议</h3>
+        <ul>
+            <li><strong>粗糙的评测也可以先用起来。</strong>他看到不少团队几乎被卡住，因为觉得建评测是一个要做好几周的大工程，于是迟迟不开始。他的看法是，Agentic 工作流要迭代，评测也一样要迭代。先放 10、15、20 个例子，写点代码或者试着用 LLM 当裁判，先拿到一些指标，和人眼看输出互相补充，两者结合起来做决定。</li>
+            <li>随着评测越来越成熟，可以把更多信任交给指标，不用每改一次提示词就读几百条输出。</li>
+            <li>评测本身也会不断改进。如果你改了系统，自己看着觉得明显变好了，但评测分数没体现出来，这通常说明该收集更大的评测集，或者改变判分方式，让评测更符合你对"哪个系统更好"的判断。</li>
+            <li>想找下一步做什么，可以看评测。很多 Agentic 工作流是在自动化人能做的任务，他会去找系统表现比人类专家差的地方，这常常提示他该在哪里用力，或者该让系统在哪类例子上做得更好。</li>
+        </ul>
+        <p>结尾他预告：除了推动改进，还有一种评测方法能帮你在整个 Agentic 系统里找出最值得投入的组件。Agentic 系统通常有很多部件，选对要改的那一块，是高效开发 Agentic 工作流的一项重要技能。下一节展开讲。</p>
+    </section>
+
+    <section id="l20">
+        <h2>20. 错误分析与确定下一步优先级</h2>
+        <p><em>英文原题 Error analysis and prioritizing next steps · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/2ftglp/error-analysis-and-prioritizing-next-steps" target="_blank">课程页</a> · 9:14</em></p>
+
+        <h3>改哪个组件，差别很大</h3>
+        <p>吴恩达说他自己也经常这样：先搭一个粗糙的系统，效果不如预期。这时的问题是该在哪里使劲。Agentic 工作流有很多组件，改某些组件的收获远比改另一些大，所以选择重点的能力会大大影响改进速度。他说，判断一个团队效率高不高、水平好不好，最强的预测因素之一就是这个团队能不能执行一套有纪律的错误分析（Error Analysis，系统地检查出错的例子、找出错误来自哪一步）流程。</p>
+
+        <h3>研究 Agent 漏要点，可能是哪一步的问题</h3>
+        <p>上一节发现研究 Agent 有时会漏掉人类专家会写的要点。工作流里几乎每一步都可能是原因：</p>
+        <ul>
+            <li>第一个 LLM 生成的搜索词不好，搜错了东西，没找到对的文章。</li>
+            <li>用的网页搜索引擎不够好。他说市面上的网页搜索引擎不少，他自己的应用里也会用好几家，有的比别的好。</li>
+            <li>搜索没问题，但把搜索结果列表交给 LLM 后，它没选好要下载的那几篇。</li>
+            <li>网页抓取（web fetch）这一步，假设能准确抓到网页，问题可能不大。</li>
+            <li>把网页内容塞给 LLM 后，LLM 忽略了文档里的一些要点。</li>
+        </ul>
+        <p>有些团队会凭直觉挑一个组件去改。有时管用，有时会花好几个月，整体效果却几乎没有提升。他认为更好的做法是做错误分析，弄清楚每一步的表现。</p>
+
+        <h3>看 trace：每一步的中间输出</h3>
+        <p>具体做法是检查 trace，也就是每一步之后的中间输出，看哪个组件的表现不达标，比如明显比人类专家差。那里就是有改进空间的地方。</p>
+        <p>他的例子：让研究 Agent 写黑洞科学近期新闻。</p>
+        <ul>
+            <li>搜索词：black hole theory、event horizon telescope、radio 等等。请人类专家看，这些搜索词合不合理？假设专家说可以，和他自己会搜的差不多。</li>
+            <li>搜索结果：看返回的 URL。其中一条是 Astro Kid News 上的"小学生声称破解了 30 年的黑洞谜团"，这看起来不像严谨的同行评审文章。把返回的文章都看一遍，可能会得出结论：博客和大众媒体类文章太多，科学文章太少，写不出你想要的质量。</li>
+            <li>其他步骤也要看。比如 LLM 挑出的"5 个最佳来源"里有 Astro Kid News、SpaceBot 2000、SpaceFun News 等。</li>
+        </ul>
+        <p>术语方面：一次 Agent 运行中所有中间步骤的输出合在一起，常被称为这次运行的 trace（轨迹）；单个步骤的输出有时叫 span。他说这些词来自计算机可观测性（observability，研究怎么弄清计算机系统在做什么）领域。这门课里他常用 trace，很少用 span，但网上两个词都能见到。</p>
+
+        <h3>只看出错的例子，用表格计数</h3>
+        <p>读 trace 能给你一个非正式的印象。要更系统，就把注意力放在系统表现差的例子上。写得完全令人满意的文章先放一边，专门收集一批最终输出不够好的例子。这也是"错误分析"这个名字的由来：关注系统出错的情况，找出哪些组件对错误负主要责任。</p>
+        <p>更严谨的做法是建一张表格，明确地数错误出在哪里。他说的"错误"指某一步的输出明显比人类专家在同样输入下给出的差。他自己常用电子表格做这件事。幻灯片上的表格（Counting up the errors）：</p>
+        <table>
+            <thead><tr><th>Prompt</th><th>Search terms</th><th>Search results</th><th>Picking 5 best sources</th></tr></thead>
+            <tbody>
+                <tr><td>Recent developments in black hole science</td><td></td><td>Too many blog posts, not enough papers</td><td></td></tr>
+                <tr><td>Renting vs buying a home in Seattle</td><td></td><td></td><td>Missed well-known blog</td></tr>
+                <tr><td>Robotics for harvesting fruit</td><td>Terms too generic</td><td>Website for elementary school students</td><td></td></tr>
+                <tr><td>Batteries for electric vehicles</td><td></td><td>Only selected US-based companies</td><td>Missed magazine</td></tr>
+                <tr><td>出错比例</td><td>5%</td><td>45%</td><td>10%</td></tr>
+            </tbody>
+        </table>
+        <p>表格里有一个判断细节。黑洞那一行，挑出的 5 个来源确实不好，但他不把这算作"挑选来源"这一步的错。因为交给它挑的全是不严谨的文章，它已经尽力了，换一个人类来挑，结果也差不多。所以只在搜索结果那一列记错。</p>
+        <p>数下来，搜索词不满意的比例是 5%，搜索结果不满意的比例是 45%。看到这个结果，他会先仔细确认搜索词确实没问题，排除"搜索词差导致结果差"的可能。如果确认搜索词没问题而结果不行，他就会仔细检查用的搜索引擎，看有没有能调的参数让它返回更相关、质量更高的结果。这类分析告诉他：这个例子里应该集中精力修搜索结果，工作流的其他组件先放一放。</p>
+
+        <h3>怎么排优先级</h3>
+        <p>他的建议是养成看 trace 的习惯：搭好 Agentic 工作流之后，看看中间输出，弄清它每一步在做什么。更系统的错误分析（比如用表格）能统计出哪个组件最常出问题。</p>
+        <p>排优先级时要同时考虑两件事：哪个组件错得多，以及你对改进哪个组件有高效的想法。一个组件有问题，但你没有任何改进思路，就不必排得太靠前；一个组件错误很多，你也有改进的主意，那就值得优先做。他强调，复杂系统里能做的事太多，很容易挑一件做上几周甚至几个月，最后发现整体性能没提升。用错误分析决定重点，对提高效率的帮助很大。</p>
+    </section>
+
+    <section id="l21">
+        <h2>21. 更多错误分析的例子</h2>
+        <p><em>英文原题 More error analysis examples · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/0kbds1/more-error-analysis-examples" target="_blank">课程页</a> · 5:15</em></p>
+        <p>吴恩达说，很多开发者要看过好几个例子，才能练出做错误分析的直觉。这一节再看两个：发票处理和客服邮件回复。</p>
+
+        <h3>发票处理：PDF 转文字，还是 LLM 抽取</h3>
+        <p>发票处理工作流有明确的流程：先把 PDF 转成文字，再让 LLM 找出四个必填字段，记进数据库。第一节说过系统常在到期日上出错，现在要弄清楚错误来自哪个组件：是 PDF 转文字（PDF-to-text）出了错，还是 LLM 从转出的文字里抽错了日期？</p>
+        <p>做法和上一节一样，只看表现差的例子。忽略日期抽对的发票，找 10 到 100 张抽错到期日的发票，逐张判断原因：</p>
+        <ul>
+            <li>PDF 转文字时日期或文字就已经错了，连人看了都分不清哪个是到期日；</li>
+            <li>或者转出的文字没问题，但 LLM 抽错了，比如拿了开票日期而不是到期日。</li>
+        </ul>
+        <p>幻灯片上的表格：</p>
+        <table>
+            <thead><tr><th>Input</th><th>PDF-to-text</th><th>LLM data extraction</th></tr></thead>
+            <tbody>
+                <tr><td>Invoice 1</td><td>Errors in extraction</td><td></td></tr>
+                <tr><td>Invoice 2</td><td></td><td>Wrong date selected</td></tr>
+                <tr><td>Invoice 3</td><td></td><td>Wrong data selected</td></tr>
+                <tr><td>Invoice 20</td><td>Errors in extraction</td><td>Wrong data selected</td></tr>
+                <tr><td>出错比例</td><td>15%</td><td>87%</td></tr>
+            </tbody>
+        </table>
+        <p>这个例子里 LLM 数据抽取造成的错误多得多，所以应该把力气放在 LLM 抽取这一步，而不是 PDF 转文字。他说如果没有这次错误分析，他能想象有的团队会花几周甚至几个月调 PDF 转文字，最后发现对整个系统影响不大。他还顺带解释：底部的百分比加起来可以不等于 100%，因为一个例子可以同时有几处错误，这些错误不互斥。</p>
+
+        <h3>客服邮件：查询写错最常见</h3>
+        <p>第二个例子是回复客户邮件的 Agentic 工作流：客户来信问订单，LLM 生成数据库查询，从订单数据库取出信息，再起草一封回复，交给人审核。可能出错的地方有：</p>
+        <ul>
+            <li>LLM 写错了数据库查询（比如 SQL），发过去取不到正确的客户信息；</li>
+            <li>数据库本身数据有误，LLM 的查询完全正确也拿不到对的信息；</li>
+            <li>拿到了正确的订单信息，LLM 写出的邮件还是不太对。</li>
+        </ul>
+        <p>同样，找一批最终输出不满意的邮件，逐一判断。幻灯片上的表格：</p>
+        <table>
+            <thead><tr><th>Input</th><th>LLM-drafted query</th><th>Orders database query</th><th>LLM-drafted email</th></tr></thead>
+            <tbody>
+                <tr><td>Email 1</td><td>Wrong table</td><td></td><td></td></tr>
+                <tr><td>Email 2</td><td></td><td>Error in database entry</td><td>Didn't address details of order</td></tr>
+                <tr><td>Email 3</td><td>Incorrect math</td><td></td><td></td></tr>
+                <tr><td>Email 50</td><td></td><td></td><td>Defensive tone</td></tr>
+                <tr><td>出错比例</td><td>75%</td><td>4%</td><td>30%</td></tr>
+            </tbody>
+        </table>
+        <p>看完很多封之后发现，最常见的错误是 LLM 写数据库查询的方式；数据库大体正确，只有少量数据错误；LLM 写邮件也有一部分问题，大约 30%。结论是最值得做的是改进 LLM 写查询的方式，其次是改进写最终邮件的提示词。吴恩达说，这种分析能告诉你：系统可能大部分时候是对的，但在它出错的那些情况里，75% 的问题来自数据库查询。这对决定往哪里使劲帮助很大，他自己开发 Agentic 工作流时也经常用这种分析决定下一步做什么。</p>
+
+        <h3>引出组件级评测</h3>
+        <p>确定了重点之后，除了前面讲的端到端评测，单独评测某个组件也常常有用，能让你更高效地改进错误分析指出的那个组件。这是下一节的内容。</p>
+    </section>
+
+    <section id="l22">
+        <h2>22. 组件级评测</h2>
+        <p><em>英文原题 Component-level evaluations · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/fwxyds/component-level-evaluations" target="_blank">课程页</a> · 3:23</em></p>
+
+        <h3>为什么不只用端到端评测</h3>
+        <p>还是研究 Agent 漏要点的例子。假设问题出在网页搜索上，每换一次搜索引擎都要把整个工作流重跑一遍。这样能拿到一个不错的整体指标，但代价高。而且这个工作流比较复杂，其他组件的随机性会带来噪声，即使搜索质量提升了一点，也可能被噪声盖住，看不出来。</p>
+
+        <h3>只评测网页搜索这一个组件</h3>
+        <p>吴恩达的替代办法是专门建一个评测，只衡量网页搜索组件的质量：</p>
+        <ul>
+            <li>针对一些查询，请专家列出金标准网页资源（gold standard web resources），也就是最权威、搜的人真的应该找到的网页，或者说找到其中任何一个都算好。</li>
+            <li>写代码统计搜索返回的结果里有多少和金标准资源重合。信息检索领域有标准指标，比如 F1 分数。他说不知道这是什么也没关系，总之有现成的指标能衡量搜索返回的网页列表和专家认定的金标准有多少重合。（F1 分数是兼顾"返回的有多少是对的"和"对的有多少被返回了"的一个综合分数。）</li>
+        </ul>
+        <p>有了它，就能单独评估搜索组件的质量。调整搜索的参数或超参数（hyperparameter，运行前人为设定的配置项）时，比如换不同的搜索引擎（他举了 Google、Bing、DuckDuckGo、Tavily、You.com 等），改返回结果数量，改让搜索引擎覆盖的日期范围，都能很快判断搜索组件的质量是否在上升，逐步做小的改进。</p>
+        <p>当然，在宣布完工之前，最好再跑一次端到端评测，确认调了一阵搜索之后整体系统确实变好了。但在一个一个调超参数的过程中，只评测一个组件比每次都重跑端到端评测高效得多。</p>
+
+        <h3>组件级评测的好处</h3>
+        <ul>
+            <li>针对具体错误给出更清楚的信号，能确认你正在改的组件是不是真的在变好，避开整个端到端系统的噪声和复杂度。</li>
+            <li>如果项目里不同团队负责不同组件，每个团队有一个清楚的指标可以优化，不用操心其他组件，可以更快地解决一个更小、更有针对性的问题。</li>
+        </ul>
+        <p>他的建议是：决定改进某个组件时，想一想值不值得为它建一个组件级评测，能不能让你在这个组件上推进得更快。至于具体怎么把一个组件改好，是下一节的话题。</p>
+    </section>
+
+    <section id="l23">
+        <h2>23. 怎么解决找到的问题</h2>
+        <p><em>英文原题 How to address problems you identify · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/ldf4ci/how-to-address-problems-you-identify" target="_blank">课程页</a> · 9:46</em></p>
+
+        <h3>非 LLM 组件：调参数，或者换掉</h3>
+        <p>Agentic 工作流里的组件类型很多，改进手段也各不相同，吴恩达分享的是一些通用模式。有些组件不是基于 LLM 的，比如网页搜索引擎、RAG（检索增强生成，先从资料库里检索相关文本再交给 LLM 生成回答）里的文本检索组件、代码执行组件，或者单独训练的机器学习模型（如语音识别、图片里的人物检测）。这些组件通常有可以调的参数或超参数：</p>
+        <ul>
+            <li>网页搜索：返回结果的数量，让搜索引擎考虑的日期范围。</li>
+            <li>RAG 文本检索：判断两段文字算不算相似的相似度阈值；或者分块大小（chunk size），RAG 系统通常会把文本切成小块再做匹配。</li>
+            <li>人物检测：检测阈值，也就是多敏感、多容易判定"找到一个人"，这会在误报（false positive）和漏报（false negative）之间取舍。</li>
+        </ul>
+        <p>他说这些超参数的细节没跟上也没关系，重点是这类组件往往有参数可调。另一个办法是直接替换组件。他自己在 Agentic 工作流里经常这么做，比如换不同的 RAG 搜索引擎或 RAG 服务商，看别家会不会更好。非 LLM 组件种类太多，改进技巧也更多样，取决于组件具体在做什么。</p>
+
+        <h3>LLM 组件的四种改法</h3>
+        <ul>
+            <li>改提示词：加更明确的指令；或者用 few-shot prompting（少样本提示，在提示词里给一个或几个"输入加期望输出"的具体例子）。他提到 DeepLearning.AI 的一些短课程里讲过这个技巧。</li>
+            <li>换一个 LLM：用 AI Suite 或其他工具，可以很方便地试多个 LLM，再用评测选出最适合的模型。</li>
+            <li>拆分任务：如果一步太复杂，单个 LLM 很难照着一大堆指令全做对，可以把它拆成几个更小的步骤，让两三次调用分别准确完成；也可以拆成一个生成步骤加一个反思步骤。</li>
+            <li>微调（fine-tuning，用你自己的数据继续训练模型）：其他方法都不够用时再考虑。它比前面几种复杂得多，开发时间成本也高，但如果有数据可以用来微调，可能比只靠提示词效果好得多。</li>
+        </ul>
+        <p>关于微调，他的习惯是先把其他办法都用尽。只有在试过所有方法之后，性能还停在 90% 或 95%，又确实需要挤出最后几个百分点时，微调自己的模型才是很好的手段。因为代价高，他一般只在比较成熟的应用上这么做。</p>
+
+        <h3>培养对不同模型能力的直觉</h3>
+        <p>选 LLM 时，如果你对不同模型有多聪明、多能干有好的直觉，会很有帮助。最直接的办法是多试几个模型，看哪个最好。他说用得多了，自然会知道哪些模型适合哪类任务，写提示词和选模型都会更高效。</p>
+        <p>他用一个例子说明：让 LLM 按指令去除 PII（personally identifiable information，个人身份信息，如姓名、社保号、地址）。场景是用 LLM 总结客户来电，一条总结里写着 2023 年 7 月 14 日，Jessica Alvarez，附带社会安全号码和一个地址，一张业务支持工单等等。这段文字里有大量敏感的个人身份信息。目的是用这些数据做下游的统计分析（客户都在打电话问什么），为了保护客户信息，要在分析之前把 PII 去掉。提示词大意是：找出下面文本里所有的 PII，然后返回打码后的文本，格式为 "Redacted:" 加内容。</p>
+        <p>吴恩达说，较大的前沿模型通常更擅长遵循指令；较小的模型回答简单事实问题往往还不错，但遵循指令的能力差一些。</p>
+        <ul>
+            <li>在较小的开放权重模型 Llama 3.1 上跑这个提示词（字幕里参数规模这几个词识别不清），它的输出出了几处错：先列出一份 PII 清单（社保号和地址），再给打码文本，然后又列了一份清单，这都不符合指令；清单里漏了人名；地址也只打码了一部分。</li>
+            <li>换一个更聪明、更会遵循指令的模型，它正确列出了所有 PII，也全部正确打码。</li>
+        </ul>
+        <p>他的观察是，不同的模型提供商专攻不同的任务，不同模型在不同任务上确实有高下：有的更擅长写代码，有的更会遵循指令，有的更了解某些小众领域的事实。如果你对哪些模型更聪明、能遵循什么样的指令有直觉，就能更好地决定用哪个模型。</p>
+
+        <h3>他自己怎么练这种直觉</h3>
+        <ul>
+            <li>经常玩不同的模型。每次有新模型发布，他常会去试一试，问各种问题，闭源（closed-weight）和开放权重（open-weight）模型都试。</li>
+            <li>准备一套个人评测，也就是你会拿去问很多模型的一组固定问题，帮你校准它们在不同任务上的表现。</li>
+            <li><strong>大量阅读别人的提示词。</strong>有人会把提示词发到网上，他常去读，了解提示词的最佳实践；他也会和朋友们交流，包括几家前沿模型公司的朋友，互相看对方怎么写提示词；他还会把自己尊敬的人写的开源包下载下来，翻出作者写的提示词来读。他说他自己经常这样做，也鼓励大家这样做，这能帮你判断模型擅长遵循哪类指令、对不同模型该怎么说。</li>
+            <li>在 Agentic 工作流里多试不同的模型。通过看 trace 得到非正式的感觉，或者用组件级、端到端评测，衡量不同模型在工作流不同部分的表现。这样积累的直觉不只关于效果，也包括不同模型在价格和速度上的取舍。他说他倾向用 AI Suite 开发 Agentic 工作流，原因之一就是换模型、试模型很方便。</li>
+        </ul>
+
+        <h3>下一步：延迟和成本</h3>
+        <p>除了提升输出质量，工作流还可能需要优化延迟和成本。他观察到很多团队刚开始开发时，头号问题就是输出质量够不够高；等系统好用、上了生产环境，让它跑得更快、更便宜往往也有价值。下一节讲这个。</p>
+    </section>
+
+    <section id="l24">
+        <h2>24. 延迟和成本优化</h2>
+        <p><em>英文原题 Latency, cost optimization · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/154qpa/latency%2C-cost-optimization" target="_blank">课程页</a> · 4:06</em></p>
+
+        <h3>先保质量，再管成本和延迟</h3>
+        <p>吴恩达常建议团队先把输出质量做高，之后再优化成本和延迟（latency，从发出请求到拿到结果要等多久）。他说成本和延迟也重要，只是把质量做上去通常是最难的部分，真正能用了之后再管别的。</p>
+        <p>他讲了自己遇到过几次的情况：团队做了一个 Agentic 工作流，上线给用户用，结果用户多到成本成了问题，只好手忙脚乱地把成本压下来。他说这是一个"好的烦恼"。所以他通常把成本放在比较靠后的位置。他也会看一眼，但真正处理要等到用户多到确实需要降低每个用户的成本。延迟他会稍微多关心一些，但也比不上确保输出质量。</p>
+
+        <h3>优化延迟：给每一步计时</h3>
+        <p>他的做法是先对工作流做基准测试（benchmark），给每一步计时。以研究 Agent 为例，幻灯片上的平均耗时：</p>
+        <table>
+            <thead><tr><th>步骤</th><th>耗时</th></tr></thead>
+            <tbody>
+                <tr><td>LLM 生成搜索词（Search web）</td><td>7 秒</td></tr>
+                <tr><td>网页搜索（web search）</td><td>5 秒</td></tr>
+                <tr><td>LLM 挑选 5 个最佳来源（Fetch 5 best sources）</td><td>3 秒</td></tr>
+                <tr><td>网页抓取（web fetch）</td><td>11 秒</td></tr>
+                <tr><td>LLM 写文章草稿（Write essay draft）</td><td>18 秒</td></tr>
+            </tbody>
+        </table>
+        <p>看这条时间线，就能大致判断哪些组件最有提速空间。他提到可以尝试的几件事：</p>
+        <ul>
+            <li>有些步骤如果还没用上并行，比如网页抓取，可以考虑把一些操作并行执行。</li>
+            <li>某个 LLM 步骤太慢（第一步 7 秒，最后一步 18 秒），可以试一个更小、可能稍微没那么聪明的模型，看效果是否仍然够用。</li>
+            <li>找一家更快的 LLM 服务商。网上有很多不同 LLM 的 API，有些公司用专门的硬件，能更快地提供某些 LLM 的服务，所以值得试试不同服务商，看哪家返回 token（模型处理文本的基本单位，大致是一个词或词的一部分）最快。</li>
+        </ul>
+
+        <h3>优化成本：给每一步算钱</h3>
+        <p>成本也是同样的思路：算出每一步的成本，再决定重点优化哪一步。很多 LLM 服务商按输入和输出的 token 数计费；很多 API 服务商按调用次数计费；计算类步骤的成本则取决于你怎么购买服务器资源、服务本身多少钱。幻灯片上（Costing your workflow）的数字：</p>
+        <table>
+            <thead><tr><th>步骤</th><th>计费方式</th><th>成本</th></tr></thead>
+            <tbody>
+                <tr><td>LLM 生成搜索词</td><td>Tokens</td><td>$0.0004</td></tr>
+                <tr><td>网页搜索</td><td>API call</td><td>$0.016</td></tr>
+                <tr><td>LLM 挑选 5 个最佳来源</td><td>Tokens</td><td>$0.0004</td></tr>
+                <tr><td>网页抓取</td><td>API call</td><td>$0.002</td></tr>
+                <tr><td>PDF 转文字</td><td>PDF-to-text</td><td>$0.03</td></tr>
+                <tr><td>LLM 写文章草稿</td><td>Tokens</td><td>$0.009</td></tr>
+            </tbody>
+        </table>
+        <p>（他口头说的是第一步 token 平均 0.04 美分、每次网页搜索 API 约 1.6 美分，和幻灯片上的美元数一致。）这样一列，就能看出有没有更便宜的组件或更便宜的 LLM 可换，最大的省钱机会在哪里。</p>
+        <p>他说这类基准测试常常让人一下子看清楚，有时会明确告诉他，某些组件对成本或延迟的贡献不大，根本不值得操心。所以当成本或延迟成了问题时，只要量一量每一步的成本和延迟，通常就有了决定优化哪些组件的依据。</p>
+    </section>
+
+    <section id="l25">
+        <h2>25. 开发流程小结</h2>
+        <p><em>英文原题 Development process summary · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/hl2aj7/development-process-summary" target="_blank">课程页</a> · 3:54</em></p>
+
+        <h3>两类活动：构建和分析</h3>
+        <p>最后一节吴恩达讲的是走这套流程时的实际感受。他说搭这些工作流时，他的时间主要花在两件事上：</p>
+        <ul>
+            <li>构建（building）：写软件，写代码改进系统。</li>
+            <li>分析（analysis）：帮他决定下一步把构建的力气花在哪里。这件事有时感觉不像在推进，但他认为同样重要。</li>
+        </ul>
+        <p>他会在构建和分析（包括错误分析）之间来回切换。</p>
+
+        <h3>随系统成熟逐步加码的分析</h3>
+        <ol>
+            <li>开发一个新的 Agentic 工作流时，他通常先快速搭一个端到端系统，甚至是粗糙的实现。</li>
+            <li>然后看端到端系统的最终输出，或者读 trace，了解它哪里做得好、哪里做得差。有时光看 trace 就能凭感觉知道想改哪个组件，于是去调某些组件，或者继续调整个端到端系统。</li>
+            <li>系统更成熟一些后，除了手动看几条输出、读 trace，他会开始建评测，准备一个小数据集（可能只有 10 到 20 个例子），至少算出端到端表现的指标。这让他对怎么改整体系统或单个组件有更细的判断。</li>
+            <li>再成熟一些，分析变得更有纪律：开始做错误分析，逐个检查组件，统计各组件导致不达标输出的频率。这种更严谨的分析让他在决定下一步改哪个组件时更聚焦，也会启发改进整体系统的想法。</li>
+            <li>最后，当系统更加成熟，为了在组件层面更高效地改进，他才会建组件级评测。</li>
+        </ol>
+        <p>他强调这个过程不是线性的：有时调端到端系统，然后做错误分析，再改一阵某个组件，再调组件级评测，在两类技巧之间来回跳。他看到经验不足的团队常常花大量时间构建，而花在分析（错误分析、建评测等）上的时间少得多。他认为这样不理想，因为分析能帮你决定把构建的时间花在哪里。</p>
+
+        <h3>关于现成的工具</h3>
+        <p>他还给了一条建议：市面上有不少工具能帮你监控 trace、记录运行时间、计算成本等等，这些工具有帮助。他自己有时也用几个，DeepLearning.AI 短课程的不少合作伙伴就提供这类工具，效果不错。但他发现自己做的 Agentic 工作流大多是高度定制的，所以他最后还是会自己写很多定制的评测，用来捕捉他这个系统特有的出错方式。</p>
+        <p>结尾他说，第四个模块（共五个）讲完了。如果能把这个模块的想法用上一部分，他认为你在实现 Agentic 工作流的成熟度上就会领先绝大多数开发者。最后一个模块会讲构建高自主度 Agent 的更进阶的设计模式。</p>
+    </section>
+
+    <section>
+        <h2>本模块的实验</h2>
+        <p>课程页上本模块列出的练习：</p>
+        <ul>
+            <li>Ungraded Lab: Adding a component-level eval to the research workflow（不计分实验：给研究工作流加一个组件级评测）。视频里没有专门介绍这个实验，从名字和第 22 节内容看，对应的是给研究 Agent 的某个组件（第 22 节的例子是网页搜索）单独建评测。</li>
+            <li>Module 4 quiz：本模块的测验。</li>
+        </ul>
+        <p>实验和测验需要 DeepLearning.AI PRO 订阅，视频本身可以免费旁听。本页笔记只整理了视频内容。</p>
+    </section>
+
+    <footer class="document-footer"><p>Andrew Ng · Agentic AI · Module 4 · Notes curated by Joyce</p></footer>
+</article>
+</body>
+</html>

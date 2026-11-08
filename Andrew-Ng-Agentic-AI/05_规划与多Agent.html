@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>规划与多 Agent | 吴恩达 Agentic AI 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="04_评测与错误分析.html">&larr; 上一篇</a></span>
+    <span>吴恩达 Agentic AI · 模块 5</span>
+    <span><a href="index.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>模块 5：规划与多 Agent 协作</h1>
+        <p class="subtitle">让 LLM 自己决定先做什么、后做什么，再让几个 Agent 分工合作</p>
+        <div class="author-meta">
+            主讲：吴恩达（Andrew Ng）· 出品：DeepLearning.AI · 本模块 6 节视频，约 32 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.deeplearning.ai/courses/agentic-ai" target="_blank">Agentic AI（DeepLearning.AI）</a> Module 5: Patterns for Highly Autonomous Agents（依据课程官方英文字幕整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一模块讲什么</h2>
+        <p>前面几个模块里的 Agentic 工作流（Agentic Workflow），步骤顺序大多是开发者事先写好的。最后这个模块讲两种让系统更自主的设计模式。第一种是规划（Planning）：让 LLM 自己写出一份分步计划，再一步步执行，开发者不用提前写死调用工具的顺序。第二种是多 Agent 协作（Multi-agent）：把一个复杂任务拆给几个扮演不同角色的 Agent，再决定它们之间怎么沟通。</p>
+        <p>吴恩达对这两种模式的态度比较克制。它们能做的事情更多，但运行时会发生什么更难预测、更难控制。规划目前在 Agentic 编程工具里用得很成功，在别的领域还在发展。模块最后一节是整门课的结语。</p>
+        <ol>本模块每节视频：
+            <li><a href="#l26">26. 规划工作流</a>（Planning workflows · 7 分钟）</li>
+            <li><a href="#l27">27. 生成并执行 LLM 计划</a>（Creating and executing LLM plans · 3 分钟）</li>
+            <li><a href="#l28">28. 用代码执行来规划</a>（Planning with code execution · 7 分钟）</li>
+            <li><a href="#l29">29. 多 Agent 工作流</a>（Multi-agentic workflows · 9 分钟）</li>
+            <li><a href="#l30">30. 多 Agent 系统的沟通模式</a>（Communication patterns for multi-agent systems · 4 分钟）</li>
+            <li><a href="#l31">31. 结语</a>（Conclusion · 2 分钟）</li>
+        </ol>
+    </section>
+
+    <section id="l26">
+        <h2>26. 规划工作流</h2>
+        <p><em>英文原题 Planning workflows · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/jcl177/planning-workflows" target="_blank">课程页</a> · 7:10</em></p>
+
+        <h3>什么是高度自主的 Agent</h3>
+        <p>吴恩达在模块开头说，这一模块的设计模式用来构建高度自主的 Agent：你不需要提前把要走的步骤顺序写死，系统可以灵活地自己决定为了完成任务要走哪些步骤。先讲规划，再讲多 Agent 系统。</p>
+
+        <h3>例一：太阳镜店的客服 Agent</h3>
+        <p>假设你开一家太阳镜零售店，库存信息存在数据库里。顾客问：“你们有没有圆形的、有货的、100 美元以下的太阳镜？”这个问题不算简单。要先看商品描述找出哪些是圆形的，再看哪些有库存，最后看哪些低于 100 美元，才能回答“有，我们有 classic 款”。</p>
+        <p>客服 Agent 要应付各种各样的问题，所以要给 LLM 一组工具（Tool，就是 LLM 可以请求调用的函数）。幻灯片上列了 6 个：</p>
+        <ul>
+            <li><code>get_item_descriptions</code>：查商品描述，比如哪些眼镜是圆形的</li>
+            <li><code>check_inventory</code>：查库存</li>
+            <li><code>process_item_return</code>：处理退货（这个问题用不上，别的问题会用到）</li>
+            <li><code>get_item_price</code>：查价格</li>
+            <li><code>check_past_transactions</code>：查历史交易</li>
+            <li><code>process_item_sale</code>：处理销售</li>
+        </ul>
+        <p>系统提示词（System Prompt，开发者写给模型的总体指令）大致是这样：</p>
+        <pre><code>You have access to the following tools:
+
+{description of tools}
+
+Return a step-by-step plan to carry out the user's request.</code></pre>
+        <p>对这个问题，LLM 可能给出一个合理的三步计划：</p>
+        <ol>
+            <li>用 <code>get_item_descriptions</code> 查看描述，找出圆形太阳镜；</li>
+            <li>用 <code>check_inventory</code> 看它们是否有货；</li>
+            <li>用 <code>get_item_price</code> 看有货的那些是否低于 100 美元。</li>
+        </ol>
+
+        <h3>计划怎么一步步执行</h3>
+        <p>LLM 输出计划后，把第 1 步的文字交给一个 LLM 调用，同时附上工具说明、用户的问题等背景上下文（Context，即这次调用模型能看到的全部输入），让它执行第 1 步。理想情况下它会调用 <code>get_item_descriptions</code>，从结果里选出圆形的款式。</p>
+        <p>第 1 步的输出，连同第 2 步的指令，再交给 LLM 执行第 2 步：拿上一步找到的两款圆形眼镜去查库存。第 2 步的输出加上第 3 步的指令，再做一次 LLM 调用，查价格。最后把这一步的结果交回 LLM，生成给用户的最终回答。</p>
+        <p>吴恩达说这张图简化了很多细节，LLM 实际写出的计划通常比这几行一句话的指令详细。基本流程是：让 LLM 写出多步计划，然后在合适的上下文（任务是什么、有哪些工具等）里逐步执行每一步。</p>
+
+        <h3>同一个 Agent，不同的计划</h3>
+        <p>他觉得这件事让人兴奋的地方在于：开发者没有提前决定按什么顺序调用工具，就能回答一个挺复杂的客户请求。换一个请求，比如“我想退掉买的金框眼镜，金属框的那副不退”，LLM 也能想出另一份计划：先根据历史交易查出顾客买过哪些眼镜，用 <code>get_item_descriptions</code> 判断哪副是金框，再调用 <code>process_item_return</code>。所以会规划的 Agent 能处理的任务范围宽得多，这些任务可能需要按各种不同顺序调用各种不同的工具。</p>
+
+        <h3>例二：邮件助理</h3>
+        <p>用户说：“回复 Bob 那封关于纽约晚餐的邀请邮件，告诉他我会去，然后把他的邮件归档。”邮件助理的工具有 <code>search_email</code>、<code>move_email</code>、<code>delete_email</code>、<code>send_email</code>，系统提示词同样要求返回分步计划。LLM 可能会这样计划：</p>
+        <ol>
+            <li>用 <code>search_email</code> 找到 Bob 提到晚餐和纽约的那封邮件；</li>
+            <li>写一封回信并发送，确认出席；</li>
+            <li>把那封邮件移到归档文件夹。</li>
+        </ol>
+        <p>执行方式和上面一样：第 1 步文字加背景上下文交给 LLM，理想情况下触发 <code>search_email</code>；结果连同第 2 步指令再交给 LLM 去回信；假设邮件发送成功，再把输出交给 LLM 执行第 3 步，把 Bob 的邮件移到归档。</p>
+
+        <h3>现在用在哪里，难在哪里</h3>
+        <p>吴恩达说，规划模式已经在很多高度 Agentic 的编程系统里用得很成功。你让它写一个比较复杂的应用，它可能会先列一个计划：先做这个组件，再做那个组件，几乎像一张检查清单（Checklist），然后一项一项完成，最后做出一个相当复杂的软件。</p>
+        <p>在很多其他应用里，规划还比较实验性，用得不算广。它的一个难处是系统有时不太好控制，因为开发者在运行时并不知道它会想出什么计划。他认为在 Agentic 编程之外，规划的采用还在增长，这项技术会继续变好，会出现在越来越多的应用里。</p>
+        <p>他承认这节讲得比较概括，下一节会深入看计划长什么样、怎么把“LLM 写计划”和“执行计划”串起来。</p>
+    </section>
+
+    <section id="l27">
+        <h2>27. 生成并执行 LLM 计划</h2>
+        <p><em>英文原题 Creating and executing LLM plans · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/wr78er/creating-and-executing-llm-plans" target="_blank">课程页</a> · 2:38</em></p>
+
+        <h3>让计划用 JSON 输出</h3>
+        <p>上一节的客服计划是用简单的文字描述的。吴恩达说，很多开发者会要求 LLM 用 JSON 格式输出计划。JSON 是一种用键值对和列表表示结构化数据的文本格式，程序可以直接解析。这样下游代码能比较清楚、无歧义地读出计划有哪几步。他说现在主流的 LLM 生成 JSON 都已经做得不错。</p>
+        <p>幻灯片上的“更新后的系统提示词”：</p>
+        <pre><code>You have access to the following tools:
+
+{description of tools}
+
+Create a step-by-step plan in JSON format.
+
+Each step should have the following items:
+step number, description, tool name, and args.</code></pre>
+        <p>对“有没有圆形、有货、100 美元以下的太阳镜”这个问题，期望得到的输出类似：</p>
+        <pre><code>{
+  "plan": [
+    {
+      "step": 1,
+      "description": "Find round sunglasses",
+      "tool": "get_item_descriptions",
+      "args": {"query": "round sunglasses"}
+    },
+    {
+      "step": 2,
+      "description": "Check available stock",
+      "tool": "check_inventory",
+      "args": {"items": "results from step 1"}
+    },
+    ...
+  ]
+}</code></pre>
+        <p>每一项都有清楚的键和值：第几步、这一步做什么、用哪个工具、传给工具什么参数。他说你可以在提示词里把 JSON 格式描述得足够详细，目标就是让模型输出这样的计划。相比用英文自然语言写计划，这样下游代码能准确解析出每一步，再可靠地逐步执行。</p>
+
+        <h3>其他格式</h3>
+        <ul>
+            <li><strong>XML</strong>：也有开发者用 XML 标签作分隔，标明计划的各个步骤和步骤编号。</li>
+            <li>Markdown：他感觉用的人更少，解析起来有时稍微有歧义。</li>
+            <li>纯文本：他认为可能是这几种里最不可靠的。</li>
+        </ul>
+        <p>他的建议是 JSON 或 XML 都是好选择。用 JSON 输出计划后就能解析它，让下游流程更系统地执行各个步骤。</p>
+        <p>结尾他预告了另一个想法：让 LLM 写代码，用代码来表达计划，这样能输出相当复杂的计划并可靠执行。</p>
+    </section>
+
+    <section id="l28">
+        <h2>28. 用代码执行来规划</h2>
+        <p><em>英文原题 Planning with code execution · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/egr0a8/planning-with-code-execution" target="_blank">课程页</a> · 7:11</em></p>
+
+        <h3>思路</h3>
+        <p>与其让 LLM 输出 JSON 计划再一步步执行，不如直接让它写代码。一段代码可以包含计划的多个步骤，比如先调这个函数、再调那个函数、再调第三个。执行 LLM 生成的代码，就能完成相当复杂的计划。</p>
+
+        <h3>反面例子：咖啡机销售表格，工具越加越多</h3>
+        <p>假设要做一个系统，根据一张历史销售电子表格回答关于咖啡机销售的问题。你可能给 LLM 这样一组工具：<code>get_column_max</code>（取某列最大值，可以回答“最贵的咖啡是哪种”）、<code>get_column_mean</code>、<code>filter_rows</code>、<code>get_column_min</code>、<code>get_column_median</code>、<code>sum_rows</code> 等等。</p>
+        <p>用户问“哪个月热巧克力卖得最多”，用这些工具其实能答，但很麻烦：先用 <code>filter_rows</code> 取出 1 月的热巧克力交易，算统计量，再对 2 月重复一遍，3 月、4 月、5 月一直到 12 月，最后取最大值。能拼出来，但不是好办法。</p>
+        <p>更糟的是有些问题这些工具根本答不了。“上周有多少笔不重复的交易？”你可能就得新建一个 <code>get_unique_entries</code> 工具。“最近 5 笔交易的金额是多少？”又得再造一个工具。吴恩达说他见过一些团队，遇到的问题越来越多，就不停地加工具，想覆盖用户可能对这类数据集提出的所有问题。他认为这种做法脆弱、低效，团队会一直在处理边界情况（Edge Case）、不停造新工具。</p>
+
+        <h3>更好的办法：让 LLM 写 Python</h3>
+        <p>系统提示词改成：</p>
+        <pre><code>Write code to solve the user's query. Return your answer as python code
+delimited with &lt;execute_python&gt; and &lt;/execute_python&gt; tags.</code></pre>
+        <p>问“最近 5 笔交易的金额是多少”，LLM 写出的代码会用 pandas（Python 里常用的数据处理库）加载表格。幻灯片上的代码是：</p>
+        <pre><code>&lt;execute_python&gt;
+import pandas as pd
+
+# Load CSV
+df = pd.read_csv("transactions.csv")
+
+# Ensure date column is parsed as datetime
+df["date"] = pd.to_datetime(df["date"])
+
+# Sort by date to get most recent transactions
+df_sorted = df.sort_values(by="date", ascending=False)
+
+# Select the last 5 transactions
+last_5 = df_sorted.head(5)
+
+# Show just the price column (amounts)
+print("Last 5 transaction amounts:")
+print(last_5["price"].to_list())
+&lt;/execute_python&gt;</code></pre>
+        <p>吴恩达指出，这段代码本身就是一份计划：加载 CSV 后，先确保日期列按某种方式解析，再按日期排序，取最近 5 笔，只显示价格列。这就是计划的第 1、2、3、4、5 步。</p>
+        <p>他解释为什么这样有效：Python 这样的编程语言，再加上 pandas 这样的库，内置了几百甚至几千个函数，而且 LLM 在训练数据里见过大量关于什么时候该调哪个函数的例子。让 LLM 写代码，它就能从这个很大的函数库里挑选、组合函数，为一个挺复杂的问题拼出计划。</p>
+        <p>再举一例，“上周有多少笔不重复的交易？”幻灯片上的代码：</p>
+        <pre><code>&lt;execute_python&gt;
+import pandas as pd
+
+# Read CSV and parse the "date" column as datetime
+df = pd.read_csv("transactions.csv", parse_dates=["date"])
+
+# Define time window
+today = pd.Timestamp.today()
+week_ago = today - pd.Timedelta(days=7)
+
+# Filter rows where date is within last week
+last_week = df[df["date"].between(week_ago, today)]
+
+# Drop duplicate rows and count
+print(last_week.drop_duplicates().shape[0])
+&lt;/execute_python&gt;</code></pre>
+        <p>他说细节不重要，看注释就能发现 LLM 大致想出了一个四步计划（读 CSV 并解析日期列、定义时间窗口、筛选行、去重后计数），每一步都用代码表达，直接执行就能给用户答案。</p>
+        <p>他的结论是：如果一个任务有可能靠写代码完成，让 LLM 用代码表达计划，再由你替它执行，是一种让它写出丰富计划的有力方式。</p>
+
+        <h3>沙箱的提醒</h3>
+        <p>工具使用那个模块讲过的注意事项在这里同样适用：要考虑是否需要一个安全的执行环境，比如沙箱（Sandbox，与主系统隔离、限制权限的运行环境）来跑代码。他也坦白，虽然可能不算最佳实践，他知道很多开发者并不用沙箱。</p>
+
+        <h3>研究数据：代码作为动作效果更好</h3>
+        <p>他展示了一张改编自论文的图，幻灯片标注的出处是 “Executable Code Actions Elicit Better LLM Agents”, Wang et al. 2024。纵轴是 8 个模型（gpt-4-1106-preview、gpt-4-0613、claude-2、gpt-3.5-turbo-0613、gpt-3.5-turbo-1106、gemini-pro、text-davinci-003、Llama-2-70b-chat-hf），横轴是任务成功完成率（%），对比三种动作方式：Code as Action（写代码执行动作）、JSON as Action、Text as Action。</p>
+        <p>吴恩达的解读是：在论文考察的任务上，对很多不同模型，让 LLM 写代码、通过代码采取行动，都优于写 JSON 再转成动作，或者用文本。总体趋势是代码胜过 JSON，JSON 又比纯文本稍好一点。从图上大致读数看，gpt-4-1106-preview 的 Code as Action 在 70% 以上，另外两种在 50% 出头；Llama-2-70b-chat-hf 三种方式都在 15% 以下。</p>
+        <p>他也说，有些应用你就是想给 LLM 一些自定义工具去用，所以写代码不适合所有应用。适用的时候，它是 LLM 表达计划的一种很强的方式。</p>
+
+        <h3>规划这部分的收尾</h3>
+        <p>他重复了上一节的判断。今天规划最有力的用途之一是高度 Agentic 的编程助手：让它写一个复杂软件，它可能先做详细计划，先建第一个组件，再建第二个、第三个，甚至计划边做边测试，形成一张清单再逐项执行，这在构建越来越复杂的软件上效果很好。其他应用里规划还在发展。它的缺点是开发者没有明确告诉系统做什么，所以更难控制，事先不知道运行时会发生什么。放弃一部分控制，换来的是模型可能尝试的事情范围大大增加。他说这项技术处在前沿，除了 Agentic 编程，整体感觉还不完全成熟，仍有很大成长空间。</p>
+    </section>
+
+    <section id="l29">
+        <h2>29. 多 Agent 工作流</h2>
+        <p><em>英文原题 Multi-agentic workflows · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/608l3n/multi-agentic-workflows" target="_blank">课程页</a> · 9:05</em></p>
+
+        <h3>为什么要多个 Agent</h3>
+        <p>前面讲的都是如何构建单个 Agent。多 Agent（Multi-agent）工作流是让多个 Agent 合作完成任务。有人第一次听到会问：不就是反复给同一个 LLM 写提示词吗，不就是一台电脑吗，为什么要多个 Agent？</p>
+        <p>吴恩达用了一个他觉得有用的类比：即使在一台电脑上做事，我们也会把工作拆成多个进程（Process）或多个线程（Thread）。哪怕只有一个 CPU，作为开发者去想怎么把工作拆成多个进程，写代码会更容易。类似地，面对一个复杂任务，与其想“雇一个人来做”，不如想“雇一个三四人的团队，各做一块”。他发现对很多 Agentic 系统的开发者来说，问自己“雇三四个不同角色的人来完成这件事合不合理”，提供了另一种把复杂任务拆成子任务、再逐个构建的思路。</p>
+
+        <h3>人类团队里现成的分工</h3>
+        <p>他举了几个任务本来就自然拆成不同角色的例子：</p>
+        <ul>
+            <li>制作营销物料，比如给太阳镜做宣传册：需要研究员看太阳镜潮流和竞品，平面设计师做图表或好看的产品图，写手把研究和图片素材整合成一本好看的宣传册。</li>
+            <li>写研究文章：研究员做在线调研，统计员算统计数据，主笔和编辑写出成稿。</li>
+            <li>准备法律案件：真实的律所常有律师助理（Associate）、律师辅助人员（Paralegal），可能还有调查员。</li>
+        </ul>
+
+        <h3>每个角色需要什么工具</h3>
+        <p>以营销物料为例细看：</p>
+        <ul>
+            <li>研究员：任务是分析市场趋势、研究竞争对手。设计研究 Agent 时要问它需要什么工具。一个自然的工具是网页搜索，人类研究员做这类报告也要上网搜。</li>
+            <li>平面设计师：任务是做可视化和美术作品。它可能需要图像生成与编辑的 API，或者像咖啡机那个例子一样，需要代码执行来画图表。</li>
+            <li>写手：把研究结果写成报告正文和营销文案。除了 LLM 本来就能做的生成文字，不需要别的工具。</li>
+        </ul>
+
+        <h3>怎么构建单个 Agent</h3>
+        <p>吴恩达在这节和下一节用紫色方框表示 Agent。构建方法是提示 LLM 扮演对应角色。比如研究 Agent 的提示词可以是：</p>
+        <pre><code>You are a research agent, expert at analyzing market trends and competitors.
+Carry out online research to analyze market trends for the sunglasses product
+and give a summary as well of what competitors are doing.</code></pre>
+        <p>（这段是按他口述整理的英文原意。）同样地，提示 LLM 扮演配有合适工具的平面设计师、扮演写手，就得到另外两个 Agent。</p>
+
+        <h3>线性串联</h3>
+        <p>三个 Agent 建好后，一种合作方式是简单的线性工作流，也就是一个线性计划。比如要做一个夏季太阳镜营销活动：</p>
+        <ol>
+            <li>把需求交给研究 Agent，它写一份报告：当前太阳镜潮流和竞品情况；</li>
+            <li>报告交给平面设计 Agent，它根据研究里的数据做几张数据可视化和几种美术方案；</li>
+            <li>所有素材交给写手 Agent，它结合研究和图片写出最终的营销宣传册。</li>
+        </ol>
+        <p>他说这种做法的好处是设计每个角色时可以一次只专注一件事。他可以花时间把平面设计 Agent 做到最好，合作者同时去做研究 Agent 和写手 Agent，最后串在一起。他还看到有开发者开始复用 Agent：做好一个给宣传册用的平面设计师之后，可以考虑把它做得更通用，同时能做宣传册、社交媒体帖子、网页插图。想清楚完成这件事要“雇”哪些 Agent，这有时就对应你会雇哪些类型的人类员工。</p>
+
+        <h3>用多个 Agent 来规划：经理 Agent</h3>
+        <p>除了线性计划，Agent 之间还可以有更复杂的互动。他举了一个“用多个 Agent 规划”的例子。之前是给 LLM 一组可调用的工具，现在改成给 LLM 一组可以调用的 Agent。提示词大致是“你是营销经理，你有以下 Agent 团队可以合作”，然后描述各个 Agent，并要求返回分步计划。这和用工具做规划很像，只是绿色的工具方框换成了紫色的 Agent 方框。</p>
+        <p>LLM 可能会计划：先让研究员调研当前太阳镜潮流并汇报，再让平面设计师做图并汇报，再让写手写报告，最后它自己可能再审阅、反思（Reflection）一遍，改进报告。执行时就把第 1 步交给研究员，结果交给设计师，再交给写手，最后可能做一步反思，然后结束。</p>
+        <p>他说可以把左边这个 LLM 看成第四个 Agent：一个营销经理，带着营销团队，定方向，把任务分派给研究员、设计师、写手。于是整个系统是四个 Agent，由营销经理 Agent 协调另外三个。</p>
+
+        <h3>沟通模式是关键设计决策</h3>
+        <p>这节出现了两种沟通模式：一种是线性的，Agent 一个接一个行动直到结束；另一种是营销经理协调几个 Agent。他说构建多 Agent 系统时要做的一个重要设计决策，就是 Agent 之间的沟通模式。这是一个研究很活跃的领域，有多种模式正在出现，下一节讲几种最常见的。</p>
+    </section>
+
+    <section id="l30">
+        <h2>30. 多 Agent 系统的沟通模式</h2>
+        <p><em>英文原题 Communication patterns for multi-agent systems · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/gymk4l/communication-patterns-for-multi-agent-systems" target="_blank">课程页</a> · 4:22</em></p>
+
+        <p>吴恩达开头说，一群人一起工作时，沟通方式可能相当复杂，设计组织架构图、想清楚人们怎样沟通协作最好，本身就是一件难事。给多 Agent 系统设计沟通模式也一样复杂。他介绍了今天各团队最常用的几种。</p>
+
+        <h3>两种最常见的</h3>
+        <ul>
+            <li><strong>线性（Linear）</strong>：营销团队按线性计划工作，研究员先做，然后设计师，然后写手。研究员把结果传给设计师，研究员和设计师的产出再一起交给写手。他说这是今天最常用的两种沟通模式之一。</li>
+            <li>层级（Hierarchical）：一个经理和几个团队成员沟通并协调他们的工作。营销经理叫研究员干活，拿回报告，转给设计师，再拿回结果转给写手。他提到，真要实现层级模式，让研究员把报告交回经理，通常比让研究员直接把结果传给设计师和写手更简单。</li>
+        </ul>
+
+        <h3>更高级、用得较少的</h3>
+        <p>深层层级（Deeper Hierarchy）：营销经理照样给研究员、设计师、写手派任务，但研究员自己还会调用两个子 Agent，比如网页研究员和事实核查员；设计师自己单干；写手下面有一个负责初稿风格的写手和一个引用核查员。也就是说有的 Agent 自己还会调用子 Agent（Sub-agent）。他在一些应用里见过，但比单层层级复杂得多，今天用得更少。</p>
+        <p>全互联（All-to-all）：任何 Agent 可以在任何时候和任何其他 Agent 说话。他说这种很难执行好，只有少数实验性项目在用。实现方式是：提示全部四个 Agent，告诉每个 Agent 另外还有三个 Agent 可以调用。一个 Agent 决定给另一个发消息时，这条消息被加进接收方的上下文；接收方可以想一会儿，再决定什么时候回复。大家就这样互相交流一段时间，直到每个都宣布自己的任务完成，或者比如写手认为已经够好了，这时生成最终输出。</p>
+        <p>他的经验是全互联的结果有点难预测。有些应用不需要很强的控制，可以跑一遍看看结果；宣传册做得不好也许无所谓，再跑一次，可能得到不同的结果。对能容忍一些混乱和不可预测性的应用，他确实看到有开发者在用这种模式。</p>
+
+        <h3>框架</h3>
+        <p>他提到今天有不少软件框架支持方便地构建多 Agent 系统，也让实现这些沟通模式变得比较容易。如果你自己做多 Agent 系统，可能会发现这些框架有助于尝试不同的沟通模式。他在视频里没有点名具体框架。</p>
+    </section>
+
+    <section id="l31">
+        <h2>31. 结语</h2>
+        <p><em>英文原题 Conclusion · <a href="https://learn.deeplearning.ai/courses/agentic-ai/lesson/qjhixk/conclusion" target="_blank">课程页</a> · 2:02</em></p>
+
+        <h3>回顾五个模块</h3>
+        <ul>
+            <li>模块 1：用 Agentic AI 可以做出哪些以前做不到的应用。</li>
+            <li>模块 2：反思（Reflection）设计模式，他说这是一种简单的办法，有时能给应用带来不错的性能提升。</li>
+            <li>模块 3：工具使用（Tool Use），也叫函数调用（Function Calling），扩展了 LLM 应用能做的事，代码执行是其中一个重要的例子。</li>
+            <li>模块 4：花了很多时间讲评测（Eval）和错误分析（Error Analysis），以及如何用一套有纪律的“构建、再分析”流程高效地持续提升 Agentic 系统的表现。他说这部分内容可能是大家今后长期构建 Agentic 系统时最有用的。</li>
+            <li>模块 5：规划和多 Agent 系统，能构建强大得多的系统，代价是有时更难控制、更难预测。</li>
+        </ul>
+
+        <h3>他的寄语</h3>
+        <p>他认为学完这门课，你已经知道怎样构建很多有意思的 Agentic AI 应用。他说，他的团队或者他看到的其他团队在面试招人时，经常考察的就是这门课里讲的这些技能，所以希望这门课也能给你带来新的职业机会。不管是出于兴趣还是在工作中用，他觉得你会喜欢这些现在能做出来的东西。最后他感谢大家花这么多时间跟他学习，希望你负责任地使用这些技能，去做很酷的东西。</p>
+    </section>
+
+    <section>
+        <h2>本模块的实验</h2>
+        <p>课程页上本模块列出的实验和测验如下。视频里吴恩达没有专门介绍这几个实验，以下只根据标题和本模块视频内容做对应说明：</p>
+        <ul>
+            <li>Ungraded Lab: Customer Service Agent：不计分实验，标题对应第 26、27 节反复使用的客服 Agent 例子（太阳镜店、按计划调用工具）。</li>
+            <li>Ungraded Lab: Market Research Team：不计分实验，标题对应第 29、30 节的多 Agent 营销团队例子（研究员、设计师、写手）。</li>
+            <li>Module 5 quiz：本模块测验。</li>
+            <li>M5 Graded Assignment - Agentic Workflows：本模块计分作业。</li>
+        </ul>
+        <p>这些实验和测验需要 DeepLearning.AI PRO 会员才能做，视频可以免费旁听。本笔记只覆盖视频内容。</p>
+    </section>
+
+    <footer class="document-footer"><p>Andrew Ng · Agentic AI · Module 5 · Notes curated by Joyce</p></footer>
+</article>
+</body>
+</html>
