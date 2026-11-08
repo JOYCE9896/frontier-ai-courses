@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第八讲：让代码库适合 Agent | Stanford CS146S 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="07_定制你的Agent配置.html">&larr; 上一讲</a>
+    <span>Stanford CS146S: Lecture 8</span>
+    <a href="09_能验证就能解决.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第八讲：让代码库适合 Agent</h1>
+        <p class="subtitle">上下文的层次回顾，为什么大多数代码库还没准备好让 Agent 干活，人能绕过去而 Agent 绕不过去的缺口，一份“Agent 就绪”检查清单和 Factory 的就绪度报告，以及后台编程 Agent 需要什么：工作树隔离、多 Agent 编排器和云端 Agent</p>
+        <div class="author-meta">
+            主讲：Mihail Eric<br>
+            资料来源：<a href="https://docs.google.com/presentation/d/1yCxocmUrGIN7IrC42WB6NW08PtYYFLe1ombDj3Ay6_8/edit" target="_blank">课件</a>（2026 年 10 月 20 日；这一讲没有公开转录，本文依据课件整理）<br>
+            课程推荐阅读：<a href="https://www.youtube.com/watch?v=ShuJ_CN6zr4" target="_blank">Making Codebases Agent Ready</a>（视频）、<a href="https://x.com/trybasis/status/2056881705269580023" target="_blank">Making Ergonomic Repositories</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、开场事务</h2>
+        <ul>
+            <li>第 4 周作业周日截止。</li>
+            <li>问大家第一次开源贡献做得怎么样，并发了期中课程问卷。</li>
+            <li>周四的客座讲座在 STLC 111，嘉宾是 Factory 的 CTO Eno Reyes（笔记见<a href="09_能验证就能解决.html">第九讲</a>）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>二、回顾：上下文是怎样叠起来的</h2>
+        <p>
+            开头一页“上下文的故事”把<a href="07_定制你的Agent配置.html">第七讲</a>结尾的内容再列了一遍。编程 Agent 每次调用模型时，送进去的上下文（Context，模型这一轮能看到的全部文字）从上到下由这几层组成：
+        </p>
+        <ol>
+            <li>系统提示词（System Prompt）</li>
+            <li>Memory.md（Agent 自己记下的长期记忆）</li>
+            <li>环境信息（操作系统、当前目录、日期等）</li>
+            <li>MCP 工具</li>
+            <li>Skill</li>
+            <li>全局 AGENTS.md</li>
+            <li>本地（仓库里的）AGENTS.md</li>
+        </ol>
+        <p>
+            这一讲接着往下走：上下文写得再好，如果代码库本身乱，Agent 照样会出错。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、为什么要做“Agent 就绪”的仓库</h2>
+        <p>
+            课件的判断是，今天大多数代码库都没有为 Agent 的成功做好准备。LLM 的很多困惑，来自它要在一个杂乱或不完整的开发环境里完成任务。所以要优化代码库和开发环境，目标是让一个人和一个 Agent 都能看懂这里发生了什么。
+        </p>
+        <h3>人能绕过去的问题</h3>
+        <p>课件逐条列了人类工程师平时怎样应付这些缺口：</p>
+        <ul>
+            <li>测试覆盖不够：手动测一下。</li>
+            <li>文档过时：去问同事。</li>
+            <li>没有 linter（自动检查代码格式和常见错误的工具）：自己看看分号写没写。</li>
+            <li>构建不稳定（flaky build，同样的代码有时成功有时失败）：重试。</li>
+            <li>环境搭建和上手复杂：去问同事。</li>
+            <li>可观测性（Observability，能看到系统运行时发生了什么）差或没有：去翻日志。</li>
+            <li>没有安全扫描：先不管。</li>
+            <li>写法不统一：靠团队里没写下来的经验（tribal knowledge）。</li>
+        </ul>
+        <h3>同样的问题怎样卡住 Agent</h3>
+        <ul>
+            <li>没有测试，Agent 没法验证改得对不对。</li>
+            <li>没有文档和规范，Agent 没法保证写法一致。</li>
+            <li>构建不可靠，Agent 没法验证自己的改动。</li>
+            <li>没有可观测性，Agent 没法调试。</li>
+            <li>环境搭建复杂，Agent 没法复现环境。</li>
+            <li>没有安全检查，Agent 会引入漏洞。</li>
+        </ul>
+        <p>
+            课件备注补了一句：杂乱的仓库可以很简单，比如访问数据库有几种不同写法、变量命名不统一、好几个函数做同一件事。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、Agent 就绪环境检查清单</h2>
+        <ul>
+            <li>足够的测试覆盖</li>
+            <li>封闭构建（Hermetic build）：构建只依赖仓库里声明的东西，在哪台机器上跑结果都一样</li>
+            <li>文档清楚、前后一致的设计模式</li>
+            <li>没有过时的 README</li>
+            <li>可以验证的检查（Agent 能自己跑、能得到明确通过或失败的检查）</li>
+            <li>一份专门给 Agent 的操作手册：AGENTS.md 等</li>
+        </ul>
+        <h3>做到之后能干什么</h3>
+        <ul>
+            <li>完成大任务，比如代码迁移。</li>
+            <li>团队里多个人各自跑多个 Agent 任务。</li>
+            <li>自动代码审查（见<a href="10_Agent代码审查.html">第十讲</a>）。</li>
+            <li>结果可以验证的长时间 Agent 任务。</li>
+            <li>在老代码库（brownfield，已有大量历史代码的项目）上跑 Agent。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>五、演示：Agent 就绪度报告</h2>
+        <p>
+            课上演示了 Factory 的 Agent 就绪度（Agent Readiness）框架，现场给几个开源仓库打分。课件给的链接：
+        </p>
+        <ul>
+            <li><a href="https://factory.ai/news/agent-readiness" target="_blank">Factory 介绍这个框架的文章</a>和<a href="https://factory.ai/agent-readiness" target="_blank">公开报告页</a></li>
+            <li>现场看的例子是 <a href="https://app.factory.ai/analytics/readiness/https%253A%252F%252Fgithub.com%252Fvercel%252Fnext.js" target="_blank">vercel/next.js 的就绪度报告</a></li>
+            <li>一条相关推文（<a href="https://x.com/alvinsng/status/2030056110317818206" target="_blank">alvinsng</a>）和一个开源的同类工具 <a href="https://github.com/kodustech/agent-readiness" target="_blank">kodustech/agent-readiness</a></li>
+        </ul>
+        <p>
+            框架的具体内容（支柱和五个等级）在第二天 Eno Reyes 的客座讲座里讲得更细，见<a href="09_能验证就能解决.html">第九讲</a>。第 5 周作业就是用这个报告给三个开源仓库打分，见<a href="作业.html">作业</a>。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、后台编程 Agent 的工作流</h2>
+        <p>
+            后半节换到后台 Agent（Background Agent）：你把任务交出去，Agent 在别处自己跑，你不用盯着，可以同时开好几个。
+        </p>
+        <h3>为什么要往这里走</h3>
+        <p>课件列了编程 Agent 能力的三个阶段和对应的效率提升：</p>
+        <table>
+            <thead><tr><th>阶段</th><th>时间</th><th>效率提升</th></tr></thead>
+            <tbody>
+                <tr><td>Tab 补全</td><td>2021</td><td>约 15%</td></tr>
+                <tr><td>同步完成单个任务</td><td>2024</td><td>约 25% 到 35%</td></tr>
+                <tr><td>后台同时完成多个任务</td><td>2026 年以后</td><td>2 倍以上</td></tr>
+            </tbody>
+        </table>
+        <h3>后台 Agent 需要什么</h3>
+        <p>
+            要求是：隔离的开发环境，加上第四节那份清单上的全部内容（测试覆盖、封闭构建、一致的设计模式、没有过时 README、可验证的检查、AGENTS.md）。课件备注自己点破了：这和前面“Agent 优先的开发环境”那页基本是同一页。也就是说，仓库做到 Agent 就绪，后台 Agent 就跑得起来。
+        </p>
+        <h3>隔离：Git 工作树</h3>
+        <p>
+            多个 Agent 同时改同一个仓库，最简单的隔离办法是 Git 工作树（worktree）：同一个仓库检出到多个目录，每个目录在自己的分支上，互不干扰。
+        </p>
+        <pre><code>git worktree add -b my-new-branch ../my-new-branch</code></pre>
+        <h3>多 Agent 编排器</h3>
+        <p>
+            选项有 Conductor、Cursor 的并行 Agent、Claude Code Swarms，或者自己写。好处是把建工作树这类底层操作包起来。缺点是界面有时比较死板；共享资源（数据库、端口）并没有完全隔离。课件备注还提到，这些编排器会让你很难在终端、IDE、云端之间来回切换。
+        </p>
+        <h3>云端 Agent</h3>
+        <p>
+            云端 Agent 把开 Agent、配环境这些复杂的事全包了，而且可以从不同的入口启动：
+        </p>
+        <ul>
+            <li>浏览器：Codex、Claude Code、Devin</li>
+            <li>代码审查：Graphite、Claude、Devin Review</li>
+            <li>聊天工具：Slack 里的 Claude Code 和 Codex</li>
+            <li>手机：原生 App，或者通过 Slack 这类第三方 App</li>
+            <li>任务跟踪软件：比如一个 Linear issue</li>
+        </ul>
+        <p>
+            课表上第 8 周（11 月 10 日）还有一讲专门讲后台 Agent，这里是提前铺垫。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS146S: The Modern Software Developer &copy; Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="07_定制你的Agent配置.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="09_能验证就能解决.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

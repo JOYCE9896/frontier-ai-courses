@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十讲：Agent 代码审查 | Stanford CS146S 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="09_能验证就能解决.html">&larr; 上一讲</a>
+    <span>Stanford CS146S: Lecture 10</span>
+    <a href="作业.html">作业 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十讲：Agent 代码审查</h1>
+        <p class="subtitle">代码审查为什么重要、能抓到什么，审查需求的层次，代码生成变快之后审查成了瓶颈，AI 审查的三级成熟度，分层检查和按风险分流，多 Agent 审查架构和一个安全审查 Agent 的规则，怎样设计一个审查 Agent（换模型、给上下文、实际运行验证、按任务选模型、用历史 bug 做评测），以及现有工具</p>
+        <div class="author-meta">
+            主讲：Mihail Eric<br>
+            资料来源：<a href="https://docs.google.com/presentation/d/1u8WYtFj0O9yc4H4JX9D4URYKhDzvrAGKLzn38DXSrak/edit" target="_blank">课件</a>（2026 年 10 月 27 日；这一讲没有公开转录，本文依据课件整理，包括课件里的图片页）<br>
+            课程推荐阅读：<a href="https://x.com/addyosmani/status/2114604912520921136" target="_blank">Layered Code Review and Risk-Based Human Oversight</a>（Addy Osmani）、<a href="https://blog.cloudflare.com/ai-code-review" target="_blank">Coordinating Specialist Review Agents at Scale</a>（Cloudflare）、<a href="https://greptile.com/blog/how-to-build-a-code-review-agent" target="_blank">Beyond the Diff: Context, Testing, and Model Selection</a>（Greptile）
+        </div>
+    </header>
+
+    <section>
+        <h2>一、开场事务</h2>
+        <ul>
+            <li>第 5 周作业周日截止（题目见<a href="作业.html">作业</a>）。</li>
+            <li>还剩一些赞助额度（Grok、Cognition）。</li>
+            <li>周四客座讲座在 STLC 111，嘉宾是 Cognition 的首席研究官 Silas Alberti（那一讲没有公开课件）。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>二、为什么讲代码审查</h2>
+        <p>
+            代码审查（Code Review）是指代码合进主分支之前，由别人（现在也可以是 Agent）读一遍改动、提意见。课件开头的判断：代码审查是想成为更好的工程师、提高团队整体代码质量时，杠杆最高的事情之一。它有两个作用：发现并修掉 bug；让团队对系统形成共同的理解（shared mental model）。
+        </p>
+        <h3>审查能抓到什么</h3>
+        <ul>
+            <li>逻辑和正确性错误</li>
+            <li>可读性和可维护性</li>
+            <li>性能</li>
+            <li>安全</li>
+            <li>最佳实践，也就是团队里没写下来的经验</li>
+        </ul>
+        <h3>审查需求的层次</h3>
+        <p>
+            课件引用了 Blake Smith 的“代码审查需求层次”金字塔，从最重要到最不重要：
+        </p>
+        <ol>
+            <li>Mental Alignment：大家对系统的理解保持一致（最重要，在金字塔底部）</li>
+            <li>Correct Solution：改动确实正确地解决了问题</li>
+            <li>Design Discussion：对设计的优缺点展开讨论</li>
+            <li>Find Bugs：在上线前抓到 bug</li>
+            <li>Style：代码风格和组织保持一致（最不重要，在顶端）</li>
+        </ol>
+        <p>
+            按这个排法，找 bug 和统一风格反而排在后面，最重要的是让团队成员随着系统的变化更新自己对它的理解。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、AI 原生的代码审查</h2>
+        <p>
+            现在的问题是，代码生成的速度上去了，审查没跟上，成了新的瓶颈。课件给了一个成熟度阶梯：
+        </p>
+        <table>
+            <thead><tr><th>阶段</th><th>做法</th><th>评价</th></tr></thead>
+            <tbody>
+                <tr><td>0</td><td>人审查一切</td><td>不可能规模化</td></tr>
+                <tr><td>1</td><td>单个 Agent 审查</td><td>好一些，配上自动修复循环更好，但还有收益没拿到</td></tr>
+                <tr><td>2</td><td>多 Agent、按风险分级、自带自我改进的审查；工程规范存在 Skill 知识库里</td><td>很多公司正在收敛到的最佳实践</td></tr>
+            </tbody>
+        </table>
+        <h3>分层检查，不靠一道关</h3>
+        <p>
+            第一张图来自 Addy Osmani 的推文（Layers, not one gate）：六层检查叠在一起，下面还有一层快速回滚。问题从上面掉进来，每一层都会漏掉一些，但每一层抓的不一样。六层从上到下是：
+        </p>
+        <ol>
+            <li>verification（验证）</li>
+            <li>required CI（必须通过的 CI）</li>
+            <li>AI review（AI 审查）</li>
+            <li>security review（安全审查）</li>
+            <li>human approval（人工批准）</li>
+            <li>merge queue + flags（合并队列和功能开关）</li>
+        </ol>
+        <p>
+            全部漏过去的问题，由最底下的 fast rollback（快速回滚）兜住。
+        </p>
+        <h3>按风险分流</h3>
+        <p>
+            第二张图来自 Augment Code 介绍 Cosmos 的文章，是一条按风险分流的审查流水线：
+        </p>
+        <ol>
+            <li>PR Author：PR 作者负责这个 PR 的整个生命周期，一轮轮修改，直到意见处理完、合并进去。</li>
+            <li>PR Risk Analyzer：给每个 PR 评估风险，决定走哪条路。</li>
+            <li>低风险的走 Auto-Approve，自动批准；其余的走 Deep Code Review，逐行分析代码正确性。</li>
+            <li>Review Outcome：发评论、批准，或要求修改。</li>
+            <li>Code Review Memory：组织级的记忆，存 Agent Skill 和开发者的最佳实践，反过来供作者和审查环节使用。</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>四、多 Agent 审查架构</h2>
+        <p>
+            课件引用了 Cloudflare 的文章（<a href="https://blog.cloudflare.com/internal-ai-engineering-stack/" target="_blank">internal AI engineering stack</a>）：一个 PR 进来，分给几个各管一方面的审查 Agent，最后由一个汇总的评判 Agent 合并结论。
+        </p>
+        <pre><code>                 Pull request
+      ┌────────┬───────┴───────┬────────────┐
+  Security  Architecture  Code Quality  Performance
+   Review     Review        Review        Review
+      └────────┴───────┬───────┴────────────┘
+                 Aggregate Judge</code></pre>
+        <h3>安全审查 Agent 的规则</h3>
+        <p>课件截了这样一个 Agent 的指令片段，规定该标什么、不该标什么：</p>
+        <pre><code>## What to Flag
+- Injection vulnerabilities (SQL, XSS, command, path traversal)
+- Authentication/authorisation bypasses in changed code
+- Hardcoded secrets, credentials, or API keys
+- Insecure cryptographic usage
+- Missing input validation on untrusted data at trust boundaries
+
+## What NOT to Flag
+- Theoretical risks that require unlikely preconditions
+- Defense-in-depth suggestions when primary defenses are adequate
+- Issues in unchanged code that this MR doesn't affect
+- "Consider using library X" style suggestions</code></pre>
+        <h3>一次实际的审查输出</h3>
+        <p>
+            课件还放了一张 OpenCode Code Review 的截图：一个合并请求的审查结果按领域分块，Security、AGENTS.md、Code Quality、Performance 各自给出 LGTM（Looks Good To Me，审查通过）和理由，比如令牌只传给创建客户端的函数、没有被记日志，路径做了前缀校验，远程内容用 Zod schema 校验；Code Quality 一栏逐条确认上一轮指出的三个问题都已解决。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、怎样设计一个审查 Agent</h2>
+        <p>这部分对应推荐阅读里 Greptile 的文章。</p>
+        <h3>审查和生成用不同的模型</h3>
+        <p>
+            写代码用一个模型，审查换另一个。课件在这一条下面写了一个词 Model inverter，没有展开解释（没有转录，具体指什么这里不确定）。
+        </p>
+        <h3>精心准备上下文</h3>
+        <p>
+            审查 Agent 只看 diff 不够。课件的图：文档和工单（Jira、Linear、文档）经过一个 MCP 网关进来，代码库经过一个代码库索引器进来，两路都汇到审查 Agent。
+        </p>
+        <h3>实际运行来验证</h3>
+        <p>起一个开发容器（dev container），把不同的代码路径真正跑一遍。</p>
+        <h3>按任务难度选模型，控制成本</h3>
+        <ul>
+            <li>收集代码上下文：便宜、快的模型。</li>
+            <li>浏览器操作：小到中等的模型，推理力度调高。</li>
+            <li>深度 bug 分析：前沿模型。</li>
+        </ul>
+        <h3>评测</h3>
+        <p>
+            评测（Eval）审查 Agent 的数据从哪来：有已知 bug 的历史 PR；以及后来出了事故、被回滚（revert）的改动。拿这些看审查 Agent 当时能不能抓出来。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、现有工具</h2>
+        <ul>
+            <li>通用：Claude Code、Greptile、CodeRabbit、Devin</li>
+            <li>安全：Vercel deepsec、Wiz、Semgrep</li>
+        </ul>
+        <p>
+            Semgrep 的 CEO Isaac Evans 是第 7 周（11 月 5 日）的客座嘉宾，那一讲还没有公开课件。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS146S: The Modern Software Developer &copy; Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="09_能验证就能解决.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="作业.html">作业 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
