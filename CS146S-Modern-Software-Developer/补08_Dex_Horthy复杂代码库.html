@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>补充八：Dex Horthy 在复杂代码库里让 Agent 交付 | Stanford CS146S 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <style>blockquote { margin: 1em 0; padding-left: 1em; border-left: 3px solid #ccc; color: #555; }</style>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="补07_Micah_Villmow多Agent工作流.html">&larr; 上一篇</a>
+    <span>Stanford CS146S: 补充八</span>
+    <a href="补09_Tomas_Reimers代码审查.html">下一篇 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>补充八：Dex Horthy 在复杂代码库里让 Agent 交付</h1>
+        <p class="subtitle">"上下文工程"一词的提出者谈不读代码的风险、为什么先追求两倍而不是十倍，然后现场用 HumanLayer 的八步流程做一个真实功能：问题、研究、设计讨论、结构大纲、计划、worktree、实现、PR；中间插入一个"学习测试"，以及为什么计划要按垂直切片排</p>
+        <div class="author-meta">
+            嘉宾：Dex Horthy（HumanLayer CEO，"context engineering"和 12-Factor Agents 的提出者）· 主持：Mihail Eric（本课程讲师）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=kBqRubi7dSk" target="_blank">Making Agents Ship in Complex Brownfield Codebases | Dex Horthy, CEO of HumanLayer</a>（2026 年 4 月 28 日，1 小时 27 分；本文依据 YouTube 自动生成的英文字幕整理）<br>
+            说明：这不是一次课堂讲座。The Build System 是本课程 YouTube 频道 The Modern Software Developer 上的访谈节目，由讲师主持，嘉宾现场用自己的工具做一个真实项目。内容和<a href="03_高级提示与RePPIT.html">第三讲：高级提示与 RePPIT</a>直接相关：第三讲的研究、计划、实现框架就是从 HumanLayer 开源的 Research-Plan-Implement 提示演化来的，这一期展示的是他们后来拆细的版本。
+        </div>
+    </header>
+
+    <section>
+        <h2>一、行业现状：有点累，反对炒作</h2>
+        <!-- 00:05–00:10 -->
+        <p>
+            主持人请他先谈谈现状。Dex 说自己"lately I'm a little tired"：他这一年都在当"反炒作的人"，可大家还在用两年前的东西宣称"一切都变了"。他当初提 context engineering 和 12-Factor Agents，就是因为网上流行的东西（复杂的 n8n 流程、"给模型一堆工具让它循环"的 Agent）演示效果好，但真正在几百人规模的公司里可靠上线的人，做法完全不同。现在大家开始热衷"harness engineering"，他觉得只是换了个词：
+        </p>
+        <blockquote>"We ruined the word agent already. Like agent was a good word and it was useful and it meant this one specific thing and then everyone started using agent to mean everything... The same thing has happened to harness."</blockquote>
+        <p>
+            让他兴奋的是人和 Agent 的多人协作：用 Markdown 文档当作人与人、人与 Agent 之间对齐想法的共享媒介。他也讨厌"multi-agent system"这个词，因为说不清是指 Agent 之间互相聊天、分层的子 Agent，还是 RLM 那种无限深的递归。他另一个关注点是让 AI 加速整个软件工程流程，而不只是写代码：规划、对齐、代码审查、返工、测试和验证。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、团队会怎样变化</h2>
+        <!-- 00:10–00:15 -->
+        <p>
+            主持人问：瀑布式、敏捷都伴随着团队结构的变化，Agent 会不会带来新的方法论？Dex 认为每次变革都是在问"怎样让一个有层级和流程的大组织像小团队一样运转"。敏捷和 DevOps 都是把按技能横切的组织转 90 度，变成跨职能的纵向团队。以前最好的工程师能往自己领域外迈一步，后端做点前端；现在 AI 让人能走出两三层。他提到 Every 公司七个产品、每个产品一个工程师。
+        </p>
+        <p>
+            他还有一个猜测：以后在团队之间造成隔阂的，可能是工作流，而不是技术栈：
+        </p>
+        <blockquote>"It's going to become harder to move from a team that uses Claude to a team that uses Codex than it's going to be to move from like the front end to the back end."</blockquote>
+        <p>
+            他举的工作流例子是 gstack、GSD 和 RPI（Research-Plan-Implement）。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、"黑灯工厂"和不读代码</h2>
+        <!-- 00:15–00:25 -->
+        <p>
+            主持人问到软件的"dark factory"：从 spec、生成、代码审查到 QA 全部由 Agent 完成，像日本无人工厂那样连灯都不用开（StrongDM 做过类似实验）。Dex 讲了自己的经历：2025 年 6 月他和 Geoffrey Huntley 聊过之后很受 Ralph 循环启发，8 月 HumanLayer 尝试过"不读代码"，只仔细读测试、知道大致结构。到 11 月他们不得不推倒大部分系统重写。重写时，他的联合创始人在 VS Code 里（连 Cursor 都没用）一个字一个字手敲了两周，把各种模式从头到尾打通，AI 只用来做研究，目的是保证未来三到六个月的核心架构是对的。
+        </p>
+        <p>
+            他提到 Amazon 的例子：出事故后有一个 90 天的整顿期，中级和初级工程师不能再互相审对方粗糙的 PR，所有代码都要资深工程师审，"we are back to reading the code"。
+        </p>
+        <p>
+            为什么模型不擅长架构：
+        </p>
+        <blockquote>"The cost function in an RL sense of bad architecture plays out over weeks, months, and years and it's very hard to create an RL judge for like good or bad software architecture."</blockquote>
+        <p>
+            他描述了一个可能的灾难场景：凌晨三点 Datadog 报警，Agent 修不好，再派一个更聪明的 Agent 也修不好，这时才发现三个月没人读过代码，恢复要几天甚至几周，客户流失，小公司可能就此倒闭。
+        </p>
+        <p>
+            主持人问：是不是再来一个模型就好了？Dex 说自己整体上算加速派，"我准备好开三档、四档，还没准备好上高速开五档"。他的个人感受是 Opus 4.5、4.6 更快、某些方面更好、画图更好，但整体上比 4.1 稍笨（他承认没有数据，基准分数说的是相反的）。他不排除 Transformer 已经接近上限。他的态度是：
+        </p>
+        <blockquote>"When you say we're going to stop writing the code, you are making a bet that you can time... You should skate to where the puck is going, but you shouldn't put your entire code base on the line to do that."</blockquote>
+        <p>
+            主持人提到 Boris Cherny 说"永远为六个月后的模型构建"。Dex 说可以，但要按中位数的情况来规划：六个月后的模型大概聪明 20% 到 30%，能做更长的任务，是渐进的提升，不是革命。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、先追求两倍</h2>
+        <!-- 00:24–00:30 -->
+        <p>
+            主持人说大企业里常见的情况是：今年一月给三千人装了 Copilot 和 Claude Code，工程师也爱用，但纸面上最好只有 15% 到 30% 的提升。Dex 说他当天上午刚聊过这个话题，他的回答是：做不到两到三倍，就是用法不对，该培训团队、换更好的工具。
+        </p>
+        <p>
+            关于一个人能同时管几个 Agent：他建议复杂工作最多同时做两件，而且分主次。主任务一旦不需要等待，就回到主任务；等待时做次要任务；主任务完成后，次要任务升为主任务，再拉进一个新的次要任务。或者一件难事加三四个不用怎么动脑的小 bug。
+        </p>
+        <blockquote>"Planning and research and all this stuff... one of these things gives you 2x leverage, another one gives you 2x leverage. That's you're moving four times faster. Learn to do that well and then go figure out how to go 10 or 20 times faster."</blockquote>
+    </section>
+
+    <section>
+        <h2>五、要做的功能</h2>
+        <!-- 00:30–00:37 -->
+        <p>
+            HumanLayer 的产品是一个管理 Claude Code 会话的界面，他们用这个产品开发这个产品本身。工单在 Linear 里：允许用户在会话有待批准的工具调用时中断会话。
+        </p>
+        <p>
+            现状是：如果没开自动批准，Claude 要执行写文件之类的操作时会停在"待批准"状态，这时界面上不能中断，只能批准；如果开始打字，就进入"拒绝"模式，打的字会作为"用户拒绝了这次工具调用，并附上反馈"发给 Claude。用户想要的是直接停掉它。
+        </p>
+        <p>
+            Dex 在白板上画了系统结构：网页客户端 → API → 他工作站上管理所有 Claude Code 会话的守护进程（daemon），会话产生的事件再流回 API，显示在客户端。客户端拿到待批准列表，把某个批准更新为"已批准"，守护进程看到后转发给 Claude Code，让它继续，再把事件发回去。涉及事件、会话、批准几张表，批准有待定、批准、拒绝几种状态，会话自己也有运行、已中断等状态。改动牵涉的地方很多，所以是一个"sticky and complex"的功能。
+        </p>
+        <p>
+            他只把 Linear 工单 ID 交给系统，打开"auto advance"（每一步完成后自动进入下一步），然后开始。工单写得很短，他说这是有意的：
+        </p>
+        <blockquote>"I want to be able to just like ramble five sentences into voice mode and then have the model go read all the code base and pull all the code base context in and then we iterate on this back together."</blockquote>
+    </section>
+
+    <section>
+        <h2>六、八步流程</h2>
+        <!-- 00:33–00:44 -->
+        <p>
+            这个流程有八步，每一步是一个独立的上下文窗口，只带上一步产出的文档：
+        </p>
+        <ol>
+            <li><strong>问题</strong>：把工单变成一组研究问题。这些问题是给模型回答的，不是给人的。</li>
+            <li><strong>研究</strong>：开一个全新的上下文窗口，这个会话不知道要做什么功能，只负责回答问题，派子 Agent 去读代码库。</li>
+            <li><strong>设计讨论</strong>：用工单和研究文档，讨论要达到的状态和取舍。</li>
+            <li><strong>结构大纲</strong>：用前三份文档写出分阶段的大纲。</li>
+            <li><strong>计划</strong>：用前四份文档写出逐行的改动计划。</li>
+            <li><strong>建 worktree</strong>。</li>
+            <li><strong>实现</strong>。</li>
+            <li><strong>提 PR</strong>。</li>
+        </ol>
+        <h3>研究要客观</h3>
+        <p>
+            主持人以为研究是为了让 Agent 弄清要做什么，Dex 纠正说不是：研究里不能出现要实现什么、模型打算怎样解决的任何细节，目的只是生成一份代码库的压缩视图，几百行 Markdown，后面每个会话都用它。研究阶段的每个子 Agent 可能读十万 token 的代码，压缩成几百到一千 token。这样每次开新会话不用重新让模型熟悉代码库，又不会因为塞了五千行背景而占满上下文。他们在五百万行的 monorepo 里跑过这个流程。
+        </p>
+        <blockquote>"It's a flavor of throwing more tokens at the problem, but it's only throwing tokens at the problem for the things that the AI is good at, which is like, okay, go read a million files and then figure out how everything works and then I'm going to tell you what we're building."</blockquote>
+        <p>
+            他引用 Geoffrey Huntley 的说法，把这种做法称为在上下文窗口之间逐步压缩：每个窗口只继承前一个的一部分，不断提炼"去哪里、怎么去"，最后变成给 Agent 用的底层文档。
+        </p>
+        <h3>流程该用多重</h3>
+        <blockquote>"The ceiling of the hardest problem you can solve is proportional to like the amount of this context engineering you're willing to do."</blockquote>
+        <ul>
+            <li>改一个按钮颜色、知道在哪个文件：直接跟 Agent 说，不用这个流程。</li>
+            <li>中等功能：可能跳过问题和研究，把时间花在设计讨论上，稍微看看大纲。</li>
+            <li>大功能：每个文件都读、都审。</li>
+            <li>两万行的 PR：多次研究、多份计划，围绕同一个目标。</li>
+        </ul>
+        <p>
+            他还说 Codex 开工前会自己多读文件，需要的提示少一些；流程拆细的另一个好处是能让 Sonnet 完成以前需要 Opus 的工作，速度更快。这个流程最初是三步（研究、计划、实现），后来拆细是为了提高能解决的问题的上限，也为了更适合小模型。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、审研究和设计：人在哪里动脑</h2>
+        <!-- 00:43–00:52 -->
+        <p>
+            研究文档大约 400 行，讲了系统里批准的状态流转。他说一般不细读研究，"current frontier models are really damn good at reading a bunch of code and explaining how it works"，但会看结尾的开放问题，例如"多个子 Agent 同时有待批准项时怎么办"。开放问题说明模型漏了重要细节。他在文档上直接加评论（"读代码去找答案""这个和竞态条件有关"），再把评论发给 Agent，让它把答案补进研究文档。设计阶段用的是第一版研究，之后所有步骤用补全后的第二版，这样后面的会话不必各自再查一遍。他说这种方式绕开了上下文压缩、清空、零散 Markdown 文件的问题，因为所有重要的东西都写进这几份文档里。
+        </p>
+        <p>
+            读设计文档时他说"Do not outsource the thinking"，这是"me doing brain surgery on the agent"。设计文档里写明了不改什么（中断流程、数据结构、订阅逻辑），以及要遵循的已有模式。他解释，很多代码库同一件事有三四种做法，这一步要确认模型找到的是新的那种。文档里列出的选项不一定都对。
+        </p>
+        <h3>学习测试</h3>
+        <p>
+            设计里有一个问题：API 发中断时，要显式拒绝所有待批准项，还是依赖守护进程已有的收尾逻辑？这取决于 Claude Agent SDK 在会话被中断时的行为，而 Dex 不信任模型靠读文档去猜。他让 Claude 写一个"学习测试"：在 <code>test/learning</code> 目录下，启动一个会话，在有待批准项时中断，打印所有事件，再恢复会话，看上下文里有什么。只打印，不写断言。
+        </p>
+        <p>
+            结果：中断信号触发后，SDK 自动注入两条用户消息，一条是工具结果"user doesn't want to proceed with this tool use"，一条是"requested interrupt by user"；恢复会话时没有重放事件，Claude 记得那次被拒绝的调用，知道文件没写成。所以只要取消 SDK 会话，SDK 会替他们拒绝所有工具调用，后端只需把这些批准标记为已拒绝，不让它们继续显示。
+        </p>
+        <p>
+            他把研究分成三类：代码库研究、网页和文档研究、学习测试。学习测试（他说可能是 Uncle Bob 或 Martin Fowler 的叫法）就是"证明这个系统像你以为的那样工作"，在对接黑盒的第三方系统时用，比如 Claude Agent SDK 或 OpenAI 的 Responses API，看思考块在哪里保留、上下文怎样变化。这些测试不进 CI，但会提交到仓库，作为"可执行的文档"：怀疑外部 SDK 行为变了，就把它们全跑一遍；其中有些带断言，覆盖他们依赖的行为。
+        </p>
+        <blockquote>"I didn't pick this issue thinking we would do a learning test, but in the middle of the design I was like, 'I don't trust that you understand this. So, I'm going to make you prove the understanding.'"</blockquote>
+        <h3>多人一起改设计</h3>
+        <p>
+            文档放在云端、挂在 Linear 工单上，可以发链接给同事评论。演示中他的联合创始人 Kyle 在文档上回复"Option A looks more readable to me"。他们还给 Claude 接了一个 MCP 服务器，让它也能在评论串里回复。工单状态会随流程自动变化（研究中、设计中），不过他不建议给每一步都建看板列。他说出的设计决定包括：有待批准项时也允许中断（不用连拒四次）；Cmd+Enter 在有待批准项时仍进入拒绝模式；在发送按钮左边加一个中断按钮。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、计划要按垂直切片排</h2>
+        <!-- 01:05–01:13 -->
+        <p>
+            结构大纲他主要看验证步骤，要求每个阶段都有人工测试步骤。他解释为什么：
+        </p>
+        <blockquote>"Models love to make these horizontal plans where it's like we're going to do the database, and then the services, and then the API, and then the front end. And before you know it... you're at the other end of 1,200 lines of code, and like you find out it's not working."</blockquote>
+        <p>
+            人写代码的方式是先做一个 API 端点，再做前端，再接服务层，再加数据库迁移，每一步都有一个能看、能检查的东西，"you would write like 50 lines of code and then run some tests"。按垂直切片排，人能在走得太深之前检查、修 UI、调整结构。
+        </p>
+        <p>
+            他认为模型最不擅长的两件事是：长期的架构决定，以及把计划排成每一步都可验证的顺序。他们这一步的提示里把"做垂直切片，不要横切"重复了四遍，内部评估仍然做不到足够可靠，所以人留在这两步：
+        </p>
+        <blockquote>"This is the highest leverage place that we have found to put humans in the workflow."</blockquote>
+        <p>
+            这次的计划只有两个阶段，所以他就让它跑完。复杂、敏感的改动有时是九个阶段，他会每个阶段都看。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、外层的 harness</h2>
+        <!-- 01:04–01:18 -->
+        <p>
+            主持人问还有哪些看不见的部分。Dex 介绍：
+        </p>
+        <ul>
+            <li><strong>hook</strong>：Claude Code 会话里装了 hook，连回守护进程。比如 Claude 写出一份文档时，hook 把内容发给 API，存进 artifacts 表；任务下面挂着会话和文档。演示中 Claude 用 <code>cat</code> 读文件绕开了 hook，Dex 只好提醒它，他们是用 hook 模拟一个虚拟文件系统。</li>
+            <li><strong>"监督 Agent"</strong>：如果用营销的说法，就是有一个监督 Agent 盯着所有会话事件并建议下一步；实际做法是把会话的最终回答过一个提示，输出一个 JSON：有没有下一步、下一个工作流是什么、在哪个目录启动。</li>
+            <li><strong>Skill 插件</strong>：create research、create design discussion、create plan、implement plan 等，每步一个；还有 iterate 类的 Skill，上下文用多了想继续改某份文档时，开新会话读已有文档再修改。自动化做的只是告诉 Claude 用哪个 Skill，开 auto advance 时再加一句"每个阶段后不用等确认"。</li>
+            <li><strong>模型分工</strong>：外层用 Opus 级模型，实现用快速的 Sonnet 子 Agent，因为计划已经写到逐行改动，"we've done all the hard thinking already"。</li>
+        </ul>
+        <p>
+            他说八步流程靠人记不住，需要一个外层编排来管理会话和各自的上下文窗口，"the outer harness, if you will"。计划写完之后，前面的文档基本就不用了。
+        </p>
+    </section>
+
+    <section>
+        <h2>十、结果</h2>
+        <!-- 01:18–01:24 -->
+        <p>
+            实现在 worktree 里跑。API 测试很慢（用真实 Docker 和 Postgres 的端到端测试，在 MacBook 上大量并行偶尔不稳定），他跳过了一部分，Rust 编译也慢（跨 worktree 保留 Rust 构建缓存很麻烦），最后只起了网页版。新建一个会话、在待批准状态按 Ctrl+C，显示"Interrupt requested"，工具调用被拒绝，功能可用。
+        </p>
+        <p>
+            代码量不大，他说不会去读懂底层每一行，但接下来会读代码、提 PR、看 CI 能否通过，可能还要再迭代一次测试。主持人总结：这次基本一次做成，中间如果是更敏感的改动会有更多检查。
+        </p>
+        <p>
+            关于开源：最初的 Research-Plan-Implement 提示已经开源，被很多公司（包括有几千名工程师的财富 500 强）在用，也有人拿去包装成 SaaS 卖。新拆细的这套（他称为 CRISPY）还没开源，可能以后用类似 AGPL 的许可证发布。他建议大家自己练：拿原来那份约 85 条指令的大提示，拆成每份约 30 条的小提示并串起来，"it will teach you so much about models, LLMs, prompt engineering, context engineering"。他说指令本身没变，只是拆开了；他提到的会议演讲里有相关说明。
+        </p>
+    </section>
+
+    <section>
+        <h2>十一、和课程的关系</h2>
+        <ul>
+            <li><a href="03_高级提示与RePPIT.html">第三讲</a>：研究、计划、实现，以及上下文的清空和压缩。这一期展示的是同一套思路拆成八步、加上外层编排之后的样子；"研究要客观、不带实现意图"和"计划按垂直切片排"是两条可以直接用的做法。</li>
+            <li><a href="09_能验证就能解决.html">第九讲</a>和<a href="补06_Eno_Reyes_Factory.html">补充六</a>：学习测试是"先证明再相信"的一个例子，和 Eno Reyes 说的验证是同一类思路，用在了设计阶段。</li>
+            <li><a href="10_Agent代码审查.html">第十讲</a>：Dex 关于"不读代码"的警告，和代码审查那一讲可以对照着读。</li>
+            <li><a href="补07_Micah_Villmow多Agent工作流.html">补充七</a>：Micah Villmow 说他已经不审代码；Dex 的经验是不读代码在三个月后出了问题。两人的看法可以对照。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS146S: The Modern Software Developer &copy; Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="补07_Micah_Villmow多Agent工作流.html">&larr; 上一篇</a>
+            <a href="index.html">返回主目录</a>
+            <a href="补09_Tomas_Reimers代码审查.html">下一篇 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

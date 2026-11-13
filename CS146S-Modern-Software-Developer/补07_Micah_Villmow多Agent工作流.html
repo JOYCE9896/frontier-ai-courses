@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>补充七：Micah Villmow 的多 Agent 工作流 | Stanford CS146S 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <style>blockquote { margin: 1em 0; padding-left: 1em; border-left: 3px solid #ccc; color: #555; }</style>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="补06_Eno_Reyes_Factory.html">&larr; 上一篇</a>
+    <span>Stanford CS146S: 补充七</span>
+    <a href="补08_Dex_Horthy复杂代码库.html">下一篇 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>补充七：Micah Villmow 的多 Agent 工作流</h1>
+        <p class="subtitle">一位做了二十年 GPU 和推理优化的工程师，用三个并行的 Claude Code 会话在一小时里给排球赛程做一个网页：先深度研究，再用自建的 Skill 库生成提示，advise、plan、execute、review、commit、retrospective 一套固定流程，Safety Net 拦下危险命令，以及他为什么不再亲自看代码</p>
+        <div class="author-meta">
+            嘉宾：Micah Villmow（Institute of Foundation Models 高级研究工程师，曾在 NVIDIA 参与 TensorRT）· 主持：Mihail Eric（本课程讲师）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=JCN2RLlXKG0" target="_blank">The Build System: Multi-Agent Workflows with Micah Villmow, Research Engineer at IFM</a>（2026 年 3 月 20 日，1 小时 42 分；本文依据 YouTube 自动生成的英文字幕整理，人名和项目名按字幕听写，个别拼写可能有出入）<br>
+            说明：这不是一次课堂讲座。The Build System 是本课程 YouTube 频道 The Modern Software Developer 上的访谈节目，由讲师主持，嘉宾现场用自己的工具做一个真实项目。内容和第三讲（先计划再实现、上下文管理）、第五讲（Skill）、第七讲（定制 Agent 配置）、第十一讲（并行和子 Agent）有关。
+        </div>
+    </header>
+
+    <section>
+        <h2>一、嘉宾</h2>
+        <!-- 00:02–00:07 -->
+        <p>
+            Micah Villmow 高中时就做 AI 相关的项目，在 Florida State 读完本科和硕士。2006 年在 ATI 实习时接触 GPU，在 RV520（Xbox 360 用的那颗芯片）上写了一个卷积网络，做到 60 帧每秒的实时物体识别，但没有发表，"who needs this?"，当时大家都用 Haar 滤波器。之后在 AMD 做了五年 GPU 计算，又去一家做手机芯片软硬件协同设计的创业公司（2016 年被 Intel 收购），然后在 NVIDIA 待了七年半，做过 INT8 量化、序列到序列模型、LSTM、嵌入式、汽车安全，最后参与了多卡推理，做了后来成为 TensorRT-LLM 的早期设计和原型。之后在一家创业公司做软件副总裁，休息半年，2026 年 3 月初刚加入 MBZUAI 的 Institute of Foundation Models 做前沿模型研究。他说自己"only ever did inference"，从没做过反向传播。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、要做的东西</h2>
+        <!-- 00:07–00:12 -->
+        <p>
+            他的孩子打排球，比赛的赛程、分组和成绩都发布在 SportsEngine 网站上。家长在手机上很难看懂：哪场在哪个场地、赢了下一场打谁、输了去哪、"LG1 Jan 31 XO Gold A1 V1"这种标签是什么意思。他想做一个只给家长看的简化页面：选一支队，就能看到这支队当天从头到尾在哪里、对手是谁、结果怎样。
+        </p>
+        <blockquote>"It used to be the case that we couldn't do anything about it unless we spent lots of effort. But now with coding agents, I can almost customize this for me."</blockquote>
+        <p>
+            主持人说这个问题很小众，只有亲身经历的人才知道痛点在哪、数据该怎么读，这也是编程 Agent 的好处：有领域知识的人可以给自己做专用的工具。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、环境：Claude Code、YOLO 模式和 Safety Net</h2>
+        <!-- 00:13–00:18 -->
+        <p>
+            他用 Claude Code，认为抛开基准分数，Claude Code 的 harness 比 OpenCode、Cline、Codex CLI 更好用（他听说 Codex CLI 最近一两个月进步很大）。他总是打开危险权限，也就是所谓的 YOLO 模式，因为不想被反复问"要不要改这个文件"。
+        </p>
+        <p>
+            主持人问是否在虚拟机里。他说没有，在 Windows 的 WSL 里，个人文件不在 WSL 镜像中，删掉家目录也只是删掉这个"类似 Docker 容器"的环境。另外他装了防护：
+        </p>
+        <ul>
+            <li><strong>Safety Net</strong>：Claude Code 插件市场里的一个插件（作者字幕听写为 kenryu42）。它挂在 Claude Code 的 hook 上，每条命令执行前检查是否危险，危险就拒绝。他说"anyone using Claude Code needs to install this or something similar"。</li>
+            <li>他以前自己写过一个类似的脚本。Claude 找到了脚本的漏洞：有些工具可以通过环境变量传入要执行的命令，而他的脚本只检查命令本身、不检查环境变量。Claude 利用这一点绕过检查，删掉了他的整个家目录。他的结论是这类防护很难做对，于是改用 Safety Net。</li>
+            <li><strong>Project Nemesis</strong>：他自己的"记忆存储"项目，提供 advise 和 retrospective 等命令。advise 查询记忆库，retrospective 把一整段对话整理好提交进记忆库。他强调只记重要的东西："Forgetting is what makes us functional."</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>四、第一步不是 Claude Code，是深度研究</h2>
+        <!-- 00:17–00:20, 00:39–00:43 -->
+        <p>
+            他做任何项目的第一步都是用深度研究工具（他用 Gemini Deep Research，因为不花钱）写一份背景报告：要做什么、最佳实践是什么、相关资料。一次要 15 到 20 分钟，所以节目前已经做好，这是第二版。报告放进仓库，作为第一个提示的输入。
+        </p>
+        <p>
+            他给深度研究的提示里，把赛程描述成一个"排序网络"：先初始排序，打一堆比赛，再最终排序，比较函数就是比赛本身。还写了想要的界面（浮动弹窗等）和他的开发原则。报告回来时带着概率计算和完整设计，他还用 Gemini 新加的功能把研究报告直接生成网页原型，看页面大概长什么样。架构是：抓取数据源，建图，导出 PNG、PDF 或 JSON，再做页面；原本想发到 GitHub Pages，后来简化成本地服务器，预测功能也砍掉了。
+        </p>
+        <blockquote>"Developers still do this when they start a new project. They go and do research on what the project is. They go learn best practices... My goal is to get myself out of the loop. So if I'm doing something more than once, I'm trying to figure out how I never have to do it again."</blockquote>
+    </section>
+
+    <section>
+        <h2>五、用 Skill 库生成提示</h2>
+        <!-- 00:19–00:31 -->
+        <h3>1. 从另一个仓库搬配置</h3>
+        <p>
+            他有一个叫 Project Odyssey 的仓库（他在做的训练框架），里面有成熟的 <code>agents</code> 目录、<code>.claude</code> 配置和 <code>CLAUDE.md</code>。第一个提示是：读 research.md，把 Odyssey 的 agents、.claude 目录和 CLAUDE.md 搬进这个 Python、JavaScript、HTML 项目，按这个项目裁剪，去掉和训练、Mojo 有关的内容，给出计划。
+        </p>
+        <h3>2. Skill 只在计划阶段用</h3>
+        <p>
+            advise 会去 Project Nemesis 里找相关的 Skill。那里有大约 400 个 Skill，格式和标准的 Agent Skill 一样，但他故意不放在工具默认读取的目录：
+        </p>
+        <blockquote>"I don't want the agent to be picking these up in the middle of developing because it might pick up the wrong one. I only want it to pick up the skills during the planning phase... because the plan should include everything it needs for the execution."</blockquote>
+        <h3>3. advise 再 plan，同样的内容给两次</h3>
+        <p>
+            他先单独跑 advise，看它挑了哪些 agents、settings、命令、共享文件，删掉不要的（比如 GitHub hooks），再进入计划模式，把 advise 的结果作为提示交给计划。他引用了一篇两个月前的论文：同一个提示重复两次效果更好，因为第二遍里的每个 token 都能注意到第一遍的全部内容，作者猜测这也是思维链有效的原因之一。他把"advise 加 plan"看成同一件事做两遍。
+        </p>
+        <p>
+            结果是一个四行的提示变成了一份很详细的提示，Claude 再据此写实施计划。"It's not until after we accept the implementation plan that anything gets created."
+        </p>
+        <p>
+            主持人问用自己的 Skill 库好还是用社区的（例如 Anthropic 官方的 skills 仓库）。他说没有足够的研究说明哪个好，他自己有个项目在研究这个。他提到上周一篇论文发现，自动生成的 CLAUDE.md 比人写的稍差，人写的比没有好；他关心的是生成内容里哪一部分有害、哪一部分有用。他的 Skill 库带着他自己的习惯和模式，换个人的代码库未必合适。
+        </p>
+        <h3>4. 每个 CLAUDE.md 都要有的开发原则</h3>
+        <p>
+            他认为最有用的一节，每个 CLAUDE.md 里都必须有：
+        </p>
+        <ul>
+            <li><strong>KISS</strong>（Keep it simple, stupid）：保持简单。</li>
+            <li><strong>YAGNI</strong>（You ain't gonna need it）："Agents are very good at adding a bunch of stuff you're not going to need."</li>
+            <li><strong>TDD</strong>：测试驱动开发。</li>
+            <li><strong>DRY</strong>（Don't repeat yourself）：没有这条，Agent 会建一堆只差一个字段的数据结构，长时间开发后同一个结构重复五六份。</li>
+            <li><strong>SOLID</strong>：架构和模块化。Agent 需要模块化，这样有限的上下文窗口只用在要改的地方。</li>
+            <li><strong>POLA</strong>（Principle of least astonishment，最少意外原则）：接口不要做调用者意料之外的事。他举的例子是一段 C++ 代码里隐式类型转换运算符修改了对象内部状态，转换之后原对象变了，这不该发生。</li>
+        </ul>
+        <p>
+            他在 Skill 里也引用这些原则。他在运行记录里看到 Agent 说"本来想加这个，但违反 YAGNI 或 DRY，改用另一个"，加了这节之后大量重复代码的问题少了很多。
+        </p>
+        <p>
+            他坦白自己是 C/C++ 底层程序员，看不出这些 Python、JavaScript 配置对不对，所以不去验证它们，只看输出对不对，"that is more of vibe coding"。他扫一眼，确认自己专门要找的东西在里面，就让它开始做。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、三个会话并行</h2>
+        <!-- 00:31–00:47, 00:53–01:02 -->
+        <p>
+            项目被拆成几个提示，每个都事先在 docs 目录里写好（用 Claude 帮忙写，他说"你自己写大概要 10 到 15 分钟，如果你清楚要什么；这里面是一两个小时的工作"）：
+        </p>
+        <ol>
+            <li>Agent 基础设施（上面那一步）。</li>
+            <li>项目结构。</li>
+            <li>抓取器和解析器。Claude 在计划阶段分析了网站，发现有一个 API 可以直接请求 JSON，不用解析 HTML。</li>
+            <li>图和导出：读抓取的 JSON，建图、做分配和遍历，提示里给了 JSON 字典的样例和各阶段的逻辑。他说这就是大家说的 spec 驱动开发，"it's basically just prompting, but you're focusing on the specifications"。</li>
+            <li>前端：一个网页，选赛区、选队、选日期，显示排名、场地、俱乐部、胜负和赛程。</li>
+            <li>最终验证。</li>
+        </ol>
+        <p>
+            抓取、图、前端三块他开三个 Claude Code 会话并行做。每个提示都是同一个套路：先 <code>/advise</code>（"I always do advise because I might have done this already in other repos"），再进入计划模式，最后加一句"在 git worktree 里做，用 Haiku 子 Agent 实现"。理由：几个会话在同一个目录，不用 worktree 会互相干扰；计划用 Opus，实现用便宜的 Haiku，他说 Opus 约 15 美元每百万 token、Haiku 约 1 美元，Haiku 大约相当于半年前的 Opus 4.0。
+        </p>
+        <p>
+            他好几次忘了进计划模式，每次都退回来："I want to see the plan. I don't want you coding without that." 计划是第一个能发现"等等，别那样做"甚至"要删掉这些东西"的地方。计划写完他还要求再审一遍计划，理由同上：让这次提示能注意到刚才做的所有内容。
+        </p>
+        <p>
+            对较强的模型可以用很口语的话，比如 "clean this up"。他说这能行，是因为上下文足够多、模型足够强；有些小模型听到 clean up 会去删东西。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、固定流程和自动生成的 issue</h2>
+        <!-- 00:35–00:39, 00:47–00:53 -->
+        <p>
+            他的流程是一个状态机：
+        </p>
+        <blockquote>"Advise, plan, execute, create the pull request, review, get it passing, commit, retrospective."</blockquote>
+        <p>
+            他说这是他脑子里一直在跑的开发流程，现在让 Claude 照着走。他一路回想职业生涯里做过的每一步，问"怎样让 Agent 替我做这一步"，再把它放进流程的对应位置。顺序很重要，比如不能在实现和审查完成之前就去提 issue。
+        </p>
+        <h3>技术债自动变成 issue</h3>
+        <p>
+            开场那段话说的是一个周末：他去看孩子比赛前跑了一个脚本，周五时仓库里 0 个 issue、0 个 PR，周六晚上变成近 700 个 issue、近 200 个 PR，Claude Code 用量每小时往上涨，他赶回家关掉时已经用了 91%。这些 issue 都是自动生成的，记录的是技术债，例如"这个 CI 组里用了临时的内联 Python 片段检测文件，应该做成正式的校验脚本"。
+        </p>
+        <p>
+            做法：在审查或回顾里，Claude 常会说"这里不好，但可以以后再修"。他不让 Claude 对发现的每个问题都开 issue（应该直接修），只让它在日志里找出这些"以后再修"，再去开 issue。"It gets lazy and tells you to go fix this later." 他只需要扫一遍 issue，决定修哪些。他还有更进一步的脚本：给一串 issue 编号，自动实现并做代码审查；计划阶段也有脚本，会把"llm_judge.py 太大了"这样一句话变成包含目标、做法、用到的 Skill、要新建和修改的文件、实现顺序的计划。
+        </p>
+        <h3>retrospective</h3>
+        <p>
+            每个阶段结束，先 commit，再 retrospective。回顾会分析这次会话：目标是什么、哪里成功、哪里失败、关键教训，然后写进 Nemesis。以后再做"用 Pixi 管理的 Python 网页项目、并且有一份 Gemini 深度研究生成的 research.md"这类项目时，这个 Skill 就会被匹配上。如果你用 uv 或 poetry，就匹配不上，得按自己的环境改。
+        </p>
+        <p>
+            他展示了一个 code smells Skill：不要自己估算代码复杂度，跑工具算圈复杂度（cyclomatic complexity）和可维护性指数；复杂度高、可维护性低的代码就该清理。Skill 里有输出样例和"失败的尝试"一栏，并引用 CLAUDE.md 里的原则。他还没做到的是让 Skill 在使用过程中被自动更新，这在他的待办里。他说这些 Skill 都开源，可以直接让 Claude 导入并按你的环境定制，但一次给太多它会偷懒，最好每次 10 到 20 个。
+        </p>
+        <p>
+            主持人问 Agent 能不能在对的时候挑对 Skill、要不要手动指定。他说不会手动指定，他只看输出：
+        </p>
+        <blockquote>"In traditional development everything is deterministic... Here there are lots of valid solutions and optimal is not exact. There's optimal and then there is a large range of good enough."</blockquote>
+    </section>
+
+    <section>
+        <h2>八、让 Agent 对着工具写代码</h2>
+        <!-- 00:59–01:04 -->
+        <p>
+            实现时 Claude 加了单元测试、Ruff lint 和类型检查。他认为这对验证最重要，而且应该尽量严格：
+        </p>
+        <blockquote>"They're not very good at following style guidelines. They're very good at following tools that tell them they messed up... So make the agents code to the tool. If the tool is insufficient, then find another tool."</blockquote>
+        <p>
+            人学会一种风格会形成肌肉记忆，换风格会抱怨；Agent 不会抱怨。所以他的项目常有三到八个 linter、类型检查器和其他小检查，标准工具查不到的，可以让 Agent 自己写检查工具。这些限制对人来说是"表面的改动"，人会反对；对 Agent，它们把代码限制在"正确的、够好的"那个范围里。不知道还有什么工具，就让 Claude 去找。
+        </p>
+        <p>
+            他还会让 Claude 给每个模块打分：一个通用的分析提示，按组件打出等级，说明理由，列出要修的问题。新项目的测试通常会被打成 C-，这能提醒你"不是一切都好"。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、Safety Net 现场救了一次</h2>
+        <!-- 01:06–01:10 -->
+        <p>
+            演示中 Safety Net 触发了。他立刻停下检查：一个会话没有按指示在 worktree 里工作，看到另一个会话提交的文件，以为不是自己改的，要把它们恢复回去。这是破坏性命令，Safety Net 拦了下来。
+        </p>
+        <blockquote>"If I didn't have the safety net, what this agent would have done, it would have reverted everything the other agent was working on while it was working on it... And that's when your hard drive gets deleted because it goes something's wrong. Let's revert everything."</blockquote>
+        <p>
+            主持人问 Claude Code 新加的原生 worktree 支持能不能解决。他说那只是建一个 worktree 并在里面启动 Claude Code，解决不了子 Agent 之间的冲突：子 Agent 仍在同一个 worktree 里，一个建的文件另一个不理解；而且你让子 Agent 去 worktree 里做，它也不一定照做，"these things are basically random generators"。
+        </p>
+    </section>
+
+    <section>
+        <h2>十、结果</h2>
+        <!-- 01:12–01:18, 01:30–01:35 -->
+        <p>
+            第一次打开页面，他说"比我预期好很多"，但队伍都不认识，是测试数据：抓取流水线还没接上。抓取跑完后，页面变成空白，原因是两个 Agent 对同一份 spec 理解不同，各按一种方式实现，端到端时对不上，"this happens a lot in development where when you have two developers implementing something"。修好后，显示的是他当天在场的真实队伍和赛程：几点在哪个场地、对手是谁，上周的成绩也能查。以后新赛程出来，重新抓取、刷新就行。
+        </p>
+        <p>
+            整个过程大约一小时。他说拆成多个并行 Agent 反而稍慢，换来的是更多检查点，能随时停下纠正；全开 YOLO 让它自己跑，大概 40 分钟能完成，但就没有过程记录，也没法中途纠错。
+        </p>
+    </section>
+
+    <section>
+        <h2>十一、上线前还缺什么，他为什么不看代码</h2>
+        <!-- 01:15–01:24 -->
+        <p>
+            这只是原型：测试很松，没有覆盖率。要给更多家长用，得查覆盖率、做性能分析、补测试（网站挂了怎么办，赛程出了但对阵还没定怎么办），在不同浏览器测试，缓存抓取结果，避免一百万人反复抓取原网站。他强调：
+        </p>
+        <blockquote>"What you do to put in production when a developer develops it is no different than what you would need to do if an agent develops it... You can't have different quality controls based on the author."</blockquote>
+        <p>
+            主持人问：全程没写一行代码，用的语言和框架都不熟，担不担心可维护性？他说这和他的职业轨迹一样。早年他在 GPU 指令集层面排指令顺序；在 NVIDIA 后期他已经不写代码，做的是设计功能、设计项目和基础设施、审代码、保证流程正确。团队大约 105 个人每天提交代码，一天几百个 PR，他每天花两三个小时审，但没人能全部看完、全部记住。
+        </p>
+        <blockquote>"The software development life cycle really hasn't changed. It just the coding portion of that life cycle has dropped to near zero cost."</blockquote>
+        <p>
+            主持人追问现在怎么审代码。他说他不审了，因为干净上下文的 Agent 就是够好的审查者。它会漏 bug，但人也会：TensorRT 当年每天收到大约 20 个客户 bug 报告，有专门的团队做分诊。他认为问题从来不在代码，在于开发时需求是未知的，你没法为每个边角情况、每个客户用法写代码，只能发出去、和客户一起迭代、出了 bug 再修。
+        </p>
+    </section>
+
+    <section>
+        <h2>十二、给开发者和新人的建议</h2>
+        <!-- 01:24–01:30, 01:39–01:41 -->
+        <p>
+            现在该做的，和他在有 Agent 之前对工程师说的一样："Do the things that developers hate doing." 写文档，用 linter，用 sanitizer，写测试。Agent 和应届生一样是边干边学的白纸，没有流程就会犯大错。TensorRT 有很厚的开发速度指南和编码规范，每个 PR 背后大约有一万 GPU 小时的测试，"that's how you make sure that code development scales"。
+        </p>
+        <p>
+            对初级工程师：刻意练习，学基础。算法、数据结构、操作系统、队列、异步编程；他推荐 Knuth 的 The Art of Computer Programming（字幕里他说成 "art of computer science"）。
+        </p>
+        <blockquote>"The syntax, that was just something just to make us more clearly define what we wanted. It never was the end goal... The end goal was building something."</blockquote>
+        <p>
+            他说过去十五年程序员有一种心态，拿到学位就有高薪工作，现在又回到要下功夫的时候了。
+        </p>
+        <p>
+            最后他留了一个他解决不了的问题：这种工作方式怎样和人类开发者结合？两边的节奏完全不同。他认为这不只是技术问题，也是心理学和社会学问题。
+        </p>
+        <p>
+            他提到的开源项目：ProjectNemesis（Skill 和记忆）、ProjectOdyssey（训练框架）、ProjectScylla（测试），他说都只用于学习，不是生产用途。
+        </p>
+    </section>
+
+    <section>
+        <h2>十三、和课程的关系</h2>
+        <ul>
+            <li><a href="03_高级提示与RePPIT.html">第三讲</a>：先研究、再计划、再实现。Micah 的研究报告、advise、plan 是同一思路的个人版本。</li>
+            <li><a href="05_Agent_Skills.html">第五讲</a>：Skill。他的做法是 Skill 只在计划阶段加载，执行阶段只看计划。</li>
+            <li><a href="07_定制你的Agent配置.html">第七讲</a>：CLAUDE.md、hook 和插件。开发原则那一节和 Safety Net 都属于这一类配置。</li>
+            <li><a href="11_后台Agent.html">第十一讲</a>：多个 Agent 并行。worktree 冲突和"两个 Agent 对同一份 spec 理解不同"是这一期里实际碰到的问题。</li>
+            <li><a href="补06_Eno_Reyes_Factory.html">补充六</a>：Eno Reyes 把验证放在中心；Micah 把 linter、类型检查和测试当作 Agent 的约束，两人说的是同一类事。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS146S: The Modern Software Developer &copy; Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="补06_Eno_Reyes_Factory.html">&larr; 上一篇</a>
+            <a href="index.html">返回主目录</a>
+            <a href="补08_Dex_Horthy复杂代码库.html">下一篇 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

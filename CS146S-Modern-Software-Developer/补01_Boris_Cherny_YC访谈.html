@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>补充一：Boris Cherny 在 YC 的访谈 | Stanford CS146S 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <style>blockquote { margin: 1em 0; padding-left: 1em; border-left: 3px solid #ccc; color: #555; }</style>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="index.html">&larr; 课程目录</a>
+    <span>Stanford CS146S: 补充一</span>
+    <a href="补02_Boris_Cherny_Sequoia访谈.html">下一篇 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>补充一：Boris Cherny 在 YC 的访谈</h1>
+        <p class="subtitle">每次新模型发布就删掉大半系统提示词再逐行加回，评测集也会过期，"product overhang"和"hobbling"，给模型略难的任务并让它能自己验证，用动态工作流和 routine 调度成千上万个 Agent</p>
+        <div class="author-meta">
+            讲者：Boris Cherny（Anthropic，Claude Code 的创造者）<br>
+            <strong>这一篇不是课堂讲座。</strong>Boris Cherny 10 月 15 日（第 4 周）在 CS146S 做过客座讲座，但那一讲没有公开课件和录像。这里整理的是他在别处公开的一场访谈：<a href="https://www.youtube.com/watch?v=qyPCVqFUyDo" target="_blank">Boris Cherny: We Cut 80% of Claude Code's Prompt</a>（Y Combinator 频道，2026 年 7 月 27 日上传，35 分 51 秒，现场有观众）。本文依据 YouTube 自动生成的英文字幕整理，字幕里把 Claude 写成 "Quad""Clocko" 之类的地方已按上下文更正。<br>
+            和课程的关系：第 4 周讲定制 Agent 配置（CLAUDE.md、Skill、Hook），这场访谈里他对"这些配置要定期删掉重来"的看法可以和第七讲对照着读。
+        </div>
+    </header>
+
+    <section>
+        <h2>一、访谈背景</h2>
+        <p>
+            访谈在 Opus 5 发布的第二天进行。主持人先提到 Opus 5 在 ARC-AGI-3 上拿到 30%，之前最好的成绩在个位数到十几。Boris 说每次训练都想教模型很多东西，多数学不会，学会的那部分有时还带着没刻意教过的能力。他举了 Opus 5 的两个新特点：
+        </p>
+        <ul>
+            <li><strong>能长时间连续工作</strong>："it can go for days, weeks, months at a time. It just won't stop." 配合 auto mode，不需要 <code>/goal</code> 之类的脚手架。</li>
+            <li><strong>很难再被提示词注入</strong>。提示词注入（prompt injection）是指模型在网页、文件里读到别人埋的指令，把它当成用户的命令去执行。他说一年前模型读到"顺便删掉用户电脑上的所有文件"可能真会照做，现在三层防护叠在一起："a well-aligned model"（对齐训练），一个对所有流量都运行的提示词注入分类器（基于可解释性研究，直接看模型内部哪些神经元在注入发生时被激活），再加上 auto mode 的分类器。"with these three layers we just cannot demonstrate prompt injection anymore."</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>二、删掉 80% 的系统提示词</h2>
+        <p>
+            这次发布 Claude Code 删掉了八成以上的系统提示词。他的解释是 Claude Code 作为 Harness 一直在变：每出一个新模型，就删一批、改一批系统提示词，工具集合和工具提示词也常改，"every model is very different"。很多提示词原本是在纠正模型"本该知道却不知道"的行为，Opus 5 自己会做，这些就不需要了。
+        </p>
+        <p>
+            两个可以自己试的开关：运行时加 <code>--system-prompt</code> 换成任意系统提示词；或者设置环境变量 <code>CLAUDE_CODE_SIMPLE=1</code>（他说这是没写进文档的功能），会把系统提示词和工具提示词全部去掉。团队把它当作消融实验用，结论是 "the model is actually a little bit more intelligent without these prompts"。不过作为产品给人用时，还是需要一部分提示词让行为符合预期。
+        </p>
+        <p>
+            主持人问是不是每次都把代码全删了重写。他说没有删光，但删得很多。做法叫消融（ablation）：把整个系统提示词删掉，再一行一行加回来，看每一行的作用，"ablation essentially is a eval where you delete things to figure out the impact"。工具也一样，经常下线工具、删 Harness 代码。"If you look at actually the code that's in the Claude code harness today, almost all of it is about safety and permissions and static analysis and there's a bunch of UI code."
+        </p>
+        <p>
+            对用 Claude Code 的普通开发者，他的建议是："every 6 months delete your Claude MD. Delete your skills. Delete your hooks. See what the model does and it might surprise you."
+        </p>
+
+        <h3>删完以后怎样加回来</h3>
+        <p>
+            先删，再用。不要猜模型需要哪条指令，因为猜不准；要真的跑起来，看它在哪里失败、哪里做得好。只有看到它反复在同一件事上出错，才把相应的指令加回去，因为 "the model is going to read this instruction every single time you use it"。
+        </p>
+        <p>
+            他拿这和过去的工程方式对比：以前做系统要先想好架构、写大量单元测试，重构一次要几个月甚至几年。模型每一代行为都不同，"It has a slightly different personality"，要花时间了解它再调整 Harness，"You have to take a very scientific mindset to it where you try something, you see the result, and then you iterate based on that."
+        </p>
+
+        <h3>评测集也会过期</h3>
+        <p>
+            主持人问评测集（eval）是不是可以一直留着。他说评测集比 Harness 活得久一点，但也只能撑一到三代模型：模型进步太快，经常把评测集做满（saturate），只能扔掉再建新的。新的评测集从哪来？还是用产品、用模型，看它在哪里吃力。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、Product overhang 和 hobbling</h2>
+        <p>
+            两个他常用的词：
+        </p>
+        <ul>
+            <li><strong>Product overhang</strong>：今天的模型（不是未来的模型）已经能做很多事，但还没有产品让它把这些能力发挥出来。</li>
+            <li><strong>Hobbling</strong>（束缚）：产品本身挡住了模型。"the model is doing something and you're just getting in the way."</li>
+        </ul>
+        <p>
+            Claude Code 的起源就是一个例子。一年半到两年前，Sonnet 3.5 是当时最好的编程模型，而当时的编程工具在做单行补全、多行补全，或者只能读代码、不能写的聊天。他判断模型能一次写完整个函数、整个文件，只是产品没让它这么做，于是给了它"the simplest possible harness"。他认为现在的模型也有大量这样的空间，"I'm not seeing startups capture"。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、怎样把模型的能力用出来</h2>
+
+        <h3>1. 给略难的任务，不要过度规定步骤</h3>
+        <p>
+            常见错误是指令写得过细："You must do like one, then two, then three, then four." 对现在的模型，应该描述任务、护栏（guardrails）和完成标准（exit criteria），然后让模型自己做，"come back in a little bit"。他说这在半年前行不通，现在行得通。
+        </p>
+
+        <h3>2. 例子：Bun 从 Zig 改写成 Rust</h3>
+        <p>
+            Claude Code 运行在 Bun 上。Bun 是 JavaScript 运行时，Node.js 的一个更快的替代品，原本用 Zig 写。Zig 和 C 一样要手动管理内存，容易出内存泄漏。Bun 团队之前让 Claude 做模糊测试（fuzzing，用大量随机输入去触发错误）一个个找内存泄漏。后来团队里的 Jared 把"整个改写"作为每代新模型的测试题，从 Fable 开始模型做得到了。
+        </p>
+        <p>
+            做法：Bun 和 Node.js 都有很大的测试套件，容易判断改得对不对。他用一个提示词启动一个动态工作流（dynamic workflow），把 Zig 改写成 Rust，跑了 11 天。不是完全一次成功，"There was steering"，中途有人引导，但以前的模型有引导也做不到。主持人问以前要多久，他说 "Definitely over a year"。改写后的版本已经上线，Claude Code 现在用的就是它。
+        </p>
+
+        <h3>3. 例子：让模型用 OpenCV 画画</h3>
+        <p>
+            最近在 Anthropic 内部流行的玩法：让 Opus 5 用 OpenCV（一个图像处理库）画肖像、动物、风景，效果相当好。模型没有专门训练过画画，只要请求的方式对，它就能做。这是在不追求商业用途、随便试的时候偶然发现的。"there's probably dozens, hundreds of opportunities like this with the models of today that no one has yet realized."
+        </p>
+
+        <h3>4. 最重要的一步是让模型能验证自己</h3>
+        <p>
+            提示词工程、上下文工程这些说法会一波一波地变。他认为现在的关键技能是两件事：给 Claude 一个看起来有点太难的任务；让它在过程中能验证自己的工作。"the verification I think is probably the single most important thing that people do not get right."
+        </p>
+        <p>
+            例子：Claude 桌面版是用 Electron 写的。他想看看原生版本会是什么样，就在 Claude Tag（在 Slack 里运行的 Claude）里依次做了几件事：问它能不能用 GitHub 上的 macOS runner，不能就接上一个，让它能启动 Mac 虚拟机；建一个空仓库，给它访问权限；然后给出任务：
+        </p>
+        <blockquote>
+            <p>"I want you to rewrite the Electron app in Swift. I want you to run the Electron app in the Mac virtual machine, screenshot it, and then look pixel by pixel, compare it to the Swift version, don't stop until you're done."</p>
+        </blockquote>
+        <p>
+            访谈时这个任务已经跑了 14 到 15 天，还在继续。Claude 还自己开了一个 Slack 频道，每隔几分钟贴一次进度截图。他说不需要 <code>/goal</code>、<code>/loop</code> 这些功能，它们有帮助，但最需要的只是任务本身和一个验证输出的办法，"so it doesn't get stuck"。
+        </p>
+
+        <h3>5. 没有窍门</h3>
+        <p>
+            主持人问怎样成为最会用 Claude Code 的那 1%。他的回答是 "Maybe like don't listen to the LinkedIn influencers"，没有什么"one weird trick"。要用经验的方法：给它太难的任务，给它像你自己做这件事时会用的验证工具，看它在哪里卡住，然后用更好的提示词、一个 Skill，或者一个 MCP（让它拿到缺的上下文）去补。
+        </p>
+        <p>
+            他观察到写了很多年代码的工程师最常见的问题是过度规定，想让模型完全按自己的方式做。"it's a journey to kind of figure out how how do you treat this thing like you would a coworker."
+        </p>
+    </section>
+
+    <section>
+        <h2>五、一次启动成千上万个 Agent</h2>
+        <p>
+            那个 Swift 改写任务派生了多少个 Agent？他也不确定，猜是几千到几万。有两种办法做到这种规模。
+        </p>
+
+        <h3>1. 动态工作流</h3>
+        <p>
+            用法是直接说 "use a workflow"，Claude 就会触发。实现上用 Bun 当沙盒，在里面启动一个虚拟机，让 Claude 在里面启动并编排很多 Agent。它会按阶段展开：第一批 Agent 做初步工作，第二批验证或汇总，第三阶段再展开。他说自己是函数式编程出身，所以把它设计成 "an algebra for agents"：有让 Agent 串行运行的方式，有并行运行的方式。
+        </p>
+        <p>
+            他把这看作一种新的测试时计算（test-time compute）。过去讲扩展定律（scaling laws），模型的能力取决于网络规模、训练数据和训练算力；后来加上测试时计算，"a researcher way of saying how many tokens does it generate"；动态工作流是加大测试时计算的一种新办法。
+        </p>
+
+        <h3>2. Loop 和 routine</h3>
+        <p>
+            Loop 是在本地给 Claude 跑的定时任务（类似 cron），routine 是同样的东西跑在云端，可以合上电脑。和动态工作流的区别：动态工作流是把一个任务拆成很多块；loop 和 routine 是同一个重复任务反复跑，每次不共享上下文，但可以共享记忆，频率可以是每 5 分钟、每小时或每天。
+        </p>
+        <p>
+            Anthropic 现在用 routine 让 Claude 维护它自己的代码库，覆盖 CLI、iOS、Android 和桌面版。在一个 Slack 频道里，Claude 启动了大约二三十个 routine，每个只是一句话的提示词，例如：
+        </p>
+        <ul>
+            <li>清理死代码：每天用静态和动态分析找没用的代码，提一个 PR。用动态分析是 Claude 自己想到的，提示词里没写。</li>
+            <li>已经全量上线的实验，把开关代码删掉。</li>
+            <li>给覆盖率不够的地方补测试；删掉没用的测试。</li>
+            <li>"abstraction police"：找出代码库里几乎重复、在不同地方各写了一遍的抽象，把它们合并。</li>
+        </ul>
+        <p>
+            他说这还没完全做到，但正在朝"完全自动维护应用"走，每天几百到几千个 Agent，做的是过去几十到上百个工程师的活，工程师可以去做新产品、和用户聊。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、"编程已经解决了"指的是什么</h2>
+        <p>
+            他给自己说过的"coding is solved"加了限定："coding is solved for the kind of coding that I do. It's not solved for everyone." 很深的系统代码、分布式系统、像素级的 UI 校验，Claude 仍然吃力；Opus 5 在视觉和电脑操作上进步很大，但还不完美。现场他请百分之百用 Agent 写代码的人举手，又请超过一半用 Agent 的人举手，两次举手的人数差不多。
+        </p>
+        <p>
+            他认为最会用的人有一种心态：经验主义。"Forget all of the things that you learned about past models. Forget everything that you've learned about computer science theory in class." 它已经从理论科学变成了经验科学，要能放下以前的判断，愿意把以前没成功的想法再试一次。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、给学计算机的学生</h2>
+        <p>
+            最后一个问题是学生还该"用老办法"学什么。他讲了自己的经历：初中在 TI-83 计算器上用 BASIC 写程序，为了考数学时作弊，还在网上写过一篇 TI-83 编程指南；后来用数据线把程序传给同学；数学到了微积分，BASIC 写的求解器不够用，又学了汇编。所以对他来说编程一直是为了解决实际问题。
+        </p>
+        <p>
+            他的建议：计算机科学本身很有意思，但也要学怎样应用，包括做创业项目和产品、培养设计感和商业感、学数据科学、学会和用户交流。"when you combine it with computer science and engineering, that's where it becomes really really valuable." 主持人总结为先做自己想要的东西，再做别人想要的东西。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS146S: The Modern Software Developer &copy; Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="index.html">&larr; 课程目录</a>
+            <a href="index.html">返回主目录</a>
+            <a href="补02_Boris_Cherny_Sequoia访谈.html">下一篇 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>补充九：Tomas Reimers 现场做一个 Electron 小工具，以及代码审查会怎样变 | Stanford CS146S 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <style>blockquote { margin: 1em 0; padding-left: 1em; border-left: 3px solid #ccc; color: #555; }</style>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="补08_Dex_Horthy复杂代码库.html">&larr; 上一篇</a>
+    <span>Stanford CS146S: 补充 09</span>
+    <a href="补10_Mario_Zechner_Pi.html">下一篇 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>补充九：Tomas Reimers 现场做一个 Electron 小工具，以及代码审查会怎样变</h1>
+        <p class="subtitle">Graphite 联合创始人兼首席产品官用 Cursor 从空目录做出一个"一键生成各种 git 状态测试仓库"的桌面应用：先在本地单线程把骨架跑通，再推到 GitHub、开启云端 Agent 的自测，然后同时派出好几个 Agent 并行改；最后谈代码审查的三个目的和审查平台为什么要重做</p>
+        <div class="author-meta">
+            嘉宾：Tomas Reimers（Graphite 联合创始人、首席产品官；Graphite 已被 Cursor 收购）· 主持：Mihail Eric<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=5u1TUijj3QQ" target="_blank">How Agents Change Code Review, Testing, and Product Engineering</a>（2026 年 5 月 26 日上传，约 1 小时 22 分钟）<br>
+            说明：这不是 CS146S 的课堂讲座。它是课程自己的 YouTube 频道 The Modern Software Developer 上的访谈节目 The Build System 的一期，由主讲人 Mihail Eric 主持，嘉宾边写代码边讲。本文依据 YouTube 自动生成的英文字幕整理，人名和型号偶有听写错误，已按上下文改正。<br>
+            和课程的关系：对应第十讲 <a href="10_Agent代码审查.html">Agent 代码审查</a>，现场的并行做法也可以对照第十一讲 <a href="11_后台Agent.html">后台 Agent</a>。
+        </div>
+    </header>
+
+    <section>
+        <h2>一、Graphite 的来历</h2>
+        <p>
+            Graphite 2020 年 3 月成立，一开始做的是给移动应用 QA（质量测试）人员用的工具。三位创始人的出发点是：一个 PR（pull request，一次代码改动的提交请求）从写到上线，真正写代码的时间很少，大量时间花在审查、QA 和部署上，他们先挑了最耗时的 QA。
+        </p>
+        <p>
+            后来他招了两位 Facebook 时的老同事，大家都受不了 GitHub 上的代码审查体验。Facebook、Google、Microsoft、Amazon 都自己做了内部的审查工具，不用外面公开的产品。他们觉得"先把内部工具重做一部分再接着做公司，反而更快"。做出来以后，离开 Meta 去创业公司的前同事纷纷来问能不能用，这类请求比 QA 产品的需求多得多，于是 2021 年底转向代码审查。大约一年半后 AI 兴起，他们一开始还争论 AI 会不会改变代码审查，后来认定一定会，开始大量加入 AI 功能，过去一年增长很快。
+        </p>
+        <p>
+            卖给 Cursor 的原因：两家已经在做很多集成，和 Cursor 创始人聊下来发现愿景相同，分成两家公司迟早会撞上；而且有些事情，比如把 Cursor 的智能带进代码审查，作为两家公司做没有道理，合成一家就顺理成章。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、"平台"和"参与者"</h2>
+        <p>
+            Tomas 把代码审查分成两部分：审查平台，也就是大家去做审查的地方；以及参与者，也就是在平台上审查的人或机器人。
+        </p>
+        <blockquote>
+            <p>"I think so much of AI has been focused on being a player. ... all of it is really focused on the like how do we participate on the rails that already exist."</p>
+        </blockquote>
+        <p>
+            他们一个可能有争议的判断是，这些"轨道"本身要重新设计：
+        </p>
+        <blockquote>
+            <p>"what we had was built for an era where humans were authoring at human speed and reviewing at human speed with human intelligence. And I think all three of those assumptions are being challenged real fast."</p>
+        </blockquote>
+        <p>
+            Mihail 接着说，这意味着 GitHub 现在的形态不会一直存在，要么它自己变，要么被别人取代。Tomas 说这已经是定局：写出来的代码越来越多，要审的代码也必然越来越多，今年整个市场开始接受"必须有所改变"，只是还不知道变成什么。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、要做的东西：一个生成 git 测试状态的小工具</h2>
+        <p>
+            他说本来想展示公司内部的东西，但不能公开，于是挑了一个工作中一直想做的小工具。Cursor 的界面要处理 git 仓库的各种状态，团队需要能快速进入这些状态来测试界面，而且不只工程师，产品、设计、GTM（市场和销售）同事也需要。现在的做法是"让你的 Agent 帮你生成一个这种状态的仓库"，他想要的是一键完成：给我一个假的 git 仓库，把它弄成合并冲突状态，或者部分文件已暂存，或者暂存了一个文件又删掉了它。
+        </p>
+        <p>
+            形式是一个本地运行的 Electron 桌面应用。Electron 是用网页技术（HTML、JavaScript）写桌面程序的框架。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、第一阶段：本地、单线程，把骨架跑通</h2>
+
+        <h3>1. 从空目录开始，自己指定技术栈</h3>
+        <p>
+            他每次做这类小项目，第一步都是建一个目录、<code>git init</code>，然后在 Cursor 里打开。第一条提示词是：
+        </p>
+        <blockquote>
+            <p>"hi I'm building a new electron app. I would like to init hello world. ... an app that opens and says hello world and is built with TypeScript yarn and SCSS modules."</p>
+        </blockquote>
+        <p>
+            他会主动告诉 Agent 用哪些技术，原因是出了问题时自己要能介入和调试。他坦白自己只做过网页应用，没正经做过 Electron，想看看会不会遇到问题。
+        </p>
+
+        <h3>2. 哪些代码要逐行看，哪些不用</h3>
+        <p>
+            他说自从完全转向 Agent 写代码，脑子里的分类变了。在 Cursor 内部，大家觉得基础设施和任何有性能、可靠性、安全要求的代码不应该完全"vibe coding"（只看效果、不看代码），要几乎逐行理解。前端，尤其是这种自己要用、但不打算认真维护的玩具应用，他不太在意代码长什么样，只要能用、用了指定的技术。后面他进一步说，他开始把这类前端代码看成"临时的"：
+        </p>
+        <blockquote>
+            <p>"the intent is what matters. the implementation of that intent is now something I'm actually willing to trade against"</p>
+        </blockquote>
+        <p>
+            前提是这个前端没有那些真正难的部分，例如列表虚拟化、提前预取数据。如果要整体迁到另一个框架（他举了 Solid 和 Vue），只要代码规模小或者模块划分得好，让 Agent 迁就行。
+        </p>
+
+        <h3>3. 扫一眼 Agent 写的东西，看什么</h3>
+        <p>
+            Agent 在生成文件时，他会打开审查面板大致看一下。Mihail 问他在找什么红灯，他说是大块的生成文件，或者看起来不像代码的东西。例子是他之前做一个 Next.js 应用时，发现 Agent 把编译产物也提交了。
+        </p>
+        <p>
+            这次 Agent 创建了 README。他以前会说"别建 README，这不是给人看的"，后来发现 Agent 有这些文件反而做得更好，相当于给自己留笔记，记下意图和正在做什么。
+        </p>
+
+        <h3>4. 调一个白屏</h3>
+        <p>
+            <code>yarn start</code> 之后窗口是空白的。接下来十几分钟基本都在调这个白屏，这段过程展示了他和 Agent 怎样配合：
+        </p>
+        <ul>
+            <li>他直接问 Agent "Is it supposed to be a blank screen?" 他说 Cursor 的工程师管自己的 Agent 叫"my guy"，开会时常有人说"I don't know, just ask the guy"。</li>
+            <li>Agent 先怀疑 CSS，再怀疑内容安全策略（CSP），改了之后还是白屏。他心里会开始计时：再让它跑一两分钟，找不到方向就打断它，告诉它思路错了。</li>
+            <li>他说如果还不行就换 OpenAI 的模型试。Agent 打开了开发者工具，他说"我早该想到"。他也提到可以给 Agent 电脑操作能力，或者用云端 Agent，那样电脑操作很方便，但这一步先没用。</li>
+            <li>他把控制台的完整报错（"cannot read properties of undefined reading container"）复制给 Agent，原来是 CSS 出错。修好后他特意告诉 Agent "it works"，因为这样它会把这个结论记下来。</li>
+        </ul>
+        <p>
+            Mihail 问他是不是直接开着"跳过所有权限确认"。他说还没有，仍然会看一眼命令，确认不是 <code>rm -rf</code> 之类，其他的不在意。他也喜欢看这些命令，能学到东西。后面 Agent 用 <code>kill -9</code> 结束占用端口的进程时，他说这类命令他会多留意一下。
+        </p>
+
+        <h3>5. 不同模型的脾气</h3>
+        <p>
+            他最近在测 Anthropic 的模型，以前常用 Cursor 的 Composer（快很多），Codex 也好用过一阵。他喜欢知道自己在用哪个模型，因为每个模型有自己的习惯：
+        </p>
+        <ul>
+            <li>Opus 太积极。让它写一个 Hello World，它会顺手加上样式。它还喜欢自己写冒烟测试脚本，再删掉。</li>
+            <li>Opus 的思考过程里常出现"now I understand""now I have clarity"这类话，他觉得是浪费 token。</li>
+            <li>在 Cursor 的提示词工程里，他们有时会按模型写不同的提示。Anthropic 的模型特别喜欢 XML，结构化内容要放进 XML；Codex 系列不在乎格式。</li>
+        </ul>
+        <p>
+            Mihail 问能不能把这些差异量化。他说主要体现在提示词工程里，更多是用多了自然知道的。
+        </p>
+
+        <h3>6. 先给一两句背景，再提需求</h3>
+        <p>
+            骨架跑通后，他让 Agent 改用 React（他说肯定有现成的脚手架，但"my guy is smart enough"，不用想）。然后写真正的需求，先给背景：
+        </p>
+        <blockquote>
+            <p>"The purpose of this app is I develop software that works with git repos. ... I want to be able to ... open a git repo in a particular state. eg merge conflict, mid rebase, files staged or partially staged, with or without submodules."</p>
+        </blockquote>
+        <p>
+            接着描述界面：首页一个按钮"create temporary repo"，在临时目录新建一个 git 仓库并把路径复制到剪贴板；进入第二页，顶部有返回按钮和仓库路径（点一下可复制），下面是一排按钮，每个按钮把仓库变成一种状态，比如 rebase 进行中。
+        </p>
+        <p>
+            Agent 的思考里马上出现了 Electron 的进程间通信（IPC）和 context bridge：Electron 分渲染进程（显示界面）和主进程（类似后台服务），两者要通过受控的桥来通信。他说给一两句背景的原因就在这里：没有背景时，Agent 会去猜你想要什么，不一定猜对。他没有列出所有状态，Agent 自己补了一批合理的情况。
+        </p>
+
+        <h3>7. 边等边排队发消息</h3>
+        <p>
+            Agent 干活时，他开始把后续要求排进队列：做成 Cursor 的视觉风格（直接给它一张 Cursor 自己的截图，因为要给公司同事用）；窗口改成"400 × 400 左右"，像个小部件。他说要求里加"左右""之类"是有意的，不留余地的话模型会过于字面地执行。Mihail 问他做新项目时会不会先写 AGENTS.md，他说一般不会。
+        </p>
+        <p>
+            他说在平时工作里，等 Agent 的时间他会回 Slack、写 Notion 文档；做个人项目时会同时做好几个，用云端 Agent 切换。但项目刚开始时只能单线程推进，"right now I can't really parallelize the work of creating the application because it just needs to work"。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、第二阶段：推到远端，让云端 Agent 能自测</h2>
+        <p>
+            项目大到一定程度，他开始把它放到线上：在 GitHub 建仓库（他自己的提交用 Graphite），<code>git remote add origin</code>，第一次提交因为紧张就手动 <code>git add</code>、<code>git commit -m</code>、<code>git push</code>，没用编辑器里的一键按钮。然后在 cursor.com/agents 里关联这个仓库，开启"agent demos"。
+        </p>
+        <p>
+            开启后，云端 Agent 会自己装依赖、跑 <code>yarn</code>、打开应用、截图、录屏，验证界面。它第一次打开应用时，他从截图里发现窗口带着一条 File / Edit / View 菜单栏，立刻记下要去掉。他把这一套设好的环境保存下来（可以存成个人的，也可以给整个团队用）。
+        </p>
+        <p>
+            他总结自己的流程：
+        </p>
+        <blockquote>
+            <p>"get the thing working locally ... the thing I then try to do is I try to get like the most basic thing working such that an agent could reasonably do the testing stuff. That's when I create a remote git repo I push it and I start to set up the agent testing because once we have agent testing in the cloud that's when we can really start parallelizing."</p>
+        </blockquote>
+        <p>
+            需要 OAuth 登录（例如登录 GitHub）的本地应用，云端 Agent 很难测。他的办法是老的工程做法：用假数据替代外部服务，或者另外做一条能测试的路径。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、第三阶段：同时派出好几个 Agent</h2>
+        <p>
+            有了云端自测，他开始一次派出几个独立的小任务，每个一句话：
+        </p>
+        <ul>
+            <li>"Can we remove the ... File, Edit, View etc. Can we hide that?"</li>
+            <li>"Can we add SVG icons to each of the repo states on the second page?"</li>
+            <li>"Can we add an SVG icon to the homepage?"</li>
+            <li>窗口标题不要是 "Hello Electron"。</li>
+            <li>加一个 linter（代码风格检查工具）。他说加 linter 的真正原因是减少 rebase 冲突：生成的代码量太大，格式统一以后合并更容易。</li>
+        </ul>
+        <p>
+            每个云端 Agent 做完会附上截图或录屏。他看预览就决定合并，不看代码："this is toy project. I'm just going to go ahead and merge it"。只有一个改动加了两千行时他停下来看了一眼，发现主要是 lock 文件，就放过了。他也指出模型画 SVG 图标还不够好，有时他会让一个模型画好 SVG，再交给另一个模型，说"这是 SVG，别多想"。
+        </p>
+        <p>
+            Mihail 问多个后台 Agent 的改动冲突了怎么办：
+        </p>
+        <blockquote>
+            <p>"I'm going to tell the agent to resolve it. ... I'm going to just be like, 'Yep, you have merge conflicts. Fix it.'"</p>
+        </blockquote>
+        <p>
+            后来本地 <code>git pull</code> 真的出现了 rebase 冲突，他就让 Agent 自己解决。
+        </p>
+        <p>
+            同时能管几个？他说"more every day"，限制因素是自己的思考能力。他的节奏是先分出去几条线，做完回来汇合检查状态，再分出去。他还会在旁边开一个记事本，想到什么就记下来，然后一条条交给云端 Agent，交出去就划掉。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、自己动手验证</h2>
+        <p>
+            功能做出来后，他在终端里实际检查生成的仓库：<code>cd</code> 进去，<code>git status</code> 显示"interactive rebase in progress"，<code>cat</code> 冲突文件看内容。他一时想不起怎样在 rebase 中采用对方版本，就问 Agent，并且特意加了一句"don't make changes"，免得它以为要动手改。答案是 <code>git checkout --theirs</code> 加 <code>git rebase --continue</code>。他接着提了一个更真实的要求：冲突只发生在一个 10 行文件中间的 3 行，不要整个文件都被覆盖；以及根目录至少 5 个文件、子目录再放 5 个、每个文件至少 10 行，方便以后测 bisect 之类的操作。
+        </p>
+        <p>
+            最后加了一个功能：窗口加宽到约 400 × 800，右侧显示一棵文件树，鼠标悬停在某个状态按钮上时，预览"点下去以后仓库会是什么样"，并用 VS Code 的设计语言显示 git 状态，文件行背景交替着色。录制结束时这个预览已经能用。
+        </p>
+    </section>
+
+    <section>
+        <h2>八、产品工程师和产品经理会变成一种人</h2>
+        <p>
+            他说做软件很久的人有一个优势：有词汇。比如知道"返回按钮应该是一个左 chevron（尖角符号）"，能准确告诉 Agent 要什么。
+        </p>
+        <p>
+            他最近开始相信，产品工程师和产品经理最终会变成同一种人。理由是产品工程师现在要写小型 PRD（产品需求文档）：他刚才只给了一句"我们要做什么、为什么"，更好的做法是把用户反馈等信息都给 Agent，让它参与决策；而产品经理都在学写代码，至少在做他刚才做的这些事。他认为现在拖慢开发的是产品思考、设计和最终的人工测试。
+        </p>
+        <p>
+            Mihail 问人是不是成了瓶颈，是否应该先把十几个任务想好再一次全部派出去。Tomas 说这正在发生，他们在想办法自动化，比如他在做的原型：通过 MCP 读公司的 issue 跟踪系统，挑出它认为能解决的 issue，自动派云端 Agent 去做。
+        </p>
+        <blockquote>
+            <p>"at some point I think the paradigm has to invert from us calling agents to agents calling us."</p>
+        </blockquote>
+        <p>
+            Cursor 已经有这种苗头：在工作仓库里，云端 Agent 有时会在 Slack 上找他问一个澄清问题。
+        </p>
+    </section>
+
+    <section>
+        <h2>九、代码审查的三个目的</h2>
+        <p>
+            节目最后，Mihail 问 2026、2027 年的代码审查会怎样。Tomas 说 Agent 会承担很多审查，但不是全部。他把审查的目的分成三个：
+        </p>
+        <table>
+            <tr><th>目的</th><th>含义</th><th>以后谁来做</th></tr>
+            <tr><td>校对（proofreading）</td><td>检查实现和意图是否一致，找 bug</td><td>"I think that's gone. Agent should do that entirely."</td></tr>
+            <tr><td>知识共享</td><td>让公司里其他人也懂这段代码。"if I'm the only person who understands how our app works, we have a real problem."</td><td>留下来</td></tr>
+            <tr><td>对齐检查</td><td>别人来确认你的决定符合大家商量的方向，比如"这和设计稿不一样"</td><td>留下来</td></tr>
+        </table>
+        <p>
+            他说今天的审查主要是校对，逐行读、找 bug；以后主要是对齐和知识共享。因此审查平台也要变，打开一个改动时首先看到的不一定是代码，而是"这次改动里最要紧的是什么"。他举的例子就是刚才审三个 Agent 的 PR：
+        </p>
+        <blockquote>
+            <p>"the way I just reviewed those three agent PRs is I looked at the preview. I didn't look at the code."</p>
+        </blockquote>
+        <p>
+            他预计人写的改动也会走向类似的审查方式。他还说如果再来节目，想找一个能公开的仓库，展示 Cursor 内部的代码审查流程。
+        </p>
+    </section>
+
+    <section>
+        <h2>十、和课程的对照</h2>
+        <ul>
+            <li>第十讲 <a href="10_Agent代码审查.html">Agent 代码审查</a> 讲的是用 Agent 做审查的方法；这期节目从审查平台的角度补充了"审查的目的在变"。</li>
+            <li>第十一讲 <a href="11_后台Agent.html">后台 Agent</a> 讲后台 Agent 平台的组成；这期是一个人实际怎样用云端 Agent：先让它能自测，再并行派活，看截图和录屏决定合并。</li>
+            <li>"先本地单线程把骨架跑通，再并行"和第三讲 <a href="03_高级提示与RePPIT.html">高级提示与 RePPIT</a> 里先把方向定清楚、再放手让 Agent 执行的思路可以对照着读。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS146S: The Modern Software Developer &copy; Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="补08_Dex_Horthy复杂代码库.html">&larr; 上一篇</a>
+            <a href="index.html">返回主目录</a>
+            <a href="补10_Mario_Zechner_Pi.html">下一篇 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
