@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>考试真题与解析 | MIT 6.5840 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <style>
+        blockquote { margin: 1em 0; padding-left: 1em; border-left: 3px solid #ccc; color: inherit; }
+        blockquote p { margin: 0.4em 0; }
+        .ans { font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="实验.html">&larr; 上一篇</a>
+    <span>MIT 6.5840: Exams</span>
+    <a href="index.html">目录 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>考试真题与解析：2025 年期中和期末</h1>
+        <p class="subtitle">2025 年春季 6.5840 的两场考试，逐题给出英文原题、官方答案和中文解析。期中（Exam I）考 MapReduce、VMware FT、线性一致性、GFS、Raft、Lab 3、ZooKeeper、分布式事务和 Spanner；期末（Exam II）考 FaRM、Chardonnay、Grove、DynamoDB 事务、AWS Lambda、Lab 4、Ray、SUNDR、比特币和 PBFT</p>
+        <div class="author-meta">
+            主讲：Frans Kaashoek、Robert Morris<br>
+            资料来源：<a href="https://pdos.csail.mit.edu/6.824/quizzes.html" target="_blank">6.5840 Past Exams</a> 页面公开的 <a href="https://pdos.csail.mit.edu/6.824/quizzes/q25-1-sol.pdf" target="_blank">2025 Exam I（含答案）</a> 和 <a href="https://pdos.csail.mit.edu/6.824/quizzes/q25-2-sol.pdf" target="_blank">2025 Exam II（含答案）</a>。题目和答案原文照录，中文解析是我按官方答案和本站讲义写的
+        </div>
+    </header>
+
+    <section>
+        <h2>怎样用这一页</h2>
+        <p>
+            2026 年的考试还没有公开，最近的一套是 2025 年。两年的课大部分相同，但 2025 年期末考的 Chardonnay、Grove、DynamoDB 三篇论文在 2026 年换成了 IronFleet、SUNDR 等，本站没有对应的笔记；这几题我仍然保留，因为它们考的还是事务、快照读和形式化验证这些课上讲过的概念，解析里会指向最接近的一讲。
+        </p>
+        <p>
+            考试是开卷的：可以看讲义、论文和实验代码，但不能联网。期中 80 分钟、满分 68，中位数 55；期末 120 分钟、满分 76，中位数 60.5。建议先自己做，再看答案。每题下面的"对应笔记"链接到本站相应的讲次。
+        </p>
+        <p>
+            每场考试最后有几道 1 分的课程调查题（哪些论文该保留、课程怎样改进），和知识无关，这里只在末尾简单列出结果。
+        </p>
+    </section>
+
+    <section>
+        <h2>期中考试（Exam I，2025 年春）</h2>
+
+        <h3>I. MapReduce</h3>
+        <blockquote>
+            <p>The MapReduce paper (MapReduce: Simplified Data Processing on Large Clusters, by Dean and Ghemawat) says in Section 3.1 that the intermediate key space is partitioned among the R reduce tasks using hash(key) mod R.</p>
+            <p>Thea is running the word-count MapReduce job (pseudo-code in the paper's Section 2.1) on a cluster with 10 worker machines. M is 20 and R is 40. There are no failures, the network is reliable, no machines are slower than expected, and there is no competing work on any of the machines or networks involved. The Map input is divided into 20 pieces of 16 megabytes each.</p>
+            <p>1. [5 points]: By mistake, the hash(key) function Thea is using with MapReduce always returns 1. What effect will that have on the execution of the word-count job, compared to using a well-behaved hash function? Circle the single best answer.</p>
+            <p>A. the job will produce incorrect final output<br>
+            B. 10 times as much total CPU time will be needed for Reduce phase<br>
+            C. 10 times as much total wall-clock time will be needed for Reduce phase<br>
+            D. 40 times as much total CPU time will be needed for Reduce phase<br>
+            E. 40 times as much total wall-clock time will be needed for Reduce phase<br>
+            F. the job will never complete</p>
+        </blockquote>
+        <p><span class="ans">答案：C。</span>hash 永远返回 1，所有单词都分到同一个 reduce 任务。结果还是对的，因为同一个单词的所有计数仍然落在同一个 reduce 任务里，只是这个任务包揽了全部单词。总计算量不变，所以 B、D 说的总 CPU 时间不会变。变的是并行度：本来 40 个 reduce 任务分给 10 台机器同时做，现在只有一台机器在干活，墙钟时间变成大约 10 倍。为什么是 10 倍而不是 40 倍：原来的瓶颈是 10 台机器，不是 40 个任务。</p>
+        <p>对应笔记：<a href="01_导论与MapReduce.html">第一讲 导论与 MapReduce</a>。</p>
+
+        <h3>II. VMware FT</h3>
+        <blockquote>
+            <p>The paper The Design of a Practical System for Fault-Tolerant Virtual Machines by Scales et al. describes a method for avoiding split-brain using shared storage. Instead of using the shared storage's test-and-set, Ben implements test-and-set using the kvsrv server from Lab 2 as follows:</p>
+        </blockquote>
+<pre><code>func test-and-set(clnt *tester.Clnt) bool {
+    val, version, err := clnt.Get("lock")
+    if err != rpc.OK {
+        return false
+    }
+    if val == "set" {
+        return false
+    }
+    if err := clnt.Put("lock", "set", version); err == rpc.OK {
+        return true
+    }
+    return false
+}</code></pre>
+        <blockquote>
+            <p>The clnt.Put and clnt.Get are RPCs that invoke the server's Put and Get methods. You can assume that Ben has implemented the Put and Get methods correctly. The initial value of "lock" is the empty string.</p>
+            <p>When the primary or the backup suspect that the other one has crashed, they invoke test-go-live, each with their own RPC client clnt:</p>
+        </blockquote>
+<pre><code>func test-go-live() {
+    for true {
+        if test-and-set(clnt) {
+            go-live()
+            return
+        }
+    }
+}</code></pre>
+        <blockquote>
+            <p>The network may lose, delay, or duplicate a few messages, but most messages will be delivered. The computers (primary, backup, and kvsrv server) do not fail.</p>
+            <p>2. [5 points]: What statements about Ben's implementation are true? (Circle all that apply)</p>
+            <p>A. Both the primary and backup may observe test-and-set returning true in test-go-live, and "go live", resulting in split brain<br>
+            B. The key/value server may never store "set" for the "lock" key<br>
+            C. The primary and backup may spin forever in test-go-live, retrying test-and-set, because it may never return true<br>
+            D. If all RPCs succeed with no timeouts while running test-go-live, either the primary or the backup will observe true from test-and-set, but not both</p>
+        </blockquote>
+        <p><span class="ans">答案：C、D。</span>Lab 2 的 Put 带版本号，只有版本号对得上才写入，所以同一时刻最多一方能把 "lock" 改成 "set"，A 错。网络大多数消息能送到，总会有某次 Put 成功写入，B 错。</p>
+        <p>C 是这道题的陷阱。设想第一次 Put 已经把 lock 改成了 set，但回复丢了。Clerk 重发 Put，这时版本号已经变了，服务器回 ErrVersion，Clerk 无法判断是自己写进去的还是别人写的，只能返回 ErrMaybe。Ben 的代码只认 rpc.OK，于是返回 false。下一轮 Get 看到 val 已经是 "set"，继续返回 false。主备双方都永远拿不到 true，一直空转。D 是正常情况：没有丢包时，先到服务器的那个 Put 成功并收到 rpc.OK，另一个因为版本号不对失败。</p>
+        <p>对应笔记：<a href="22_VMware_FT.html">补充一 VMware FT</a>（用 test-and-set 防止脑裂），<a href="实验.html">实验页</a>里 Lab 2 的 ErrMaybe 语义。</p>
+
+        <h3>III. 线性一致性</h3>
+        <blockquote>
+            <p>Alyssa is experimenting with a linearizable put/get key/value storage service. Unlike Lab 2, her key/value service has no versions; put calls look like put(key, value).</p>
+            <p>Alyssa has two clients. Client C1 executes this:</p>
+        </blockquote>
+<pre><code>t = get("x")
+put("x", t + 1)</code></pre>
+        <blockquote>
+            <p>At about the same time, client C2 executes this:</p>
+        </blockquote>
+<pre><code>t = get("x")
+put("x", t * 2)</code></pre>
+        <blockquote>
+            <p>Before either client starts, the value for key "x" in the storage system is 10. Both clients' calls complete without error. There is no other activity involving the storage system, and there are no failures.</p>
+            <p>Suppose the history of the execution, in the style of Lecture 4, with values omitted, looks like this:</p>
+        </blockquote>
+<pre><code>C1: |--Rx?--|  |--Wx?--|
+C2: |--Rx?--|  |--Wx?--|</code></pre>
+        <blockquote>
+            <p>3. [5 points]: After both clients have finished, what could the resulting value of x be in the storage system? (Circle all that apply)</p>
+            <p>A. 10 &nbsp; B. 11 &nbsp; C. 20 &nbsp; D. 21 &nbsp; E. 22</p>
+        </blockquote>
+        <p><span class="ans">答案：11 和 20。</span>两个读都在两个写开始之前结束，线性一致要求它们读到当时的值 10。于是 C1 写 11，C2 写 20。两个写在时间上重叠，线性一致允许它们按任意顺序生效，最后生效的那个决定最终值。21（先乘后加）和 22（先加后乘）都要求某个客户端读到另一个客户端写过的值，这在这个时间线里不可能。</p>
+        <blockquote>
+            <p>Alyssa resets the value of "x" to 10, and re-runs the two client programs. This time, the execution history looks like this:</p>
+        </blockquote>
+<pre><code>C1: |--Rx?--|  |--Wx?--|
+C2:      |---Rx?---|  |--Wx?--|</code></pre>
+        <blockquote>
+            <p>4. [5 points]: After both clients have finished, what could the resulting value of x be in the storage system? (Circle all that apply)</p>
+            <p>A. 10 &nbsp; B. 11 &nbsp; C. 20 &nbsp; D. 21 &nbsp; E. 22</p>
+        </blockquote>
+        <p><span class="ans">答案：11、20、22。</span>这次 C2 的读和 C1 的写在时间上重叠，所以 C2 的读可以排在 C1 的写之前（读到 10），也可以排在之后（读到 11）。读到 10 时，情况和上一题一样，结果是 11 或 20。读到 11 时，C2 写 22，而且 C2 的写在 C1 的写结束之后才开始，只能排在后面，最终值是 22。21 仍然不可能：它要求 C1 读到 C2 写的 20，但 C1 的读在 C2 的写开始之前就结束了。</p>
+        <p>对应笔记：<a href="08_线性一致性.html">第八讲 一致性与线性一致性</a>（历史图、线性化点、"先于"关系）。</p>
+
+        <h3>IV. GFS</h3>
+        <blockquote>
+            <p>Consider GFS as described in The Google File System by Ghemawat et al.</p>
+            <p>5. [5 points]: Which statements about GFS are true? (Circle all that apply)</p>
+            <p>A. GFS ensures linearizability of client operations by allowing clients to read from chunk replicas.<br>
+            B. The primary server of a chunk ensures that Append operations are executed exactly once.<br>
+            C. A chunk server uses 64 Mbytes of disk space for each chunk.<br>
+            D. Leases help ensure that each chunk has only one primary.</p>
+        </blockquote>
+        <p><span class="ans">答案：只有 D。</span>A：客户端可以从任何副本读，而某个副本可能还没收到最新的写，读到旧数据，这违反线性一致。B：记录追加失败时客户端会重试，主副本照样执行，所以同一条记录可能被追加两次，GFS 给的是"至少一次"。C：论文 2.5 节说 chunk 以普通 Linux 文件保存，按需增长、惰性分配，只写了几个字节的 chunk 只占几个字节的空间。D：3.1 节说 coordinator 只把一个 chunk 的租约给一个副本，租约过期之后才会给别的副本，这样同一时刻最多一个主副本。</p>
+        <p>对应笔记：<a href="03_GFS.html">第三讲 GFS</a>。</p>
+
+        <h3>V. Raft</h3>
+        <blockquote>
+            <p>Refer to Ongaro and Ousterhout's In Search of an Understandable Consensus Algorithm (Extended Version).</p>
+            <p>6. [10 points]: Which statements about Raft are true? (Circle all that apply)</p>
+            <p>A. If a follower receives an AppendEntries RPC from the leader and the follower's term matches the one in the RPC, then the prevLogIndex in the RPC must be equal to or higher than the follower's lastApplied<br>
+            B. Raft is optimized for the case that term switch happen frequently<br>
+            C. Raft guarantees that a leader in term t is leader in term t + 1<br>
+            D. If a leader sends the command in log index i on the apply channel, the leader must have persisted log index i<br>
+            E. If a follower crashes in a term and quickly reboots, it remembers who it voted for before the crash<br>
+            F. The leader's matchIndex for a peer is always equal to or smaller than the leader's nextIndex for that peer.<br>
+            G. A candidate who becomes leader sends out AppendEntries to all followers to suppress further elections<br>
+            H. If Raft doesn't use snapshots, a crashed follower will send all committed log entries on the apply channel after it reboots, even ones that it sent before the crash</p>
+        </blockquote>
+        <p><span class="ans">答案：D、E、F、G、H。</span>逐条看：</p>
+        <ul>
+            <li>A 错。网络会让 RPC 乱序。领导者先发的一条 AppendEntries 可能被延迟，后发的几条先到，跟随者已经据此把 lastApplied 推高了；这时那条旧 RPC 才到，它的 prevLogIndex 就会小于 lastApplied。实现时要能处理这种旧 RPC，不能截断已经提交的日志。</li>
+            <li>B 错。作者认为任期很少切换，所以连 5.3 节末尾的快速回退优化都说不一定需要。</li>
+            <li>C 错。Raft 不保证同一个领导者连任。</li>
+            <li>D 对。一条日志只有在多数派（包括领导者自己）持久化之后才算提交，提交之后才能送上 apply channel。</li>
+            <li>E 对。votedFor 是持久化状态（图 2），重启后还记得投过谁，这样同一任期不会投两票。</li>
+            <li>F 对。matchIndex 是"已知已复制到哪里"，nextIndex 是"下一条要发哪里"，前者总小于后者。</li>
+            <li>G 对。新领导者立刻发心跳，让别的节点重置选举计时器。</li>
+            <li>H 对。没有快照时，lastApplied 不持久化，重启后从头重放日志，已提交的条目会再送一遍 apply channel，上层状态机靠重放重建状态。</li>
+        </ul>
+        <blockquote>
+            <p>7. [10 points]: Which of the following bugs causes a Raft implementation to violate the safety properties listed in Figure 3? (Circle all that apply)</p>
+            <p>A. A deadlock in a follower<br>
+            B. A follower who starts an election very quickly<br>
+            C. A partitioned leader who on rejoining updates its term to the new leader's term and sends AppendEntries for commands in its log with the new term<br>
+            D. A race condition in the follower's implementation that causes two followers to send different commands on the apply channel for log index i<br>
+            E. A candidate that forgets to vote for itself<br>
+            F. A follower who appends a log entry to its log even if the term in the AppendEntries is smaller than its own and who then sends the log entry on the apply channel<br>
+            G. A follower that forgets to implement the rollback optimization presented at the end of section 5.3<br>
+            H. A leader who always sends only one entry in an AppendEntries RPC to a follower</p>
+        </blockquote>
+        <p><span class="ans">答案：C、D、F。</span>这题区分两类 bug。安全性（safety）bug 会产生错误的结果，比如两个节点在同一个位置执行了不同的命令；活性（liveness）bug 只会让系统卡住或变慢，不会出错。</p>
+        <ul>
+            <li>A、B、E、G、H 是活性问题。跟随者死锁，如果凑多数派正好缺它，系统就停了；选举太快、候选人忘了投自己，可能一直选不出领导者；没有快速回退、每次只发一条日志，只是慢。</li>
+            <li>C：旧领导者回来后直接把自己的任期改成新任期，再把旧日志用新任期号发出去，等于伪造了新领导者的日志，破坏"同一任期只有一个领导者"和日志匹配性质。</li>
+            <li>D：两个跟随者在同一个 index 应用了不同的命令，直接违反状态机安全性。</li>
+            <li>F：接受过期领导者（任期比自己小）的日志并应用，可能应用了从未被提交、之后会被覆盖的条目。</li>
+        </ul>
+        <p>对应笔记：<a href="06_Raft一.html">第六讲 Raft（一）</a>、<a href="07_Raft二.html">第七讲 Raft（二）</a>。</p>
+
+        <h3>VI. Lab 3A–3C</h3>
+        <blockquote>
+            <p>George is implementing Raft as in Lab 3A-3C. Eager to test his implementation, George runs a git pull to get the latest changes from the 6.5840 staff. The latest changes introduce a new test, TestMiniReElection, which tests whether Raft can re-elect a leader after a single network partition.</p>
+        </blockquote>
+<pre><code>func TestMiniReElection(t *testing.T) {
+    servers := 3 // initialize three servers
+    ...
+    // wait for a leader to be elected; get the leader's index
+    leader1 := ts.checkOneLeader()
+    ts.g.DisconnectAll(leader1) // disconnect leader1 from other servers
+    // wait for a new leader to be elected; get the leader's index
+    leader2 := ts.checkOneLeader() // ***
+}</code></pre>
+        <blockquote>
+            <p>ts.checkOneLeader() repeatedly polls only the connected servers until one of the connected servers returns that it is a leader. If it cannot find a leader within 5s, it returns a timeout error.</p>
+            <p>Unfortunately, there is a bug in the Raft test infrastructure. When leader1 is disconnected, leader1 can still send RPCs to the other servers but not receive responses from the other servers.</p>
+            <p>George runs TestMiniReElection, and finds that the test fails at the line marked with "***" with the timeout error "expected one leader, got none".</p>
+            <p>8. [5 points]: Assume George's Raft implementation is completely correct, and that the network is reliable. Briefly explain why the buggy test infrastructure causes George's implementation to fail the new test.</p>
+        </blockquote>
+        <p><span class="ans">答案：</span>leader1 被"断开"后仍然能向外发 RPC，它照常发心跳 AppendEntries。另外两台一直收到心跳，任期也对得上，于是不断重置选举计时器，永远不会发起选举。leader1 自己收不到回复，但它不需要回复也会继续认为自己是领导者。测试只查询仍然连着的两台，它们都不是领导者，5 秒后超时。</p>
+        <p>对应笔记：<a href="06_Raft一.html">第六讲</a>（心跳和选举超时），<a href="10_Lab3答疑.html">第十讲 Lab 3 答疑</a>，<a href="实验.html">实验页</a> Lab 3。</p>
+
+        <h3>VII. ZooKeeper</h3>
+        <blockquote>
+            <p>Refer to ZooKeeper: Wait-free coordination for Internet-scale systems, by Hunt, Konar, Junqueira, and Reed, and to Lecture 9.</p>
+            <p>Alyssa runs a ZooKeeper service with a ZooKeeper leader and multiple followers. Alyssa has three ZooKeeper client programs, P1, P2, and P3:</p>
+        </blockquote>
+<pre><code>P1:
+  s = openSession()
+  if create(s, "/leader", "one", flags=ephemeral) == true:
+    print "P1 starting as leader"
+    _, version = getData(s, "/x", watch=false)
+    setData(s, "/x", "one", version)
+    _, version = getData(s, "/y", watch=false)
+    setData(s, "/y", "one", version)
+
+P2:
+  s = openSession()
+  if create(s, "/leader", "two", flags=ephemeral) == true:
+    print "P2 starting as leader"
+    _, version = getData(s, "/x", watch=false)
+    setData(s, "/x", "two", version)
+    _, version = getData(s, "/y", watch=false)
+    setData(s, "/y", "two", version)
+    print "P2 done"
+
+P3:
+  s = openSession()
+  sync(s, "/")
+  x = getData(s, "/x", watch=false)
+  y = getData(s, "/y", watch=false)
+  print x, y</code></pre>
+        <blockquote>
+            <p>Initially, znode "/leader" does not exist, znode "/x" exists and contains the string "empty", and znode "/y" exists and also contains the string "empty".</p>
+            <p>The ZooKeeper calls in Alyssa's code are all synchronous. The ZooKeeper client call create() is exclusive, returning false if the file already exists, and true if it was able to create the file. The programs might end up talking to different ZooKeeper followers.</p>
+            <p>Alyssa starts P1, waits until she sees it print "P1 starting as leader", then (on a different computer) starts P2. Just at this point in time, P1's network connection starts to become slow and unreliable, so that sometimes it delivers packets, sometimes not. Alyssa sees that P2 prints "P2 starting as leader", and after a little while "P2 done". P2's network connection is reliable and fast.</p>
+            <p>After Alyssa sees "P2 done", she runs P3.</p>
+            <p>9. [5 points]: What output from P3 could Alyssa see? (Circle all that apply)</p>
+            <p>A. one, one &nbsp; B. two, two &nbsp; C. one, two &nbsp; D. two, one</p>
+        </blockquote>
+        <p><span class="ans">答案：只有 B（two, two）。</span>推理分三步。第一，P2 打印了 "P2 starting as leader"，说明它的 create 成功了，也就是 "/leader" 当时不存在。P1 创建的是临时 znode，只有 P1 的会话被 ZooKeeper 终止，它才会被删掉。会话一旦终止，P1 后面的任何写都不会再被接受。第二，所以 P1 的写全部发生在 P2 开始之前，P2 的写排在后面，两次 setData 都会成功（版本号是 P2 自己刚读到的）。第三，P3 在 P2 结束之后启动，并且先调 sync，保证它连接的跟随者已经追上领导者，读到的是 P2 写的值。</p>
+        <p>对应笔记：<a href="09_ZooKeeper.html">第九讲 ZooKeeper</a>（临时 znode、隔离、sync 和跟随者读）。</p>
+
+        <h3>VIII. 分布式事务</h3>
+        <blockquote>
+            <p>Alyssa has a database that supports serializable transactions. Records "x" and "y" both start out containing the value 1. Alyssa starts three transactions at the same time:</p>
+        </blockquote>
+<pre><code>T1:                       T2:                       T3:
+  BEGIN-X                   BEGIN-X                   BEGIN-X
+  temp1 = get("x")          temp1 = get("y")          put("y", 3)
+  temp2 = get("y")          put("x", temp1 * 2)       END-X
+  put("x", temp1 + temp2)   END-X
+  END-X</code></pre>
+        <blockquote>
+            <p>BEGIN-X marks the start of a transaction, and END-X marks the end. All three transactions commit and finish. There are no aborts, deadlocks, or failures. There is no other activity in the database.</p>
+            <p>When Alyssa looks at record "x" in the database after the transactions complete, she sees the value 5.</p>
+            <p>10. [5 points]: Briefly explain how the value 5 could have resulted from these transactions.</p>
+        </blockquote>
+        <p><span class="ans">答案：</span>数据库可以按 T2、T3、T1 的顺序一个接一个执行。T2 读 y=1，写 x=2；T3 写 y=3；T1 读 x=2、y=3，写 x=5。可串行化只要求结果等于某一种串行顺序，并不要求是开始的顺序，三个事务同时开始，哪种顺序都合法。</p>
+        <p>对应笔记：<a href="11_分布式事务.html">第十一讲 分布式事务</a>。</p>
+
+        <h3>IX. Spanner</h3>
+        <blockquote>
+            <p>Refer to Spanner: Google's Globally-Distributed Database, by Corbett et al.</p>
+            <p>11. [5 points]: Suppose you only wanted to support read-write transactions (not read-only and not snapshot reads). You want therefore to eliminate all of the Spanner mechanisms that are not needed for read-write transactions. Which of these techniques can be eliminated? (Circle all that apply)</p>
+            <p>A. commit wait (Sections 4.1.2, 4.2.1)<br>
+            B. safe time (Section 4.1.3)<br>
+            C. deadlock avoidance (Section 4.2.1)<br>
+            D. assignment of timestamps to read/write transactions (Section 4.1.2)</p>
+        </blockquote>
+        <p><span class="ans">答案：A、B、D。</span>读写事务的可串行化和外部一致性靠的是两阶段锁加两阶段提交，跟时间戳无关。时间戳、commit wait、safe time 都是为无锁的只读事务服务的：只读事务按时间戳读快照，需要知道某个副本在这个时间戳上的数据已经完整（safe time），也需要时间戳和真实时间的先后一致（commit wait）。去掉只读事务，这些都可以去掉。死锁避免（wound-wait）是两阶段锁需要的，不能去掉。</p>
+        <p>对应笔记：<a href="12_Spanner.html">第十二讲 Spanner</a>。</p>
+    </section>
+
+    <section>
+        <h2>期末考试（Exam II，2025 年春）</h2>
+
+        <h3>I. FaRM</h3>
+        <blockquote>
+            <p>Consider the following statements about FaRM as described in No compromises: distributed transactions with consistency, availability, and performance. For each statement, circle True or False.</p>
+            <p>1. [8 points]:</p>
+            <p>True / False : Short leases are important for FaRM, because FaRM must reconfigure to remove a failed replica of a region before FaRM can continue to use the region.</p>
+            <p>True / False : For small messages RDMA performs 4× better than RPC because the CPU is a performance bottleneck for RPCs.</p>
+            <p>True / False : To obtain write locks FaRM uses RDMA writes so that the destination machine's CPU doesn't have to do any work on a lock request.</p>
+            <p>True / False : For the TATP workload the median latency on the left end of the graph is 9 microseconds (see Figure 7), rather than the 19 microsecond mean commit latency mentioned in Section 6.3, because not all operations update multiple rows.</p>
+        </blockquote>
+        <p><span class="ans">答案：对、对、错、对。</span></p>
+        <ul>
+            <li>第一句对。FaRM 用主/备复制，没有用 Paxos 或 Raft 这类多数派协议，一个区域的所有副本都在线才能继续写。某个副本坏了，必须先重新配置把它移除，所以要尽快发现故障，租约要短。</li>
+            <li>第二句对，见论文图 3：小消息时 RPC 的瓶颈在 CPU 处理，单边 RDMA 绕过了对方 CPU。</li>
+            <li>第三句错。加锁要检查版本号并原子地设置锁位，FaRM 用 RDMA 把 LOCK 消息写进对方的日志，对方的 CPU 仍然要运行加锁代码。不需要对方 CPU 参与的是读（单边 RDMA 读）和 VALIDATE。</li>
+            <li>第四句对。TATP 里大部分操作只读或只改一行，走的是更短的路径，所以中位数比平均提交延迟低。</li>
+        </ul>
+        <p>对应笔记：<a href="14_FaRM与乐观并发控制.html">第十四讲 FaRM 与乐观并发控制</a>。</p>
+
+        <h3>II. Chardonnay</h3>
+        <p>2026 年的课程没有讲这篇论文，本站没有对应笔记。三道题考的是快照读和死锁避免，可以对照第十一讲和第十二讲 Spanner 的只读事务来理解。</p>
+        <blockquote>
+            <p>Answer these questions with reference to Chardonnay: Fast and General Datacenter Transactions for On-Disk Databases by Eldeeb et al.</p>
+            <p>2. [3 points]: Section 6.1 says that all of a read-write transaction's writes are tagged with a version containing the same epoch number. For example, if a read-write transaction executes at around the time the Epoch Service changes the epoch from 20 to 21, either all the transaction's updated records should have a VID prefixed with 20, or all should be prefixed with 21, but not a mix of the two. Explain briefly why having the same epoch number in all the written items' versions is important for correctness.</p>
+        </blockquote>
+        <p><span class="ans">答案：</span>只读（快照）事务看到的版本，对每个读写事务来说，要么包含它的全部写，要么一个都不包含。Chardonnay 的只读事务读的是"某个 epoch 结束时"的快照。如果一个读写事务的写分散在 20 和 21 两个 epoch，读 epoch 20 快照的人会看到它的一半写，结果不可串行化。</p>
+        <blockquote>
+            <p>3. [3 points]: Section 6.1 describes how a transaction chooses a version ID (VID): it is the current epoch, with a counter appended. Suppose, instead, that version IDs were just the current epoch (with nothing appended). Briefly explain how this change could cause snapshot reads to yield incorrect (non-serializable) values.</p>
+        </blockquote>
+        <p><span class="ans">答案：</span>同一个 epoch 里同一条记录可能被写多次。没有计数器，这些版本的 VID 完全相同，快照读分不出哪个是这个 epoch 里最后一个版本，可能对一些记录读到 epoch 早期的版本、对另一些读到晚期的版本，拼出一个从没存在过的状态。</p>
+        <blockquote>
+            <p>4. [3 points]: Section 8 says that the locks for a transaction are acquired one at a time using a "chain" technique. It would be faster if the client sent out all the lock requests in parallel. Briefly explain why sending a transaction's lock request messages in parallel would be a bad idea.</p>
+        </blockquote>
+        <p><span class="ans">答案：</span>一个接一个加锁是为了按固定顺序加锁，从而避免死锁。并行发出去，各个锁的获得顺序就没法保证，两个事务可能各拿到对方需要的一部分锁，互相等待。</p>
+        <p>相关笔记：<a href="11_分布式事务.html">第十一讲</a>（两阶段锁和死锁），<a href="12_Spanner.html">第十二讲</a>（快照读）。</p>
+
+        <h3>III. Grove</h3>
+        <p>Grove 是 2025 年讲的验证论文，2026 年换成了 IronFleet。两者都在证明分布式系统代码满足规范，区别和这道题有关的一点：两者都只证安全性，Grove 不证活性。</p>
+        <blockquote>
+            <p>Consider "Grove: a separation-logic library for verifying distributed systems" by Sharma et al. For each statement, circle True or False.</p>
+            <p>5. [8 points]:</p>
+            <p>True / False : Because any replica in Grove can serve a Get request, Grove achieves higher throughput for Get's than for Put's (see Figure 19), but sacrifices linearizability for Get's.</p>
+            <p>True / False : If a response to a Get is lost, the Grove exactlyonce library will resend the Get, which the server executes again and the second response may contain a different value than the first (but lost) response contained.</p>
+            <p>True / False : If the Go code for vKV had a bug that caused a backup to lose the effect of a Put after a crash, then Grove's specification and proof would catch this bug.</p>
+            <p>True / False : If the configservice had an infinite loop that caused Reconfigure to never return, then this bug would be caught by Grove's specification and proof.</p>
+        </blockquote>
+        <p><span class="ans">答案：错、对、对、错。</span>第一句错：Grove 从备份读，但用租约等机制保证了读仍然线性一致。第二句对：重发的 Get 会被重新执行，如果两次之间有 Put，第二次的结果不同，这不影响正确性，因为客户端只看到一次回复，它对应 Get 在某个时刻的线性化点。第三句对：崩溃后丢掉已确认的 Put 是安全性错误，规范和证明能发现。第四句错：死循环让函数永不返回，属于活性问题，Grove 不证活性。</p>
+        <p>相关笔记：<a href="15_IronFleet.html">第十五讲 IronFleet</a>（安全性和活性、规范和精化）。</p>
+
+        <h3>IV. DynamoDB 事务</h3>
+        <p>本站没有 DynamoDB 的笔记，这题考的是只读事务怎样不看到"一半"的写，和第十二讲 Spanner 的问题相同。</p>
+        <blockquote>
+            <p>With respect to Distributed Transactions at Scale in Amazon DynamoDB by Idziorek et al., imagine that a read-only transaction (TransactGetItems) and a read-write transaction (TransactWriteItems) execute concurrently. The read-write transaction updates multiple items stored on different storage nodes; the read-only transaction reads the same set of items. Serializability requires that the read-only transaction see all of the items as they were before the read-write transaction, or all as they are after the read-write transaction (but not a mix of before and after).</p>
+            <p>6. [5 points]: For the above scenario, which mechanisms help to ensure this all-before or all-after property? Refer to the design as described in the paper's Sections 2 and 3 (but not Section 4). Circle all that apply.</p>
+            <p>A. The item.timestamp &lt; input.timestamp check in Listing 3.<br>
+            B. Multiple time-stamped versions stored for each key.<br>
+            C. Log sequence numbers (LSNs).<br>
+            D. Two-phase locking.<br>
+            E. item.ongoingTransactions</p>
+        </blockquote>
+        <p><span class="ans">答案：C、E。</span>DynamoDB 的只读事务分两轮读：第一轮读出每个条目和它的 LSN，第二轮再确认 LSN 没变；如果某个条目上有正在进行的写事务（ongoingTransactions 非空），读就失败重试。这样读到的要么全在写之前，要么全在写之后。A 不对，时间戳只用于读写事务之间排序，只读事务不用。B 不对，DynamoDB 每个键只存一个版本。D 不对，只读事务不加锁。</p>
+        <p>相关笔记：<a href="11_分布式事务.html">第十一讲</a>，<a href="12_Spanner.html">第十二讲</a>。</p>
+
+        <h3>V. AWS Lambda</h3>
+        <blockquote>
+            <p>Consider the paper, and guest lecture about, On-demand container loading in AWS Lambda by Brooker et al. For each of the following statements, indicate whether it is true or false.</p>
+            <p>7. [8 points]:</p>
+            <p>True / False : AWS Lambda is attractive to customers because the customer can spawn many lambdas in response to a load spike without having to provision machines in advance.</p>
+            <p>True / False : Replication of chunks in the AZ-level cache is important to ensure that chunks are not lost forever when a cache node fails.</p>
+            <p>True / False : Erasure coding of cached chunks helps improve tail latency, because a worker can reconstruct a chunk without having to download all stripes of the chunk.</p>
+            <p>True / False : The convergent encryption scheme described in Section 3.1 helps protect against an attacker who compromises a worker and attempts to read containers of any customer.</p>
+        </blockquote>
+        <p><span class="ans">答案：对、错、对、对（第四句也接受"错"）。</span>第二句错：AZ 级缓存坏了，数据在 S3 里还有，不会永久丢失；缓存里的冗余是为了低延迟。第三句对：纠删码把 chunk 切成若干条带加校验条带，拿到其中足够数量就能还原，不用等最慢的那个节点。第四句：收敛加密让每个 worker 只能解密它要运行的函数所需的 chunk。题目里 "any" 有歧义，官方说答"错"也给分。</p>
+        <p>对应笔记：<a href="17_AWS_Lambda.html">第十七讲 AWS Lambda</a>。</p>
+
+        <h3>VI. Lab 4</h3>
+        <blockquote>
+            <p>Ben Bitdiddle is implementing the rsm package from Lab 4. He uses a shared reply table to implement communication between the rsm's Submit() method and the reader goroutine. The reply table maps a completed operation's id to its reply from DoOp(). In addition, rsm contains a nextId field that is initialized to 0 and is incremented by 1 each time Submit() is called.</p>
+            <p>His code takes the following steps:</p>
+            <p>A. The kvraft server calls rsm.Submit() with a client request req.<br>
+            B. Submit() increments rsm.nextId, packs the request into a new operation Op{id: rsm.nextId, req: req}, and calls rsm.rf.Start() with the Op. If rsm.rf.Start() indicates that the current peer is the Raft leader, it then waits for the reply table to contain a reply under the key Op.id (the one passed to Start()).<br>
+            C. When the rsm's reader goroutine receives an ApplyMsg from the applyCh, it calls DoOp(), then populates the reply table with the result from DoOp() under key Op.id.<br>
+            D. When Submit() sees the Op.id key in the reply table, it deletes the Op.id key/value pair from the reply table and returns the corresponding reply.</p>
+            <p>Assume that all omitted parts of Ben's design are correct.</p>
+            <p>8. [5 points]: Ben notices that his implementation can result in incorrect behavior. Explain why.</p>
+        </blockquote>
+        <p><span class="ans">答案：</span>nextId 是每台服务器各自从 0 开始数的，不同服务器分配的 id 会重复。假设旧领导者 S1 提交了 id=5 的操作，正在等；这时领导权换到 S2，S2 也给自己的新操作分配了 id=5。S2 的操作被提交后，S1 上的 reader goroutine 也会应用它，把结果填进 S1 的 reply 表 key=5，S1 上等着的 Submit 以为这是自己操作的回复，返回给了错误的客户端。常见的修法是用 Start() 返回的 index（加上 term）来匹配，或者在 Op 里放服务器 id，应用时检查是不是自己提交的那个。</p>
+        <p>对应笔记：<a href="实验.html">实验页</a> Lab 4（rsm 和 Submit），<a href="10_Lab3答疑.html">第十讲</a>。</p>
+
+        <h3>VII. Ray</h3>
+        <blockquote>
+            <p>Consider the following Ray program, which creates a sqrt task task for each number in the list mylist. The creation yields a DFut and the caller waits for the tasks to complete by calling get on each future. The code is as follows:</p>
+        </blockquote>
+<pre><code># A call to sqrt_task yields a DFut
+@ray.remote
+def sqrt_task(n):
+    # sqrt is a python function, which returns the square root of its argument
+    return sqrt(n)
+
+@ray.remote
+def sum_task(f):
+    # sum is a python function, which takes a future and returns the sum
+    l = get(f)        # collect the list l
+    return sum(l)     # return the sum of the numbers in list l
+
+# A call to sqrt_list_task yields a shared DFut
+@ray.remote
+def sqrt_list_task(n_list):
+    # start tasks and collect futures
+    l = [ ]           # list holding DFuts
+    for i in n_list:  # iterate over list of numbers
+        l.append(sqrt_task(i))
+    r = [ ]
+    for f in l:
+        r.append(get(f))  # collect the result
+    return r          # return a SharedDFut for r
+
+# invoke sqrt_list_task with a large list of numbers, sum, and print result
+f = sqrt_list_task(mylist)
+s = sum_task(f)
+print(s)</code></pre>
+        <blockquote>
+            <p>Assume Ray behaves in the way described in Ownership: a distributed futures system for fine-grained tasks by Wang et al., and Ray is running on a cluster of computers.</p>
+            <p>For each of the following statements, indicate whether it is true or false.</p>
+            <p>9. [8 points]:</p>
+            <p>True / False : a Ray worker may start running sum task before sqrt list task has finished</p>
+            <p>True / False : the driver that invokes sum task receives the list with square-rooted numbers from the worker that ran sqrt list task.</p>
+            <p>True / False : the driver is the owner for each future that sqrt task returns.</p>
+            <p>True / False : the driver is the owner for the shared future returned by sqrt list task.</p>
+        </blockquote>
+        <p><span class="ans">答案：对、错、错、对。</span>第一句对：远程调用是异步的，sum_task 拿到的是 future，可以先开始跑，到 get(f) 才阻塞。第二句错：driver 只是把 future 传给 sum_task，平方根列表由运行 sum_task 的 worker 直接从运行 sqrt_list_task 的 worker 那里取，不经过 driver。第三句错：sqrt_task 是在 sqrt_list_task 里面调用的，谁调用谁就是 owner，所以这些 future 的 owner 是运行 sqrt_list_task 的 worker。第四句对：sqrt_list_task 是 driver 调用的，它返回的 future 归 driver 所有。</p>
+        <p>对应笔记：<a href="18_Ray.html">第十八讲 Ray</a>（所有权、借用、对象存储）。</p>
+
+        <h3>VIII. SUNDR</h3>
+        <blockquote>
+            <p>Consider the straw-man design in the paper Secure Untrusted Data Repository (SUNDR) by Li et al.</p>
+            <p>In the straw-man design, a client asks the server to append a "fetch" operation to the history after reading the history. Each client also remembers the most recent operation it has appended to the history. One reason for these mechanisms is to prevent the server from first showing some operations to the client, and then later hiding those operations.</p>
+            <p>Suppose one modified the SUNDR straw-man protcol in three ways. First, eliminate "fetch" operations, so that the history only includes modify operations. Second, have each client remember the last entry in the most recent history the client obtained from the server; call this remembered entry ELAST. Third, each client checks that ELAST is present in the next history it obtains from the server. With these modifications, a client can still detect a situation in which the server first shows an operation to a client, and then omits that operation in a later history shown to the same client.</p>
+            <p>10. [5 points]: It turns out this modification is a bad idea. Explain briefly how this modification would allow a malicious server to violate fork consistency.</p>
+        </blockquote>
+        <p><span class="ans">答案：</span>设正确的历史最后两条是 E1、E2。客户端 C1 来读时，服务器只给到 E1，藏起 E2，C1 记住 ELAST=E1。到这里还没违规：fork 一致性允许服务器给不同客户端看不同的分支，C1 现在就处在一个缺了 E2 的分叉上。下一次 C1 再读，服务器把完整历史（含 E2）给它。C1 检查 ELAST=E1 在里面，E1、E2 的签名也都对，于是接受。这样被分叉出去的 C1 又看到了另一个分支上的 E2，两个分支被合上了，而 fork 一致性要求分叉一旦出现就不能再合回去。原设计里 C1 读完会追加一个 fetch 操作并签名，这个 fetch 排在 E1 后面，E2 的作者从未见过它，服务器就没法再把 E2 塞进 C1 的历史而不被发现。</p>
+        <p>对应笔记：<a href="19_SUNDR.html">第十九讲 SUNDR</a>（被分叉的日志为什么合不回去）。</p>
+
+        <h3>IX. 比特币</h3>
+        <blockquote>
+            <p>Bitcoin: A Peer-to-Peer Electronic Cash System, by Nakamoto, mentions in Section 4 that the cryptographic hash of a valid block must start with a certain number of zero bits. Assume that the hash algorithm is SHA-256, which returns a 256-bit hash.</p>
+            <p>11. [3 points]: You are trying to mine a new block. The required number of zero bits is seven. You set the block's 32-bit nonce field to a random value, and compute the SHA-256 hash of the block. What's the probability that the first seven bits of the hash are zeros? Circle the one best answer.</p>
+            <p>A. 1/2 &nbsp; B. 1/7 &nbsp; C. 1/128 &nbsp; D. 1/256 &nbsp; E. 1/249 &nbsp; F. 1/(2<sup>32</sup>)</p>
+        </blockquote>
+        <p><span class="ans">答案：C（1/128）。</span>SHA-256 的输出可以看成均匀随机，每一位是 0 的概率 1/2，七位都是 0 的概率是 (1/2)<sup>7</sup> = 1/128。</p>
+        <blockquote>
+            <p>Ben runs a Bitcoin node. A few hours ago Ben's node learned about block B747, which is a valid block. Ben sees a transaction T27 in B747 that pays some money to a certain public key, signed by the correct private key. Ben would like to steal the money involved in T27. He modifies his copy of block B747 so that the payee's public key in T27 is Ben's own public key. He doesn't change anything else in B747. He modifies his Bitcoin node software to announce the block to other nodes as if it were a valid block.</p>
+            <p>12. [3 points]: Which of the following will cause other Bitcoin nodes to decide that Ben's B747 is invalid? Circle all that apply.</p>
+            <p>A. The "Prev Hash" field in the next block in the chain doesn't refer to Ben's B747.<br>
+            B. Other peers will already know about the real B747.<br>
+            C. The "Prev Hash" field in Ben's B747 isn't valid.<br>
+            D. The hash of Ben's B747 won't start with enough zeroes.<br>
+            E. The signature in T27 in Ben's B747 isn't correct.</p>
+        </blockquote>
+        <p><span class="ans">答案：D、E。</span>D：改了区块内容，区块的哈希就变了，原来的 nonce 让原区块的哈希开头有足够多的 0，改过之后几乎不可能还满足。E：T27 的签名是对原来的收款公钥签的，换成 Ben 的公钥后签名验证不过。A、B 不对：一个合法但还没有后继的区块，节点要暂时接受，因为它可能是一个新分叉的开头；已经知道真 B747 也不能作为拒绝理由。C 不对：Ben 没改 Prev Hash，它仍然指向原 B747 的前一个区块，是合法的。</p>
+        <blockquote>
+            <p>Now Ben is designing a new crypto-currency system, identical to Bitcoin, except with a different agreement scheme to resolve forks in the block-chain: instead of the longest fork winning, nodes compute the hash of the last block in each fork, and the fork with the lowest last-block hash value wins. Ben reasons that all nodes will compute the same hashes, and thus all nodes will agree about which fork wins.</p>
+            <p>13. [3 points]: Why is Ben's fork-resolution idea a disaster? Explain briefly.</p>
+        </blockquote>
+        <p><span class="ans">答案：</span>在比特币里，攻击者想抹掉很多个区块之前的一笔交易，就要从那之前分叉，并且挖矿速度长期超过主链，直到追上并超过主链长度，这需要的算力被认为对大多数攻击者太贵。Ben 的规则下，攻击者只需挖出一个区块，它的哈希碰巧比主链对应位置的最后一个区块小，所有节点就会切到攻击者这条很短的分叉上。挖一个区块需要的算力少得多，而且攻击者可以从任意早的位置分叉。</p>
+        <p>对应笔记：<a href="20_比特币.html">第二十讲 比特币</a>（工作量证明、分叉、51% 攻击）。</p>
+
+        <h3>X. PBFT</h3>
+        <blockquote>
+            <p>Consider the PBFT protocol as described in the paper Practical Byzantine Fault Tolerance by Castro and Liskov.</p>
+            <p>For each of the following statements, indicate whether it is true or false.</p>
+            <p>14. [6 points]:</p>
+            <p>True / False : Assume all replicas of a PBFT-replicated system are running the same software and the software has a bug. If an attacker exploits this bug in all replicas to control each replica, then the attacker can commit arbitrary operations in the log.</p>
+            <p>True / False : If an attacker controls the primary of a PBFT-replicated system, then the attacker can commit arbitrary operations in the log.</p>
+            <p>True / False : Honest replicas must include in a VIEW-CHANGE the messages already prepared so that a new primary cannot omit already-committed operations.</p>
+        </blockquote>
+        <p><span class="ans">答案：对、错、对。</span>第一句对：PBFT 只在被攻破的机器不超过 f 台时保证正确，同一个 bug 让所有副本都被控制，就远远超过 f 了。这也是为什么实际部署会考虑让副本跑不同的实现。第二句错：只控制主节点，还是只控制了一台，一条操作要被提交，需要 2f+1 个副本在 PREPARE 和 COMMIT 阶段认可，主节点作恶会被发现并触发视图变更。第三句对：视图变更消息要带上已经 prepared 的请求的证明，新主节点据此重建，不能漏掉已经可能被提交的操作。</p>
+        <blockquote>
+            <p>15. [2 points]: If there are 10 machines in our system, and at most 2 machines are malicious, how many REPLY messages does a client need to receive before it knows its operation was executed? (Circle best answer)</p>
+            <p>A. 1 &nbsp; B. 3 &nbsp; C. 4 &nbsp; D. 6 &nbsp; E. 7</p>
+        </blockquote>
+        <p><span class="ans">答案：B（3）。</span>客户端要等 f+1 个内容相同的 REPLY，f=2，所以是 3。最多 2 个是坏的，3 个相同的回复里至少有一个来自诚实副本，诚实副本只有在操作真的执行后才会回复。这里问的是"知道已执行"，所以 f+1 就够，不需要 2f+1。</p>
+        <p>对应笔记：<a href="21_拜占庭容错.html">第二十一讲 拜占庭容错（PBFT）</a>。</p>
+    </section>
+
+    <section>
+        <h2>附：课程调查题</h2>
+        <p>两场考试最后都有 1 分的调查题，答了就给分。结果有几条可以看出课程后来为什么那样改：</p>
+        <ul>
+            <li>期中问"哪些讲次一定要保留"，Raft（125 票）、MapReduce（122 票）最高；问"哪些该删"，Lab 3A/3B 答疑（49 票）、Spanner（41 票）、VMware FT（29 票）最多。2026 年 VMware FT 确实从课表里去掉了（本站把它整理成了<a href="22_VMware_FT.html">补充一</a>），Spanner 和答疑课保留了。</li>
+            <li>期末问"哪些该删"，Grove 得到 85 票，远多于其他论文。2026 年的验证一讲换成了 IronFleet。</li>
+            <li>期末问实验里线性一致性检查器 Porcupine 的可视化有没有用，多数人（78 人）说"偶尔帮我找到了问题"。</li>
+            <li>对实验的意见最多的是"更好的调试工具""实验之间不要层层依赖""公布 Raft 参考实现"；对课程安排的意见最多的是增加 office hours 和助教。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>MIT 6.5840: Distributed Systems &copy; Spring 2026</p>
+        <nav class="footer-nav">
+            <a href="实验.html">&larr; 上一篇</a>
+            <a href="index.html">返回主目录</a>
+            <a href="01_导论与MapReduce.html">第一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

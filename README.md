@@ -34,7 +34,7 @@ Stanford、CMU、Harvard 和 MIT 2025-2026 学年 AI 课程的中文笔记，附
 | [CMU 15-213 (CS:APP)](https://joyce9896.github.io/frontier-ai-courses/15-213-CSAPP/) | 计算机系统入门，CS:APP 两位作者亲授的 2015 年秋季版全部 27 讲：数据表示、x86-64 机器代码、高速缓存、链接、进程与信号、虚拟内存、malloc、网络、并发 |
 | [Stanford CS143](https://joyce9896.github.io/frontier-ai-courses/CS143-Compilers/) | 编译器：2026 年春季课件加 Aiken 公开课，18 讲覆盖词法分析、LL 和 LR 语法分析、类型检查、代码生成、操作语义、数据流分析、寄存器分配、垃圾回收，附 Cool 编译器项目和书面作业梳理 |
 | [Stanford CS149](https://joyce9896.github.io/frontier-ai-courses/CS149-Parallel-Computing/) | 并行计算：2023 年秋季全部 19 讲，多核、SIMD、ISPC、CUDA、局部性与调度、Spark、DNN 与 FlashAttention、缓存与内存一致性、无锁编程、事务内存、DSL、专用硬件与 DRAM，附五个编程作业和书面作业梳理 |
-| [MIT 6.5840](https://joyce9896.github.io/frontier-ai-courses/MIT-6.5840-Distributed-Systems/) | 分布式系统（原 6.824）：2026 年春季讲义对照 2020 年录像，21 讲覆盖 MapReduce、GFS、Paxos、Raft、线性一致性、ZooKeeper、两阶段提交、Spanner、链式复制、FaRM、Memcache、Lambda、Ray、SUNDR、比特币、拜占庭容错，另有七篇 2020 年版补充，附五个 Go 实验梳理 |
+| [MIT 6.5840](https://joyce9896.github.io/frontier-ai-courses/MIT-6.5840-Distributed-Systems/) | 分布式系统（原 6.824）：2026 年春季讲义对照 2020 年录像，21 讲覆盖 MapReduce、GFS、Paxos、Raft、线性一致性、ZooKeeper、两阶段提交、Spanner、链式复制、FaRM、Memcache、Lambda、Ray、SUNDR、比特币、拜占庭容错，另有七篇 2020 年版补充，附五个 Go 实验梳理和 2025 年两套考试的逐题解析 |
 
 ### 技术
 
