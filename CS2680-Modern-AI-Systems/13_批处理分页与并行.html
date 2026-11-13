@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十三讲：高效 LLM 服务基础（三）：批处理、调度、分页与并行 | Harvard CS2680 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="12_GPU编程续.html">&larr; 上一讲</a>
+    <span>Harvard CS2680: Lecture 13</span>
+    <a href="作业.html">作业与项目 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十三讲：高效 LLM 服务基础（三）：批处理、调度、分页与并行</h1>
+        <p class="subtitle">LLM 服务和普通网络服务哪里不同，TTFT、TBT、TPOT 和 goodput 怎样测，测性能的四个陷阱，连续批处理和选择性批处理，FCFS、分块预填充、预填充与解码分离、SJF，PagedAttention，前缀缓存的块哈希与基数树，以及数据、张量、流水线、专家、上下文五种并行</p>
+        <div class="author-meta">
+            主讲：Juncheng Yang<br>
+            资料来源：<a href="https://cs2680.seas.harvard.edu/slides/11_llm_serving_basics_3.pdf" target="_blank">课件</a>（2026 年 11 月 4 日；课程不录像，本文依据课件整理。课件编号是第 11 份，本站按上课顺序排在第十三篇）<br>
+            课程推荐阅读：<a href="https://www.usenix.org/conference/osdi22/presentation/yu" target="_blank">Orca</a>、<a href="https://arxiv.org/abs/2309.06180" target="_blank">vLLM（PagedAttention）</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>一、开头的通知</h2>
+        <!-- Slide 3. -->
+        <p>
+            作业 4 下周二午夜截止。讲者提醒几件事：读懂并调好推理引擎的启动参数；可以试投机解码和"Agent 与引擎协同设计"；书面总结和视频里要有测量和推理，说清看到了什么、做了什么、什么变了、为什么变、代价是什么；测量时不要只看一个计数器或一个指标。项目提案上周三已经截止。
+        </p>
+        <p>
+            本讲分三块：怎样评估 LLM 服务的性能，调度和资源管理，以及并行。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、LLM 服务为什么要花好几讲</h2>
+        <!-- Slides 4–6. -->
+        <p>
+            一个普通网页请求 5 到 50 毫秒就跑完。一个 LLM 请求先做一次预填充（prefill，把整段提示一次算完），再进入解码（decode），每生成一个 token 就要把模型完整跑一遍前向。和过去的计算相比，有三点不同：计算量大，必须用 GPU 等加速器；每个 token 都要付钱，每个用户请求都要重新跑模型；GPU 很贵，所以服务效率直接决定成本和速度。
+        </p>
+        <p>
+            <strong>单个请求内部</strong>的不同：
+        </p>
+        <ul>
+            <li><strong>两个阶段，两种瓶颈</strong>：预填充受算力限制，解码受显存带宽限制（第十讲的屋顶线模型）。</li>
+            <li><strong>一次前向可能跨多张 GPU、多台机器</strong>，既要算也要通信。</li>
+            <li><strong>状态是"软"的，而且越来越大</strong>：KV 缓存存在某张 GPU 上。请求被路由到另一张 GPU 时，那张卡没有这份缓存，只能重算。所以 token 本身就是重建状态用的检查点。</li>
+        </ul>
+        <p>
+            <strong>多个请求之间</strong>的不同：
+        </p>
+        <ul>
+            <li><strong>输出长度未知</strong>：提示长度是已知的，输出要到停止 token 出现才知道多长。</li>
+            <li><strong>token 是工作量的单位</strong>：准入、调度、路由、自动扩缩、限流、定价、服务等级目标（SLO）都按 token 计；不同请求的开销能差 $10^4$ 到 $10^6$ 倍。</li>
+            <li><strong>瓶颈会移动</strong>：批大小从小到大、上下文从短到长、预填充和解码的比例变化，瓶颈都跟着变。</li>
+            <li><strong>Agent 和推理模型把这些差距进一步拉大</strong>：多轮对话中，第二轮会重用第一轮的内容，第三轮重用前两轮，前缀重用率能到 90% 左右，KV 缓存变成了一个存储问题。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>三、怎样测 LLM 服务的性能</h2>
+
+        <h3>1. 预填充和解码</h3>
+        <!-- Slide 9. -->
+        <table>
+            <tr><th></th><th>预填充</th><th>解码</th></tr>
+            <tr><td>粒度</td><td>一次处理全部 $S$ 个提示 token</td><td>每步 1 个 token</td></tr>
+            <tr><td>主要运算</td><td>矩阵乘矩阵（GEMM）</td><td>矩阵乘向量（GEMV）或很"瘦"的 GEMM</td></tr>
+            <tr><td>瓶颈</td><td>算力（FLOPs）</td><td>显存带宽</td></tr>
+            <tr><td>决定哪个延迟</td><td>TTFT</td><td>TPOT × 输出长度</td></tr>
+        </table>
+
+        <h3>2. 一个请求时间线上的几个指标</h3>
+        <!-- Slide 11. -->
+        <p>
+            请求到达后先排队，然后预填充，在 $t_1$ 吐出第一个 token，之后每次前向吐一个，直到 $t_6$。
+        </p>
+        <ul>
+            <li><strong>TTFT</strong>（time to first token）：从到达到第一个 token。</li>
+            <li><strong>TBT</strong>（time between tokens）：相邻两个 token 之间的间隔，按每个 token 测，所以看它的 P99 能抓到卡顿。</li>
+            <li><strong>TPOT</strong>（time per output token）：所有间隔的平均，$(\text{E2E} - \text{TTFT}) \div (n-1)$。几次长卡顿对它几乎没有影响。</li>
+            <li><strong>E2E</strong>：从到达到最后一个 token，$\text{E2E} = \text{TTFT} + \text{TPOT} \times (n-1)$。</li>
+            <li><strong>吞吐</strong>：每张 GPU 每秒在所有请求上输出的 token 数，批越大越高。</li>
+            <li><strong>Goodput</strong>：只把满足 TTFT 和 TPOT 两个 SLO 的请求算进吞吐。</li>
+        </ul>
+
+        <h3>3. GPU 吞吐和用户感受到的速度</h3>
+        <!-- Slide 12. -->
+        <p>
+            GPU 吞吐是服务器每秒吐出的全部 token；用户吞吐是 $1 \div \text{TPOT}$，即一个读者看到的速度。课件的图里，批大小从 1 加到 64，GPU 吞吐涨到约 20 倍，每个用户却慢了约 3 倍。两个目标方向相反，选批大小就是在两者之间取舍。
+        </p>
+
+        <h3>4. 测性能的四个陷阱</h3>
+        <!-- Slides 13–16. -->
+        <p>
+            <strong>陷阱一：跑得太短，只有过渡过程。</strong>例如一次性发 500 个请求。前面的请求要承担内核编译、懒加载、GPU 时钟爬升、前缀缓存还是空的这些开销；后面的请求在越来越小的批里跑。把整次运行平均，两头的失真混在一起。应该报告中间稳态段的性能，去掉预热和收尾。
+        </p>
+        <p>
+            <strong>陷阱二：指标会误导或不透明。</strong>请求的提示长度、输出长度、对延迟的敏感度都不同，一个平均数会掩盖用户真正看到的东西。课件的例子：两个回答都是 100 个 token、都在 5 秒内流完。一个每 50 毫秒稳定地出一个 token；另一个中间卡住 4.5 秒，其余时间很快。两者的平均 TPOT 都是 50 毫秒，但第二个用户盯着不动的屏幕看了 4.5 秒；最大 TBT 一个是 50 毫秒，一个是 4500 毫秒。应该给出完整分布，并同时报告 TTFT、TPOT 和吞吐。
+        </p>
+        <p>
+            <strong>陷阱三：负载不真实。</strong>四个方面：
+        </p>
+        <ul>
+            <li>token 内容：基准用随机 token（像 "kq 7z ##vl 3x"），真实请求是"帮我总结这封邮件"。随机内容下，投机解码的草稿 token 很少被接受，结论会偏。</li>
+            <li>长度分布：真实流量里偶尔有一个 32 万 token 的提示，会卡住整个批。</li>
+            <li>到达时间：真实请求成批涌来，P99 TTFT 会被推得很高。</li>
+            <li>前缀缓存命中：真实请求常共享系统提示，可以跳过预填充；随机基准没有这个现象。</li>
+        </ul>
+        <p>
+            应该回放真实的请求记录（trace），保留真实的长度和到达时间。
+        </p>
+        <p>
+            <strong>陷阱四：比较不公平。</strong>一是资源不对等：自己的方法用 8 张卡，基线用 4 张，2 倍的提升可能全来自多出的卡。二是基线没调参：默认配置的基线记作 1.0×，调好以后是 1.6×，自己的方法调好是 1.8×，真实提升只有 $1.8 \div 1.6 \approx 1.1$ 倍。三是没有把算法和实现分开：课件的例子里 70% 的加速来自工程实现，只有 30% 来自算法本身。做法是在相同硬件上把每个基线都调好，再逐一关掉每项技术，看它单独贡献多少。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、批处理</h2>
+
+        <h3>1. 静态、动态、连续批处理</h3>
+        <!-- Slide 23. -->
+        <ul>
+            <li><strong>静态批处理</strong>：客户端自己凑一批，服务器把整批跑完才接下一批。先结束的请求所在的位置空着等。</li>
+            <li><strong>动态批处理</strong>：请求一到就发，服务器等一会儿凑成一批再跑。等待和空闲都还在。</li>
+            <li><strong>连续批处理</strong>（continuous batching）：以"生成一个 token 的一次迭代"为单位组批。每一步都可以把结束的请求移出、把新请求加进来，GPU 几乎不空闲。这也叫迭代级调度（iteration-level scheduling），来自 Orca（Yu 等，OSDI 2022）。</li>
+        </ul>
+
+        <h3>2. 请求长短不一，普通批处理会出问题</h3>
+        <!-- Slides 24–25. -->
+        <p>
+            连续批处理意味着同一步里混着处于不同阶段的请求。课件的例子：
+        </p>
+        <table>
+            <tr><th>请求</th><th>阶段</th><th>本步 token 数</th><th>已有 KV 缓存长度</th></tr>
+            <tr><td>A</td><td>预填充</td><td>128</td><td>0</td></tr>
+            <tr><td>B</td><td>解码</td><td>1</td><td>500</td></tr>
+            <tr><td>C</td><td>解码</td><td>1</td><td>1,000</td></tr>
+        </table>
+        <p>
+            如果按传统做法把每个输入补齐到 128 个 token，B 和 C 各有 127 个位置是白算的填充。
+        </p>
+        <p>
+            Orca 的观察是：Transformer 里不是每种运算都需要同样的批处理方式。线性层里，每个 token 都乘同一个权重矩阵 $W$，所以可以把所有请求的 token 堆成一个矩阵，一次 GEMM 算完。注意力不行：每个请求读的是自己的 KV 缓存，长度各不相同（例子里分别是 300、40、120），没有共享的操作数，只能各算各的。
+        </p>
+
+        <h3>3. 选择性批处理</h3>
+        <!-- Slide 26. -->
+        <p>
+            于是 Orca 只在注意力那一步按请求拆开，其余全部合并：
+        </p>
+        <ol>
+            <li>把所有请求的输入 token 拼成一个按 token 排列的矩阵（不需要填充）。</li>
+            <li>Q、K、V 投影：一次 GEMM 算所有 token。</li>
+            <li>注意力：每个请求用自己的 KV 缓存单独算。</li>
+            <li>合并结果，做输出投影：一次 GEMM。</li>
+            <li>MLP、LayerNorm、残差：对所有 token 一起算。</li>
+        </ol>
+        <p>
+            这叫选择性批处理（selective batching）。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、请求调度</h2>
+
+        <h3>1. 先来先服务，以及预填充和解码怎样混</h3>
+        <!-- Slides 28–29. -->
+        <p>
+            vLLM 和 SGLang 默认用先来先服务（FCFS）：KV 缓存有空间了，就按到达顺序放等待的请求进来。简单，也不会有请求饿死，但队头的一个长请求会拖慢后面所有请求。
+        </p>
+        <p>
+            更细的问题是：新请求的预填充和正在进行的解码怎样安排？两种极端：
+        </p>
+        <table>
+            <tr><th></th><th>预填充优先（SGLang）</th><th>解码优先（FasterTransformer）</th></tr>
+            <tr><td>做法</td><td>新请求一到马上预填充</td><td>等当前解码跑完再接新请求</td></tr>
+            <tr><td>好处</td><td>TTFT 低；每步都能补满批，吞吐高</td><td>TPOT 稳定，token 流不断</td></tr>
+            <tr><td>代价</td><td>每来一个新请求，所有解码都停一下，TPOT 变差</td><td>新请求要排队等，TTFT 高；请求陆续结束，批越来越小，吞吐下降</td></tr>
+        </table>
+        <p>
+            打破这个取舍有两种办法：分块预填充，以及预填充和解码分离。这个框架来自 Sarathi-Serve（Agrawal 等，OSDI 2024）。
+        </p>
+
+        <h3>2. 分块预填充</h3>
+        <!-- Slides 30–31. -->
+        <p>
+            把长提示切成小块，每一步只处理一块，和正在解码的请求放进同一个批。课件的例子：4 个请求在解码，来了一个 2,048 token 的提示。
+        </p>
+        <ul>
+            <li>不分块：一步里做完 2,048 个 token 的预填充加 4 个解码，这一步要 92 毫秒，正在解码的 4 个请求要等 92 毫秒才拿到下一个 token。</li>
+            <li>按 512 token 分块：分 4 步，每步 512 个提示 token 加 4 个解码，大约每 23 毫秒出一个 token。</li>
+        </ul>
+        <p>
+            给每一步设一个 token 预算，就能限住每次迭代的延迟。前提是混合批的内核和纯预填充、纯解码的内核一样高效。SGLang 默认预填充优先，可以用 <code>--prefill-decode-interval N</code> 保护解码；vLLM 默认解码优先，配合分块预填充。
+        </p>
+        <p>
+            分块的代价：第 $k$ 块要读前面 $k-1$ 块已经写进缓存的 KV，也就是 $(k-1) \times 512$ 个 token。总的预填充计算量不变，只是分到 4 步里，但 KV 被反复读取，显存读取量变多。所以块大小是在解码延迟和预填充效率之间取舍。
+        </p>
+
+        <h3>3. 预填充与解码分离（PD 分离）</h3>
+        <!-- Slides 32–34. -->
+        <p>
+            另一条路是让预填充和解码在不同的 GPU 上跑：预填充池跑完提示、吐出第一个 token，把这个请求的 KV 缓存传给解码池，解码池接着生成第 2 到第 $n$ 个 token。代表工作有 DistServe（Zhong 等，OSDI 2024）、Splitwise（Patel 等，ISCA 2024）、Mooncake（Qin 等，FAST 2025）。
+        </p>
+        <table>
+            <tr><th></th><th>预填充池</th><th>解码池</th></tr>
+            <tr><td>目标</td><td>TTFT 的 SLO</td><td>TPOT 的 SLO</td></tr>
+            <tr><td>批大小</td><td>一个或几个提示</td><td>几百个序列</td></tr>
+            <tr><td>并行方式</td><td>多用张量并行，降延迟</td><td>多开副本</td></tr>
+            <tr><td>适合的 GPU</td><td>算力高</td><td>显存带宽高</td></tr>
+        </table>
+        <p>
+            代价是每个请求要传一次 KV，要调预填充和解码的机器比例，至少要两个实例。
+        </p>
+        <p>
+            KV 要传多少？课件以 Llama-3.1-70B（GQA，FP16）为例：
+        </p>
+        <p>$$2\,(K,V) \times 80\ \text{层} \times 8\ \text{个 KV 头} \times 128\ \text{维} \times 2\ \text{字节} = 320\ \text{KB/token}$$</p>
+        <p>
+            一个 65,536 token 的提示就是 20 GB。它的预填充大约要 $2 \times 70\text{B} \times 65{,}536 \div (4 \times 200\ \text{TFLOPS}) \approx 11.5$ 秒。传 20 GB 要多久：
+        </p>
+        <table>
+            <tr><th>链路</th><th>带宽</th><th>时间</th></tr>
+            <tr><td>NVLink（H100）</td><td>450 GB/s</td><td>44 ms</td></tr>
+            <tr><td>NVLink（A100）</td><td>300 GB/s</td><td>67 ms</td></tr>
+            <tr><td>InfiniBand 400 Gb/s</td><td>50 GB/s</td><td>400 ms</td></tr>
+            <tr><td>PCIe 4.0 x16</td><td>32 GB/s</td><td>625 ms</td></tr>
+            <tr><td>以太网 100 Gb/s</td><td>12.5 GB/s</td><td>1.6 s</td></tr>
+        </table>
+        <p>
+            即使 400 毫秒也不到预填充时间的 4%。而且可以逐层传：第 $i$ 层的 KV 在传的时候，第 $i+1$ 层还在算，大部分传输时间被藏起来了。
+        </p>
+
+        <h3>4. 从先来先服务到短作业优先</h3>
+        <!-- Slides 35–37. Marked "advanced" on the slides. -->
+        <p>
+            先来先服务的问题叫队头阻塞：批满了，R0 要生成 1,000 个 token，后面的 R1 到 R4 各只要 20 个，却都要等 R0。短作业优先（SJF）能让平均等待时间最小，但需要提前知道每个作业有多大，而 LLM 的作业大小取决于输出长度，解码结束前不知道。
+        </p>
+        <p>
+            课件算了一个小例子：三个请求同时到，GPU 每秒出一个 token，R0 要 10 个 token，R1 要 2 个，R2 要 1 个。按先来先服务，三者分别在第 10、12、13 秒结束，除以各自的 token 数，平均每个 token 等 $(1 + 6 + 13) \div 3 \approx 6.7$ 秒；按短作业优先，顺序是 R2、R1、R0，分别在第 1、3、13 秒结束，平均 $(1 + 1.5 + 1.3) \div 3 \approx 1.3$ 秒。
+        </p>
+        <p>
+            课件标为进阶内容的两种做法：
+        </p>
+        <ul>
+            <li><strong>学习排序</strong>（Fu 等，NeurIPS 2024）：用一个 OPT-125M 小模型给每个等待的提示打分，按预测的排名排队，vLLM 每步从队头取。它不回归具体长度，只用排序损失学相对顺序。等太久的请求会被提前，防止饿死。</li>
+            <li><strong>FastServe</strong>（Wu 等，NSDI 2026）：按 token 级抢占的多级反馈队列。Q1 到 Q4 的时间片分别是 $q$、$2q$、$4q$、$8q$；新作业按提示长度直接进入时间片足够完成其预填充的那一级（短提示进 Q1，预填充超过 $2q$ 的进 Q3）；用完时间片就降一级；等太久的再升回去。长作业慢慢沉下去，短作业先完成，不需要知道作业大小，也能近似"剩余时间最短优先"（SRPT）。</li>
+        </ul>
+
+        <h3>5. 自测题</h3>
+        <!-- Slide 40. -->
+        <ol>
+            <li>每来一个长提示，P99 TBT 就飙升，用什么办法？答：分块预填充限住每步的提示 token 数；PD 分离让预填充根本不进解码的步骤。</li>
+            <li>什么时候不值得做 PD 分离？答：提示都很短，或者机器很少。KV 传输、比例调优和多出来的实例，比它省下的卡顿还贵。</li>
+            <li>SJF 需要作业大小，对 Agent 负载有没有别的办法？答：用"没命中缓存、需要预填充的 token 数"当作业大小。</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>六、显存管理：PagedAttention</h2>
+
+        <h3>1. 预留连续显存，三种浪费</h3>
+        <!-- Slide 43. -->
+        <p>
+            课件的例子：两张 H200 跑 Llama-3.1-70B，共 282 GB 显存，权重占 141 GB（50%），KV 缓存约 130 GB（45%），其余是激活。每个 token 320 KB，一个请求如果按最长 128K token 预留，就是 40 GB，三个这样的请求就把 KV 预算占满了。
+        </p>
+        <p>
+            输出长度事先不知道，早期的系统只能按最大长度给每个请求预留一段连续显存，于是有三种浪费：
+        </p>
+        <ul>
+            <li><strong>预留</strong>：给还没生成的 token 占着的位置，以后会用，但现在闲着。</li>
+            <li><strong>内部碎片</strong>：回答在达到最大长度之前就遇到结束符，后面的位置永远用不上。</li>
+            <li><strong>外部碎片</strong>：各请求之间零散的空隙，加起来不少，但不连续，放不下新请求。</li>
+        </ul>
+        <p>
+            vLLM 论文（Kwon 等，SOSP 2023）测得，在 Orca 式的连续分配下，KV 显存里只有 20% 到 38% 存的是真正的 token。
+        </p>
+
+        <h3>2. 连续分配也没法共享</h3>
+        <!-- Slide 44. -->
+        <p>
+            同一个提示要生成 $n$ 个回答（并行采样）时，连续分配会把提示的 KV 存 $n$ 份。束搜索里各条束共享提示和一段每步都在变的前缀，分叉一次就要复制整段。共享系统提示的场景下，每个用户请求都重复存一遍同样的指令。
+        </p>
+
+        <h3>3. 像操作系统的分页那样管 KV 缓存</h3>
+        <!-- Slide 45. -->
+        <p>
+            PagedAttention 借用了操作系统虚拟内存的做法：把每个请求的 KV 缓存分成固定大小的块（vLLM 里一块 16 个 token，课件图里画成 4 个），逻辑上连续的块在物理显存里可以分散存放，由一张块表记录"第几个逻辑块在哪个物理块、填了几个 token"。类比关系是：一个 token 的位置对应操作系统里的一个字节，一个块对应一页。
+        </p>
+        <ul>
+            <li><strong>按需分配</strong>：最后一块填满了才分配新块，不再预留。</li>
+            <li><strong>共享页和写时复制</strong>：多个序列共享提示的块，用引用计数管理，要改时才复制。</li>
+            <li><strong>换出</strong>：显存不够时把块换到 CPU 内存。</li>
+        </ul>
+        <p>
+            多加一层间接寻址，就不再需要连续的显存。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、前缀缓存</h2>
+
+        <h3>1. 重用已经算过的前缀</h3>
+        <!-- Slide 47. -->
+        <p>
+            三个聊天请求共享同一段 1,000 token 的系统提示，各自再带一个 50 token 的问题。没有缓存时要预填充 $3 \times 1{,}050 = 3{,}150$ 个 token；有前缀缓存时，第一个请求算完整的 1,050 个，后两个只算各自的 50 个，共 1,150 个。
+        </p>
+        <p>
+            共享前缀的来源：系统提示（每个请求都重复同样的指令）；多轮对话（每一轮都重发历史）；Agent（每一步都重发工具定义和到目前为止的轨迹）。
+        </p>
+        <p>
+            前缀必须完全一致才能重用，因为一个 token 的 KV 取决于它前面的所有 token。
+        </p>
+
+        <h3>2. vLLM 的块哈希</h3>
+        <!-- Slide 48. -->
+        <p>
+            vLLM 在 PagedAttention 之上加了一张哈希表。每个块的哈希值把父块的哈希也算进去：$h_0 = H(\varnothing, B_0)$，$h_1 = H(h_0, B_1)$，$h_2 = H(h_1, B_2)$。所以 $h_2$ 代表的是前 12 个 token 整体，而不只是第三块的 4 个 token。课件的例子是 "You are a helpful / assistant who / answers in French"：前两块命中缓存（物理块 7 和 2），第三块没命中，需要计算。
+        </p>
+        <ul>
+            <li>查找：对新提示的每个满块算哈希，遇到第一个没命中的就停。</li>
+            <li>共享：命中时把那个块的引用计数加一，不复制数据。</li>
+            <li>淘汰：没人引用的块先留着，显存不够时按 LRU（最近最少使用）淘汰。</li>
+            <li>粒度：没填满的最后一块永远不共享。</li>
+        </ul>
+
+        <h3>3. SGLang 的 RadixAttention</h3>
+        <!-- Slide 49. -->
+        <p>
+            SGLang（Zheng 等，NeurIPS 2024）用一棵基数树（radix tree）保存所有请求的 KV。根下面是系统提示，再往下分出少样本示例、各个对话的各轮、各个查询。新请求到达时，在树里找最长匹配的前缀，只预填充剩下的部分；请求结束时，把新 token 作为一个分支插进树里，KV 留在 GPU 上；显存不够时，淘汰最近最少使用、且没有正在运行的请求在用的叶子。分支共享父节点的 KV，公共前缀只存一份。
+        </p>
+
+        <h3>4. 自测题</h3>
+        <!-- Slide 51. -->
+        <ol>
+            <li>两个 1,000 token 的提示只在第 3 个 token 不同，能共享多少 KV？答：最多 2 个 token；如果按 16 token 一块做哈希，一个也共享不了。</li>
+            <li>为什么追求前缀缓存命中率会和公平调度冲突？答：总是先服务缓存最热的客户，其他客户可能饿死。</li>
+            <li>缓存的前缀在一个块中间结束，块哈希和基数树哪个还能重用？答：基数树，它按 token 粒度匹配；块哈希只重用满块。</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>八、并行：一个模型，多张 GPU</h2>
+
+        <h3>1. 为什么一张卡不够</h3>
+        <!-- Slide 54. -->
+        <p>
+            70B 模型用 bf16 存，权重就有 140 GB，一张 H200 只有 141 GB，KV 缓存还要抢同一块显存。另外，一张卡的显存带宽限住了解码速度。粗略估算：每生成一个 token 至少要把权重读一遍，
+        </p>
+        <p>$$t_{\text{token}} \ge \frac{2N}{BW_{\text{HBM}}} = \frac{140\ \text{GB}}{4.8\ \text{TB/s}} \approx 29\ \text{ms}$$</p>
+        <p>
+            切到 4 张卡上，每张 35 GB 权重，还有空间放 KV。并行同时带来容量和速度。
+        </p>
+
+        <h3>2. 集合通信</h3>
+        <!-- Slides 55–56. -->
+        <p>
+            多卡之间交换数据用几种标准的集合通信操作。设 4 张卡，$M$ 是数据总量，下面的"每卡开销"是每张卡要发送的数据量：
+        </p>
+        <table>
+            <tr><th>操作</th><th>做什么</th><th>用在哪</th><th>每卡开销</th></tr>
+            <tr><td>send / recv</td><td>一张卡把缓冲区发给另一张</td><td>流水线并行的级间传递，序列并行的环</td><td>$M$</td></tr>
+            <tr><td>broadcast</td><td>一张卡把数据复制给所有卡</td><td>把批输入发给各张量并行的卡</td><td>$M$</td></tr>
+            <tr><td>all-gather</td><td>每张卡贡献一片，最后每张卡都有完整数据</td><td>张量并行的输出，序列并行的 K/V</td><td>$0.75M$</td></tr>
+            <tr><td>reduce-scatter</td><td>对各卡数据求和，每张卡只留一片结果</td><td>带序列并行的张量并行</td><td>$0.75M$</td></tr>
+            <tr><td>all-reduce</td><td>求和后每张卡都有完整结果，等于 reduce-scatter 加 all-gather</td><td>张量并行的行切分层之后</td><td>$1.5M$</td></tr>
+            <tr><td>all-to-all</td><td>第 $i$ 张卡把第 $j$ 片发给第 $j$ 张卡</td><td>专家并行的 token 分发和汇总</td><td>$0.75M$</td></tr>
+        </table>
+
+        <h3>3. 数据并行</h3>
+        <!-- Slide 57. -->
+        <p>
+            每张卡放完整的模型，路由器把请求分给各个副本，每个副本有自己的调度器和 KV 缓存。$G$ 个副本吞吐约为单卡的 $G$ 倍，副本之间不通信。缺点是能跑的最大模型不变：每张卡还是要装下全部权重。矩阵视角下，所有卡用同一个 $W$，批按行切开。
+        </p>
+
+        <h3>4. 张量并行</h3>
+        <!-- Slides 59–63. -->
+        <p>
+            把每一层的矩阵切开分到各卡上，每张卡算每一层的一部分，每个块结束时用一次 all-reduce 拼起来。每张卡的权重是 $2N \div G$，70B 模型 4 张卡就是每张 35 GB。通信很频繁，需要 NVLink 级别的带宽，所以只在一台机器内部用。具体怎么切来自 Megatron-LM（Shoeybi 等，2019）：
+        </p>
+        <ul>
+            <li><strong>列切分</strong>：$W$ 按列切成 $W_0 \ldots W_3$，每张卡都有完整的输入 $X$，算出自己那几列输出 $Y_i = X W_i$。层内不需要通信。</li>
+            <li><strong>行切分</strong>：$W$ 按行切，每张卡拿 $X$ 对应的那几列 $X_i$，算出 $Z_i = X_i W_i$。每个 $Z_i$ 形状完整，但只是部分和，要 all-reduce 求和得到 $Z = \sum Z_i$。</li>
+            <li><strong>组合</strong>：列切分层的输出分片正好是行切分层需要的输入分片，所以一个块里只需要在最后通信一次。MLP 里，上投影和门控用列切分，激活函数在本地算，下投影用行切分，最后 all-reduce。注意力里，Q、K、V 投影按列切分（每张卡负责 $1/G$ 的头），注意力在本地按头计算，输出投影按行切分，最后 all-reduce。</li>
+        </ul>
+
+        <h3>5. 流水线并行</h3>
+        <!-- Slide 64. -->
+        <p>
+            把层切成连续的几段，每张卡负责一段，例如 80 层分成 L1–20、L21–40、L41–60、L61–80 四段。卡之间只在段与段的交界处传一次激活（$2bh$ 字节），对带宽要求低，可以跨机器。问题是"气泡"：流水线刚开始和快结束时，有些卡在空等。把一批切成 $m$ 个微批，空闲比例是
+        </p>
+        <p>$$\text{bubble} = \frac{G-1}{m+G-1}$$</p>
+        <p>
+            4 段、4 个微批时是 $3/7 \approx 43\%$（28 个时间格里 12 个空着）；16 个微批时降到 16%。
+        </p>
+
+        <h3>6. 专家并行</h3>
+        <!-- Slide 66. -->
+        <p>
+            混合专家（MoE）层里有很多专家，每个 token 只用其中几个。把专家分散到各卡，例如 8 个专家放 4 张卡、每卡 2 个。每个 token 分三步：把它发给它的 $k$ 个专家所在的卡；各专家本地计算；把结果送回并求和。所有卡同时做这件事，就是一次 all-to-all。每张卡的负载约为 $k \times b \div G$，top-2、1,024 个 token、4 张卡时每卡 512 个。路由不均匀时，有些卡忙、有些卡闲。
+        </p>
+
+        <h3>7. 上下文并行</h3>
+        <!-- Slide 68. -->
+        <p>
+            提示太长、一张卡放不下时，按 token 切：128K token 的提示分给 4 张卡，每张 32K。用环形注意力（ring attention）在卡之间依次传递 K/V 块，保证每个 query 都能看到所有 key，传输和注意力计算重叠进行。每层要传 $G-1$ 次。它帮的是预填充，对解码没有帮助。
+        </p>
+
+        <h3>8. 各种并行的通信量</h3>
+        <!-- Slides 70–71. -->
+        <p>
+            以 70B 规模的模型（隐藏维度 $h = 8{,}192$，80 层，bf16）解码一个 token 为例：
+        </p>
+        <table>
+            <tr><th>策略</th><th>集合通信</th><th>频率</th><th>每 token 每卡字节数</th></tr>
+            <tr><td>数据并行</td><td>无</td><td>从不</td><td>0</td></tr>
+            <tr><td>张量并行（$G=4$）</td><td>all-reduce</td><td>每层 2 次</td><td>3.9 MB</td></tr>
+            <tr><td>流水线并行（$G=4$）</td><td>send / recv</td><td>每个级间 1 次</td><td>16 KB</td></tr>
+            <tr><td>专家并行（$G=4$，top-2）</td><td>all-to-all</td><td>每个 MoE 层 2 次</td><td>约 3.9 MB</td></tr>
+        </table>
+        <p>
+            张量并行的数字可以自己验算：一次 all-reduce 每张卡发送 $2(G-1)/G \times 2h = 1.5 \times 16{,}384 \approx 24.6$ KB，每层 2 次、80 层，约 3.9 MB。流水线并行每跳只传一个 $2h = 16$ KB 的激活。两者差了约 240 倍。
+        </p>
+        <p>
+            传一次的时间约为 $t = \text{字节数} \div \text{带宽} + \text{跳数} \times \text{延迟}$。H100 SXM 上，NVLink 4 每个方向 450 GB/s，PCIe Gen5 x16 是 64 GB/s，InfiniBand NDR 是 50 GB/s。3.9 MB 的张量并行流量，走 NVLink 约 9 微秒，走 InfiniBand 约 78 微秒，还要再加开销。经验法则：张量并行放在机器内部，流水线并行跨机器。
+        </p>
+
+        <h3>9. 自测题</h3>
+        <!-- Slide 73. -->
+        <ol>
+            <li>一台机器 4 张 H200（课件按每张 140 GB 算），跑 70B bf16 模型，先怎么切？答：TP=4 走 NVLink，或者 DP=2 加 TP=2，取决于上下文多长。</li>
+            <li>再加一台机器用什么并行？答：跨机器用流水线并行：每个 token 只传一次 $2h$ 字节，而张量并行每层都要 all-reduce，流量多约 240 倍。</li>
+            <li>为什么"注意力用数据并行、MoE 用专家并行"在长上下文时可能比张量并行好，短上下文时更差？答：长上下文时，如果 KV 头数少于张量并行的卡数，张量并行要在多张卡上重复存 KV，而数据并行能撑更大的批；短上下文时，all-to-all 的开销占了大头。</li>
+        </ol>
+
+        <h3>10. 小结</h3>
+        <!-- Slide 74. -->
+        <table>
+            <tr><th>并行方式</th><th>带来什么</th><th>代价</th></tr>
+            <tr><td>数据并行</td><td>$G$ 个副本服务 $G$ 倍请求</td><td>每个副本都要装下整个模型</td></tr>
+            <tr><td>张量并行</td><td>每张卡只读 $1/G$ 的权重，降低每个 token 的延迟</td><td>每层都要 all-reduce，只能在 NVLink 机器内用</td></tr>
+            <tr><td>流水线并行</td><td>增加容量，可以跨机器，通信少</td><td>有气泡</td></tr>
+            <tr><td>上下文（序列）并行</td><td>能处理很长的提示</td><td>只帮预填充</td></tr>
+            <tr><td>专家并行</td><td>服务 MoE 模型</td><td>all-to-all 流量，专家负载不均</td></tr>
+        </table>
+    </section>
+
+    <section>
+        <h2>九、本讲小结和延伸阅读</h2>
+        <!-- Slides 75–77. -->
+        <ul>
+            <li>测量：看 TTFT 和 TBT 的分位数，看 goodput。</li>
+            <li>批处理：连续批处理，选择性批处理。</li>
+            <li>调度：请求调度，分块预填充，PD 分离。</li>
+            <li>显存管理：分页的、可共享的 KV 缓存。</li>
+            <li>并行：DP、TP、PP、EP、SP。</li>
+        </ul>
+        <p>
+            下一讲讲投机解码。课件列出的延伸阅读：评估方面 Agrawal 等 On Evaluating Performance of LLM Inference Systems（2025）；批处理和调度方面 Orca（OSDI 2022）、Sarathi-Serve（OSDI 2024）、Fairness in Serving LLMs（Sheng 等，OSDI 2024）；PD 分离 DistServe（OSDI 2024）；KV 显存 PagedAttention 和 vLLM（SOSP 2023）、SGLang（NeurIPS 2024）；并行 Megatron-LM（2019）、Reducing Activation Recomputation（Korthikanti 等，MLSys 2023），以及 MPICH 集合通信的经典论文（Thakur、Rabenseifner、Gropp，IJHPCA 2005）。
+        </p>
+        <p>
+            推理算法的另一个视角可以参考本站的 <a href="../11-664-LM-Inference/index.html">CMU 11-664</a>；多机系统里的复制和一致性，参考 <a href="../MIT-6.5840-Distributed-Systems/index.html">MIT 6.5840</a>。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Harvard CS2680: Modern AI Systems: Agents and System Optimizations &copy; Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="12_GPU编程续.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="作业.html">作业与项目 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

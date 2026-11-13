@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第十二讲：GPU 编程（续）：编程模型、利用率与内核优化 | Harvard CS2680 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="11_作业反馈与Agent陷阱.html">&larr; 上一讲</a>
+    <span>Harvard CS2680: Lecture 12</span>
+    <a href="13_批处理分页与并行.html">下一讲 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第十二讲：GPU 编程（续）：编程模型、利用率与内核优化</h1>
+        <p class="subtitle">CUDA 内核怎样写、怎样启动，从 torch.compile 到 CUDA C++ 的五层抽象，代码怎样编译成 SASS，用 MFU 和 MBU 衡量效率，怎样读 GPU 计数器，内核在哪三个地方浪费时间，以及融合、FlashAttention、持久化内核、split-KV、CUDA Graphs、PDL、megakernel、通信重叠和用 Agent 写内核</p>
+        <div class="author-meta">
+            主讲：Juncheng Yang<br>
+            资料来源：<a href="https://cs2680.seas.harvard.edu/slides/10_llm_serving_basics_2b.pdf" target="_blank">课件</a>（2026 年 11 月 2 日；课程不录像，本文依据课件整理）<br>
+            这份课件是第十讲"GPU 入门"的后半部分。前半部分的 GPU 结构、SIMT、屋顶线和内存层级见 <a href="10_GPU入门.html">第十讲</a>，本文不再重复。课件里标着 "ADVANCED — skim, or read more on your own" 的页，本文也标为选读。
+        </div>
+    </header>
+
+    <section>
+        <h2>一、这一讲讲什么</h2>
+        <p>
+            第十讲讲的是 GPU 的硬件：为什么它是吞吐机器，算力、显存容量、带宽三个上限怎样决定性能。这一讲接着讲三件事：
+        </p>
+        <ol>
+            <li><strong>GPU 编程</strong>：代码怎样在 GPU 上跑，以及从高到低几种写 GPU 代码的方式。</li>
+            <li><strong>效率和利用率</strong>：怎样判断一个推理服务有没有把 GPU 用好。</li>
+            <li><strong>近年的内核优化</strong>：时间浪费在哪里，各种技术分别解决哪一种浪费。</li>
+        </ol>
+        <p>
+            讲者在开头说，这部分只为建立直觉，不深入细节。做作业 4（自己部署模型并优化推理）时会用到这里的很多概念。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、GPU 编程</h2>
+
+        <h3>1. GPU 代码是异步执行的</h3>
+        <p>
+            一台 GPU 服务器分成两边。主机（host）是 CPU 加内存，运行 <code>main()</code>；设备（device）是 GPU 加 HBM 显存，运行内核（kernel，在 GPU 上执行的函数）。两边通过 PCIe Gen5 x16 连接，带宽约 64 GB/s，比 HBM 慢 75 倍左右，所以数据在两边来回搬很贵。
+        </p>
+        <p>
+            一个典型的流程是：CPU 用 <code>cudaMalloc</code> 在显存里分配空间，把输入从主机复制到设备，启动内核，然后把结果复制回来。要点有两个：
+        </p>
+        <ul>
+            <li><strong>启动是异步的</strong>：CPU 发出启动命令后不等内核跑完，继续做自己的事。直到要把结果复制回来时，CPU 才停下来等。</li>
+            <li><strong>错误出现得晚</strong>：内核里出了错（例如越界访问），要到下一次同步调用时才报出来。所以报错的那一行常常不是出错的那一行。</li>
+        </ul>
+
+        <h3>2. 内核是为一个线程写的</h3>
+        <p>
+            CUDA 内核的写法是：只写一个线程要做的事，启动时指定要多少个线程。下面是向量加法，每个线程算一个输出元素：
+        </p>
+        <pre><code>// one thread computes one output element
+__global__ void add(float* x, float* y,
+                    float* out, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i &lt; n) out[i] = x[i] + y[i];
+}
+
+// launch: n = 1M elements
+int threads = 256;
+int blocks  = (n + threads - 1) / threads;
+add&lt;&lt;&lt;blocks, threads&gt;&gt;&gt;(x, y, out, n);</code></pre>
+        <p>
+            线程被分成线程块（block）。这里每块 256 个线程，100 万个元素需要 $2^{20} / 256 = 4096$ 个块，GPU 把它们分到 132 个 SM（流式多处理器，GPU 上的计算单元）上执行。每个线程用"第几块 × 每块多少线程 + 块内第几个"算出自己负责的元素：第 2 块（从 0 数）的第 1 号线程，算出 $i = 2 \times 256 + 1 = 513$，就去处理 <code>out[513]</code>。<code>if (i &lt; n)</code> 是为了最后一块里多出来的线程不越界。
+        </p>
+        <p>
+            块大小一般取 32 的倍数，常用 128 到 256，因为硬件按 32 个线程一组（线程束，warp）执行，线程束由块内线性编号连续的 32 个线程组成。函数前面的修饰符决定它在哪里运行、从哪里调用：
+        </p>
+        <table>
+            <tr><th>修饰符</th><th>在哪里运行</th><th>从哪里调用</th></tr>
+            <tr><td><code>__global__</code></td><td>设备</td><td>主机（这就是内核）</td></tr>
+            <tr><td><code>__device__</code></td><td>设备</td><td>设备</td></tr>
+            <tr><td><code>__host__ __device__</code></td><td>两边都有</td><td>任意一边</td></tr>
+        </table>
+
+        <h3>3. 软件概念和硬件的对应</h3>
+        <table>
+            <tr><th>软件</th><th>含义</th><th>对应的硬件</th></tr>
+            <tr><td>Grid（网格）</td><td>一次内核启动的所有块</td><td>整张 GPU，块分散在 132 个 SM 上</td></tr>
+            <tr><td>Block（线程块）</td><td>最多 1024 个线程，共享一块 shared memory</td><td>一个 SM，块分到某个 SM 后一直待到跑完</td></tr>
+            <tr><td>Warp（线程束）</td><td>32 个线程步调一致地执行</td><td>SM 的一个分区，调度器每个周期发射一次</td></tr>
+            <tr><td>Thread（线程）</td><td>有自己的寄存器和编号</td><td>一个核心（也叫 lane），线程束 32 条通道中的一条</td></tr>
+        </table>
+        <p>
+            线程束和 SIMT 的细节见 <a href="10_GPU入门.html">第十讲</a>。
+        </p>
+
+        <h3>4. 不想管线程：图编译器</h3>
+        <p>
+            大多数人不直接写 CUDA。最省事的一层是图编译器，例如 PyTorch 的 <code>torch.compile</code> 和 JAX 的 <code>jax.jit</code>（后者生成 XLA）：
+        </p>
+        <pre><code>import torch
+
+def block(x, w, b):
+    h = x @ w + b
+    return gelu(h) * 0.5
+
+# capture the graph, fuse, generate kernels
+fast = torch.compile(block, mode="max-autotune")
+y = fast(x, w, b)  # first call compiles
+
+# JAX: jax.jit(block) lowers to XLA</code></pre>
+        <p>
+            分工是：你用普通的 PyTorch 或 JAX 写数学运算，不管线程、数据块和内存；编译器决定哪些算子融合在一起、块取多大，生成 Triton 或 XLA 内核。它在两种情况下帮不上忙：代码里的控制流（比如依赖数据的 if）把计算图打断；或者那个慢的算子没法和别的融合。
+        </p>
+
+        <h3>5. 再往下一层：tile 语言</h3>
+        <p>
+            CUDA C++ 让你写一个线程的工作；tile 语言让你写一个线程块处理一整块数据（tile）的工作。区别如下：
+        </p>
+        <table>
+            <tr><th></th><th>CUDA C++</th><th>tile 语言</th></tr>
+            <tr><td>你写的是</td><td>一个线程的工作</td><td>一个数据块的工作</td></tr>
+            <tr><td>下标</td><td><code>blockIdx × blockDim + threadIdx</code></td><td><code>program_id</code> 加上一段范围</td></tr>
+            <tr><td>搬数据到 shared memory、同步</td><td>自己搬，自己调 <code>__syncthreads()</code></td><td>编译器负责</td></tr>
+            <tr><td>张量核心</td><td>线程束级的 MMA 指令</td><td>对整个数据块做一次点积</td></tr>
+        </table>
+        <p>
+            在用的 tile 语言有：Triton（Python，支持 NVIDIA 和 AMD GPU）、Pallas（JAX 的内核语言，支持 TPU 和 GPU）、TileLang（基于 TVM 的 Python DSL）、ThunderKittens（C++ 模板）、cuTile（NVIDIA 在 CUDA 13.1 里加的 tile 模型）。
+        </p>
+
+        <h3>6. 选读：三个例子</h3>
+        <p>
+            <strong>Triton</strong>：同样的向量加法，每个"程序"（对应一个 CUDA 线程块）处理 1024 个元素。
+        </p>
+        <pre><code># each program handles one BLOCK
+@triton.jit
+def add(x, y, out, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs &lt; n
+    a = tl.load(x + offs, mask=mask)
+    b = tl.load(y + offs, mask=mask)
+    tl.store(out + offs, a + b, mask=mask)
+
+# launch: one program per tile
+grid = (triton.cdiv(n, 1024),)
+add[grid](x, y, out, n, BLOCK=1024)</code></pre>
+        <p>
+            <code>mask</code> 起的作用和 CUDA 版的 <code>if (i &lt; n)</code> 一样。合并访存、shared memory 中转、用 <code>tl.dot</code> 调张量核心，都由编译器处理；<code>@triton.autotune</code> 可以针对每种输入形状试不同的块大小和线程束数量。
+        </p>
+        <p>
+            <strong>TileLang</strong>：你决定数据块的形状、放 shared memory 还是寄存器、提前加载几级（<code>num_stages</code>）；线程怎样分配、用哪种复制指令、MMA 调用由 TileLang 决定。适合需要显式控制数据搬运的矩阵乘和注意力变体。
+        </p>
+        <pre><code>@T.prim_func
+def mm(A, B, C):
+  with T.Kernel(N // bn, M // bm, threads=128) as (bx, by):
+    As = T.alloc_shared((bm, bk), "float16")
+    Bs = T.alloc_shared((bk, bn), "float16")
+    Cl = T.alloc_fragment((bm, bn), "float")
+    T.clear(Cl)
+    for k in T.Pipelined(K // bk, num_stages=3):
+      T.copy(A[by * bm, k * bk], As)
+      T.copy(B[k * bk, bx * bn], Bs)
+      T.gemm(As, Bs, Cl)
+    T.copy(Cl, C[by * bm, bx * bn])</code></pre>
+        <p>
+            <strong>CuTe、CUTLASS、ThunderKittens</strong>：再往下，你要自己决定数据布局（layout）、TMA 异步复制、哪些线程束负责加载、哪些负责计算。CuTe 的核心概念是 layout，一个把坐标映射成内存偏移的函数：
+        </p>
+        <pre><code># a layout maps a coordinate to an offset
+row = cute.make_layout((8, 4), stride=(4, 1))   # (i, j) -> i*4 + j
+col = cute.make_layout((8, 4), stride=(1, 8))   # (i, j) -> i + j*8</code></pre>
+        <p>
+            同一套写法可以描述线程束里线程到数据的映射、shared memory 里打乱（swizzle）过的数据块、TMA 的复制单元和 MMA 的片段。这些库提供经过测试的复制、MMA 和流水线组件，用于把矩阵乘和注意力压到接近峰值。
+        </p>
+
+        <h3>7. 选读：五层抽象怎么选</h3>
+        <table>
+            <tr><th>层次</th><th>工具</th><th>什么时候用</th><th>代价</th></tr>
+            <tr><td>图编译器</td><td>torch.compile、XLA</td><td>整个模型的默认选择</td><td>对那个慢的算子几乎没有控制力</td></tr>
+            <tr><td>tile 语言</td><td>Helion、Triton、Pallas</td><td>某个算子没被融合，或者框架里没有</td><td>几小时；能在不同 GPU 间移植</td></tr>
+            <tr><td>显式数据块</td><td>TileLang</td><td>需要控制数据怎样分级搬运</td><td>几天</td></tr>
+            <tr><td>布局和线程束角色</td><td>CuTe、CUTLASS、ThunderKittens</td><td>矩阵乘或注意力必须跑到峰值</td><td>几周；每代 GPU 都要重做</td></tr>
+            <tr><td>线程</td><td>CUDA C++</td><td>不规则的工作：排序、稀疏、图</td><td>一切自己负责</td></tr>
+        </table>
+
+        <h3>8. 选读：所有 GPU 程序最后都编译成 SASS</h3>
+        <p>
+            SASS 是 GPU 真正执行的机器码。不同来源的代码走不同的路：
+        </p>
+        <ul>
+            <li><strong>CUDA C++（NVCC）</strong>：设备代码经 NVVM 生成 PTX（NVIDIA 的虚拟指令集），再由 <code>ptxas</code> 生成 SASS，两者一起打包进 fatbin；主机代码交给 GCC、Clang 或 MSVC，最后链接成可执行文件。</li>
+            <li><strong>Triton</strong>：<code>@triton.jit</code> 函数依次变成 Triton IR、TritonGPU IR、LLVM IR，再经 LLVM 生成 PTX，由 <code>ptxas</code> 生成 SASS（cubin）。</li>
+            <li><strong>cuTile</strong>（Python 或 C++）：生成 CUDA Tile IR，由 <code>tileiras</code> 直接生成 SASS。</li>
+        </ul>
+        <p>
+            程序加载时，驱动程序找和当前 GPU 匹配的 SASS；没有的话，就把 PTX 即时编译一遍并缓存起来。这就是为什么同一个程序能在新一代 GPU 上运行。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、GPU 的效率和利用率</h2>
+
+        <h3>1. MFU：模型算力利用率</h3>
+        <p>
+            MFU（Model FLOPs Utilization）是实际达到的模型运算速度除以 GPU 的峰值：
+        </p>
+        <p>$$\text{MFU} = \frac{\text{实际的模型 FLOP/s}}{\text{峰值 FLOP/s}}$$</p>
+        <p>
+            推理时，生成一个 token 的模型运算量约为 $2N$ 次浮点运算（$N$ 是参数量，只算前向）。峰值取 GPU 张量核心的稠密运算速度。课件的例子是 8 张 H100 跑 Llama 2 70B：
+        </p>
+        <ul>
+            <li>每个 token 的运算量：$2 \times 70\text{B} \approx 140$ GFLOP。</li>
+            <li>每张卡每秒 3040 个 token，实际速度 $3040 \times 140\ \text{GFLOP} \approx 426$ TFLOP/s。</li>
+            <li>H100 的峰值是 1979 TFLOP/s，MFU $\approx 426 / 1979 \approx 22\%$。</li>
+        </ul>
+        <p>
+            经验值：训练 35% 到 45%；推理的预填充阶段 40% 到 60%，解码阶段 10% 到 40%。
+        </p>
+
+        <h3>2. MFU 为什么低</h3>
+        <p>
+            课件列了四个原因（引自 PaLM 论文和 Korthikanti 等关于激活重算的工作）：
+        </p>
+        <ul>
+            <li><strong>通信</strong>：张量并行、流水线并行、数据并行之间的数据传输没有被计算掩盖。</li>
+            <li><strong>流水线气泡</strong>：每批数据填满和排空流水线时，一些阶段空等。</li>
+            <li><strong>受内存限制的内核</strong>：归一化、softmax、优化器更新这些操作的速度取决于带宽，用不上张量核心的峰值。</li>
+            <li><strong>重算（训练时）</strong>：激活检查点会把前向计算再跑一遍，这部分运算不算进 MFU。</li>
+        </ul>
+        <p>
+            课件的总结是：MFU 把硬件能力和软件成熟度分开了。同一块硬件，MFU 低说明软件还有改进空间。
+        </p>
+
+        <h3>3. MBU：解码看的是带宽</h3>
+        <p>
+            第十讲讲过，解码阶段每生成一个 token 都要把全部权重读一遍，速度受带宽限制。所以解码应该看 MBU（Model Bandwidth Utilization）：
+        </p>
+        <p>$$\text{MBU} = \frac{\text{实际每秒读写的字节数}}{\text{HBM 峰值带宽}}$$</p>
+        <p>
+            每一步解码要读的字节数是全部权重加上 KV 缓存。例子：Llama 3 8B，BF16，批大小 1，H200。每个 token 读 16 GB，每秒 200 个 token 就是 3.2 TB/s，H200 的带宽是 4.8 TB/s，MBU $\approx 67\%$。经验规则：预填充和训练报 MFU，解码报 MBU。
+        </p>
+        <p>
+            衡量推理服务的其他指标：
+        </p>
+        <ul>
+            <li><strong>每张 GPU 每秒多少 token</strong>：要在给定的延迟目标下报，例如每个输出 token 的 p50 时间。</li>
+            <li><strong>每个 token 的能耗</strong>：焦耳 = 平均板卡功率 ÷ 每秒 token 数。</li>
+            <li><strong>每百万 token 的成本</strong>：每 GPU 小时的价格 ÷（每秒 token 数 × 3600）× $10^6$。</li>
+        </ul>
+
+        <h3>4. 先看时间线，再看单个内核</h3>
+        <p>
+            NVIDIA 有两个性能分析工具，用法是先粗后细：
+        </p>
+        <table>
+            <tr><th>工具</th><th>命令</th><th>看到什么</th><th>用来找什么</th></tr>
+            <tr><td>Nsight Systems（nsys）</td><td><code>nsys profile -o run ./app</code></td><td>一条时间线：CPU 线程、CUDA API 调用、数据复制、内核和 stream</td><td>空闲的间隙、本该并行却串行的 stream、启动开销</td></tr>
+            <tr><td>Nsight Compute（ncu）</td><td><code>ncu --set full -k vec_add ./app</code></td><td>把单个内核重放多次收集计数器：离理论上限多远、内存流量、线程束为什么停顿、最热的代码行</td><td>一个内核为什么慢（重放时测的时间只能用来比较）</td></tr>
+        </table>
+        <p>
+            流程是：用 nsys 找到慢的区域，用 ncu 解释其中一个内核，改一处，再测。
+        </p>
+
+        <h3>5. 读懂 GPU 利用率计数器</h3>
+        <table>
+            <tr><th>计数器</th><th>测的是什么</th></tr>
+            <tr><td><code>nvidia-smi</code> 的 utilization</td><td>至少有一个内核在运行的时间占比</td></tr>
+            <tr><td>SM active</td><td>SM 上有线程束驻留的周期占比</td></tr>
+            <tr><td>SM occupancy</td><td>驻留的线程束数 ÷ 最大线程束数，对所有 SM 平均</td></tr>
+            <tr><td>Tensor pipe active</td><td>张量核心忙碌的周期占比</td></tr>
+            <tr><td>DRAM active</td><td>HBM 在搬数据的周期占比</td></tr>
+        </table>
+        <p>
+            这几个数可以用 <code>dcgmi dmon -e 203,1002,1003,1004,1005</code> 一起看。<code>nvidia-smi</code> 显示 100% 只说明有内核在跑，一个只用了一个 SM 的内核也会让它显示 100%。课件给了一个判断顺序：
+        </p>
+        <ol>
+            <li><strong>GPU 忙吗？</strong>nvidia-smi 不到 100%：内核之间 GPU 在闲着，原因多半是 CPU 启动开销或数据加载。下一步看 Nsight Systems 时间线，考虑 CUDA Graphs。</li>
+            <li><strong>SM 忙吗？</strong>SM active 低：线程块太少，填不满所有 SM。下一步加大批大小，或者让每个内核有更多块。</li>
+            <li><strong>哪个单元忙？</strong>DRAM active 高，是受内存限制，用 MBU 评价；Tensor pipe active 高，是受计算限制，用 MFU 评价；两者都低，是受延迟限制，用 Nsight Compute 查。</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>四、近年的 GPU 内核优化</h2>
+
+        <h3>1. 时间浪费在三个地方</h3>
+        <table>
+            <tr><th>位置</th><th>浪费在哪</th><th>代表技术</th></tr>
+            <tr><td>内核内部</td><td>张量核心在等数据加载、softmax 和 exp</td><td>FlashAttention、线程束专门化、FlashAttention-4</td></tr>
+            <tr><td>SM 之间</td><td>轮次不均匀时一些 SM 空闲；内核启动之间的间隙</td><td>持久化内核、split-KV、CUDA Graphs、PDL、megakernel</td></tr>
+            <tr><td>GPU 之间</td><td>GPU 互相等数据</td><td>融合的集合通信、MoE all-to-all 重叠</td></tr>
+            <tr><td>写内核本身</td><td>每代新 GPU 都要重新手工调内核，花的是工程师的时间</td><td>让 Agent 写内核并测试</td></tr>
+        </table>
+
+        <h3>2. 内核融合</h3>
+        <p>
+            融合是把几个操作合进一个内核，中间结果不写回 HBM。分两种：
+        </p>
+        <ul>
+            <li><strong>纵向融合</strong>：前一步的输出直接给下一步用。例如矩阵乘、加偏置、GELU 合成一个内核，每个结果留在寄存器里。省掉的是 HBM 往返。常见的有矩阵乘的收尾（epilogue）、LayerNorm、带掩码的 softmax。</li>
+            <li><strong>横向融合</strong>：几个读同一个输入的操作合成一个。例如 $x W_q$、$x W_k$、$x W_v$ 合成一个矩阵乘 $x [W_q\ W_k\ W_v]$，$x$ 只读一次，只启动一次。常见的有 QKV 投影、FFN 的 gate 和 up 投影。</li>
+        </ul>
+        <p>
+            课件的例子：在 1 GB 的 FP32 数据上依次做缩放、加偏置、ReLU。拆成三个内核时，每一步都要从 HBM 读一遍、写一遍，共 6 次，耗时 1.25 ms；融合成一个内核只读一次写一次，HBM 流量少 3 倍，耗时 0.42 ms。<code>torch.compile</code> 会自动把纵向的链融合成一个 Triton 内核；QKV 和 gate、up 的权重则常由模型代码手工拼接。
+        </p>
+
+        <h3>3. FlashAttention：分块算注意力，分数矩阵不进 HBM</h3>
+        <p>
+            标准注意力先算出 $n \times n$ 的分数矩阵 $S = QK^\top$，写到 HBM，再读回来算 softmax 得到 $P$，再写、再读，最后乘 $V$。序列长 8K 时，每个注意力头、每一层都有 $8192^2 \approx 6700$ 万个分数要在 HBM 里进出。
+        </p>
+        <p>
+            FlashAttention 的做法是：取一块 $Q$，依次和每一块 $K$、$V$ 计算，分数块只存在于一个线程块的 shared memory 和寄存器里。softmax 需要整行的最大值和总和，所以用在线 softmax（online softmax），边算边维护当前的最大值和总和，每来一块新数据就修正之前的结果。最后 HBM 只做三件事：读一遍 $K$、$V$，写一遍输出 $O$。
+        </p>
+
+        <h3>4. 选读：从 FlashAttention 到 FlashAttention-4</h3>
+        <table>
+            <tr><th>版本</th><th>瓶颈</th><th>做法</th><th>效果</th></tr>
+            <tr><td>FlashAttention（2022，A100）</td><td>HBM 流量：分数矩阵写出去再读回来</td><td>在 shared memory 里分块；在线 softmax</td><td>注意力快 2 到 4 倍；显存随长度线性增长</td></tr>
+            <tr><td>FlashAttention-2（2023，A100）</td><td>占用率低：每个头一个块，非矩阵乘的运算多</td><td>沿序列维度切分工作；减少重新缩放</td><td>约为第一版的 2 倍；最高约 A100 峰值的 70%</td></tr>
+            <tr><td>FlashAttention-3（2024，H100）</td><td>线程束在加载数据和算 softmax 时，张量核心在等</td><td>TMA 加线程束专门化；softmax 和矩阵乘重叠；FP8</td><td>FP16 下约 H100 峰值的 75%</td></tr>
+            <tr><td>FlashAttention-4（2025，B200）</td><td>张量核心算力翻倍，算 exp 的单元没有，softmax 成了瓶颈</td><td>累加结果放在 TMEM；一部分 exp 改用 FMA 单元算</td><td>在 B200 上比 cuDNN 的注意力快</td></tr>
+        </table>
+        <p>
+            四代的思路一样：找到当前最慢的那个部件，把工作挪走或者和别的工作重叠。
+        </p>
+
+        <h3>5. 选读：持久化内核</h3>
+        <p>
+            一个矩阵乘被切成 160 个输出块，每块一个线程块。GPU 有 132 个 SM，所以要分两轮：第一轮 132 个块占满所有 SM，第二轮只剩 28 个块，104 个 SM 空等。而且每个块都要为它那一个输出块做一遍准备工作。
+        </p>
+        <p>
+            持久化内核（persistent kernel）只启动 132 个块，每个 SM 一个，各自循环领取输出块，算完一块写出去，接着算下一块。没有空闲的第二轮，准备工作只做一次。CUTLASS 和 DeepGEMM 都这样做。Stream-K（PPoPP 2023）更进一步，把输出块切得更小，让所有 SM 同时结束。
+        </p>
+
+        <h3>6. 选读：split-KV 平衡解码的负载</h3>
+        <p>
+            解码时每个请求只有一个查询 token，如果只按"批大小 × 注意力头数"分工，块数不够，SM 会闲着。而且不同请求的 KV 长度能差 100 倍，KV 缓存的页面在 HBM 里也是分散的。
+        </p>
+        <p>
+            split-KV（来自 Flash-Decoding）把每个请求的 KV 页面切开，分给多个 SM，例如每个 SM 处理 4 页。每个 SM 算出一个部分结果（当前最大值 $m$、总和 $\ell$、部分输出 $O$），最后按在线 softmax 的方法合并。FlashInfer（MLSys 2025 杰出论文）把分页的 KV 看作块稀疏的行，配合即时编译的专用内核和这种调度，网格大小固定，所以能和 CUDA Graphs 一起用。vLLM 和 SGLang 都用它。
+        </p>
+
+        <h3>7. 选读：CUDA Graphs</h3>
+        <p>
+            解码一个 token 要跑几十个小内核，每次启动在 CPU 和驱动上花几微秒，GPU 就在内核之间等着。CUDA Graphs 把一步解码里的所有启动录下来，之后每个 token 只用一次调用重放：
+        </p>
+        <pre><code>cudaStreamBeginCapture(s, mode);   // record one step
+  /* ...launch the kernels... */
+cudaStreamEndCapture(s, &amp;g);
+cudaGraphInstantiate(&amp;e, g, 0);
+cudaGraphLaunch(e, s);              // replay every token</code></pre>
+        <p>
+            vLLM 和 SGLang 都这样做。
+        </p>
+
+        <h3>8. 选读：PDL，让下一个内核提前开始</h3>
+        <p>
+            在同一个 stream 里，内核 B 要等内核 A 完全结束、内存刷新之后才启动。解码每个 token 有很多微秒级的内核，启动延迟、每个内核开头的准备（prologue）和结尾的拖尾加起来不少。
+        </p>
+        <p>
+            Programmatic Dependent Launch（PDL）让 A 在合适的时候调用 <code>cudaTriggerProgrammaticLaunchCompletion()</code> 通知可以开始下一个；B 提前启动，先做不依赖 A 的准备工作，到 <code>cudaGridDependencySynchronize()</code> 处再等 A 的结果。PDL 需要 Hopper 或更新的 GPU（SM 9.0），可以在 CUDA Graphs 里用。
+        </p>
+
+        <h3>9. 选读：megakernel，整个模型一次启动</h3>
+        <p>
+            批大小为 1 时解码 Llama-3.2-1B，每层约 7 个内核，16 层，每个 token 就是约 112 次启动。每到内核边界，GPU 都要排空，下一个内核才开始加载权重。课件说 vLLM 和 SGLang 在这种情况下只用到 H100 带宽的约 50%。
+        </p>
+        <p>
+            Hazy Research 的 megakernel 把整个模型的前向放进一个内核：GPU 上有一个解释器，每个 SM 有自己的指令队列，shared memory 分页存放权重，用全局计数器管理操作之间的依赖。当前操作还在算时，下一个操作的权重已经在加载。批大小为 1 时达到 H100 带宽的 78%，单用户吞吐约为 SGLang 的 1.5 倍。Mirage MPK 能自动把模型编译成这样的任务图。
+        </p>
+
+        <h3>10. 选读：把张量并行的通信藏进矩阵乘</h3>
+        <p>
+            张量并行把每一层切到 8 张卡上，每个切分的矩阵乘前面要一次 AllGather，后面要一次 ReduceScatter。如果通信和计算是分开的内核，矩阵乘要等整个集合通信完成。
+        </p>
+        <p>
+            FLUX（Chang 等，2024）把通信融合进矩阵乘：每个输出块算完，收尾阶段直接通过 NVLink 或 NVSHMEM 写到它所属的 GPU；AllGather 加矩阵乘时，哪一行数据到了就先算哪一块。不需要额外的通信内核。在 8 张卡上最多掩盖 96% 的通信，预填充比 vLLM 快最多 1.66 倍，解码快最多 1.30 倍。
+        </p>
+
+        <h3>11. 选读：MoE 的 all-to-all 和计算重叠</h3>
+        <p>
+            混合专家模型的每一层要把每个 token 发给它选中的 8 个专家（在别的 GPU 上），再把输出收回来。串行执行时，发送（dispatch）和收回（combine）期间张量核心闲着，NCCL 的通信内核还会占用 SM。
+        </p>
+        <p>
+            DeepSeek 的 DeepEP 把一批数据分成两个微批次，A 在算注意力或专家时，B 在通信，交替进行。传输用基于 hook 的方式由网卡完成，不占 SM；发送用 FP8，收回用 BF16；跨节点时先走 NVLink 再转 RDMA。节点内发送约 153 GB/s，跨节点约 43 GB/s，接近链路上限。
+        </p>
+
+        <h3>12. 选读：让 Agent 写内核</h3>
+        <p>
+            每一代 GPU 都有新特性（TMA、TMEM、FP4），每种注意力变体都要新的手调内核，而会写的工程师很少。课件介绍的做法是一个循环：Agent 用 CUDA、Triton 或 CuTe DSL 写内核，编译（拿到 nvcc、ptxas 的报错），在很多种输入形状上和 PyTorch 参考实现比对结果，再测运行时间和 Nsight 计数器，把这些反馈给 Agent 继续改。
+        </p>
+        <p>
+            风险是生成的内核可能靠一个弱测试或者利用评测框架的漏洞显得很快。KernelBench 用 fast<sub>p</sub> 作指标：结果正确、并且比 PyTorch 快 $p$ 倍以上的任务占比；静态检查会拒绝有竞态的调度。这和 Agent 课程里反复讲的"奖励作弊"是同一类问题。
+        </p>
+
+        <h3>13. 内核优化的要点</h3>
+        <ol>
+            <li><strong>内核内部：喂饱张量核心。</strong>融合收尾操作，FP8、FP4 按块缩放，把线程束分成生产者和消费者，把工作从最慢的单元上挪走。</li>
+            <li><strong>SM 之间和启动之间：消除空闲。</strong>持久化线程块和 split-KV 平衡各 SM 的负载；PDL 和 megakernel 消除内核之间的间隙。</li>
+            <li><strong>GPU 之间：掩盖通信。</strong>把张量并行的集合通信融合进矩阵乘的数据块，让 MoE 的 all-to-all 和专家计算重叠。</li>
+            <li><strong>写内核：把搜索自动化。</strong>Agent 写出候选内核并测性能，在多种形状上的正确性检查决定哪些留下。</li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>五、AI 硬件面临的问题</h2>
+        <ul>
+            <li><strong>网络</strong>：离开一台机器就慢 9 倍。把 Llama 3 70B 一个 32K token 提示的 KV 缓存交给另一台机器，走 400G 网卡要 215 ms，走 H100 的 NVLink 只要 24 ms。</li>
+            <li><strong>可靠性</strong>：Llama 3 训练期间平均每 3 小时出一次故障。419 次中断里，GPU 故障占 30%，HBM3 显存占 17%，网络占 8%。</li>
+            <li><strong>功耗</strong>：GB200 NVL72 一个机柜 120 kW，HGX B200 60 kW，普通机柜 15 kW，是普通机柜的 8 倍。</li>
+            <li><strong>散热和用水</strong>：GB200 NVL72 机柜必须液冷。训练 GPT-3 用了 70 万升淡水；预计 2027 年 AI 的取水量达 42 亿到 66 亿立方米。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>六、选读：优化 GPU 代码的四个目标</h2>
+        <p>
+            课件最后附了一组选读，把常见的优化手段按目标归类。一个快的矩阵乘通常同时用到好几种：合并访存、双缓冲数据块、用张量核心。
+        </p>
+        <table>
+            <tr><th>目标</th><th>技术</th><th>做法</th><th>例子</th></tr>
+            <tr><td rowspan="6">少搬数据</td><td>合并访存</td><td>相邻线程读连续地址</td><td>线程 i 读 <code>x[i]</code>，不读 <code>x[32·i]</code></td></tr>
+            <tr><td>shared memory 分块</td><td>一块数据加载一次，块内线程共用</td><td>矩阵块被很多输出复用</td></tr>
+            <tr><td>寄存器分块</td><td>每个线程用寄存器里的数据算多个输出</td><td>每个线程多个累加器</td></tr>
+            <tr><td>内核融合</td><td>中间结果当场用掉，不经过 HBM</td><td>矩阵乘 + 偏置 + 激活一个内核</td></tr>
+            <tr><td>填充 / swizzle</td><td>改 shared memory 布局，避免 bank 冲突</td><td>转置时数据块从 32×32 改成 32×33</td></tr>
+            <tr><td>按缓存排序</td><td>让相邻的块读同样的数据，复用缓存</td><td>把读相同输入的输出块排在一起</td></tr>
+            <tr><td rowspan="5">掩盖等待、增加并行</td><td>异步复制 + 双缓冲</td><td>算当前数据块时加载下一块</td><td>矩阵乘里两个 shared memory 缓冲区交替用</td></tr>
+            <tr><td>指令级并行</td><td>前面的指令在等时，发射不相关的指令</td><td>多个累加器，而不是一条依赖链</td></tr>
+            <tr><td>线程束专门化</td><td>不同线程束担任流水线的不同角色</td><td>生产者线程束加载，消费者线程束做 MMA</td></tr>
+            <tr><td>split-K / 拆分归约</td><td>把长的归约分给更多工作者，再合并</td><td>解码时把长的 KV 序列分给多个块</td></tr>
+            <tr><td>线程束内通信</td><td>线程束内直接在寄存器之间交换数据</td><td>用 shuffle 求线程束内的和或最大值</td></tr>
+            <tr><td rowspan="5">用更快的指令</td><td>映射到张量核心</td><td>把矩阵运算整理成硬件支持的形状和布局</td><td>用 MMA 指令代替标量 FMA</td></tr>
+            <tr><td>降低精度</td><td>存和搬的字节更少，支持的话算得也更快</td><td>FP16/BF16 输入，FP32 累加</td></tr>
+            <tr><td>展开 + 特化</td><td>在编译时固定结构，省掉运行时的判断</td><td>为某个 head 维度或某种掩码单独生成内核</td></tr>
+            <tr><td>减少分支发散</td><td>让一个线程束里的线程走同一条路径</td><td>把控制流相似的任务分到一起</td></tr>
+            <tr><td>自动调优</td><td>对每种输入形状实测不同版本</td><td>搜索块大小、线程束数、流水线深度</td></tr>
+        </table>
+        <p>
+            这些手段都有代价：split-K 多一步合并，流水线要多开缓冲区、多做同步；用张量核心要求形状合适，降精度要保证结果仍然准确，这是两个独立的选择。
+        </p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Harvard CS2680: Modern AI Systems: Agents and System Optimizations &copy; Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="11_作业反馈与Agent陷阱.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="13_批处理分页与并行.html">下一讲 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>

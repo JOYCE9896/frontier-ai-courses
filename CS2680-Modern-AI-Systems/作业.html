@@ -12,7 +12,7 @@
 <body>
 
 <nav class="top-nav">
-    <a href="10_GPU入门.html">&larr; 第十讲</a>
+    <a href="13_批处理分页与并行.html">&larr; 第十三讲</a>
     <span>Harvard CS2680: Assignments</span>
     <a href="index.html">课程目录 &rarr;</a>
 </nav>
@@ -22,7 +22,7 @@
         <h1>作业与期末项目</h1>
         <p class="subtitle">五个作业是同一个 Agent 系统一层层往下拆：先当用户看 Agent 怎样工作，再自己写循环，再在黑盒 API 上省 token，再换成自己部署的模型，最后优化整个栈。这一页整理每个作业要做什么、怎样评分、难在哪里，以及期末项目的要求</p>
         <div class="author-meta">
-            资料来源：Harvard CS2680 课程网站的 <a href="https://cs2680.seas.harvard.edu/assignments/index.html" target="_blank">作业总览</a>、<a href="https://cs2680.seas.harvard.edu/assignments/assignment1.html" target="_blank">作业 1</a>、<a href="https://cs2680.seas.harvard.edu/assignments/assignment2.html" target="_blank">作业 2</a>、<a href="https://cs2680.seas.harvard.edu/assignments/assignment3.html" target="_blank">作业 3</a>、<a href="https://cs2680.seas.harvard.edu/assignments/assignment4.html" target="_blank">作业 4</a>、<a href="https://cs2680.seas.harvard.edu/project.html" target="_blank">期末项目</a>（截至 2026 年 10 月 23 日；作业 5 尚未发布）。这里只做中文梳理，具体操作步骤、启动代码和提交格式以原网页为准。
+            资料来源：Harvard CS2680 课程网站的 <a href="https://cs2680.seas.harvard.edu/assignments/index.html" target="_blank">作业总览</a>、<a href="https://cs2680.seas.harvard.edu/assignments/assignment1.html" target="_blank">作业 1</a>、<a href="https://cs2680.seas.harvard.edu/assignments/assignment2.html" target="_blank">作业 2</a>、<a href="https://cs2680.seas.harvard.edu/assignments/assignment3.html" target="_blank">作业 3</a>、<a href="https://cs2680.seas.harvard.edu/assignments/assignment4.html" target="_blank">作业 4</a>、<a href="https://cs2680.seas.harvard.edu/assignments/assignment5.html" target="_blank">作业 5</a>、<a href="https://cs2680.seas.harvard.edu/project.html" target="_blank">期末项目</a>（截至 2026 年 11 月 13 日）。这里只做中文梳理，具体操作步骤、启动代码和提交格式以原网页为准。
         </div>
     </header>
 
@@ -182,7 +182,53 @@
     <section>
         <h2>六、作业 5：Mads-Stack，优化整个栈</h2>
         <p>
-            截至 2026 年 10 月 23 日尚未发布，总览页上只有一段描述：这次 Agent 循环、模型和服务系统全部可以改。先剖析完整的执行路径，直到能说清时间、token 和算力花在哪里；改系统之前先写下性能假设；然后跨层优化，在同样的负载上重跑，判断哪些改动真正起了作用。原计划占 20%，第八讲时因为太难、且和期末项目以及其他课的项目重叠，改为 10%。发布后再补。
+            11 月 11 日发布，11 月 24 日晚 11:59 截止，占 10%（原计划 20%，第八讲时改为 10%）。在作业 4 的基础上，把自己的 Agent 做强：修掉作业 4 里拖后腿的地方，借鉴其他 Agent 的设计。这次模型和推理引擎也可以换，但不是必须，仍然只用一张 RTX PRO 4500（32 GB），同时只能用一张卡的规则和作业 4 相同。没有书面总结，换成一篇公开的博客文章和一个视频。
+        </p>
+
+        <h3>新的评测：Terminal-Bench 2.0</h3>
+        <p>
+            Terminal-Bench 2.0 是一个公开基准，89 个任务，覆盖软件工程、系统管理、安全、数据科学和模型训练。每个任务给 Agent 一段文字说明和一个可以联网的容器，各有自己的时间、CPU 和内存上限。Agent 结束任务后，隐藏测试在同一个容器里检查最终状态。镜像压缩后约 49 GB，只能在 x86_64 上跑。同一个 Agent 既要跑 Terminal-Bench，也要跑作业 4 的 26 个任务，所以第一步是把作业 4 的 Agent 改成通用的。
+        </p>
+        <p>
+            调度接口也变了：<code>next_task()</code> 返回任务编号、完整的任务文字、沙盒地址、工作目录和 <code>time_limit_s</code>（任务自己的上限和整次运行剩余时间里较小的那个）；<code>done(k)</code> 结束任务，按当时的状态评分；超时还没结束的任务在超时那一刻评分。作业 4 里的 <code>evaluate</code>、<code>extract_patch</code>、<code>submit_patch</code>、<code>continue_task</code> 都去掉了。
+        </p>
+
+        <h3>第一部分：把作业 4 的 Agent 改成通用的，七处改动</h3>
+        <ol>
+            <li>从任务文字读任务，删掉假定"有一个仓库要修、要产出补丁"的提示和代码。工作目录不一定是 git 仓库。</li>
+            <li>自己检查结果。没有了 <code>evaluate(k)</code>，Agent 要在 <code>done(k)</code> 之前自己写检查、自己跑。</li>
+            <li>把最终状态留在原地：文件放在说明要求的位置；任务要求的服务在 <code>done(k)</code> 之后还得在运行，所以要以后台方式启动并把输出重定向到文件。</li>
+            <li>处理长命令和交互式命令：一条沙盒命令最多跑 900 秒，更长的放后台再轮询；命令不能接收键盘输入，编辑器、REPL 这类程序用 tmux 驱动或用非交互模式。</li>
+            <li>可以读写任意路径。作业 4 的沙盒服务拒绝仓库和 <code>/work</code> 之外的路径，而任务可能要写 <code>/etc</code>。</li>
+            <li>在 <code>time_limit_s</code> 内规划每个任务的轮数和命令。</li>
+            <li>模型名从 <code>CS2680_MODEL_*</code> 环境变量读（排行榜设为 <code>cs2680-model</code>），不要写死作业 4 的模型名。</li>
+        </ol>
+
+        <h3>第二部分：继续优化整个栈</h3>
+        <p>
+            做法和作业 4 一样：测量，找出限制，修掉它。Agent 这边，研究它失败的任务，试别的 Agent 设计里的想法；引擎这边，在作业 4 允许的范围内继续改。服务器更快，Agent 在每个任务的时限内就能多跑几轮。结果每次运行都有波动，一个改动要跑不止一次才能下结论。Agent 犯的每个错、试过的每种技术都要记下来，没效果的也要记。
+        </p>
+        <p>
+            这次模型也可以换：换别的检查点，做量化、剪枝或蒸馏，训练或微调，或者加一个草稿模型做投机解码。服务器仍然要以 <code>cs2680-model</code> 这个名字提供服务，并在 45 分钟内（含加载权重）就绪。自己的模型放在集群的个人目录下，连同草稿模型最多 48 GiB，每次评测时复制到 GPU 节点，复制时间也算在 45 分钟里。模型越小能解决的任务越少，每次换模型后都要重新测解决数。
+        </p>
+
+        <h3>规则</h3>
+        <p>
+            Harness 必须对一般任务有效，不能针对具体任务定制。以下做法会让提交作废：使用参考答案或隐藏测试；把某个任务或仓库的特定知识写进 Harness（例如"做 Ansible 任务时注意 X 目录下的文件"）；把离线实验得到的、关于具体任务的经验写进去，即使措辞看起来很通用（例如"如果需求提到初始化方法，就改 <code>__init__</code>"）；在任务之间复制代码（可以带笔记，比如测试怎么跑、哪种方法失败了，但不能带项目代码）；在 Terminal-Bench 2.0 或作业 4 的任务以及 Agent 在这些任务上的运行记录上训练模型；让服务器或模型目录识别任务、内置预先算好的回答或缓存；在容器里联网查 Terminal-Bench、任务或答案（装软件包可以）。允许自己跑 Terminal-Bench 2.0 和作业 4 起始包里的 25 个任务来测量和调通用参数，但不能跑那 26 个排行榜任务。
+        </p>
+
+        <h3>排行榜、评分和加分</h3>
+        <p>
+            每次评测在全新的 RTX PRO 4500 节点上启动一次服务器，先跑 Terminal-Bench 2.0（整次最多 6 小时，同时打开的任务数不限），结束后再跑作业 4 的 26 个任务（无网络，最多 4 小时）。每次评测任务顺序随机，没打开的任务算没解决。课程会用这两组结果研究 Harness 对基准分数影响有多大、怎样控制运行之间的波动。每天 2 次评测。排行榜不接受迟交，11 月 24 日晚 11:59 停止收提交；迟交天数只能用在博客和视频上。
+        </p>
+        <p>
+            排行榜 50 分，只看 Terminal-Bench 2.0。达到基线就拿满 50 分，基线二选一：快速档是一次运行解决至少 20 个、端到端不超过 2 小时；准确档是解决至少 30 个、不超过 6 小时。注意两个数字指同一次完整运行：解决 22 个但最后一个任务在 2 小时 10 分结束，就不算达到快速档，即使前 2 小时内已经解决了 20 个。没达到基线时得 $\min(2s, 40)$ 分，$s$ 是有效提交里最多解决的任务数。分数只取决于自己的提交，和别人的成绩无关。博客 40 分，视频 10 分（3 分钟，证据放在屏幕上）。
+        </p>
+        <p>
+            博客写作业 2 到 5 学到的东西，不必按作业分。动笔前先回想四次作业，尽量多列教训，每条写清做了什么、结果怎样、学到什么，配上自己的测量和例子；错误也算教训。必须自己写，被发现用 AI 写会扣分。博客是公开的，注意不要放隐私数据。
+        </p>
+        <p>
+            加分最多给课程总分加 5 个百分点：26 个任务的排名最多 3 点，Terminal-Bench 排名最多 2 点。只有达到基线的提交才有资格，而且基线和加分必须来自同一次提交。两个排名各自按轮次算（和作业 4 的天际线排名相同，Terminal-Bench 这边以 20 个任务为门槛，26 个任务这边仍以 7 个为门槛）：26 个任务第 1、2、3 轮分别加 3、2、1 点；Terminal-Bench 第 1、2 轮分别加 2、1 点。加分计入课程 10% 的加分上限，不改变本作业的分数。
         </p>
     </section>
 
@@ -220,7 +266,7 @@
     <footer class="document-footer">
         <p>Harvard CS2680: Modern AI Systems: Agents and System Optimizations &copy; Fall 2026</p>
         <nav class="footer-nav">
-            <a href="10_GPU入门.html">&larr; 第十讲</a>
+            <a href="13_批处理分页与并行.html">&larr; 第十三讲</a>
             <a href="index.html">返回主目录</a>
             <a href="index.html">课程目录 &rarr;</a>
         </nav>
