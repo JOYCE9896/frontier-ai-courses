@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第二十讲：在轨迹上搜索 | CMU 11-768 课程笔记</title>
+    <link rel="stylesheet" href="tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+
+<nav class="top-nav">
+    <a href="18_多Agent系统.html">&larr; 上一讲</a>
+    <span>CMU 11-768: Lecture 20</span>
+    <a href="index.html">课程目录 &rarr;</a>
+</nav>
+
+<article>
+    <header>
+        <h1>第二十讲：在轨迹上搜索</h1>
+        <p class="subtitle">同一个任务跑很多遍，怎样从中挑出对的那一个；怎样让后面的尝试用上前面的经验；以及不改模型、只搜索 Harness</p>
+        <div class="author-meta">
+            主讲：Daniel Fried · 2026 年 11 月 12 日（官网课表标题：Search 1: Reranking and Critic Models）<br>
+            资料来源：<a href="https://www.cmu-agents.com/slides/lecture-20-search-basics.pdf" target="_blank">课程幻灯片</a>（共 31 页）以及它引用的论文<br>
+            本讲录像尚未公开（截至 2026 年 11 月 13 日），本文不含课堂口述。幻灯片里的图表数字是从图上读出来的。录像发布后再对照补充。
+        </div>
+    </header>
+
+    <section>
+        <h2>一、这一讲要解决什么问题</h2>
+        <!-- Slides 1, 22, 30. -->
+        <p>
+            前面几讲讲的是怎样让 Agent 跑一次就尽量做对：改 Harness（第 1 到第 7 讲），或者训练模型（第 8 到第 12 讲）。这一讲换一个方向：模型和 Harness 都不变，在推理时多花算力。同一个任务让 Agent 做很多遍，每一遍留下一条轨迹（trajectory，从开始到结束的全部思考、工具调用和观察），然后在这些轨迹里"搜索"一个好答案。
+        </p>
+        <p>
+            多花的算力可以花在两个方向上：
+        </p>
+        <ul>
+            <li><strong>广度</strong>：并行地多做几次，每次互相独立。</li>
+            <li><strong>深度</strong>：拿着上一次的结果和反馈再改一次，一轮一轮往下做。</li>
+        </ul>
+        <p>
+            两种方式最后都要回答同一个问题：手上有一堆候选答案，交哪一个？本讲按这个顺序走：重复采样，选择答案，迭代改进，把三者合起来用在 Agent 上，最后是 Harness 本身的搜索。下一讲（11 月 17 日）讲更进一步的树搜索。
+        </p>
+    </section>
+
+    <section>
+        <h2>二、重复采样</h2>
+
+        <h3>1. 为什么同一个任务每次结果不同</h3>
+        <!-- Slides 2–4. -->
+        <p>
+            语言模型每一步输出的是一个概率分布，下一个 token 是从这个分布里抽出来的。抽样时常用温度 $T$ 调整分布的形状：
+        </p>
+        <p>$$P(x_t \mid x_{&lt;t}) = \mathrm{softmax}(z_t / T)$$</p>
+        <p>
+            $z_t$ 是模型在第 $t$ 步给每个 token 打的原始分数（logits）。$T$ 小于 1 时分布变尖，几乎总是选分数最高的；$T$ 大于 1 时分布变平，更容易选到别的 token。对 Agent 来说，这种随机性既影响推理的文字，也影响选了哪个工具、传了什么参数，所以同一个任务跑两次，轨迹可能完全不同。幻灯片提醒，推理模型（reasoning model）的温度常常被厂商固定在 1.0，用户调不了，具体要看各家文档（例如 Claude 的 extended thinking 设置和 DeepSeek-R1 的使用建议）。
+        </p>
+        <p>
+            重复采样（repeated sampling）就是利用这种随机性：从同一个起点出发，在全新的环境里独立地跑 $k$ 次，每次得到一个输出，例如对代码仓库的一个补丁。因为各次之间互不依赖，这 $k$ 次常常可以放进同一个批次一起生成。
+        </p>
+
+        <h3>2. 覆盖率和 pass@k</h3>
+        <!-- Slides 5–6. -->
+        <p>
+            pass@k 的定义是：$k$ 次尝试里至少有一次成功的概率。假设每次成功的概率是 $p$，各次独立，那么
+        </p>
+        <p>$$P(\text{全部失败}) = (1-p)^k, \qquad \text{pass@}k = 1 - (1-p)^k$$</p>
+        <p>
+            算个例子：$p = 25\%$。$k=1$ 时是 25%；$k=10$ 时 $1-0.75^{10} \approx 94\%$；$k=100$ 时几乎是 100%。也就是说，只要模型偶尔能做对，多试几次，"候选里有正确答案"的概率涨得很快。这个指标叫覆盖率（coverage）。
+        </p>
+        <p>
+            幻灯片特别说明：pass@k 是假设有一个"神谕"（oracle），能完美分辨每个候选是对是错时的成功率。真实系统没有这个神谕，后面两节讲的就是怎样尽量接近它。
+        </p>
+
+        <h3>3. 怎样提高覆盖率</h3>
+        <!-- Slide 7. -->
+        <p>
+            覆盖率要高，候选之间得有差别。如果 100 次采样都给出同一个错误答案，采样再多也没用。幻灯片列了几种增加多样性的办法：
+        </p>
+        <table>
+            <tr><th>办法</th><th>代表工作</th><th>说明</th></tr>
+            <tr><td>多采样</td><td>—</td><td>最直接</td></tr>
+            <tr><td>调高采样温度</td><td>Codex（Chen 等，2021）</td><td>对温度固定的推理模型不太适用</td></tr>
+            <tr><td>一次生成多个回答</td><td>Verbalized Sampling</td><td>在提示里要求模型一次列出多个不同的答案；Agent 的一次运行很长，不太适用</td></tr>
+            <tr><td>用一组不同的提示</td><td>Mode-conditioning</td><td>每次尝试给不同的提示，引导到不同的解法</td></tr>
+            <tr><td>在训练时奖励多样性，或直接优化 pass@k</td><td>Rewarding the Unlikely（He 等，2025）、Differential Smoothing（Gai 等，2026）、MaxRL（Tajwar 等，2026）</td><td>RL 训练容易让模型只会一种解法，这些工作在训练目标里补偿</td></tr>
+        </table>
+
+        <h3>4. 正确答案在里面，不等于选得出来</h3>
+        <!-- Slide 8. -->
+        <p>
+            幻灯片放了两张图。一张来自 Codex 论文（HumanEval 编程题），一张来自 Large Language Monkeys（Brown 等，2024，MATH 数学题）。两张图的共同点是：随着样本数增加，覆盖率一路上升，而实际能用的选择方法（多数投票、用奖励模型挑最好的、两者结合）很快就停住了，和覆盖率之间的差距越拉越大。正确答案已经在候选里，选择这一步把它漏掉了。
+        </p>
+    </section>
+
+    <section>
+        <h2>三、选择答案</h2>
+
+        <h3>1. 验证信号从哪来</h3>
+        <!-- Slide 10. -->
+        <p>
+            要挑答案，先得有办法给候选打分。幻灯片把信号分成三类：
+        </p>
+        <ul>
+            <li><strong>真实检查</strong>：数学题用证明检查器（例如 Lean）；代码用题目自带的参考测试。这类信号可靠，但很多任务没有。</li>
+            <li><strong>预测的正确性</strong>：代码可以让模型自己写测试再跑；也可以用奖励模型打分，例如 LLM-as-a-judge（让另一个模型当评委）。</li>
+            <li><strong>和其他候选的相似度</strong>：很多候选得出同一个结果，这个结果更可能是对的。</li>
+        </ul>
+
+        <h3>2. 训练一个奖励模型：SWE-Gym 的例子</h3>
+        <!-- Slide 11. -->
+        <p>
+            SWE-Gym（Pan 等，2024/2025）在完整的 OpenHands 运行轨迹上训练了一个结果验证器（outcome verifier），做法分三步：
+        </p>
+        <ol>
+            <li>用任务自带的测试给每条训练轨迹打标签：测试通过是 YES，没通过是 NO。</li>
+            <li>让 YES 和 NO 的样本数量大致平衡，然后在完整的轨迹上微调一个模型，让它看完一条轨迹后回答 YES 或 NO。</li>
+            <li>用的时候，对每条新轨迹算出模型回答 YES 的概率，返回概率最高的那条。</li>
+        </ol>
+        <p>
+            训练时有测试，使用时不需要测试，这就是"预测的正确性"。
+        </p>
+
+        <h3>3. Best-of-N</h3>
+        <!-- Slide 12. -->
+        <p>
+            有了打分器，最简单的选择方法是 Best-of-N：每个候选打一个分，返回最高分的那个。例如候选 A、B、C 分别得 0.3、0.8、0.5，就返回 B。
+        </p>
+
+        <h3>4. 自洽性：让候选投票</h3>
+        <!-- Slide 13. -->
+        <p>
+            自洽性（self-consistency，Wang 等，2022）不需要打分器。做法是采样多条推理，每条得出一个最终答案，然后数票，选出现最多的答案。例如三条推理得出 42、17、42，就选 42。不同的推理路径能走到同一个答案，说明这个答案更可信。
+        </p>
+        <p>
+            幻灯片给了这个做法背后的数学（引自 Welleck 等的 From Decoding to Meta-Generation 第 4.2.2 节）。我们真正想要的是概率最大的答案 $a$，而一个答案可以由很多条不同的推理 $z$ 得出，所以要把这些推理的概率加起来：
+        </p>
+        <p>$$\hat{a}_{\text{MBR}} = \arg\max_a p(a \mid x) = \arg\max_a \sum_z p(z, a \mid x) \approx \arg\max_a \sum_{i=1}^{N} \mathbb{1}\{a^{(i)} = a\}$$</p>
+        <p>
+            对所有 $z$ 求和算不出来，就用 $N$ 个样本里答案等于 $a$ 的次数去近似。这叫最小贝叶斯风险（Minimum Bayes Risk, MBR）解码，损失函数取 0–1 损失（答案对了损失 0，错了损失 1）时，它就退化成多数投票。
+        </p>
+
+        <h3>5. 代码的版本：按执行结果投票</h3>
+        <!-- Slide 14. -->
+        <p>
+            代码的写法千差万别，两段程序文字不同，功能可能完全一样，所以没法直接比较文字。MBR-Exec（Shi 等，2022）和 AlphaCode（Li 等，2022）的做法是：把每个候选程序跑一遍，按输出结果分组，选人数最多的组。幻灯片的例子是"把 1 到 n 中的偶数加起来，n = 12"：
+        </p>
+        <pre><code># Candidate A
+evens = range(2, n + 1, 2)
+return sum(evens)        # 2+4+...+12 = 42
+
+# Candidate B
+evens = range(2, n, 2)
+return sum(evens)        # 2+4+...+10 = 30  (misses 12)
+
+# Candidate C
+m = n // 2
+return m * (m + 1)       # 6 * 7 = 42</code></pre>
+        <p>
+            A 和 C 写法完全不同，但都输出 42，B 输出 30。按输出投票选 42，B 那个少算了 12 的版本被排除。
+        </p>
+
+        <h3>6. 验证器有误差时会怎样</h3>
+        <!-- Slide 15. -->
+        <p>
+            真实的验证器会出错。幻灯片用两个数描述它：$q$ 是把正确答案判为"接受"的概率，$r$ 是把错误答案误判为"接受"的概率。选择规则是：按顺序看候选，返回第一个被接受的；一个都没被接受就返回最后一个。
+        </p>
+        <p>
+            幻灯片里的交互图取 $p = 25\%$、$q = 95\%$、$r = 10\%$。$k = 1$ 时成功率还是 25%，而 $k$ 越大，成功率不会涨到 100%，只会趋近 76%。这个极限可以自己算出来：$k$ 很大时几乎一定有候选被接受，被接受的那个是正确答案的概率是
+        </p>
+        <p>$$\frac{pq}{pq + (1-p)r} = \frac{0.25 \times 0.95}{0.25 \times 0.95 + 0.75 \times 0.10} = \frac{0.2375}{0.3125} = 76\%$$</p>
+        <p>
+            所以验证器的误判率决定了重复采样的上限。$r$ 越大（越容易把错答案放过），上限越低；采样再多也突破不了。这就是第二节第 4 小节那两张图里，实际选择方法停在覆盖率下方的原因。
+        </p>
+    </section>
+
+    <section>
+        <h2>四、迭代改进</h2>
+
+        <h3>1. 改进是串行的</h3>
+        <!-- Slide 17. -->
+        <p>
+            重复采样里各次尝试互不相干。改进（refinement）则是拿着上一轮的结果和反馈，生成新一轮的版本：A0 改成 A1，A1 再改成 A2。这必须一轮接一轮地做，但可以同时改好几个候选（A 和 B 各自往下改），所以广度和深度可以结合。
+        </p>
+
+        <h3>2. Reflexion：把反馈记下来再试</h3>
+        <!-- Slide 18. -->
+        <p>
+            Reflexion（Shinn 等，NeurIPS 2023）的循环是：尝试一次，评估器算出或预测出奖励，再让模型写一段反思，带着反思重做同一个任务。幻灯片的例子是一道问答题：
+        </p>
+        <blockquote>
+            <p>"What was a series of battles … fought on October 28, 1776 near White Plains, New York?"</p>
+        </blockquote>
+        <p>
+            第一次回答 "Battle of White Plains"，判为错误。模型写的反思是："题目问的是一系列战役，我只给了一场战役的名字……我会提供更多背景，例如战役所属的战役群（campaign）的名称。"第二次回答 "The New York and New Jersey campaign"，判为正确。
+        </p>
+
+        <h3>3. 反馈的种类</h3>
+        <!-- Slide 19. -->
+        <p>
+            反馈的来源和第三节的验证信号一一对应：
+        </p>
+        <table>
+            <tr><th>信号</th><th>用作反馈</th><th>代表工作</th></tr>
+            <tr><td>真实检查</td><td>证明检查器的报错；参考测试的运行结果</td><td>Self-Debugging（Chen 等，2023）</td></tr>
+            <tr><td>预测的正确性</td><td>模型自己写的测试的运行结果</td><td>Reflexion</td></tr>
+            <tr><td>奖励模型</td><td>LLM 评委的意见，评委可以就是 Agent 自己</td><td>Self-Refine（Madaan 等，2023）</td></tr>
+            <tr><td>和其他候选的相似度</td><td>参考其他候选的做法</td><td>PDR（见下文）</td></tr>
+        </table>
+
+        <h3>4. 改进的局限</h3>
+        <!-- Slide 20. -->
+        <p>
+            没有可靠的对错信号时，让模型自己检查自己，效果并不稳定。幻灯片引用了 Huang 等（Large Language Models Cannot Self-Correct Reasoning Yet）的图：让 GPT-3.5 在不知道答案对错的情况下自我纠正一次，结果分四类。
+        </p>
+        <table>
+            <tr><th>数据集</th><th>没有变化</th><th>对改成错</th><th>错改成对</th><th>错改成另一个错</th></tr>
+            <tr><td>GSM8K（小学数学）</td><td>74.7%</td><td>8.8%</td><td>7.6%</td><td>8.9%</td></tr>
+            <tr><td>CommonSenseQA（常识问答）</td><td>42.8%</td><td>39.8%</td><td>5.8%</td><td>11.6%</td></tr>
+        </table>
+        <p>
+            在 GSM8K 上，改对的和改错的差不多抵消；在 CommonSenseQA 上，把对答案改错的远多于把错答案改对的。幻灯片的总结是三点：有些错答案会被改对；有些对答案会被改错；而且自我批评常常保留原来的盲点，模型第一次没看出来的问题，第二次多半也看不出来。
+        </p>
+
+        <h3>5. 把探索和改进结合起来：PDR</h3>
+        <!-- Slide 21. -->
+        <p>
+            Parallel-Distill-Refine（PDR，Madaan 等，2025）每一轮做三件事：并行生成多个候选；把这些候选总结成一份摘要（distill）；下一轮的每个尝试都以这份摘要为条件重新生成。各次尝试之间通过一个大小有限的共享工作区交换信息，上下文不会无限变长。相关工作还有 Recursive Self-Aggregation。
+        </p>
+    </section>
+
+    <section>
+        <h2>五、用在 Agent 上：Scaling Test-Time Compute for Agentic Coding</h2>
+        <!-- Slides 23–25. -->
+        <p>
+            前面的例子多是数学题和短代码。Agent 的难处在于一条轨迹很长，几十步工具调用，几万个 token，没法把十几条轨迹直接塞给评委去比。Kim 等（2026）在 SWE-bench 上的做法分三步。
+        </p>
+
+        <h3>1. 先把轨迹总结成结构化摘要</h3>
+        <p>
+            用一个 LLM 把每条轨迹压缩成固定格式的摘要，例如"关键发现"和"解决思路"。幻灯片摘录了论文附录里一个 SymPy 问题的摘要：
+        </p>
+        <pre><code>"key_discoveries": [
+  "Add(ZeroMatrix, ZeroMatrix) evaluates to scalar 0",
+  "MatAdd(0, ZeroMatrix, ZeroMatrix) canonicalizes to 0 because rm_id
+   removes all identities and keeps the first one (0)"
+]
+"solution_approach": {
+  "strategy": "Modify `get_postprocessor` in `sympy/matrices/expressions/matexpr.py`
+               to check if `nonmatrices` is empty. [...]"
+}</code></pre>
+
+        <h3>2. 递归锦标赛投票（RTV）</h3>
+        <p>
+            Recursive Tournament Voting 把摘要分成小组，让 LLM 评委在每组里选出最好的一个。评委本身有噪声，所以每组多判几次再汇总。胜出的摘要（和它对应的轨迹）进入下一轮，再分组比较，直到只剩一条。这和体育比赛的淘汰赛一样，每次只需要比较少数几个，避免让评委一次读太多内容。
+        </p>
+
+        <h3>3. 选出来的摘要给下一轮用</h3>
+        <p>
+            和 PDR 一样，下一轮的尝试以选中的摘要为条件；最后交答案时再用一次选择。论文在 100 个 SWE-bench 任务上做了消融实验，下表是最终选择之前，各次尝试的平均成功率：
+        </p>
+        <table>
+            <tr><th>模型</th><th>单条摘要 第 0 轮</th><th>单条摘要 第 1 轮</th><th>随机 K 条 第 1 轮</th><th>RTV 选 K 条 第 1 轮</th></tr>
+            <tr><td>Claude-4.5-Sonnet</td><td>69.87</td><td>70.87</td><td>75.06</td><td>78.06</td></tr>
+            <tr><td>Gemini-3.1-Pro</td><td>72.69</td><td>73.75</td><td>76.94</td><td>79.25</td></tr>
+        </table>
+        <p>
+            第 0 轮三种设置相同（还没有摘要可用）。只看一条摘要，第二轮几乎没有提升；看多条摘要，提升 4 到 5 个百分点；用 RTV 挑出好的多条摘要，再多 2 到 3 个百分点。
+        </p>
+    </section>
+
+    <section>
+        <h2>六、搜索 Harness 本身</h2>
+
+        <h3>1. Harness 也是可以优化的对象</h3>
+        <!-- Slide 27. -->
+        <p>
+            第一讲讲过，Harness 是控制怎样使用模型的那部分代码。幻灯片举了 Meta-Harness（Lee 等，2026）发布的一个文本分类基线：模型权重固定，能改的只有这几行代码。
+        </p>
+        <pre><code>examples_section = self._format_examples_section(seed=seed)
+prompt = PROMPT_TEMPLATE.format(
+    examples_section=examples_section,
+    input=input,
+)
+response = self.call_llm(prompt)
+answer = extract_json_field(response, "final_answer")</code></pre>
+        <p>
+            怎样挑少样本示例、提示模板怎样写、怎样从回答里抽取答案，都会影响分数。
+        </p>
+
+        <h3>2. Meta-Harness：用编程 Agent 改 Harness</h3>
+        <!-- Slide 28. -->
+        <p>
+            Meta-Harness 的问题是：模型权重固定，怎样改 Harness 让任务得分最高。做法是一个循环：
+        </p>
+        <ol>
+            <li><strong>评估</strong>：用当前的 Harness 和固定的模型跑任务，把代码、得分和运行日志都存进文件系统。</li>
+            <li><strong>提议</strong>：一个编程 Agent（proposer）读之前所有版本的代码、得分和轨迹，修改 Harness，得到新版本，回到第 1 步。</li>
+        </ol>
+        <p>
+            所有历史都放在文件系统里，提议者可以像程序员查日志一样，按需要去翻，不用把全部历史塞进上下文。
+        </p>
+
+        <h3>3. WHALE：权重和 Harness 交替优化</h3>
+        <!-- Slide 29. -->
+        <p>
+            WHALE（Kim 等，2026）把两条改进路线合在一起：一段时间固定 Harness 训练模型权重，一段时间固定权重搜索 Harness，交替进行。课程介绍里说过，改进 Agent 有 Harness 工程和训练模型两条路，这个工作把它们放进同一个优化过程。
+        </p>
+    </section>
+
+    <section>
+        <h2>七、本讲小结：算力该花在哪</h2>
+        <!-- Slide 30. -->
+        <p>
+            最后一页把全讲画成一张图：每一轮有多个并行尝试（广度），轮与轮之间带着前面的结果和反馈（深度），各次尝试共享以前的经验，最后检查、选择，交出一个答案。幻灯片给的判断方法是两条：
+        </p>
+        <ul>
+            <li><strong>pass@k 很低</strong>：候选里本来就很少有正确答案，应该加大广度，或者让尝试更多地利用反馈。</li>
+            <li><strong>最终准确率远低于 pass@k</strong>：正确答案在候选里，但没被选出来，应该改进选择器。</li>
+        </ul>
+        <table>
+            <tr><th>环节</th><th>做法</th><th>要注意的问题</th></tr>
+            <tr><td>生成候选</td><td>重复采样；调温度；不同提示；训练时奖励多样性</td><td>候选太相似，覆盖率涨不上去</td></tr>
+            <tr><td>选择</td><td>真实测试；奖励模型和 Best-of-N；多数投票和按执行结果投票；RTV</td><td>验证器误判率决定上限</td></tr>
+            <tr><td>改进</td><td>Reflexion、Self-Debugging、Self-Refine、PDR</td><td>没有可靠信号时，自我纠正可能把对的改错</td></tr>
+            <tr><td>Harness</td><td>Meta-Harness 自动搜索；WHALE 与训练交替</td><td>—</td></tr>
+        </table>
+    </section>
+
+    <footer class="document-footer">
+        <p>CMU 11-768: AI Agents · Fall 2026</p>
+        <nav class="footer-nav">
+            <a href="18_多Agent系统.html">&larr; 上一讲</a>
+            <a href="index.html">返回主目录</a>
+            <a href="index.html">课程目录 &rarr;</a>
+        </nav>
+    </footer>
+</article>
+
+</body>
+</html>
