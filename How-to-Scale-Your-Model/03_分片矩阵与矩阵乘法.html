@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>分片矩阵与矩阵乘法 | How to Scale Your Model 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="02_怎样理解TPU.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">How to Scale Your Model 目录</a> · 03</span>
+    <span><a href="04_Transformer的全部数学.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 3 章 · 分片矩阵与矩阵乘法</h1>
+        <p class="subtitle">数组被切开放到很多芯片上以后，怎样用一套记号描述切法，矩阵乘法在每种切法下要补什么通信，每种通信要花多少时间</p>
+        <div class="author-meta">
+            作者：Jacob Austin、Sholto Douglas 等（Google DeepMind）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://jax-ml.github.io/scaling-book/sharding" target="_blank">Sharded Matrices and How to Multiply Them</a>（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            第 1 章讲了 roofline，第 2 章讲了 TPU 的芯片结构和芯片之间的 ICI 互联。这一章把两者接起来：模型太大，一块芯片的 HBM 装不下，就要把数组切成块分到很多芯片上，这叫分片（Sharding，也叫 partitioning）。切开以后，大部分计算照常进行，但矩阵乘法在某些切法下必须先在芯片之间搬数据。这一章先给出一套描述分片的记号，再把所有矩阵乘法的分片情况归成 4 类，每类对应一种通信操作，最后算出这些通信操作（AllGather、ReduceScatter、AllReduce、AllToAll）各要多少时间。
+        </p>
+        <p>
+            读完这一章，你可以拿到一个形如 $A[I_X, J] \cdot B[J, K_Y]$ 的分片矩阵乘法，判断要不要通信、要哪种通信，再用 ICI 带宽算出通信时间，和计算时间比一比。第 5 章讲训练并行（数据并行、FSDP、张量并行）时，用的全是这一章的记号和公式。
+        </p>
+        <ol>
+            <li><a href="#t01">分片记号与集合通信</a></li>
+            <li><a href="#t02">分片数组上的计算</a></li>
+            <li><a href="#t03">深入 TPU 的通信原语</a></li>
+            <li><a href="#t04">这一章学到了什么</a></li>
+            <li><a href="#t05">习题</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 分片记号与集合通信</h2>
+        <p><em>原书小节：Partitioning Notation and Collective Operations</em></p>
+        <p>
+            在一万块 TPU 或 GPU 上训练 LLM，抽象地看，做的计算和在一块芯片上训练是一样的。区别在于数组放不进单块芯片的 HBM（High Bandwidth Memory，高带宽内存，芯片旁边存权重和激活的显存），所以必须切开。（书里补充：切分也可能是为了速度。即使更少的芯片就能装下，用更多芯片也意味着更多 FLOPs/s。推理时有时小拓扑就装得下，但为了降低延迟会扩到更大的拓扑；训练时也常常为了缩短每一步的时间而加芯片。）把数组切开分到多个设备上，叫作分片或分区。扩展模型的功夫，就在于找到一种切法，让计算仍然高效。
+        </p>
+        <p>下面是一个二维数组 A 分到 4 块 TPU 上的例子：</p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/sharding-example.png" alt="形状为 A[I, J] 的数组切到 4 个设备上">
+            <figcaption>图：形状为 $A[I, J]$ 的数组分到 4 个设备上。两个维度各在 2 个设备上均匀切开，分片写作 $A[I_X, J_Y]$。每块 TPU 存总量的 1/4。（引自原书）</figcaption>
+        </figure>
+        <p>
+            分片后的数组仍然有和原数组一样的全局形状（global shape，也叫逻辑形状 logical shape），比如 (4, 128)；同时每个设备上还有一个本地形状（device local shape），比如 (2, 64)，它决定每块 TPU 实际存多少字节。上图中每块 TPU 存了整个数组的 1/4。下面把这个例子推广到任意数组。
+        </p>
+
+        <h3>统一的分片记号</h3>
+        <p><em>原书小节：A unified notation for sharding</em></p>
+        <p>
+            书里用一种命名轴记号（named-axis notation）的变体来描述张量怎样按块分布在设备上。先假设有一个二维或三维的设备网格，叫设备网格（device mesh），每个网格轴有名字，例如 $X$、$Y$、$Z$，称为网格轴名（mesh axis names）。然后说明数组的每个命名维度沿哪些物理网格轴切开，就确定了矩阵数据在网格上的摆放。这种分配叫一个分片方式（a sharding）。
+        </p>
+        <p>拿上图来说：</p>
+        <ul>
+            <li>网格：<code>Mesh(devices=((0, 1), (2, 3)), axis_names=('X', 'Y'))</code>，表示 4 块 TPU 排成 2x2 网格，两个轴分别叫 $X$ 和 $Y$。</li>
+            <li>分片：$A[I_X, J_Y]$，表示第一个轴 $I$ 沿网格轴 $X$ 切，第二个轴 $J$ 沿网格轴 $Y$ 切。这样每个分片存数组的 $1 / (\lvert X\rvert \cdot \lvert Y\rvert)$。</li>
+        </ul>
+        <p>
+            合起来，数组的本地形状（单个设备持有的那一块的大小）是 $(\lvert I\rvert / 2, \lvert J\rvert / 2)$，其中 $\lvert I\rvert$ 是 A 第一个维度的大小，$\lvert J\rvert$ 是第二个维度的大小。
+        </p>
+
+        <h4>小测验：二维数组沿一个维度、两个网格轴切</h4>
+        <p>
+            题目：数组 <code>fp32[1024, 4096]</code>，分片 $A[I_{XY}, J]$，网格 <code>{'X': 8, 'Y': 2}</code>。每个设备存多少数据？在 H100 上从 HBM 读出这个数组要多久（每块芯片内存带宽按 3.4e12 字节/秒算）？
+        </p>
+        <p>
+            解答：$A[I_{XY}, J]$ 把第一个维度 $I$ 同时沿 $X$ 和 $Y$ 两个硬件轴切开，本地形状是 $(\lvert I\rvert /(\lvert X\rvert \cdot \lvert Y\rvert), \lvert J\rvert)$。全局形状是 <code>fp32[1024, 4096]</code>，所以本地形状是 <code>fp32[64, 4096]</code>。每块 GPU 存 $4 \cdot 64 \cdot 4096 = 1\text{MiB}$，读一遍大约要 $10^6 / 3.4\times 10^{12} = 294\text{ns}$。数据这么小，实际会因为各种开销慢得多。
+        </p>
+
+        <h4>把这些分片画出来</h4>
+        <p>下面用一个分到 4 个设备上的二维数组，逐个看各种分片的样子。</p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/sharding-colored1.png" alt="分到 4 个设备上的二维数组">
+            <figcaption>图：一个二维数组和 4 个设备。（引自原书）</figcaption>
+        </figure>
+        <p>完全复制（fully-replicated）的矩阵直接写作 $A[I, J]$，不带任何下标。每个设备上都有整个矩阵的完整副本。</p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/sharding-colored2.png" alt="完全复制的 A[I, J]">
+            <figcaption>图：$A[I, J]$，每个设备都存完整副本。（引自原书）</figcaption>
+        </figure>
+        <p>
+            在某个维度上加一个网格轴下标，表示这个维度沿该网格轴切开。比如 $A[I_X, J]$ 表示逻辑轴 $I$ 沿网格维度 $X$ 切开，$J$ 不切，各块在 $Y$ 方向上保持部分复制（partially-replicated）。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/sharding-colored3.png" alt="A[I_X, J]">
+            <figcaption>图：$A[I_X, J]$，$I$ 沿 $X$ 切，在 $Y$ 方向上复制。（引自原书）</figcaption>
+        </figure>
+        <p>$A[I_X, J_Y]$ 表示 $I$ 沿 $X$ 轴切，$J$ 沿 $Y$ 轴切。</p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/sharding-colored4.png" alt="A[I_X, J_Y]">
+            <figcaption>图：$A[I_X, J_Y]$。（引自原书）</figcaption>
+        </figure>
+        <p>其他几种可能如下图：</p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/sharding-colored5.png" alt="其他分片方式">
+            <figcaption>图：其他分片方式。（引自原书）</figcaption>
+        </figure>
+        <p>
+            $A[I_{XY}, J]$ 表示把 $X$ 和 $Y$ 两个网格轴拍平成一个更大的维度，让 $I$ 沿所有设备切开。多个网格轴下标的顺序有意义，它规定了在网格上遍历切块的顺序。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/sharding-colored6.png" alt="A[I_XY, J]">
+            <figcaption>图：$A[I_{XY}, J]$，$I$ 沿 $X$、$Y$ 拍平后的全部设备切开。（引自原书）</figcaption>
+        </figure>
+        <p>
+            最后一条规则：同一个网格维度不能用来切数组的多个命名轴。比如 $A[I_X, J_X]$ 是无意义的、被禁止的分片。一个网格维度一旦用来切了数组的某一维，就算“用掉”了。
+        </p>
+
+        <h4>小测验：三维网格上的内存</h4>
+        <p>
+            题目：数组 A 形状为 <code>int8[128, 2048]</code>，分片 $A[I_{XY}, J]$，网格 <code>Mesh({'X': 2, 'Y': 8, 'Z': 2})</code>（共 32 个设备）。每个设备上 A 占多少内存？所有设备加起来一共占多少？
+        </p>
+        <p>
+            解答：A 沿 $X$ 和 $Y$ 切开，在 $Z$ 上复制。每个设备上的形状是 <code>int8[128 / (2 * 8), 2048] = int8[8, 2048]</code>，大小 $8 \cdot 2048 = 16{,}384$ 字节。因为在 $Z$ 上复制，而每个 $Z$ 平面内沿 $X$、$Y$ 完全切开，所以一共有 2 份完整副本（每个 $Z$ 平面一份）。总大小 = 原数组大小 × $Z$ 方向副本数 = $128 \cdot 2048 \cdot 2 = 512\text{KiB}$。也可以这样验证：32 个设备 × 每设备 16,384 字节 = 512 KiB。
+        </p>
+
+        <h3>在代码里怎样描述分片</h3>
+        <p><em>原书小节：How do we describe this in code?</em></p>
+        <p>
+            到这里为止还没讲代码，这里先预览一下。JAX 的命名分片语法和上面的抽象记号很接近，第 10 章会细讲。书里提供了一个 Google Colab，可以运行并 profile，看 JAX 怎样处理不同的分片。下面这段代码做了 3 件事：
+        </p>
+        <ol>
+            <li>创建一个 <code>jax.Mesh</code>，把 8 块 TPU 映射成 4x2 网格，两个轴命名为 'X' 和 'Y'。</li>
+            <li>创建矩阵 A 和 B：A 的两个维度都切开，B 沿输出维度切开。</li>
+            <li>编译并执行一个简单的矩阵乘法，返回一个分片数组。</li>
+        </ol>
+<pre><code>import jax
+import jax.numpy as jnp
+
+# Create our mesh! We're running on a TPU v2-8 4x2 slice with names 'X' and 'Y'.
+# The Auto axis type tells JAX to let the XLA compiler infer intermediate shardings.
+assert len(jax.devices()) == 8
+Auto = jax.sharding.AxisType.Auto
+mesh = jax.make_mesh(axis_sizes=(4, 2), axis_names=('X', 'Y'), axis_types=(Auto, Auto))
+
+# A little utility function to help define our sharding. A PartitionSpec is our
+# sharding (a mapping from axes to names).
+def P(*args):
+  return jax.NamedSharding(mesh, jax.sharding.PartitionSpec(*args))
+
+# We shard both A and B over the non-contracting dimension and A over the contracting dim.
+A = jnp.zeros((8, 2048), dtype=jnp.bfloat16, device=P('X', 'Y'))
+B = jnp.zeros((2048, 8192), dtype=jnp.bfloat16, device=P(None, 'Y'))
+
+# We can perform a matmul on these sharded arrays! out_shardings tells us how we want
+# the output to be sharded. JAX/XLA handles the rest of the sharding for us.
+y = jax.jit(lambda A, B: jnp.einsum('BD,DF->BF', A, B), out_shardings=P('X', 'Y'))(A, B)</code></pre>
+        <p>
+            JAX 方便的地方在于，这些数组用起来就像没切过一样。<code>B.shape</code> 返回的是全局（逻辑）形状 (2048, 8192)，要看 <code>B.addressable_shards</code> 才能知道它在本地怎么切的。对这些数组做运算时，JAX 会自己设法广播或变形。上例中 A 的本地形状是 [2, 1024]，B 的本地形状是 [2048, 4096]。JAX/XLA 会在需要时自动插入跨设备的通信，完成最后的乘法。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 分片数组上的计算</h2>
+        <p><em>原书小节：Computation With Sharded Arrays</em></p>
+        <p>
+            数据分布在很多设备上，要对它做数学运算，数据和计算的分片会带来什么开销？这取决于是什么计算。
+        </p>
+        <ul>
+            <li>逐元素运算（elementwise operations）：在分布式数组上做没有任何额外开销。</li>
+            <li>需要用到分布在多个设备上的元素的运算：情况就复杂了。好在机器学习里几乎所有计算都是矩阵乘法，而矩阵乘法相对好分析。</li>
+        </ul>
+        <p>
+            这一节剩下的部分讲怎样把分片矩阵乘起来。粗略地说，就是把矩阵的块搬来搬去，让每一块都能完整地乘完或加完。不同的分片需要不同的通信。比如 $A[I_X, J] \cdot B[J, K_Y] \to C[I_X, K_Y]$ 不需要任何通信，因为收缩维度（contracting dimension，矩阵乘法里被求和掉的那一维，这里是 $J$）没有被切开。但如果想让输出不切开，即 $A[I_X, J] \cdot B[J, K_Y] \to C[I, K]$，就要么把 $A$ 和 $B$ 复制到每个设备，要么把 $C$ 复制到每个设备（用 AllGather）。这两种选择的通信成本不同，要算出来挑小的。可以用“分块矩阵乘法”的思路来理解。
+        </p>
+        <p>先回忆分块矩阵（block matrix），也就是由矩阵组成的矩阵：</p>
+        $$\begin{pmatrix} a_{00} & a_{01} & a_{02} & a_{03} \\ a_{10} & a_{11} & a_{12} & a_{13} \\ a_{20} & a_{21} & a_{22} & a_{23} \\ a_{30} & a_{31} & a_{32} & a_{33} \end{pmatrix} = \left( \begin{matrix} \begin{bmatrix} a_{00} & a_{01} \\ a_{10} & a_{11} \end{bmatrix} \\ \begin{bmatrix} a_{20} & a_{21} \\ a_{30} & a_{31} \end{bmatrix} \end{matrix} \begin{matrix} \begin{bmatrix} a_{02} & a_{03} \\ a_{12} & a_{13} \end{bmatrix} \\ \begin{bmatrix} a_{22} & a_{23} \\ a_{32} & a_{33} \end{bmatrix} \end{matrix} \right) = \begin{pmatrix} \mathbf{A_{00}} & \mathbf{A_{01}} \\ \mathbf{A_{10}} & \mathbf{A_{11}} \end{pmatrix}$$
+        <p>矩阵乘法有个好性质：把两个乘数写成块的形式后，乘积可以按标准规则写成块之间的矩阵乘法：</p>
+        $$\begin{pmatrix} A_{00} & A_{01} \\ A_{10} & A_{11} \end{pmatrix} \cdot \begin{pmatrix} B_{00} & B_{01} \\ B_{10} & B_{11} \end{pmatrix} = \begin{pmatrix} A_{00}B_{00} + A_{01}B_{10} & A_{00}B_{01} + A_{01}B_{11} \\ A_{10}B_{00} + A_{11}B_{10} & A_{10}B_{01} + A_{11}B_{11} \end{pmatrix}$$
+        <p>
+            所以分布式矩阵乘法可以归结为三步：在网络上搬动这些分片块，在本地做块的矩阵乘法，再把结果加起来。剩下的问题是要加什么通信、成本多少。
+        </p>
+        <p>所有可能的分片大致可以归成 4 种情况，每种都有一条“该加什么通信”的规则：</p>
+        <ol>
+            <li>情况 1：两个输入都没有沿收缩维度切开。直接乘本地分片，不需要通信。</li>
+            <li>情况 2：一个输入的收缩维度被切开。通常先沿收缩维度对这个输入做 AllGather。</li>
+            <li>情况 3：两个输入的收缩维度都被切开。先乘本地分片，再对结果做 AllReduce。</li>
+            <li>情况 4：两个输入的某个非收缩维度沿同一个轴切开。必须先对其中一个输入做 AllGather 才能继续。</li>
+        </ol>
+        <p>这些规则照着用就行，但理解它们为什么成立、成本有多高也很有用。下面逐个讲。</p>
+
+        <h3>情况 1：两个乘数都没有切开收缩维度</h3>
+        <p><em>原书小节：Case 1: neither multiplicand has a sharded contracting dimension</em></p>
+        <p>
+            引理：分片矩阵相乘时，只要收缩维度没被切开、两个矩阵也没有沿同一个轴切开，计算就是合法的，输出沿用输入的分片。比如下面这个就没问题：
+        </p>
+        $$\mathbf{A}[I_X, J] \cdot \mathbf{B}[J, K_Y] \rightarrow \mathbf{C}[I_X, K_Y]$$
+        <p>
+            它完全不需要通信，结果同时沿 $X$ 和 $Y$ 两个硬件维度切开。原因是计算和分片无关：每个设备都持有被收缩那一维的完整本地块，可以自己乘完、自己求和。下面几种都成立，都服从这条规则：
+        </p>
+        $$\begin{aligned} \mathbf{A}[I, J] \cdot \mathbf{B}[J, K] \rightarrow &\ \mathbf{C}[I, K] \\ \mathbf{A}[I_X, J] \cdot \mathbf{B}[J, K] \rightarrow &\ \mathbf{C}[I_X, K]\\ \mathbf{A}[I, J] \cdot \mathbf{B}[J, K_Y] \rightarrow &\ \mathbf{C}[I, K_Y]\\ \mathbf{A}[I_X, J] \cdot \mathbf{B}[J, K_Y] \rightarrow &\ \mathbf{C}[I_X, K_Y] \end{aligned}$$
+        <p>
+            A 和 B 的收缩维度 $J$ 都没切开，所以直接做本地的分块矩阵乘法，结果自然就是想要的输出分片。如果两个乘数的非收缩维度沿同一个轴切开，这一点就不成立了（见情况 4）。
+        </p>
+
+        <h3>情况 2：一个乘数的收缩维度被切开</h3>
+        <p><em>原书小节：Case 2: one multiplicand has a sharded contracting dimension</em></p>
+        <p>考虑输入 A 沿收缩维度 $J$ 切开、B 完全复制的情况：</p>
+        $$\mathbf{A}[I, J_X] \cdot \mathbf{B}[J, K] \rightarrow \mathbf{C}[I, K]$$
+        <p>
+            这时不能直接把 A 和 B 的本地块相乘，因为要对 A 的整个收缩维度求和，而它分散在 $X$ 轴上。通常的做法是先对 A 的分片做 AllGather，让每个设备都有完整副本，再和 B 相乘：
+        </p>
+        $$\textbf{AllGather}_X[I, J_X] \rightarrow \mathbf{A}[I, J]$$
+        $$\mathbf{A}[I, J] \cdot \mathbf{B}[J, K] \rightarrow \mathbf{C}[I, K]$$
+        <p>这样真正的乘法可以在每个设备上完整地做完。</p>
+        <blockquote>
+            <p><strong>要点</strong>：相乘的矩阵中有一个沿收缩维度切开时，一般先对它做 AllGather，让收缩维度不再被切开，然后做本地矩阵乘法。</p>
+        </blockquote>
+        <p>
+            如果 B 没有沿 $X$ 切开，也可以先做本地的部分矩阵乘法，再把各分片的部分和加起来（AllReduce）。这样计算被切开了，但通信成本通常更高。有些情况下这样更快，不过实践中 B 通常也是切开的。后面的习题 4 会算什么时候这种做法更好。
+        </p>
+
+        <h4>什么是 AllGather</h4>
+        <p>
+            AllGather 是这一章讲的第一个核心 MPI 通信原语。（MPI 是分布式计算里的消息传递接口，AllGather、AllReduce 这些名字来自它，统称集合通信 collective。）AllGather 去掉一个轴上的切分，把分散在各设备上的分片重新拼起来，放到这个轴上的每个设备上。用上面的记号，AllGather 就是从一组轴里去掉一个下标，例如：
+        </p>
+        $$\textbf{AllGather}_{XY}(A[I_{XY}, J]) \rightarrow A[I, J]$$
+        <p>
+            不必去掉某个维度的全部下标，例如 $A[I_{XY}, J] \rightarrow A[I_Y, J]$ 也是一次 AllGather，只是只在一个轴上做。AllGather 也可以用来去掉非收缩维度上的切分，比如这个乘法：
+        </p>
+        $$A[I_X, J] \cdot B[J, K] \rightarrow C[I, K]$$
+        <p>可以一开始就对 A 做 AllGather 去掉输入的切分，也可以先做分片乘法，再对结果 C 做 AllGather。</p>
+
+        <h4>AllGather 实际怎样执行</h4>
+        <p>
+            沿单个 TPU 轴（一个环 ring）做一维 AllGather，基本做法是每块 TPU 把自己的分片沿环传下去，直到每个设备都有一份。（GPU 的 AllGather 也可以这样做：把一个节点里的 GPU 按任意顺序连成环，沿环传递数据块。）
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/all-gather.gif" alt="8 个设备上的 AllGather 动画">
+            <figcaption>图：在 8 个 TPU 或 GPU 设备上做 AllGather 的动画。每个设备开始时有数组的 1/8，结束时有完整副本。（引自原书）</figcaption>
+        </figure>
+        <p>
+            AllGather 可以单向做，也可以双向做（动画是双向）。单向时，每块 TPU 发送大小为 $\text{bytes} / N$ 的块，绕环走 $N - 1$ 跳；双向时，走 $\lfloor \frac{N}{2} \rfloor$ 跳，每跳大小为 $2 \cdot \text{bytes} / N$。
+        </p>
+        <p>
+            要花多久？以双向 AllGather 为例。设数组共 $V$ 字节，收缩维度上有 $X$ 个分片。从上图可以看出，每一跳在每个方向上发送 $V / \lvert X\rvert$ 字节，所以每跳用时
+        </p>
+        $$T_{hop} = \frac{2 \cdot V}{\lvert X \rvert \cdot W_\text{ici}}$$
+        <p>
+            其中 $W_\text{ici}$ 是双向 ICI 带宽（ICI 是 Inter-Chip Interconnect，TPU 芯片之间的直连链路，第 2 章讲过）。分子里的 2 是因为用的是双向带宽：每个方向发 $V / X$，合计 $2V / X$。一共要走 $\lvert X\rvert / 2$ 跳才能到达每块 TPU（严格说是 $\lfloor X / 2 \rfloor$），所以总时间是
+        </p>
+        $$T_{total} = \frac{2 \cdot V \cdot X}{2 \cdot X \cdot W_\text{ici}}$$
+        $$T_{total} = \frac{V}{W_\text{ici}}$$
+        <p>
+            这个结果和 $X$ 无关。也就是说，虽然 TPU 之间只和邻居相连，连接的局部性并不影响结果，瓶颈只在每条链路的速度。
+        </p>
+        <blockquote>
+            <p>要点：在吞吐受限（throughput-bound）的区间里做 AllGather（以及 ReduceScatter、AllReduce），实际通信时间只取决于数组大小和可用带宽，和数组切成多少份无关。</p>
+        </blockquote>
+
+        <h4>ICI 延迟</h4>
+        <p>
+            ICI 链路上的每一跳，不管传多少数据，都有一个固有开销，一般在 1us 左右。所以当数组 $A$ 很小、每跳的传输时间不到 1us 时，就进入延迟受限（latency-bound）的区间，这时总时间会依赖 $X$。设单跳最短时间为 $T_\text{min}$，则
+        </p>
+        $$T_{hop} = \max \left[ T_{min}, \frac{2 \cdot V}{X \cdot W_\text{ici}} \right]$$
+        $$T_{total} = \max \left[ \frac{T_{min} \cdot X}{2}, \frac{V}{W_\text{ici}} \right]$$
+        <p>
+            因为要走 $X / 2$ 跳。大规模的 reduce 或 gather 一定是带宽受限的，数据量大到每跳的固定开销可以忽略。但数组很小时（比如从模型采样的时候），这个开销就不能忽略，ICI 带宽反而无关紧要，纯粹受延迟限制。换个说法：以 TPU v5e 为例，单向 ICI 带宽 4.5e10 字节/秒，任何小于 $4.5\times 10^{10} \cdot 10^{-6} = 45\text{kB}$ 的缓冲区都会是延迟受限的。
+        </p>
+        <p>下面是在 TPU v5e 8x16 切片上实测的 AllGather 带宽。数组沿大小为 16 的那个轴切开，所以有完整的双向环。</p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/all-gather-bandwidth.png" alt="TPU v5e AllGather 实测带宽">
+            <figcaption>图：TPU v5e 上 AllGather 的实测带宽和估算链路带宽。橙色是每秒实际 AllGather 的字节数，蓝色是按这个集合通信的已知成本反推出的单向链路带宽。（引自原书）</figcaption>
+        </figure>
+        <p>
+            实测达到了标称峰值带宽（4.5e10）的约 95%，而且在数组约 10MB 时就到了峰值。16 路切分下，每个设备约 625kB。（书里顺带提一句：这比 GPU 好得多。）
+        </p>
+
+        <h4>在多个轴上做 AllGather</h4>
+        <p>
+            在多个轴上 gather 时，就有多个 ICI 维度可以同时用来传数据。例如 $\text{AllGather}_{XY}([B, D_{XY}])$ 跨两个硬件网格轴，可用带宽增加 $N_\text{axes}$ 倍。把延迟也考虑进来，一般规则是：
+        </p>
+        $$T_{total} = \max \left[ \frac{T_{min} \cdot \sum_{i} |X_i|}{2}, \frac{V}{W_\text{ici} \cdot N_\text{axes}} \right]$$
+        <p>其中 $\sum_i \lvert X_i \rvert / 2$ 是 TPU 网格里最长路径的长度。</p>
+
+        <h4>小测验 2：AllGather 的时间</h4>
+        <p>
+            题目：用第 2 章的数字，在 TPU v5e、二维网格 <code>{'X': 8, 'Y': 4}</code> 上，做 $\text{AllGather}_Y([E_Y, F]) \to [E, F]$，$E = 2048$，$F = 8192$，bfloat16，要多久？如果 $E=256, F=256$ 呢？
+        </p>
+        <p>解答：先算几个基本量。</p>
+        <ol>
+            <li>TPU v5e 的两个轴各有 4.5e10 字节/秒的单向 ICI 带宽。</li>
+            <li>第一问是 bfloat16 的 $A[E_Y, F]$，每个设备上是 <code>bf16[512, 8192]</code>，占 $512 \cdot 8192 \cdot 2 = 8.4\text{MB}$。整个数组 $2048 \cdot 8192 \cdot 2 = 34\text{MB}$。</li>
+        </ol>
+        <p>
+            第一问：用上面的公式，只在一个轴上做 AllGather，$T_{\text{comms}} = 34\text{e}6 / 9\text{e}10 = 377\mu s$。检查是否延迟受限：大小为 4 的轴上最多 3 跳，延迟下限大约 3us，差得远。但是 TPU v5e 只有在轴大小为 16 时才有环绕连接（wraparound），这里没有，所以做不了完全双向的 AllGather。边上的数据要走 3 跳才能到另一边，理论上更接近 $T_{\text{comms}} = 3 \cdot 8.4\text{e}6 / 4.5\text{e}10 = 560\mu s$。书里在 Colab 上实测的 profile 是 $680 \mu s$，没拿到 100% 的理论带宽，这个数是合理的。
+        </p>
+        <p>
+            第二问：每个分片大小是 $64 \cdot 256 \cdot 2 = 32\text{kB}$。$32\text{e}3 / 4.5\text{e}10 = 0.7\mu s$，所以是延迟受限的。走 3 跳，大约 $3 \cdot 1\mu s = 3\mu s$。实测更接近 8us。
+        </p>
+        <p>
+            补充：在像 <code>{'X': 16, 'Y': 4}</code> 这样的二维网格里，每个网格轴不必对应一个具体的硬件轴。比如它也可以描述一个 4x4x4 的 TPU v5p 立方体，其中 $X$ 轴占了两个硬件轴。后面讲多轴数据并行时会用到这一点。
+        </p>
+
+        <h3>情况 3：两个乘数的收缩维度都被切开</h3>
+        <p><em>原书小节：Case 3: both multiplicands have sharded contracting dimensions</em></p>
+        <p>第三种基本情况是两个乘数的收缩维度都沿同一个网格轴切开：</p>
+        $$\textbf{A}[I, J_X] \cdot \textbf{B}[J_X, K] \rightarrow C[I, K]$$
+        <p>
+            这时本地的分块矩阵乘法至少能做，因为两边持有的收缩下标是同一组。但每个乘积只是最终结果的一个部分和，$X$ 方向上每个设备留下的是不同的部分和。这种情况太常见，所以记号里专门标出来：
+        </p>
+        $$\textbf{A}[I, J_X] \cdot_\text{LOCAL} \textbf{B}[J_X, K] \rightarrow C[I, K] \{\ U_X \}$$
+        <p>
+            $\{ U_X \}$ 读作“沿 $X$ 网格轴未归约（unreduced）”，表示这个操作在某种意义上还没完成，要等最后一次求和。$\cdot_\text{LOCAL}$ 表示做本地求和，但结果保持未归约状态。
+        </p>
+        <p>这可以看成矩阵乘法和外积之间的一个关系：</p>
+        $$A \cdot B = \sum_{i=1}^{P} \underbrace{A_{:,i} \otimes B_{i,:}}_{\in \mathbb{R}^{n \times m}}$$
+        <p>
+            其中 $\otimes$ 是外积。如果 $X$ 轴上的第 $i$ 块 TPU 持有 A 的第 $i$ 列和 B 的第 $i$ 行，它就能在本地算出 $A_{:,i} \otimes B_{i,:} \in \mathbb{R}^{n\times m}$。这个矩阵的每个元素，是 $A \cdot B$ 在该位置上求和式的第 $i$ 项。还得对 $P$ 求和（$P$ 被切在了 $X$ 轴上），才能得到完整的 $A \cdot B$。把 A 和 B 按块（也就是分片）写，再对结果的每个分片求和，道理完全一样。
+        </p>
+        <p>这次求和可以用沿 $X$ 轴的一次完整 AllReduce 完成：</p>
+        $$\begin{aligned} A[I, J_X] \cdot_\text{LOCAL} B[J_X, K] \rightarrow &\ C[I, K] \{ U_X \} \\ \textbf{AllReduce}_X C[I, K] \{ U_X \} \rightarrow &\ C[I, K] \end{aligned}$$
+        <p>
+            AllReduce 消除部分和，让这个轴上每个设备都得到同样的、已经完全求和的值。它是这一章的第二个关键通信，第一个是 AllGather，后面还有 ReduceScatter 和 AllToAll。AllReduce 接收一个带未归约（部分求和）轴的数组，沿这个轴传递分片并累加，完成求和。它的签名是：
+        </p>
+        $$\textbf{AllReduce}_Y A[I_X, J] \{U_Y\} \rightarrow A[I_X, J]$$
+        <p>也就是只去掉 $\{U_Y\}$ 后缀，其他不变。</p>
+
+        <h4>AllReduce 有多贵</h4>
+        <p>
+            一种理解方式是：每个设备把自己的分片发给邻居，并把收到的分片加起来。这显然比 AllGather 贵，因为这里每个“分片”的形状和完整数组一样。一般来说，AllReduce 的成本是 AllGather 的两倍。一个理由是 AllReduce 可以拆成另外两个原语的组合：ReduceScatter 和 AllGather。ReduceScatter 和 AllReduce 一样消除部分和，但输出沿某个维度“分散”（切开）；AllGather 再把这些块收集起来，让这个逻辑轴沿该物理轴恢复成不切开（复制）的状态。
+        </p>
+        $$\begin{aligned} \textbf{ReduceScatter}_{Y,J} : A[I_X,J] \{U_Y\} \rightarrow &\ A[I_X, J_Y] \\ \textbf{AllGather}_Y : A[I_X, J_Y] \rightarrow &\ A[I_X, J] \end{aligned}$$
+
+        <h4>ReduceScatter 呢</h4>
+        <p>
+            AllGather 把切开的数组拼回去（去掉一个下标）；ReduceScatter 则对未归约（部分求和）的数组求和，然后沿同一个网格轴把另一个逻辑轴切开（加上一个下标）：$X[F]\{U_Y\} \to X[F_Y]$。下面的动画展示了它的做法，和 AllGather 很像，只是收到的分片要加在一起，不单独保留。所以除去做加法的时间，它的耗时和 AllGather 大致相同。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/reduce-scatter.gif" alt="ReduceScatter 动画">
+            <figcaption>图：ReduceScatter 的动画，流程和 AllGather 相同，但每个设备把收到的分片累加起来。（引自原书）</figcaption>
+        </figure>
+        <p>每跳的通信时间就是每分片的字节数 $V / Y$ 除以带宽 $W_\text{ici}$，和 AllGather 一样，因此：</p>
+        $$T_{\text{comms per AllGather or ReduceScatter}} = \frac{V}{W_\text{ici}}$$
+        $$T_{\text{comms per AllReduce}} = 2 \cdot \frac{V}{W_\text{ici}}$$
+        <p>这里 $W_\text{ici}$ 是双向带宽，前提是有一个完整的环可以用来做归约。</p>
+
+        <h3>情况 4：两个乘数的非收缩维度沿同一个轴切开</h3>
+        <p><em>原书小节：Case 4: both multiplicands have a non-contracting dimension sharded along the same axis</em></p>
+        <p>
+            切一个张量时，每个网格维度最多出现一次。按上面的规则做，有时会违反这一条，比如：
+        </p>
+        $$A[I_X, J] \cdot B[J, K_X] \rightarrow C[I_X, K_X]$$
+        <p>
+            这是不合法的。沿 $X$ 维的第 $i$ 个分片只能算出 C 的第 $(i, i)$ 块，也就是对角线上的块。所有分片的信息合起来，也只够恢复结果的对角块，所以不允许这种分片。
+        </p>
+        <p>解决办法是对某些维度做 AllGather。有两种选择：</p>
+        $$\begin{aligned} \textbf{AllGather}_X A[I_X, J] \rightarrow &\ A[I, J] \\ A[I, J] \cdot B[J, K_X] \rightarrow &\ C[I, K_X] \end{aligned}$$
+        <p>或者</p>
+        $$\begin{aligned} \textbf{AllGather}_X B[J, K_X] \rightarrow &\ B[J, K] \\ A[I_X, J] \cdot B[J, K] \rightarrow &\ C[I_X, K] \end{aligned}$$
+        <p>两种做法的结果里 $X$ 都只出现一次。选哪个，看后续运算需要什么分片。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 深入 TPU 的通信原语</h2>
+        <p><em>原书小节：A Deeper Dive into TPU Communication Primitives</em></p>
+        <p>前面 4 种情况引出了分片矩阵乘法用到的几个“核心通信原语”：</p>
+        <ul>
+            <li>AllGather：从分片中去掉一个下标，把各分片收集起来。</li>
+            <li>ReduceScatter：沿某个轴对分片求和，去掉“未归约”后缀，同时让数组沿第二个轴切开。</li>
+            <li>AllReduce：去掉“未归约”后缀，数组沿这个轴不切开。</li>
+        </ul>
+        <p>还有一个核心通信原语，出现在混合专家模型（Mixture of Experts，MoE，每个 token 只交给少数几个“专家”子网络处理的模型）和其他一些计算里：AllToAll。</p>
+
+        <h3>最后一个通信原语：AllToAll</h3>
+        <p><em>原书小节：Our final communication primitive: the AllToAll</em></p>
+        <p>
+            最后一个基本集合通信是 AllToAll。它在分析分片矩阵乘法时不会自然出现，但实践中经常用到。更准确地说，这里指它的一个特例：分片转置，或者说重新分片（resharding）。例如：
+        </p>
+        $$\textbf{AllToAll}_{X, J} A[I_X, J] \rightarrow A[I, J_X]$$
+        <p>
+            当分片计算的不同区域用的布局不兼容时，通常需要 AllToAll 在中间重新排布。分片的 MoE 模型里它自然会出现。可以把 AllToAll 理解为把一个下标从一个轴挪到另一个轴。因为 AllToAll 不需要把每个分片的全部数据复制到环上所有设备，它比 AllGather 便宜，成本是 AllGather 的 1/4。
+        </p>
+        <p>
+            （书里的推导：对偶数大小的双向环，每个设备向右发 $(N/2 + (N/2-1) + \ldots + 1)$ 块，向左发 $((N/2-1) + \ldots + 1)$ 块，合计 $0.5 \cdot (N / 2) \cdot (N/2 + 1) + 0.5 \cdot (N / 2) \cdot (N/2 - 1) = N^2/4$。每块（分片的分片）大小为 $\text{bytes} / N^2$，所以每个设备的成本是 $(\text{bytes} / N^2) \cdot N^2 / 4 = \text{bytes} / 4$。总带宽随设备数增长，所以这个结论对所有设备成立。）
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/all-to-all.gif" alt="AllToAll 动画">
+            <figcaption>图：AllToAll 的动画，每个设备只把分片中属于别人的那一小块送到目标设备。（引自原书）</figcaption>
+        </figure>
+        <p>推广到 N 维 AllToAll：在 AxBxC 网格上，对总共 $V$ 字节（所有设备加起来）的数组，成本是</p>
+        $$T_\text{comms per AllToAll} = \frac{V \cdot \max(A, B, C, ...)}{4 \cdot N \cdot W_\text{ici}}$$
+        <p>
+            其中 $W_\text{ici}$ 照例是双向 ICI 带宽，$N = A \cdot B \cdot C \cdot \ldots$ 是设备总数。换成每设备字节数 $V / N$ 来写，成本是 $(V / N) \cdot \max(A, B, C, \ldots) / (4 \cdot W_\text{ici})$。一维网格时退化为 $V / (4 \cdot W_\text{ici})$，是 AllGather 的 1/4。二维时，成本实际上随最小那个轴的大小增大而下降。
+        </p>
+        <p>
+            粗略推导：先看一维环面（torus）$\mathbb{Z} / N\mathbb{Z}$。随机挑一个源节点和一个目标节点，平均相距 $N / 4$ 跳，成本是 $(V \cdot N) / (4 \cdot N)$。N 维环面上各轴基本独立，每个节点持有 $1 / N$ 的字节，平均要把数据送出 $\max(A, B, C, \ldots) / 4$ 跳。也可以用对分带宽（bisection bandwidth，把网络切成两半时，两半之间链路的总带宽）推出来：AllToAll 中网格的每一半要把一半数据（$V / 4$ 字节）送到另一半。最窄的对分面垂直于最长的轴，穿过 $2 \cdot N / \max(A, B, \ldots)$ 条链路（两个切面，算上环绕连接），单向带宽为 $N \cdot W_\text{ici} / \max(A, B, \ldots)$。两者相除就得到上面的公式。
+        </p>
+
+        <h3>再谈 ReduceScatter</h3>
+        <p><em>原书小节：More about the ReduceScatter</em></p>
+        <p>ReduceScatter 比看上去更基础：它是 AllGather 的导数，反过来也成立。也就是说，如果前向传播中有</p>
+        $$\textbf{AllGather}_X A[I_X] \rightarrow A[I]$$
+        <p>那么反向传播时，对反向模式导数 $A'$（一般每个分片上都不同）做 ReduceScatter，得到切开的 $A'$：</p>
+        $$\textbf{ReduceScatter}_X A'[I] \{ U_X \} \rightarrow A'[I_X]$$
+        <p>
+            同样，前向中的 $\text{ReduceScatter}_X(A[I] \{U_X\}) \to A[I_X]$ 意味着反向中的 $\text{AllGather}_{X}(A'[I_X]) \to A'[I]$。
+        </p>
+        <h4>为什么 AllGather 和 ReduceScatter 互为导数</h4>
+        <p>
+            原因在于，作为线性算子，广播（broadcast）和归约（reduce）互为转置，而 AllGather 和 ReduceScatter 分别是广播和归约的外积（也叫 Kronecker 积）。具体地，取向量 $x \in \mathbb{R}^n$、任意设备数 $p \in \mathbb{N}$，令 $u = (1, \ldots, 1) \in \mathbb{R}^p$，可以这样定义广播和归约，和直觉一致：
+        </p>
+        $$\begin{aligned} \text{broadcast} &: \mathbb{R}^n \rightarrow \mathbb{R}^{p n} \\ \text{broadcast} &= u \otimes \mathbf{I}_n \\ \text{reduce} &: \mathbb{R}^{p n} \rightarrow \mathbb{R}^n \\ \text{reduce} &= u^T \otimes \mathbf{I}_n \end{aligned}$$
+        <p>
+            看一个例子，$n = 1$，$p = 2$。若 $x = (7)$，则 $\text{broadcast}(x) = \left(\begin{pmatrix} 1 \\ 1 \end{pmatrix} \otimes \begin{pmatrix} 1 \end{pmatrix}\right) x = \begin{pmatrix} 1 \\ 1 \end{pmatrix} x = \begin{pmatrix} 7\\ 7 \end{pmatrix} \in \mathbb{R}^{p n}$，也就是把 $\mathbb{R}^n$ 中的向量广播到 $\mathbb{R}^{pn}$。再令 $y = (8, 9)$，则 $\text{reduce}(y) = \left(\begin{pmatrix} 1 & 1 \end{pmatrix} \otimes \begin{pmatrix} 1\end{pmatrix}\right) y = \begin{pmatrix} 1 & 1 \end{pmatrix} \begin{pmatrix} 8 \\ 9 \end{pmatrix} = \begin{pmatrix} 17 \end{pmatrix}$，把 $\mathbb{R}^{p n}$ 中的向量归约成 $\mathbb{R}^{n}$ 中的向量。因为对任意矩阵 $A$、$B$ 有 $(A \otimes B)^T = A^T \otimes B^T$，所以 $\text{reduce} = \text{broadcast}^T$。AllGather 和 ReduceScatter 可以写成下面的外积：
+        </p>
+        $$\begin{aligned} \text{AllGather} &: \mathbb{R}^{p n} \rightarrow \mathbb{R}^{p^2 n} \\ \text{AllGather} &= \text{broadcast} \otimes \mathbf{I}_p \\ \text{ReduceScatter} &: \mathbb{R}^{p^2 n} \rightarrow \mathbb{R}^{p n} \\ \text{ReduceScatter} &= \text{reduce} \otimes \mathbf{I}_p \end{aligned}$$
+        <p>
+            这里把 $\mathbb{R}^{p^2 n}$ 看成 $\mathbb{R}^{p \times p n}$，即 $p$ 个设备每个持有一个 $\mathbb{R}^{p n}$ 向量。书里建议拿小例子（比如 $n = 2$，$p = 3$）写出这些算子的矩阵看看。用同样的转置性质，得到 $\text{AllGather}^T = \text{ReduceScatter}$，自然也有 $\text{ReduceScatter}^T = \text{AllGather}$。这个转置关系会出现在反向传播里：若 $y = Ax$，$A$ 是某个线性算子（比如 AllGather 或 ReduceScatter），反向传播时手里有损失对 $y$ 的导数 $\frac{\partial L}{\partial y}$，求 $\frac{\partial L}{\partial x}$ 就是 $\frac{\partial L}{\partial x} = A^T \frac{\partial L}{\partial y}$。所以 AllGather 的导数是 ReduceScatter，反之亦然。
+        </p>
+
+        <h4>用 ReduceScatter 代替 AllReduce</h4>
+        <p>
+            把 AllReduce 拆成 AllGather 和 ReduceScatter 还有一个方便之处：最后那次 AllGather 可以推迟到以后再做。很多时候我们不想花代价把完整的矩阵乘积重新拼好、复制到每个设备上。我们希望即使在两个乘数收缩维度都切开的情况下，结果也保持切开状态：
+        </p>
+        $$A[I, J_X] \cdot B[J_X, K] \rightarrow C[I, K_X]$$
+        <p>这时可以用 ReduceScatter 代替 AllReduce，需要时再做 AllGather：</p>
+        $$\begin{aligned} A[I, J_X] \cdot_{LOCAL} B[J_X, K] \rightarrow &\ C[I, K] \{ U_X \} \\ \textbf{ReduceScatter}_{X,K} C[I, K] \{ U_X \} \rightarrow &\ C[I, K_X] \end{aligned}$$
+        <p>
+            ReduceScatter 会引入一个新的切开维度，所以在这里可以自由选择沿 $I$ 还是 $K$ 切。用 ReduceScatter 时一般要选在哪个命名维度上加新切分（不过这个选择通常由更大的模型上下文决定）。所以记号写成 $\text{ReduceScatter}_{X,K}$，标明要切的轴。
+        </p>
+
+        <h3>让矩阵乘法的通信和计算重叠</h3>
+        <p><em>原书小节：How to overlap matmul communication with compute</em></p>
+        <p>
+            第 1 章说过，一般假设只要通信够快，总能和一些有用的计算重叠起来。这一节讲的集合通信通常可以和矩阵乘法本身的计算重叠，但做起来不简单。用的算法叫集合矩阵乘法（collective matmul），最早由 Wang et al. 提出。下面是一个简化的动画：
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/ag_matmul.gif" alt="集合矩阵乘法动画">
+            <figcaption>图：一个分片矩阵向量乘积怎样和随后的 AllReduce 重叠（上面的情况 3）。完整的矩阵乘法由多个矩阵向量乘积组成。（引自原书）</figcaption>
+        </figure>
+        <p>
+            简单说，就是在给矩阵的一块做乘法的同时，开始对前面几块做环形归约。有时也可以在批维度或矩阵输入维度上分块。第 10 章会用 JAX 写一个简单实现，Mosaic 文档里也有一个 GPU 上的好例子。书里鼓励读者找机会自己实现一个版本。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 这一章学到了什么</h2>
+        <p><em>原书小节：What Have We Learned?</em></p>
+        <ul>
+            <li>
+                数组的分片由两部分确定：一个 Mesh，给 TPU 网格的物理硬件轴命名；一个 Sharding，把网格轴名分配给数组的逻辑轴。比如 $A[I_{XY}, J]$ 描述一个抽象数组 A，第一个维度沿 $X$ 和 $Y$ 两个网格轴切开。配合 <code>Mesh(mesh_shape=(4, 8), axis_names=('X', 'Y'))</code>，或简写为 <code>Mesh({'X': 4, 'Y': 8})</code>，就知道这个数组的第一个维度被切成了 32 份。
+            </li>
+            <li>
+                分片数组上的运算和不切开的数组完全一样，除非沿切开的轴做收缩。那时就要加通信。分 4 种情况：
+                <ol>
+                    <li>两个数组都没有沿收缩维度切开：不需要通信。</li>
+                    <li>一个数组沿收缩维度切开（或者两个数组的收缩维度沿不同轴切开）：先对其中一个输入做 AllGather，再运算。</li>
+                    <li>两个数组沿收缩维度以相同方式切开：本地乘分片，再做 AllReduce 或 ReduceScatter。</li>
+                    <li>两个数组的非收缩维度沿同一个网格轴切开：先对其中一个输入做 AllGather。</li>
+                </ol>
+            </li>
+            <li>
+                TPU 大致用 4 个核心通信原语：
+                <ul>
+                    <li>AllGather：$[A_X, B] \to [A, B]$</li>
+                    <li>ReduceScatter：$[A, B] \{U_X\} \to [A_X, B]$</li>
+                    <li>AllToAll：$[A, B_X] \to [A_X, B]$</li>
+                    <li>AllReduce：$[A_X, B]\{U_Y\} \to [A_X, B]$（严格说它算不上原语，它由 ReduceScatter 加 AllGather 组合而成）</li>
+                </ul>
+            </li>
+        </ul>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/all-collectives.png" alt="四种集合通信汇总">
+            <figcaption>图：四种集合通信原语的示意汇总。（引自原书）</figcaption>
+        </figure>
+        <p>
+            只要是带宽受限的，这些操作的成本和延迟就不依赖轴的大小，只依赖输入数组的大小和链路带宽。单向 AllGather/ReduceScatter 的时间是：
+        </p>
+        $$T_{\text{comm per AllGather or ReduceScatter}} = \frac{\text{Data volume}}{\text{bandwidth}} \cdot \frac{\text{Axis} - 1}{\text{Axis}} \longrightarrow \frac{\text{Data volume}}{\text{bandwidth (bidirectional)}}$$
+        <p>
+            AllReduce 由一次 ReduceScatter 加一次 AllGather 组成，所以成本是上式的 2 倍。AllToAll 只需要把分片沿环传一部分路程，成本是 AllGather 的 1/4。汇总如下：
+        </p>
+        <table>
+            <thead>
+                <tr><th>操作</th><th>说明</th><th>记号</th><th>运行时间</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>AllGather</td><td>沿一个轴收集切开数组的所有分片，去掉一个下标</td><td>$[A_X, B] \to [A, B]$</td><td>bytes / (双向 ICI 带宽 × 轴数 num_axes)</td></tr>
+                <tr><td>ReduceScatter</td><td>沿一个轴对部分求和的数组求和，并沿另一个轴切开（加一个下标）</td><td>$[A, B] \{U_X\} \to [A_X, B]$</td><td>同 AllGather</td></tr>
+                <tr><td>AllReduce</td><td>沿一个轴对部分求和的数组求和，去掉 $\{U_X\}$；等于 AllGather 加 ReduceScatter</td><td>$[A_X, B]\{U_Y\} \to [A_X, B]$</td><td>2 × AllGather</td></tr>
+                <tr><td>AllToAll</td><td>收集（复制）一个轴，同时沿同一个网格轴切开另一个维度</td><td>$[A, B_X] \to [A_X, B]$</td><td>双向环上为 AllGather / 4</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section id="t05">
+        <h2>05. 习题</h2>
+        <p><em>原书小节：Some Problems to Work</em></p>
+        <p>下面是基于这一章内容的练习题。书里说明目前没有给出全部答案，以后会陆续补上；没有答案的题这里也只列题目。</p>
+
+        <h3>习题 1：复制的分片</h3>
+        <p>
+            题目：数组分片为 $A[I_X, J, K, \ldots]$（只沿 $X$ 切开），网格 <code>Mesh({'X': 4, 'Y': 8, 'Z': 2})</code>。所有芯片上 $A$ 占的总字节数，和一份数组大小的比值是多少？
+        </p>
+        <p>
+            解答：数组只沿大小为 4 的 $X$ 切开，所以每个分片大小是 $[I / 4, J, K, \ldots] = \text{sizeof}(A) / 4$。数组在 $Y$ 和 $Z$ 上复制，总大小是 $Y \cdot Z \cdot \text{sizeof}(A)$，所以比值是 $Y \cdot Z \cdot \text{sizeof}(A) / \text{sizeof}(A) = 8 \cdot 2 = 16$。
+        </p>
+
+        <h3>习题 2：AllGather 的延迟</h3>
+        <p>
+            题目：在 TPU v4p 4x4x4 切片、网格 <code>Mesh({'X': 4, 'Y': 4, 'Z': 4})</code> 上，$B=1024$，$D=4096$，bfloat16。$\text{AllGather}_X([B_X, D_Y])$ 要多久？$\text{AllGather}_{XY}([B_X, D_Y])$ 呢？$\text{AllReduce}_Z([B_X, D_Y] \{U_Z \})$ 呢？
+        </p>
+        <p>解答：这是一个完整的 4x4x4 立方体，所有轴都有环绕连接，可用的双向带宽是 9e10 字节/秒。</p>
+        <ol>
+            <li>
+                $\text{AllGather}_X$：只在一个轴上 gather，另一个轴是切开的，相当于在 1 个轴上 gather $2BD / Y$ 字节。只看 $Y$ 轴上的一个分片，沿 $X$ 的 AllGather 就像一个字节数为 $1/Y$ 的普通 AllGather。TPU v4p 的双向 ICI 带宽是 9e10 字节/秒，所以用时 $2BD / (9\text{e}10 \cdot Y) = 2 \cdot 1024 \cdot 4096 / (9\text{e}10 \cdot 4) = 23 \mu s$。
+            </li>
+            <li>
+                $\text{AllGather}_{XY}$：带宽是前一问的两倍，但要 gather 整个数组，$T = 2BD / (2 \cdot W) = 2 \cdot 1024 \cdot 4096 / (2 \cdot 9\text{e}10) = 46\mu s$。离延迟下限 4us（每跳 1us）很远，没问题。
+            </li>
+            <li>
+                $\text{AllReduce}_Z$：AllReduce 的成本是 AllGather 的两倍。每个分片大小为 $2BD / (X \cdot Y)$，成本约为 $4BD / (X \cdot Y \cdot W)$，即 $4 \cdot 1024 \cdot 4096 / (16 \cdot 9\text{e}10) = 11.6\mu s$。
+            </li>
+        </ol>
+        <p>
+            补充：第 1、2 问的做法其实不是最优的，因为数组在没用到的 $Z$ 轴上也是复制的，可以利用这些闲着的链路。先把 $[B_X, D_Y]$ 重新分片成 $[B_{XZ}, D_Y]$，这一步不花成本（每个设备丢掉自己分片的一部分就行），再做 $\text{AllGather}_{XZ}$（或 $\text{AllGather}_{XYZ}$），最终状态相同，但 gather 用到了更多的轴。这样第 1 问降到 11.5us，第 2 问降到 31us。实践中直接一开始就沿更多轴切分就能得到这个效果，这也是要把数组切得尽量细的一个理由。
+        </p>
+
+        <h3>习题 3：延迟受限的 AllGather</h3>
+        <p>
+            题目：做 $\text{AllGather}_X([B_X])$，但 $B$ 很小（比如 128）。在 TPU v4p 4x4x4 切片、网格 <code>Mesh({'X': 4, 'Y': 4, 'Z': 4})</code>、bfloat16 下要多久？提示：多半是延迟受限的。
+        </p>
+        <p>
+            解答：bfloat16 数组总共只有 256 字节，每个设备 64 字节。TPU v4p 上大小为 4 的轴有环绕连接，可以双向发送。单向带宽 4.5e10，每跳的传输时间约 $64 / 4.5\text{e}10 \approx 0$，肯定是延迟受限的。数一下跳数：整个 gather 只要 2 跳，所以估计约 2us。
+        </p>
+
+        <h3>习题 4：矩阵乘法的两种策略</h3>
+        <p>
+            题目：要计算 $X[B, D] \cdot_D Y[D_X, F] \to Z[B, F]$。这一章教的做法是先做 $\text{AllGather}_X(Y[D_X, F])$，再乘完全复制的矩阵（情况 2，策略 1）。另一种做法是乘本地分片 $X[B, D_X] \cdot_D Y[D_X, F] \to Z[B, F] \{U_X\}$（情况 3，策略 2），再做 $\text{AllReduce}_X(Z[B, F] \{ U_X\})$。两种做法各要多少 FLOPs 和通信？哪个更好，为什么？
+        </p>
+        <p>
+            解答：先看基准（策略 1）。前面已经算过，AllGather 的成本是 $2DF / W_\text{ici}$。拿到完全复制的数组后，总计算时间是 $2BDF / C$（$C$ 是加速器的 FLOPs/s，每块 TPU 做同样的 FLOPs）。所以
+        </p>
+        $$T_\text{total (Strategy 1)} = \max\left(\frac{2BDF}{C}, \frac{2DF}{W_\text{ici}}\right)$$
+        <p>
+            策略 2 对 $2BF$ 字节做 AllReduce，成本 $4BF / W_\text{ici}$，但计算被切开了，FLOPs 只有 $1/X$。也就是做 $2\cdot B\cdot D\cdot F / X$ 次 FLOPs，AllReduce 在 bfloat16 下传 $2 \cdot 2 \cdot B \cdot F$ 字节。策略 2（不做 AllGather，只在后面做一次 AllReduce）的总时间约为
+        </p>
+        $$T_\text{total} = \max\left(\frac{2BDF}{X \cdot C}, \frac{4BF}{W_\text{ici}}\right)$$
+        <p>
+            哪个更大？策略 2 在 $D / (X \cdot C) \gt 2 / W_\text{ici}$ 时是计算受限的，即 $D / 2X \gt C / W_\text{ici} \approx 2550$，也就是 $X \lt D / (2 \cdot 2550)$。$D$ 一般约 8k，这意味着大约 $X \lt 2$，不太可能。所以策略 2 基本总是通信受限的。基准策略（策略 1）在 $B \lt C / W_\text{ici} = 2550$ 时通信受限，这经常成立，但不总是。
+        </p>
+        <p>所以如果 $B \lt 2550$，两种策略都是通信受限的，有</p>
+        $$T_\text{comms for Strategy 2} \lt T_\text{comms for Strategy 1} \Leftrightarrow \frac{4BF}{W_\text{ici}} \lt \frac{2DF}{W_\text{ici}}$$
+        <p>
+            当 $D \gt 2B$（其中 $2B \lt 5100$）时成立。这经常成立，所以批很小时策略 2 有时更好。批很大（$B \gt 2550$）时，有
+        </p>
+        $$T_\text{comms for Strategy 2} \lt T_\text{math for Strategy 1} \Leftrightarrow \frac{4BF}{W_\text{ici}} \lt \frac{2BDF}{C}$$
+        <p>
+            当 $2 / W_\text{ici} \lt D / C$，即 $D \gt 2 \cdot 2550 = 5100$ 时成立，大模型通常满足。所以除非 $D$ 很小，这种替代策略对大模型通常更好。
+        </p>
+        <p>
+            那为什么不总这么做？实践中有时确实这么做，但一个矩阵乘法的某个输入的收缩维度沿某个轴切开、另一个输入却没沿这个轴切开，这种情况一般很少见。比如做 FSDP（Fully Sharded Data Parallel，完全分片数据并行，把参数也沿数据并行的轴切开，第 5 章讲）时，参数沿数据维度切开，激活也沿数据维度切开。所以这种情况不常出现。
+        </p>
+
+        <h3>习题 5：最低延迟</h3>
+        <p>
+            题目：要在 TPU v4p 4x4x4 上以尽可能低的延迟做 $A[I, J] \cdot_J B[J, K] \to C[I, K]$。输入可以任意切分，但结果要完全复制。输入该怎么切？总 FLOPs 和通信时间是多少？
+        </p>
+        <p>解答（书里只给了部分答案）：书里不给完整答案，只列出最可能的四种方案：</p>
+        <ol>
+            <li>$A[I_{XYZ}, J] \cdot B[J, K]$，最后做 AG（AllGather）</li>
+            <li>$A[I, J] \cdot B[J, K_{XYZ}]$，最后做 AG</li>
+            <li>$A[I, J_{XYZ}] \cdot B[J_{XYZ}, K]$，最后做 AR（AllReduce）</li>
+            <li>$A[I, J] \cdot B[J, K]$（完全复制）</li>
+        </ol>
+        <p>
+            也可以考虑把不同的轴切到不同的网格轴上，但不太会改变最终成本。除方案 4 以外，每块 TPU 的总 FLOPs 相同，只是通信不同，算出每种的通信成本挑最低的即可。结论是方案 1 和方案 2 一样好。
+        </p>
+
+        <h3>习题 6：三种常见分片的通信与计算</h3>
+        <p>题目（书里未给答案）：</p>
+        <ol>
+            <li>在 TPU v5e 4x4 上做 $A[I_X, J_Y] \cdot_J B[J_Y, K] \to C[I_X, K]$。要做什么通信？通信和计算各花多少时间？</li>
+            <li>$A[I_X, J] \cdot_J B[J_X, K_Y] \to C[I_X, K_Y]$ 呢？这是训练中最标准的设置，结合了数据并行、张量并行和 ZeRO 分片。</li>
+            <li>$A[I_X, J] \cdot_J B[J, K_Y] \to C[I_X, K_Y]$ 呢？这是推理的标准设置，纯张量并行（加数据并行）。</li>
+        </ol>
+        <p>（张量并行 tensor parallelism：把权重矩阵沿模型维度切到多块芯片上；ZeRO：把优化器状态、梯度和参数沿数据并行的轴切开以省内存。两者在第 5 章细讲。）</p>
+
+        <h3>习题 7：一个 Transformer 块的分片</h3>
+        <p>
+            题目：典型的 Transformer 块有两个矩阵 $W_\text{in}[D, F]$ 和 $W_\text{out}[F, D]$，其中 $F \gg D$。批大小为 B，整个块是 $In[B, D] \cdot W_\text{in}[D, F] \cdot W_\text{out}[F, D]$。取 $D=8192$，$F=32768$，$B=128$，全部用 bfloat16。在 TPU v5e 2x2 切片上运行，但假设每块 TPU 只有 300MB 空闲内存。In、$W_\text{in}$、$W_\text{out}$ 和 Out 该怎么切，才能不超内存又让总时间最短？通信和 FLOPs 各花多少时间？提示：最终输出不必完全复制，但要和输入的切法相同，这样这一“层”可以重复堆叠。
+        </p>
+        <p>
+            解答（书里只给了部分答案）：先看内存。两个大矩阵各占 $2 \cdot 8192 \cdot 32768 = 536\text{MB}$。激活 In 大小 $2 \cdot 128 \cdot 8192 = 2\text{MB}$，小到不用管。每个设备只有 300MB 空闲内存，所以矩阵乘法显然要切。两种候选：
+        </p>
+        <ol>
+            <li>$In[B_X, D] \cdot W_\text{in}[D_{XY}, F] \cdot W_\text{out}[F, D_{XY}] \rightarrow Out[B_X, D]$（这通常叫 FSDP）</li>
+            <li>$In[B, D_{XY}] \cdot W_\text{in}[D, F_{XY}] \cdot W_\text{out}[F_{XY}, D] \rightarrow Out[B, D_{XY}]$（这叫张量并行）</li>
+        </ol>
+        <p>
+            第一种很差，因为要先对很大的权重或者激活做 AllGather。第二种需要在开头做一次 AllGather，在结尾做一次 ReduceScatter（比 AllReduce 便宜）。剩下的计算书里留作练习。
+        </p>
+
+        <h3>习题 8：测一测通信原语（挑战题）</h3>
+        <p>
+            题目（书里未给答案）：以上面那段代码为模板，分配一个分片数组，用 <code>pmap</code> 或 <code>shard_map</code> 对 4 个主要通信原语（AllGather、AllReduce、ReduceScatter、AllToAll）做基准测试。要用到 <code>jax.lax.all_gather</code>、<code>jax.lax.psum</code>、<code>jax.lax.psum_scatter</code> 和 <code>jax.lax.all_to_all</code>。你理解这些函数的语义吗？它们各要多久？
+        </p>
+
+        <h3>习题 9：分片矩阵乘法的另一种策略</h3>
+        <p>
+            题目：前面说，矩阵乘法只有一个输入沿收缩维度切开时，应该对切开的矩阵做 AllGather，再在本地做收缩。你可能会想到另一种策略：先做分片矩阵乘法，再对结果做 AllReduce（就像两个输入都沿收缩维度切开那样）。即通过下面两步计算 $A[I, J_X] *_J B[J, K] \to C[I, K]$：
+        </p>
+        <ul>
+            <li>$C[I, K] \{ U_X \} = A[I, J_X] \cdot B[J_X, K]$</li>
+            <li>$C[I, K] = \text{AllReduce}(C[I, K] \{ U_X\})$</li>
+        </ul>
+        <p>回答：</p>
+        <ol>
+            <li>对矩阵 $A[N, M]$ 和 $B[M, K]$ 明确写出这个算法，用下标说明每个设备上具体算什么。假设 $A$ 以 $A[I, J_X]$ 的方式切在 ND 个设备上，输出要在所有设备上复制。</li>
+            <li>如果最终结果不必在每个设备上复制，允许切开（沿 N 或 K 维），上面的算法怎样改？</li>
+            <li>只看上面策略（第 2 问的版本，不是第 1 问的）的通信成本，它和“先 AllGather A 再做矩阵乘法”的算法相比如何？</li>
+        </ol>
+        <p>解答：</p>
+        <ol>
+            <li>
+                先计算外积，把结果存到 $O[N, K]$：$o_{kj} = \sum_i a_{ki} b_{ij}$。注意重复的下标不是被收缩的那个，因为这里做的是外积。这里的求和只遍历当前设备上存的那些 $i$。比如收缩轴大小为 16、有 4 个设备时，设备 0 上 $i$ 取 {0, 1, 2, 3}，设备 1 上取 {4, 5, 6, 7}，设备 2 上取 {8, 9, 10, 11}，设备 3 上取 {12, 13, 14, 15}。然后对每个设备上 $O[N, K]$ 的部分和做 AllReduce，得到完整的 $O[N, K]$。
+            </li>
+            <li>
+                第 2 步不做 AllReduce，改用更便宜的 ReduceScatter，沿哪个轴都可以：$[N, K] \{ U_X \} \to [N_X, K]$ 或 $[N, K] \{ U_X \} \to [N, K_X]$。
+            </li>
+            <li>
+                正文说过，吞吐受限时 AllGather 的成本和 ReduceScatter 相同，只由被处理的完整矩阵大小决定。先 gather 再乘的算法里，成本按 $NM$ 增长（AllGather 的是 $A$）；先乘再 ReduceScatter 的算法里，成本按 $NK$ 增长（ReduceScatter 的是 $O$）。所以两种算法的通信成本之比是 $M/K$。
+            </li>
+        </ol>
+
+        <h3>习题 10：AllToAll 的那个 4 倍</h3>
+        <p>
+            题目：上表说，在吞吐受限时，AllToAll 的时间比 AllGather 或 ReduceScatter 少 4 倍。这道题看这个 4 倍从哪来，以及如果 ICI 链路只能单向传输，这个倍数会怎样变化。
+        </p>
+        <ol>
+            <li>先看单向情况。设有 $D$ 个设备排成环，要对 N x N 的矩阵 $A[I_X, J]$ 做 AllGather 或 ReduceScatter（为简单起见设 $D$ 整除 $N$）。描述这两个集合通信涉及的传输，算出整个算法过程中单条 ICI 链路上一共传了多少个标量（浮点数或整数）。</li>
+            <li>再看 AllToAll，仍然是单向 ICI。算法和 AllGather 有什么不同？算出单条 ICI 链路上传了多少个标量。</li>
+            <li>你会发现 (a) 和 (b) 的答案之比是个整齐的数。用简单的话解释这个倍数从哪来。</li>
+            <li>加上双向通信。这对 AllGather 的总时间有什么影响？</li>
+            <li>双向通信对 AllToAll 的总时间有什么影响？</li>
+            <li>简单解释双向环上 AllGather 和 AllToAll 的时间之比。</li>
+        </ol>
+        <p>解答：</p>
+        <ol>
+            <li>
+                过程很简单：每一步，每个设备把一条单分片的“条带”（共 $\frac{N}{D} \times N$ 个元素）发给最近的邻居。这要做 $D-1$ 次，因为每个分片要送到除起点之外的所有设备。所以每个设备一共发出 $\frac{N^2(D-1)}{D}$ 个标量，也就是一条 ICI 链路上流过的量。答案：$N^2 (1-\frac{1}{D})$，$D \gg 1$ 时就是 $N^2$。
+            </li>
+            <li>
+                从通信角度看，AllToAll 和 AllGather 的关键区别在于：AllToAll 里，某个设备上的分片不需要整块送到所有其他设备。设设备 0 上的分片是 $[A, B, C, D]$（这里 A、B、C、D 是矩阵，以 4 个设备的环为例）。矩阵 $A$ 不用送到任何地方，$B$ 要送到设备 1，$C$ 送到设备 2，$D$ 送到设备 3。所以第一步把 $B$、$C$、$D$ 发给设备 1；下一步设备 1 把 $C$、$D$ 转给设备 2；最后一步设备 2 把 $D$ 转给设备 3。总传输量是 (A/B/C/D 每块的大小) × (3 + 2 + 1)。一般情况下每块大小是 $\frac{N^2}{D^2}$，$(3 + 2 + 1)$ 变成 $((D-1) + (D-2) + \ldots + 1) = \frac{D(D-1)}{2}$。所以单条 ICI 链路上传的总量是 $\frac{N^2(D-1)}{D \times 2}$。答案：$\frac{N^2}{2}(1-\frac{1}{D})$，$D \gg 1$ 时就是 $\frac{N^2}{2}$。
+            </li>
+            <li>
+                倍数就是 $\frac{1}{2}$：单向环上，AllToAll 的成本是 AllGather/ReduceScatter 的一半。回看上面的推导，AllGather 里同样大小的块要传 $(D-1)$ 次，求和是 小块大小 × $(D + D + D + \ldots + D)$；AllToAll 里求和是 小块大小 × $(D + (D-1) + (D-2) + \ldots + 1)$。这个 2 倍来自 $1 + 2 + \ldots + n = n(n+1)/2$。
+            </li>
+            <li>
+                双向环上，每条“分片条带”可以同时往两个方向发，所以任何一条链路要承载的标量总数减半。
+            </li>
+            <li>
+                这种情况下，比单向情况快 4 倍。看源自设备 0 的那条分片条带里每个大小为 $N^2/D^2$ 的块的去向最容易理解。单向时，一个块要走 $D-1$ 的距离，另一个走 $D-2$，依此类推直到 1；双向时，条带里的块分成往右走和往左走两组，最远只走 $\lfloor D/2 \rfloor$。对应的求和变成 $D/2 + (D/2 - 1) + (D/2 - 2) + \ldots = D/2 \cdot (D/2+1)/2$，$D$ 很大时约为 $D^2/8$。单向时是 $D^2/2$，所以快了 4 倍。
+            </li>
+            <li>
+                单向环上，AllToAll 已经比 AllGather 快一倍，因为不需要把整条条带送到每一个设备。加上双向以后，AllToAll 快了 4 倍，AllGather 只快了 2 倍。合在一起，就得到要找的 4 倍。
+            </li>
+        </ol>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>
+                相乘的矩阵中有一个沿收缩维度切开时，一般先对它做 AllGather，让收缩维度不再被切开，再做本地矩阵乘法：$\textbf{AllGather}_X A[I, J_X] \rightarrow A[I, J]$，然后 $A[I, J] \cdot B[J, K] \rightarrow C[I, K]$。
+            </li>
+            <li>
+                在吞吐受限的区间做 AllGather（以及 ReduceScatter、AllReduce），通信时间只取决于数组大小和可用带宽，和切成多少份无关：双向环上 $T_\text{AllGather} = T_\text{ReduceScatter} = V / W_\text{ici}$，$T_\text{AllReduce} = 2V / W_\text{ici}$，$T_\text{AllToAll} = V / (4 W_\text{ici})$（一维）；多轴 gather 时带宽乘以 $N_\text{axes}$。每跳约 1us 的延迟下，TPU v5e 上小于约 45kB 的缓冲区是延迟受限的，此时 $T_{total} = \max \left[ T_{min} \cdot \sum_i |X_i| / 2, \ V / (W_\text{ici} \cdot N_\text{axes}) \right]$。
+            </li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>How To Scale Your Model · Sharded Matrices and How to Multiply Them · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

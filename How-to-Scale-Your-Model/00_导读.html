@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>导读 | How to Scale Your Model 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="index.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">How to Scale Your Model 目录</a> · 00</span>
+    <span><a href="01_Roofline分析.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 0 章 · 导读</h1>
+        <p class="subtitle">为什么今天做模型研究也得懂硬件效率，这本书按什么顺序讲 TPU、GPU、分片、训练和推理</p>
+        <div class="author-meta">
+            作者：Jacob Austin、Sholto Douglas、Roy Frostig、Anselm Levskaya、Charlie Chen、Sharad Vikram、Federico Lebron、Peter Choy、Vinay Ramasesh、Albert Webson、Reiner Pope（Google DeepMind；Reiner Pope 的工作在 Google DeepMind 完成，现在在 MatX）· 发布日期：2025 年 2 月 4 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://jax-ml.github.io/scaling-book/" target="_blank">How To Scale Your Model (intro)</a>（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            这是全书的首页。作者先说明写这本书的理由：现在的模型已经跑在硬件极限附近，研究者如果不懂芯片的算力、内存带宽和芯片间通信，就很难判断一个新想法在大规模下能不能跑得动。接着给出全书的结构，从单芯片的 roofline 分析讲到 TPU 硬件、分片矩阵乘法、Transformer 的参数和 FLOPs 计算，再到训练和推理的并行方案、JAX 编程和性能分析，最后附一章 GPU。
+        </p>
+        <p>
+            首页没有公式，也没有习题。读完它，你应该知道这本书最后想让你会做的事：给定一个模型和一种硬件平台，估算出最合适的并行方案，以及训练和推理大概要花多久。
+        </p>
+        <ol>
+            <li><a href="#t01">开篇：这本书能帮你做什么</a></li>
+            <li><a href="#t02">为什么要关心模型扩展</a></li>
+            <li><a href="#t03">全书结构</a></li>
+            <li><a href="#t04">各章链接</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开篇：这本书能帮你做什么</h2>
+        <p><em>原书小节：首页开头（无标题）</em></p>
+        <figure><img src="https://jax-ml.github.io/scaling-book/assets/img/dragon.png" alt="How to Scale Your Model 封面插图"><figcaption>图：原书首页的封面插图（引自原书）</figcaption></figure>
+        <p>
+            作者开头说，深度学习很多地方还像黑魔法，但模型性能优化不必如此，规模再大也一样。从一块加速器到上万块，适用的都是几条相对简单的原则。理解这些原则后，你可以：
+        </p>
+        <ul>
+            <li>粗略估算模型的各个部分离理论最优还差多远；</li>
+            <li>在不同规模下有根据地选择并行方案，也就是怎样把计算拆到多个设备上；</li>
+            <li>估算训练和运行大型 Transformer 模型需要的成本和时间；</li>
+            <li>设计能利用特定硬件特性的算法；</li>
+            <li>从“当前算法性能被什么限制”出发去设计硬件。</li>
+        </ul>
+        <h3>需要的背景</h3>
+        <p>
+            作者假设读者对 LLM 和 Transformer 架构有基本了解，但不一定知道它们在大规模下怎样运行。你应该懂 LLM 训练的基础，最好对 JAX 有一点了解（JAX 是 Google 的数值计算库，写法接近 NumPy，可以自动求导，并编译到 TPU/GPU 上运行）。原书推荐的预备读物是一篇讲 Transformer 架构的博客和 Transformer 原始论文，另外附了一份延伸阅读清单。
+        </p>
+        <h3>目标</h3>
+        <p>
+            读完全书，你应该能比较有把握地估算：在给定硬件平台上，一个 Transformer 模型最好的并行方案是什么，训练和推理大概要多长时间。作者说，如果读完还做不到，欢迎发邮件或留言告诉他们哪里没讲清楚。首页还特别提到新加的第 12 章，讲 NVIDIA GPU。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 为什么要关心模型扩展</h2>
+        <p><em>原书小节：Why should you care?</em></p>
+        <p>
+            作者说，三四年前，大多数机器学习研究者用不着懂这本书里的内容。现在连“小”模型都跑在离硬件极限很近的地方，做新研究就得考虑大规模下的效率。（原书旁注：机器学习研究在系统创新和软件改进之间有一种交替节奏。Alex Krizhevsky 当年得自己写很难写的 CUDA 代码才让 CNN 跑得快，几年后 Theano、TensorFlow 这些库出来，就不用再自己写了。这本书的内容也许几年后同样会被抽象掉。但 scaling law 把模型一直推到硬件的最前沿，在可预见的将来，做前沿研究很可能离不开“怎样把模型高效扩展到大型硬件拓扑上”的理解。）
+        </p>
+        <p>
+            书里有一句话：如果 benchmark 上提升 20%，代价是 roofline 效率下降 20%，那这 20% 的提升就没有意义。很多有前景的模型架构失败，要么是因为在大规模下跑不高效，要么是因为没人花工夫让它们跑得高效。
+        </p>
+        <h3>强扩展与通信瓶颈</h3>
+        <p>
+            “模型扩展”（model scaling）的目标是：增加训练或推理用的芯片数量时，吞吐量按比例线性增长。这叫<strong>强扩展</strong>（strong scaling）。加芯片（也就是并行，parallelism）通常能减少计算时间，但芯片之间要多做通信。当通信时间超过计算时间，就变成通信受限（communication bound），没法再强扩展。
+        </p>
+        <p>
+            计算时间缩短以后，单芯片层面通常也会遇到瓶颈。一块新的 TPU 或 GPU 标称每秒能做 500 万亿次运算，但如果不小心，它的实际速度可能只有标称的十分之一，原因是时间都花在了在内存里搬参数上。单芯片算力、内存带宽和总内存之间的相互作用，是扩展问题的核心。如果对硬件理解得足够深，能预判瓶颈出现在哪里，就可以设计或调整模型来避开它们。
+        </p>
+        <h3>硬件设计者面对的反向问题</h3>
+        <p>
+            硬件设计者面对的是反过来的问题：造出的硬件要给算法提供刚好够用的算力、带宽和内存，同时成本尽量低。这就是“软硬件协同设计”（co-design）。难处在于，第一批芯片真正能用通常是 2 到 3 年以后，设计者得押注那时的算法长什么样。
+        </p>
+        <p>
+            作者认为 TPU 在这件事上很成功。矩阵乘法的特殊之处在于，它每读一个字节内存能做的 FLOPs 远多于几乎所有其他算法（每字节约 N 次 FLOPs）。早期 TPU 用的是脉动阵列（systolic array）架构，一种让数据在网格状的乘加单元之间按节拍流动的设计，它在当时的性价比（每美元性能，perf per dollar）远好于同期 GPU。TPU 是为机器学习负载设计的，带 Tensor Core 的 GPU 也在快速往这个方向变。作者也提到风险：如果神经网络没有流行起来，或者以 TPU 处理不了的方式彻底改变（TPU 天生不如 GPU 灵活），代价会很高。
+        </p>
+        <p>
+            这本书的目标是讲清楚 TPU（和 GPU）硬件怎样工作，以及 Transformer 架构怎样演变成能在当前硬件上跑好的样子。作者希望它对两类人都有用：设计新架构的研究者，和努力让当前这一代 LLM 跑得更快的工程师。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 全书结构</h2>
+        <p><em>原书小节：High-Level Outline</em></p>
+        <h3>第 1 到 3 章：roofline 与 TPU</h3>
+        <p>
+            第 1 章讲 roofline 分析，以及哪些因素会限制扩展能力：通信、计算和内存。（roofline 分析把一段程序的运行时间分别按“做计算”和“搬数据”估算，看哪一个是瓶颈。）第 2 章和第 3 章细讲 TPU 怎样工作，既讲单芯片，也讲多芯片互联成的系统，芯片间链路的带宽和延迟都有限，作者特别强调后者。这几章要回答的问题包括：
+        </p>
+        <ul>
+            <li>一个给定大小的矩阵乘法应该花多长时间？什么时候它受算力限制，什么时候受内存带宽或通信带宽限制？</li>
+            <li>TPU 怎样连成训练集群？系统的每一部分有多少带宽？</li>
+            <li>在多块 TPU 之间收集（gather）、分散（scatter）或重新分布一个数组要多久？</li>
+            <li>当矩阵在设备之间的分布方式不同时，怎样高效地相乘？</li>
+        </ul>
+        <figure><img src="https://jax-ml.github.io/scaling-book/assets/img/pointwise-product.gif" alt="TPU 做逐元素乘法的示意动图"><figcaption>图：第 2 章里的示意图，展示 TPU 怎样做逐元素乘法。根据数组大小和各条链路的带宽，程序可能是计算受限（compute-bound，用满硬件算力），也可能是内存受限（memory-bound，卡在从内存加载数据上）（引自原书）</figcaption></figure>
+        <h3>第 4 章：Transformer 的数学</h3>
+        <p>
+            五年前机器学习的架构五花八门：ConvNet、LSTM、MLP、Transformer。现在基本只剩 Transformer。作者认为值得把 Transformer 的每一部分都搞懂：每个矩阵的确切形状，归一化在哪里做，每部分有多少参数和多少 FLOPs。
+        </p>
+        <p>
+            这里有一个记号约定（原书旁注）：FLOPs 指浮点运算（FLoating point OPs）的总次数，基本就是需要做的加法和乘法的总数。很多资料用 FLOPs 表示“每秒运算次数”，这本书不这么用，表示速率时明确写成 FLOPs/s。
+        </p>
+        <p>
+            第 4 章仔细推导这些“Transformer 数学”，教你数训练和推理时的参数量和 FLOPs。由此可以知道模型要用多少内存，计算和通信各要花多少时间，以及注意力（attention）什么时候会比前馈层（feed-forward）更重要。
+        </p>
+        <figure><img src="https://jax-ml.github.io/scaling-book/assets/img/transformer-diagram.png" alt="标准 Transformer 层的矩阵乘法示意图"><figcaption>图：一个标准 Transformer 层，每个矩阵乘法（matmul）画成圆圈里的一个点，所有参数（不含归一化层）用紫色表示。第 4 章会细讲这张图（引自原书）</figcaption></figure>
+        <h3>第 5 到 8 章：训练与推理</h3>
+        <p>
+            第 5 章（训练）和第 7 章（推理）是全书的核心，讨论一个基本问题：给定模型大小和芯片数量，怎样并行化模型，才能保持在强扩展区间里？问题简单，答案却复杂得出人意料。
+        </p>
+        <p>
+            大体上，把模型拆到多块芯片上有四种主要的并行技术：数据并行（data）、张量并行（tensor）、流水线并行（pipeline）和专家并行（expert）。另外还有一些降低内存需求的技术：重计算（rematerialization，反向传播时重新算一遍中间结果，省下存它们的内存）、优化器/模型分片（optimizer/model sharding，也叫 ZeRO）、卸载到主机内存（host offload）和梯度累积（gradient accumulation）。书里会讨论其中很多种。作者希望读完这几章，你能自己为新架构或新场景在这些方案中做选择。
+        </p>
+        <p>
+            第 6 章和第 8 章是实践教程，把这些概念用到 LLaMA 3 这个流行的开源模型上。
+        </p>
+        <h3>第 9、10、12 章：JAX、性能分析与 GPU</h3>
+        <p>
+            第 9 章和第 10 章讲怎样在 JAX 里实现这些想法，以及代码出问题时怎样做性能分析（profiling）和调试。第 12 章是新加的，专门讲 GPU。
+        </p>
+        <p>
+            全书各处都留了习题。作者说不必把所有章节读完，也不必按顺序读。这本书目前还是草稿，会继续修改。作者特别感谢 James Bradbury 和 Blake Hechtman，书中很多想法是他们推导出来的。首页最后一句引向第 1 章：TPU 的 roofline。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 各章链接</h2>
+        <p><em>原书小节：Links to Sections</em></p>
+        <p>
+            作者自己说，这个系列可能写得比必要的长。前三章是预备知识，已经熟悉的读者可以跳过，但后面会用到这几章引入的记号。最后三个部分可能最实用，因为讲的是怎样处理真实模型。
+        </p>
+        <h3>第一部分：预备知识</h3>
+        <ul>
+            <li><a href="01_Roofline分析.html">第 1 章 · Roofline 分析</a>（A Brief Intro to Roofline Analysis）：算法受三样东西限制：计算、通信和内存。用它们可以近似估算算法跑多快。</li>
+            <li><a href="02_怎样理解TPU.html">第 2 章 · 怎样理解 TPU</a>（How to Think About TPUs）：TPU 怎样工作？这对我们能训练和部署什么模型有什么影响？</li>
+            <li><a href="03_分片矩阵与矩阵乘法.html">第 3 章 · 分片矩阵与矩阵乘法</a>（Sharded Matrices and How to Multiply Them）：通过作者最喜欢的运算，也就是（分片的）矩阵乘法，讲模型分片（sharding）和多 TPU 并行。</li>
+        </ul>
+        <h3>第二部分：Transformer</h3>
+        <ul>
+            <li><a href="04_Transformer的全部数学.html">第 4 章 · Transformer 的全部数学</a>（All the Transformer Math You Need to Know）：Transformer 前向和反向传播要多少 FLOPs？怎样算参数量？KV cache 有多大？</li>
+            <li><a href="05_训练时怎样并行Transformer.html">第 5 章 · 训练时怎样并行 Transformer</a>（How to Parallelize a Transformer for Training）：FSDP、Megatron 分片、流水线并行。给定芯片数量，怎样用给定的批大小尽可能高效地训练给定大小的模型？</li>
+            <li><a href="06_在TPU上训练LLaMA3.html">第 6 章 · 在 TPU 上训练 LLaMA 3</a>（Training LLaMA 3 on TPUs）：在 TPU 上怎样训练 LLaMA 3？要多久？花多少钱？</li>
+            <li><a href="07_Transformer推理.html">第 7 章 · Transformer 推理</a>（All About Transformer Inference）：模型训好后要部署。推理多了一个要考虑的量，延迟，内存的情况也变了。这一章讲分离式部署（disaggregated serving）怎样工作，以及怎样看待 KV cache。</li>
+            <li><a href="08_在TPU上部署LLaMA3_70B.html">第 8 章 · 在 TPU 上部署 LLaMA 3-70B</a>（Serving LLaMA 3 on TPUs）：在 TPU v5e 上部署 LLaMA 3 要多少钱？延迟和吞吐量之间怎样取舍？</li>
+        </ul>
+        <h3>第三部分：实践教程</h3>
+        <ul>
+            <li><a href="09_怎样分析TPU程序性能.html">第 9 章 · 怎样分析 TPU 程序性能</a>（How to Profile TPU Code）：真实的 LLM 从来没有上面的理论那么简单。这一章讲 JAX + XLA 技术栈，以及怎样用 JAX/TensorBoard profiler 调试和修复真实问题。</li>
+            <li><a href="10_用JAX给TPU编程.html">第 10 章 · 用 JAX 给 TPU 编程</a>（Programming TPUs in JAX）：JAX 提供了一批用来并行化计算的 API，但得知道怎么用。有例子和习题。</li>
+        </ul>
+        <h3>第四部分：结语与附加内容</h3>
+        <ul>
+            <li><a href="11_结语与延伸阅读.html">第 11 章 · 结语与延伸阅读</a>（Conclusions and Further Reading）：关于 TPU 和 LLM 的结束语和延伸阅读。</li>
+            <li><a href="12_怎样理解GPU.html">第 12 章 · 怎样理解 GPU</a>（How to Think About GPUs）：附加章节，讲 GPU 怎样工作、怎样联网，以及它的 roofline 和 TPU 有什么不同。</li>
+        </ul>
+        <h3>引用方式</h3>
+        <p>原书给出的学术引用格式：</p>
+        <pre><code>Austin et al., "How to Scale Your Model", Google DeepMind, online, 2025.
+
+@article{scaling-book,
+  title = {How to Scale Your Model},
+  author = {Austin, Jacob and Douglas, Sholto and Frostig, Roy and Levskaya, Anselm and Chen, Charlie and Vikram, Sharad and Lebron, Federico and Choy, Peter and Ramasesh, Vinay and Webson, Albert and Pope, Reiner},
+  publisher = {Google DeepMind},
+  howpublished = {Online},
+  note = {Retrieved from https://jax-ml.github.io/scaling-book/},
+  year = {2025}
+}</code></pre>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <p>首页没有 Takeaway 框，下面是它的几个主要论点：</p>
+        <ul>
+            <li>从一块加速器到上万块，模型性能优化遵循同一套相对简单的原则：算法受计算、通信和内存三者限制。</li>
+            <li>如果 benchmark 提升 20% 的代价是 roofline 效率下降 20%，这个提升没有意义。</li>
+            <li>强扩展（strong scaling）指芯片数增加时吞吐量线性增长；通信时间超过计算时间就进入通信受限，无法强扩展。</li>
+            <li>单芯片上，标称 500 万亿次/秒的芯片，如果卡在内存里搬参数，实际可能只有十分之一的速度。</li>
+            <li>矩阵乘法每字节内存能做的 FLOPs 远多于几乎所有其他算法（每字节约 N 次），这是 TPU 脉动阵列架构性价比高的原因。</li>
+            <li>四种主要并行技术：数据、张量、流水线、专家并行；降内存的技术：重计算、ZeRO 分片、主机卸载、梯度累积。</li>
+            <li>本书记号：FLOPs 指运算总次数，速率写作 FLOPs/s。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>How To Scale Your Model · How To Scale Your Model (intro) · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

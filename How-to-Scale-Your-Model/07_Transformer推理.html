@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transformer 推理 | How to Scale Your Model 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="06_在TPU上训练LLaMA3.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">How to Scale Your Model 目录</a> · 07</span>
+    <span><a href="08_在TPU上部署LLaMA3_70B.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 7 章 · Transformer 推理</h1>
+        <p class="subtitle">推理分成 prefill 和 generation 两种任务：前者像训练一样受算力限制，后者几乎总受内存带宽限制。这一章算清楚两者的延迟、吞吐和内存，再讲怎样分片、怎样搭一个推理引擎</p>
+        <div class="author-meta">
+            作者：Jacob Austin、Sholto Douglas 等（Google DeepMind）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://jax-ml.github.io/scaling-book/inference" target="_blank">All About Transformer Inference</a>（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            前面几章讲的都是训练。模型训好以后要拿来生成文本，这就是推理（inference）。训练只关心吞吐，推理还要关心延迟：用户要等多久看到第一个 token，之后每个 token 隔多久出来一个。这一章先把推理拆成 prefill（处理提示词）和 generation（逐个生成 token，也叫 decode）两个阶段，用第 1 章的 roofline 方法分析每个阶段里的线性层和注意力分别卡在算力还是内存带宽上；然后引入推理特有的数据结构 KV cache，算它占多少内存、怎样拖慢生成；再看几种压缩 KV cache 的架构和运行时技巧。
+        </p>
+        <p>
+            后半章讲多芯片：prefill 基本可以照搬训练时的分片方式，generation 只能用各种模型并行，KV cache 还要单独分片。最后讲推理引擎的设计（交错执行、prefill 和 generation 分离部署、continuous batching、前缀缓存）和 Google 开源的 JetStream。读完以后，你可以给一个模型、一块 TPU slice 和一个批大小，估出每步生成的最短延迟和最大吞吐，判断 KV cache 能塞下多大的 batch。第 8 章会把这些用到 LLaMA 3-70B 的部署上。
+        </p>
+        <ol>
+            <li><a href="#t01">Transformer 推理的基础</a></li>
+            <li><a href="#t02">提高生成吞吐、降低延迟的技巧</a></li>
+            <li><a href="#t03">把推理分布到多个加速器上</a></li>
+            <li><a href="#t04">设计一个高效的推理引擎</a></li>
+            <li><a href="#t05">习题</a></li>
+            <li><a href="#t06">附录</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. Transformer 推理的基础</h2>
+        <p><em>原书小节：The Basics of Transformer Inference</em></p>
+        <p>
+            训好一个 Transformer 以后，最终要用它生成新序列。基准分数上涨、loss 曲线下降，都只是间接指标，真正落地还要看生成。（原书旁注：历史上，做 Transformer 研究可以完全不碰推理，打分式的多选基准不需要正经的 KV cache 和生成循环就能高效跑完。所以研究代码库里，推理这条路径往往有很多容易改进的地方。）
+        </p>
+        <p>
+            采样在概念上很简单。输入一个序列，Transformer 输出 $\log p(\text{next token}_i \vert \text{previous tokens})$，也就是所有可能的下一个 token 的对数概率。从这个分布里采样得到一个新 token，接到序列末尾，再重复，就得到提示词的续写。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/naive-inference.png" alt="朴素采样示意图">
+            <figcaption>图：从 Transformer 朴素采样。蓝色 logits 给出下一个 token 的分布，从中采样。每一步都要重新处理整个前缀，所以整个算法是 $\Theta(n^2)$ 的。（引自原书）</figcaption>
+        </figure>
+        <p>
+            上面是朴素实现。它能用，但实际上没人这么做，因为每生成一个 token 都要把整个序列重算一遍。生成 $n$ 个 token，前馈层（FFW）是 $O(n^2)$，注意力是 $O(n^3)$。
+        </p>
+        <p>
+            解决办法是保存每次前向传播的一部分中间激活，避免重算之前的 token。在点积注意力里，一个 token 只关注它之前的 token，所以可以把每个 token 的 key 和 value 投影写进一个新的数据结构，叫 KV cache（键值缓存：把已经算过的 token 的 K、V 向量存起来，后面直接读）。存好以后，新 token 计算 $q_i \cdot k_j$ 时，不需要在旧 token 上做任何新的 FLOPs。
+        </p>
+        <p>于是推理有两个主要部分：</p>
+        <ul>
+            <li>Prefill（预填充）：给一段长提示词，同时处理提示词里的所有 token，把得到的激活（具体说是 key-value 投影）存进 KV cache，同时保存最后一个 token 的 logits。</li>
+            <li>Generation（生成，也叫 decode）：拿着 KV cache 和上一步的 logits，从 logits 里采样一个 token，把它送回 Transformer，得到下一步的新 logits，同时把这个新 token 的 KV 追加进 KV cache。重复这个过程，直到生成特殊的 &lt;EOS&gt; token 或者达到最大长度。</li>
+        </ul>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/cached-inference.png" alt="带 KV cache 的采样示意图">
+            <figcaption>图：带 KV cache 的高效采样。Prefill 处理提示词，把每个 token 的 key-value 激活存进缓存。Generation 拿这份缓存和最后一个 token 的 logits，采样新 token，把它送进模型，关注 KV cache，并把新 token 的 key-value 投影写回缓存。在 MLP 块里这是 $O(n)$ 的算法。（引自原书）</figcaption>
+        </figure>
+        <p>
+            有了 KV cache，生成 $n$ 个 token 的复杂度降到 FFW 上 $O(n)$、注意力上 $O(n^2)$，因为不再重新处理之前的 token。不过生成一个序列仍然需要很多次前向传播。你向 Gemini 或 ChatGPT 提问、结果一段段流式返回时，后台就是这样：每个 token（通常）都是对一个巨大模型的一次单独调用，只是有一部分被缓存了。
+        </p>
+        <p>
+            后面会看到，prefill 和 generation 是两种很不一样的任务，Transformer 推理其实是伪装成一件事的两件事。和训练相比，KV cache 也是一个新的、分量很重的复杂度来源。
+        </p>
+
+        <h3>我们到底要优化什么</h3>
+        <p><em>原书小节：What do we actually want to optimize?</em></p>
+        <p>
+            推理有一个训练里完全没有的维度：延迟（latency）。训练只关心吞吐（throughput，每块芯片每秒处理的 token 总数）；推理还要关心 token 出来得多快，包括首 token 时间 TTFT（Time To First Token，从发出请求到看到第一个 token 的时间）和每个 token 的延迟。不同场景的要求不同：
+        </p>
+        <ul>
+            <li>离线批量推理（跑评测、生成数据）只关心总成本，不在乎单个样本的延迟。</li>
+            <li>聊天界面和流式任务要在大规模下便宜地运行，同时 TTFT 要低，生成速度要超过人的阅读速度。</li>
+            <li>端侧推理（比如在笔记本上跑 llama.cpp）一次只服务一个用户，要求延迟尽可能低，硬件限制可能很严。</li>
+        </ul>
+        <p>
+            提高硬件利用率仍然重要，它影响成本和 TTFT。但和训练不同，它不一定在所有场景下都带来更好的单用户体验。加速器、系统和模型架构层面的很多优化，都是在延迟、吞吐、上下文长度甚至模型质量之间做取舍。
+        </p>
+
+        <h3>更细地看 Transformer</h3>
+        <p><em>原书小节：A more granular view of the Transformer</em></p>
+        <p>
+            到目前为止，我们大多把 Transformer 看成一叠前馈块。从 FLOPs 和内存的角度这通常够用，但要正确建模推理就不够了。（原书旁注：你会在这一节反复看到，推理比训练苛刻得多。FLOPs 少得多，能做 batching 的机会少，对延迟更敏感，KV cache 也让事情复杂很多。）第 4 章讲过，前向传播的主要部分是：
+        </p>
+        <ul>
+            <li>一批线性运算：MLP 的 $W_{in}$、$W_{out}$，注意力的 QKV 投影和输出投影 $W_Q$、$W_K$、$W_V$、$W_O$。它们都要从 HBM（High Bandwidth Memory，芯片旁边的高带宽显存）读参数和一批激活，做一些 FLOPs，再把结果写回 HBM。</li>
+            <li>点积注意力：从 HBM 读一批 key-value 投影和一批 query 激活，做一些内积和 softmax，把注意力结果写回 HBM。</li>
+            <li>其他所有东西：layer norm、激活函数、token 采样、更新 KV cache、位置编码。它们也有 FLOPs，但相比上面两类可以忽略，或者被融合进上面两类里。</li>
+        </ul>
+        <p>
+            接下来几节会在 prefill 和 generation 两种情况下分别看这些运算，问同一个问题：在单个加速器上，是算力受限（compute-bound）还是内存受限（memory-bound）？两种阶段的答案差别很大。
+        </p>
+
+        <h3>线性运算：瓶颈在哪</h3>
+        <p><em>原书小节：Linear operations: what bottlenecks us?</em></p>
+        <p>
+            所有线性运算在概念上都一样，不管在 MLP 里还是注意力里。它们的算术强度（Arithmetic Intensity，每搬运 1 字节数据做多少次浮点运算）取决于批大小。第 1 章算过，这里再算一遍。看一个 $\text{bf16[B, D]}$ 的 batch 乘以一个 $\text{bf16[D, F]}$ 的矩阵，它可以是大的 MLP 块（$W_\text{in}$ 或 $W_\text{out}$），也可以是较小的注意力投影（$W_Q$、$W_K$、$W_V$、$W_O$）。做这次矩阵乘法要把两个数组从 HBM 读进 MXU（Matrix Multiply Unit，TPU 里专做矩阵乘法的单元），做乘法，再把结果写回 HBM。和之前一样：
+        </p>
+        $$T_\text{math} = \frac{\text{Computation FLOPs}}{\text{Accelerator FLOPs/s}} = \frac{2BDF}{\text{Accelerator FLOPs/s}}$$
+        $$T_\text{comms} = \frac{\text{Communication Bytes}}{\text{Bandwidth Bytes/s}} = \frac{2BD + 2FD + 2BF}{\text{Bandwidth Bytes/s}}$$
+        <p>
+            TPU 或 GPU 可以一边计算一边加载，让两者重叠。所以要算力受限，需要 $T_\text{math} \geq T_\text{comms}$，即：
+        </p>
+        $$\frac{2BDF}{2BD + 2DF + 2BF} \geq \frac{\text{Accelerator FLOPs/s}}{\text{Bandwidth Bytes/s}} \underset{\text{TPU v5e}}{=} \frac{1.97E+14}{8.20E+11} = 240$$
+        <p>
+            右边是硬件的算术强度。再假设 $D$ 和 $F$ 远大于 $B$（batch 通常最多 500，$D$ 和 $F$ 大于 10k），分母可以近似成 $2BD + 2DF + 2BF \approx 2DF$，于是：
+        </p>
+        $$\frac{2BDF}{2BD + 2DF + 2BF} \approx \frac{2BDF}{2DF} \geq \frac{\text{Accelerator FLOPs/s}}{\text{Bandwidth Bytes/s}} \underset{\text{TPU v5e}}{=} \frac{1.97E+14}{8.20E+11} \implies B \geq 240 = B_{\text{crit}}$$
+        <p>
+            如果把权重量化，或者用更低精度做矩阵乘法，这个临界批大小（critical batch size）会变。权重量化到 int8 或 fp8，$B_\text{crit}$ 减半；用 int8 或 fp8 做 FLOPs，$B_\text{crit}$ 翻倍。设 $\beta = \text{bits per param} / \text{bits per activation}$，$\alpha_\text{hbm} = C / W_\text{hbm}$（$C$ 是芯片算力，$W_\text{hbm}$ 是 HBM 带宽），临界批大小就是 $B_\text{crit} = \beta \alpha_\text{hbm}$。
+        </p>
+        <blockquote>
+            <p>要点：当且仅当每个副本上的 token 批大小大于 $B_\text{crit} = C / W_\text{hbm} \cdot (\text{bits per param} / \text{bits per activation}) = \beta \cdot \alpha_\text{hbm}$ 时，Transformer 的矩阵乘法是算力受限的。TPU v5e 上 bf16 激活时是 240 个 token，H100 上大约是 280 个 token。</p>
+        </blockquote>
+        <p>
+            训练时，所有矩阵乘法的算术强度都很高，因为同一份权重在很大的 batch 上反复使用。这一点也适用于 prefill，因为用户的提示词通常有几百甚至几千个 token。TPU v5e 的硬件算术强度是 240，所以在这块硬件上用 bf16 跑稠密模型，只要输入序列长于 240 个 token，prefill 就是算力受限的，一切正常。比这短的提示词理论上可以拼在一起提高利用率，但一般没必要。
+        </p>
+        <blockquote>
+            <p>要点：prefill 时，所有矩阵乘法基本上总是算力受限的。所以只要把硬件利用率，也就是 MFU（Model FLOPs Utilization，模型实际用到的 FLOPs 占硬件峰值的比例）做到最大，就能同时把每芯片吞吐（成本）和延迟（TTFT）做到最好。除非提示词极短，否则把多个提示词拼成 batch 做 prefill，只会增加延迟，换来很小的吞吐提升。</p>
+        </blockquote>
+        <p>
+            Generation 就不同了。对每个请求，前向传播只能一次处理一个 token，因为步与步之间有先后依赖。所以要（容易地）获得好的利用率，只能把多个请求拼在一起，在 batch 维度上并行。后面会细讲：把很多并发请求拼在一起又不影响延迟，是很难的。因此 generation 很难把硬件 FLOPs 用满。
+        </p>
+        <blockquote>
+            <p>要点：generation 时，token 总批大小必须大于 $B_{\text{crit}}$，线性层/前馈层才能算力受限（TPU v5e 上 bf16 参数时是 240）。generation 是一个 token 一个 token 串行进行的，所以这要求把多个请求拼在一起，这很难。</p>
+        </blockquote>
+        <p>
+            这个数字很大。generation 的批大小 240 意味着 240 个请求同时在生成，对稠密模型就是 240 份独立的 KV cache。除了一些批量推理场景，实践中很难做到。相比之下，prefill 时一次推 240 个以上的 token 很平常，不过稀疏度（sparsity）增加时要小心一些。
+        </p>
+        <p>
+            具体数字会随量化方式和硬件变化。加速器在低精度下通常能提供更多算力。例如参数是 int8、计算用 bf16，临界批大小降到 120；激活和参数都是 int8，它又回到 240，因为 TPU v5e 的 int8 x int8 算力是 400 TOPs/s。
+        </p>
+
+        <h3>注意力呢</h3>
+        <p><em>原书小节：What about attention?</em></p>
+        <p>
+            点积注意力要复杂一些，因为要考虑 KV cache。只看一个注意力头，用纯多头注意力（MHA）。在一个 Flash Attention 融合核里，我们要做这些事（这里做了不少简化，忽略了 softmax、mask 等非矩阵乘法的 FLOPs。它们应该和计算或 HBM 读取重叠，但在某些 TPU 代际上不容易做到。这些细节不改变主结论，即 KV cache 通常是内存受限的，但值得留意）：
+        </p>
+        <ol>
+            <li>从 HBM 读形状为 $\text{bf16[B, T, D]}$ 的 $Q$ 激活。</li>
+            <li>从 HBM 读 $KV$ cache，它是一对 $\text{bf16[B, S, D]}$ 张量。</li>
+            <li>在 $QK$ 矩阵乘法里做 $2BSTD$ 次 FLOPs。有了 Flash Attention，不需要把 $\text{bf16[B, S, T]}$ 的注意力矩阵写回 HBM。</li>
+            <li>在 $AV$ 矩阵乘法里做 $2BSTD$ 次 FLOPs。</li>
+            <li>把结果 $\text{bf16[B, T, D]}$ 写回 HBM。</li>
+        </ol>
+        <p>合起来：</p>
+        $$\text{Multiheaded Attention Arithmetic Intensity} = \frac{4BSTD}{4BSD + 4BTD} = \frac{ST}{S+T}$$
+        <p>
+            Prefill 时做的是自注意力，$S=T$，上式化简为 $T^2 / 2T = T / 2$。prefill 阶段注意力的算术强度是 $\Theta(T)$，序列够长就很容易算力受限。
+        </p>
+        <p>
+            Generation 时序列维度只有 1，$B$ 和 $D$ 又约掉了，于是可以近似：
+        </p>
+        $$S \gg T = 1 \implies \frac{ST}{S+T} \approx 1$$
+        <p>
+            这很糟糕：generation 阶段注意力的算术强度没有任何办法提高。我们只做很少的 FLOPs，却要加载巨大的 KV cache，所以注意力几乎总是受内存带宽限制。
+        </p>
+        <blockquote>
+            <p>要点：prefill 时，对任何合理的序列长度（大约大于 480 个 token），注意力通常是算力受限的；generation 时算术强度低且是常数，所以总是受内存带宽限制。</p>
+        </blockquote>
+        <p>
+            原因在概念上是这样的：线性层能算力受限，是因为参数（占内存带宽的大头）被 batch 里的很多样本复用；而 batch 里每个样本有自己的 KV cache，batch 越大，KV cache 越多。除非大幅修改架构，这里几乎总是内存受限。
+        </p>
+        <p>
+            这也意味着，一旦参数占的内存和 KV cache 占的内存相当，再增大批大小，吞吐的收益就会递减。递减有多严重，取决于单个序列的参数字节数和 KV cache 字节数之比，大约是 $2DF / SHK$。因为 $HK\approx D$，这个比值大致取决于 $F$ 和序列长度 $S$ 之比。它也取决于让 KV cache 变小的架构改动（后面会讲）。
+        </p>
+
+        <h3>LLM 延迟和吞吐的理论估计</h3>
+        <p><em>原书小节：Theoretical estimates for LLM latency and throughput</em></p>
+        <p>
+            从上面的推导可以得到优化时步时间（step time）的目标界限。原书特别说明：如果整章只记一件事，就记下面这个。generation 时批大小通常较小，这时可以假设注意力和 MLP 都受内存带宽限制，得到每步延迟的下界：
+        </p>
+        $$\text{Theoretical Min Step Time} = \frac{\text{Batch Size} \times \text{KV Cache Size} + \text{Parameter Size}}{\text{Total Memory Bandwidth}}$$
+        <p>吞吐同理：</p>
+        $$\text{Theoretical Max Tokens/s} = \frac{\text{Batch Size} \times \text{Total Memory Bandwidth}}{\text{Batch Size} \times \text{KV Cache Size} + \text{Parameter Size}}$$
+        <p>
+            批大小继续增大，FLOPs 最终会超过参数加载时间，所以实际上用更一般的式子：
+        </p>
+        $$\text{Step Time (General)} = \underbrace{\frac{\text{Batch Size} \times \text{KV Cache Size}}{\text{Total Memory Bandwidth}}}_{\text{Attention (always bandwidth-bound)}} + \underbrace{\max\left(\frac{2 \times \text{Batch Size} \times \text{Parameter Count}}{\text{Total FLOPs/s}}, \frac{\text{Parameter Size}}{\text{Total Memory Bandwidth}}\right)}_{\text{MLP (can be compute-bound)}}$$
+        <p>
+            左边的注意力部分永远不会算力受限，所以不需要 FLOPs 那一项。这几个式子很适合做粗略估算（back-of-the-envelope）。
+        </p>
+        <p>
+            小测验：在 TPU v5e 4x4 slice 上，用一个 30B 参数的稠密模型做一步 generation，批大小 4 个 token，参数 int8、FLOPs 用 bf16，上下文 8192，每 token 的 KV cache 是 100 kB。这一步延迟的合理下界是多少？如果批大小是 256 呢？
+        </p>
+        <p>
+            解答：int8 下参数占 30e9 字节，每个序列的 KV cache 是 100e3 * 8192 = 819MB。共 16 块芯片，每块 HBM 带宽 8.2e11 bytes/s，bf16 算力 1.97e14 FLOPs/s。批大小小，按第一个式子，步时间至少是 (4 * 819e6 + 30e9) / (16 * 8.2e11) = 2.5 ms。批大小 256 时，MLP 已经深入算力受限区间，步时间大约是 (256 * 819e6) / (16 * 8.2e11) + (2 * 256 * 30e9) / (16 * 1.97e14) = 21ms。
+        </p>
+        <p>
+            可以看到延迟和吞吐之间有明显的取舍。小 batch 快，但硬件利用率低；大 batch 慢，但效率高。下图是 ESTI 论文（Efficiently Scaling Transformer Inference）里几个较早的 PaLM 模型的延迟-吞吐帕累托前沿（Pareto frontier）：
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/latency-cost.png" alt="PaLM 模型的成本与延迟帕累托前沿">
+            <figcaption>图：几个 PaLM 模型的成本（可理解为吞吐）与延迟的帕累托前沿。芯片数（C）和批大小（B）让你沿前沿移动。例外是绿点（PaLM 540B，C:32 B:16），可用内存不够，撑不起合适的批大小，吞吐受损。吞吐大致在批大小 240 之后趋平。int8 权重的延迟-吞吐前沿更好，但最大吞吐没有更高。（引自原书）</figcaption>
+        </figure>
+        <p>
+            批大小是调节延迟和吞吐的旋钮。此外，如果受 HBM 容量限制，我们可能宁愿用更大的拓扑（更多芯片），以便放下更大的 batch。下一节细讲。
+        </p>
+        <blockquote>
+            <p>要点：如果关心 generation 吞吐，就用尽可能大的每芯片批大小。任何高于 TPU 算术强度（$B_\text{crit}$，通常是 120 或 240）的每芯片批大小都能把吞吐做到最大。为此可能需要增大拓扑。更小的批大小能改善延迟，代价是吞吐。</p>
+        </blockquote>
+        <p>
+            以上都比较理论。实践中通常看不到一条清晰的 roofline 折线，原因有几个：
+        </p>
+        <ul>
+            <li>假设 HBM 读取和 FLOPs 完美重叠并不现实，编译器（XLA）会出错。</li>
+            <li>对分片模型，XLA 也常常没法把模型分片矩阵乘法的 ICI 通信和 FLOPs 有效重叠，所以线性层在 $\text{BS}=32$ 以上就常常开始出现延迟损失。（ICI 是 Inter-Chip Interconnect，TPU 芯片之间的直连高速链路。）</li>
+            <li>因为重叠不完美，超过理论 roofline 的批大小仍会带来一些吞吐提升。不过这条规则作为经验法则是好用的。</li>
+        </ul>
+
+        <h3>内存呢</h3>
+        <p><em>原书小节：What about memory?</em></p>
+        <p>
+            前面看了带宽和 FLOPs，还没看内存。由于 KV cache，推理时的内存情况和训练很不一样。这里用一个真实模型 LLaMA 2-13B 来演示：
+        </p>
+        <table>
+            <thead><tr><th>超参数</th><th>值</th></tr></thead>
+            <tbody>
+                <tr><td>L（num_layers，层数）</td><td>40</td></tr>
+                <tr><td>D（d_model）</td><td>5,120</td></tr>
+                <tr><td>F（ffw_dimension）</td><td>13,824</td></tr>
+                <tr><td>N（num_heads）</td><td>40</td></tr>
+                <tr><td>K（num_kv_heads）</td><td>40</td></tr>
+                <tr><td>H（qkv_dim）</td><td>128</td></tr>
+                <tr><td>V（num_embeddings）</td><td>32,000</td></tr>
+            </tbody>
+        </table>
+        <p>推理时什么在占内存？首先是参数：</p>
+        <table>
+            <thead><tr><th>参数</th><th>公式</th><th>大小（字节）</th></tr></thead>
+            <tbody>
+                <tr><td>FFW 参数</td><td>d_model² x ffw_multiplier x 3（SwiGLU 的 gate、up、down 三个投影）x n_layers</td><td>5,120 x 5,120 x 2.7 x 3 x 40 = 8.5e9</td></tr>
+                <tr><td>词表参数</td><td>2（输入和输出嵌入）x n_embeddings x d_model</td><td>2 x 32,000 x 5,120 = 0.3e9</td></tr>
+                <tr><td>注意力参数</td><td>[2（q 和 output）x d_model x n_heads x d_qkv + 2（k 和 v）x d_model x n_kv_heads x d_qkv] x n_layers</td><td>(2 x 5,120 x 40 x 128 + 2 x 5,120 x 40 x 128) x 40 = 4.2e9</td></tr>
+            </tbody>
+        </table>
+        <p>
+            加起来 8.5e9 + 4.2e9 + 0.3e9 = 13e9，和预期的 13B 一致。前几章说过，训练时参数可能存成 bfloat16，优化器状态存成 float32，大约占 100GB。和梯度检查点（gradient checkpoints）相比这不算什么，后者可以占好几 TB。
+        </p>
+        <p>
+            推理有什么不同？推理时只存一份参数，比如用 bfloat16，占 26GB，实践中用量化往往还能少很多。没有优化器状态，也没有梯度。因为不做检查点（不需要为反向传播保留激活），prefill 和 generate 的激活占用都可以忽略（prefill 这边主要得益于 Flash Attention，它不把注意力矩阵完整写出来）。prefill 8k 个 token 时，单个激活只占约 8,192 x 5,120 x 2 bytes = 80MB。更长的 prefill 可以拆成多次较小的前向传播，长上下文也不成问题。generation 的 token 更少，激活可以忽略。
+        </p>
+        <p>
+            主要的不同是 KV cache。它是所有历史 token 的 key 和 value 投影，大小只受最大允许序列长度限制。$T$ 个 token 的总大小是：
+        </p>
+        $$\text{KV cache size} = 2 \cdot \text{bytes per float} \cdot H \cdot K \cdot L \cdot T$$
+        <p>
+            其中 $H$ 是每个头的维度，$K$ 是 KV 头的数量，$L$ 是层数，前面的 2 是因为 key 和 value 都要存。
+        </p>
+        <p>
+            即使批大小和上下文长度都不大，它也会迅速变大。LLaMA-13B 在 bf16 下，单个 8192 长度序列的 KV cache 是：
+        </p>
+        $$8192\ (T) \times 40\ (K) \times 128\ (H) \times 40\ (L) \times 2\ (\text{bytes}) \times 2 = 6.7 \text{GB}$$
+        <p>
+            只要 4 份就超过了参数占的内存。LLaMA 2 并没有针对长上下文的 KV cache 大小做优化（通常没这么糟，因为 $K$ 一般小得多，比如 LLaMA-3），但这个例子说明问题：内存和延迟的估算里不能忽略 KV cache。
+        </p>
+
+        <h3>为 LLaMA 2-13B 建模吞吐和延迟</h3>
+        <p><em>原书小节：Modeling throughput and latency for LLaMA 2-13B</em></p>
+        <p>
+            看看在 8 块 TPU v5e 上，以不同批大小完美高效地做 generation 会怎样，批大小一直加到前面推出的、理论吞吐最大的临界值 240。
+        </p>
+        <table>
+            <thead><tr><th>批大小</th><th>1</th><th>8</th><th>16</th><th>32</th><th>64</th><th>240</th></tr></thead>
+            <tbody>
+                <tr><td>KV cache 内存（GiB）</td><td>6.7</td><td>53.6</td><td>107.2</td><td>214.4</td><td>428.8</td><td>1608</td></tr>
+                <tr><td>总内存（GiB）</td><td>32.7</td><td>79.6</td><td>133.2</td><td>240.4</td><td>454.8</td><td>1634</td></tr>
+                <tr><td>理论步时间（ms）</td><td>4.98</td><td>12.13</td><td>20.30</td><td>36.65</td><td>69.33</td><td>249.09</td></tr>
+                <tr><td>理论吞吐（tokens/s）</td><td>200.61</td><td>659.30</td><td>787.99</td><td>873.21</td><td>923.13</td><td>963.53</td></tr>
+            </tbody>
+        </table>
+        <p>
+            8 块 TPU v5e 合计有 128GiB HBM、6.5TiB/s HBM 带宽（每块 0.82TiB/s）和 1600TF/s 算力。
+        </p>
+        <p>
+            对这个模型，增大批大小确实提高吞吐，但收益递减很快。批大小超过 16 就 OOM（内存溢出）了，要接近 240 需要多一个数量级的内存。更大的拓扑能改善延迟，但每芯片吞吐已经碰到天花板。
+        </p>
+        <p>
+            假设参数总量不变，但把 KV cache 神奇地缩小 5 倍（比如用 1:5 的 GMQA，即 8 个 KV 头被 40 个 Q 头共享，下一节细讲）：
+        </p>
+        <table>
+            <thead><tr><th>批大小</th><th>1</th><th>8</th><th>16</th><th>32</th><th>64</th><th>240</th></tr></thead>
+            <tbody>
+                <tr><td>KV cache 内存（GiB）</td><td>1.34</td><td>10.72</td><td>21.44</td><td>42.88</td><td>85.76</td><td>321.6</td></tr>
+                <tr><td>总内存（GiB）</td><td>27.34</td><td>36.72</td><td>47.44</td><td>68.88</td><td>111.76</td><td>347.6</td></tr>
+                <tr><td>理论步时间（ms）</td><td>4.17</td><td>5.60</td><td>7.23</td><td>10.50</td><td>17.04</td><td>52.99</td></tr>
+                <tr><td>理论吞吐（tokens/s）</td><td>239.94</td><td>1,429.19</td><td>2,212.48</td><td>3,047.62</td><td>3,756.62</td><td>4,529.34</td></tr>
+            </tbody>
+        </table>
+        <p>
+            KV cache 变小后，收益仍然递减，但每芯片的理论吞吐能一直涨到批大小 240。能放下的 batch 大得多（64），所有批大小下延迟也都更好。延迟、最大吞吐、最大批大小都大幅改善。后来的 LLaMA 版本就用了这个优化：LLaMA-3 8B 有 32 个 query 头和 8 个 KV 头。
+        </p>
+        <blockquote>
+            <p>要点：除了参数，KV cache 的大小对模型最终的推理性能影响很大。要用架构设计和运行时优化两方面手段把它控制住。</p>
+        </blockquote>
+    </section>
+
+    <section id="t02">
+        <h2>02. 提高生成吞吐、降低延迟的技巧</h2>
+        <p><em>原书小节：Tricks for Improving Generation Throughput and Latency</em></p>
+        <p>
+            自 Attention is All You Need 论文以来，出现了很多让模型更高效的技术，很多专门针对 KV cache。一般来说，KV cache 越小，越容易在不损失延迟的前提下增大 generation 的批大小和上下文长度，Transformer 周边的系统（比如请求缓存）也更好做。不考虑对质量的影响，常见的有：
+        </p>
+        <h3>分组多查询注意力（GMQA / GQA）</h3>
+        <p>
+            Grouped multi-query attention：减少 KV 头的数量，让多个 Q 头共享同一个 KV 头。极端情况下，所有 Q 头共享一个 KV 头。和纯 MHA 相比，KV cache 缩小的倍数等于 Q:KV 的比例。实践中观察到模型性能对这个改动相对不敏感。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/gmqa.png" alt="MHA、GQA、MQA 对比">
+            <figcaption>图：多头注意力、分组查询注意力和多查询注意力中 Q 头与 KV 头的对应方式。（引自原书）</figcaption>
+        </figure>
+        <p>它还相当于提高了注意力计算的算术强度（见第 4 章习题 4）。</p>
+
+        <h3>混入一些局部注意力层</h3>
+        <p>
+            局部注意力（local attention）把上下文限制在一个小到中等的最大长度内。训练和 prefill 时，就是把注意力矩阵的 mask 从三角形变成对角线附近的一条带。这样局部层的 KV cache 最大长度就被封顶了。模型里局部层和全局层混用，上下文超过局部窗口时，KV cache 会小很多。
+        </p>
+
+        <h3>跨层共享 KV</h3>
+        <p>
+            模型可以学会按某种模式在不同层之间共享同一份 KV cache。这确实能缩小 KV cache，对增大批大小、缓存、离线存储等都有好处。但共享的 KV cache 可能要从 HBM 读多次，所以步时间不一定改善。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/kv-sharing.png" alt="跨层共享 KV 的示意图">
+            <figcaption>图：左边是多层纯全局注意力；右边是一种全局/局部交错并与相邻层共享 KV 的模式。来源：Character.ai 博客。（引自原书）</figcaption>
+        </figure>
+
+        <h3>量化</h3>
+        <p>
+            推理通常对参数和 KV 的精度不那么敏感。把参数和 KV cache 量化到 int8、int4、fp8 等，可以同时节省两者的内存带宽，降低达到算力 roofline 所需的批大小，并省出内存来跑更大的 batch。量化还有一个好处：即使模型训练时没用量化，往往也可以在训练后直接应用。
+        </p>
+
+        <h3>不规则 HBM 读取和 Paged Attention</h3>
+        <p>
+            前面的计算里，每份 KV cache 都分配了 8k 上下文，但通常不需要从内存读整份 KV cache。请求的长度分布很广，用不到模型的最大上下文，所以可以写一些核函数（比如 Flash Attention 的变体），只读 KV cache 里非填充（non-padding）的部分。
+        </p>
+        <p>
+            Paged Attention 在此基础上更进一步：像操作系统的页表那样存放 KV cache，基本上完全避免填充。这增加了很多复杂度，但每个 batch 只用它需要的内存。这是运行时优化，和模型架构无关。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/paged-attention.png" alt="PagedAttention 示意图">
+            <figcaption>图：generation 时，一个 token（"forth"）关注多个 KV cache 块（页）。把 KV cache 分页，就不必加载或存储多余的内存。取自 PagedAttention 论文。（引自原书）</figcaption>
+        </figure>
+        <blockquote>
+            <p>全局视角：和标准 MHA Transformer 相比，这些 KV cache 优化合起来能把 KV cache 缩小一个数量级以上，Transformer 的整体成本也可能因此改善一个数量级。</p>
+        </blockquote>
+    </section>
+
+    <section id="t03">
+        <h2>03. 把推理分布到多个加速器上</h2>
+        <p><em>原书小节：Distributing Inference Over Multiple Accelerators</em></p>
+        <p>
+            到这里，我们一直没细说怎样扩展到多块芯片。沿着第 5 章的思路，看看有哪些策略、各自的取舍。照例把 prefill 和 generation 分开看。
+        </p>
+
+        <h3>Prefill</h3>
+        <p>
+            从 roofline 的角度，prefill 和训练几乎一样，训练的技术和取舍几乎都适用：模型并行（Megatron 式）、序列分片（上下文够长时）、流水线并行，甚至 FSDP（Fully Sharded Data Parallel，参数和优化器状态都分片到各数据并行副本上的数据并行）都可行。只是要把 KV 保留下来，后面 generation 要用。和训练一样，芯片越多，可用的 FLOPs/s 越多（TTFT 可能更低），但通信开销也会增加（每芯片吞吐可能下降）。
+        </p>
+        <p>prefill 分片的一般规则（假设只对单个序列做 prefill，没有 batch 维度）：</p>
+        <ul>
+            <li>模型分片：先做一定程度的模型并行，直到变成 ICI 受限。第 5 章算过，单轴大约是 $F / 2200$（通常是 4 到 8 路）。</li>
+            <li>序列并行：在此之上做序列并行（类似数据并行，但在序列维度上切分）。序列并行会在注意力里带来一些额外通信，但上下文较长时通常不大。和训练一样，通信和计算可以重叠（Megatron 用 collective matmul，注意力用 ring attention）。</li>
+        </ul>
+        <blockquote>
+            <p>要点：prefill 时，训练里能用的分片方式几乎都能用。先做模型并行到 ICI 界限，再做序列并行。</p>
+        </blockquote>
+
+        <h3>Generation</h3>
+        <p>
+            Generation 比 prefill 复杂。一是更难凑出大 batch，要把很多请求拼在一起；二是延迟目标更低。两者叠加，generation 通常更受内存限制，对通信开销更敏感，分片策略也因此受限：
+        </p>
+        <ul>
+            <li>FSDP 行不通：我们受限于把参数和 KV cache 从 HBM 搬到 MXU 的速度，不想再通过 ICI 搬它们，ICI 比 HBM 慢好几个数量级。我们要移动的是激活，不是权重。所以类似 FSDP 的方法在 generation 时通常完全不可用。（原书旁注：训练完忘了把它关掉，是一种常见且容易犯的错误，会带来数量级的性能倒退。）</li>
+            <li>没有理由做数据并行：纯数据并行会复制参数，也不能让参数加载更快。不如直接起多个模型副本。（意思是起多台服务器，每台一份模型、用更小的批大小。在模型层面做数据并行严格更差。）</li>
+            <li>没有序列，就没有序列分片。</li>
+        </ul>
+        <p>
+            所以稠密模型的 generation 基本只剩模型分片的各种变体。和 prefill 一样，最简单的是普通模型并行（激活完全复制，MLP 的权重在隐藏维度上完全分片），做到 4 到 8 路时变成 ICI 受限。但因为通常受内存带宽限制，其实可以超过这个界限来改善延迟。
+        </p>
+        <p>
+            关于 generation 的 ICI 界限：训练时我们希望算力受限，所以 roofline 看的是 ICI 通信何时超过 FLOPs 时间。generation 时，如果受参数加载的内存带宽限制，就可以把模型分片做到超过这个点，以很小的吞吐代价（按 tokens/sec/chip 算）换来更低的延迟。模型分片越多，加载权重可用的 HBM 带宽越多，而 FLOPs 无关紧要（FLOPs 时间不是瓶颈，要担心的是 ICI 时间超过参数加载时间）。看看模型并行能做到多少路才成为瓶颈：
+        </p>
+        $$T_\text{HBM comms} = \frac{2DF}{Y \cdot W_\text{hbm}} \qquad T_\text{ICI comms} = \frac{2BD}{W_\text{ici}}$$
+        $$T_\text{ICI comms} > T_\text{HBM comms} \rightarrow \frac{W_\text{hbm}}{W_\text{ici}} > \frac{F}{Y \cdot B} \rightarrow Y > F / (B \cdot \beta)$$
+        <p>
+            其中 $\beta = W_\text{hbm} / W_\text{ici}$，TPU v5e 和 TPU v6e 上通常约为 8。例如 $F$ 是 16,384、$B$ 是 32，理论上模型并行可以做到 16384 / (32 * 8) = 64 路，吞吐不会有明显损失。这假设 KV cache 也能完全 64 路分片，而这很难，下面讨论。
+        </p>
+        <p>
+            注意力层也按头 Megatron 式地对 $W_Q$ 和 $W_O$ 做模型分片。KV 权重很小，分片超过 $K$ 路时，复制它们往往比分片更便宜。
+        </p>
+        <blockquote>
+            <p>要点：generation 时只能用模型并行的各种变体。目标是移动激活，不移动更大的 KV cache 或参数。批大小大时，模型并行做到 FLOPs-ICI 界限（$F / \alpha$）；批大小小时，可以多做模型分片来改善延迟（吞吐代价不大）。要分片的路数多于 KV 头数时，KV 也可以沿 batch 维度分片。</p>
+        </blockquote>
+
+        <h3>KV cache 的分片</h3>
+        <p>
+            还有一个数据结构要分片：KV cache。我们几乎总是避免复制 KV cache，因为它是注意力延迟的主要来源。做法是先沿头维度对 KV 做 Megatron 分片。这最多只能 $K$ 路，所以对头数少的模型，先把头维度尽量分完，再沿 batch 维度分片，即 $\text{KV}[2, B_Z, S, K_Y, H]$。这样 KV cache 就完全分布开了。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/esta-figure.png" alt="两种注意力分片方式对比">
+            <figcaption>图：(a) 纯模型分片的多头注意力，(b) KV cache 按 batch 分片的多查询注意力。注意需要两次额外的 AllToAll，把激活从模型分片转成 batch 分片，才能作用在 KV cache 上。（引自原书）</figcaption>
+        </figure>
+        <p>
+            代价是每个注意力层两次 AllToAll（全交换通信：每块芯片把自己的数据切块分别发给其他每块芯片）。一次把 Q 激活转成 batch 分片，以便按 batch 分片计算注意力；另一次把按 batch 分片的注意力输出转回纯模型分片。
+        </p>
+        <p>
+            下面是模型并行同时作用在 $Y$ 和 $Z$ 两个轴上的完整注意力算法。原书作者道歉说 $K$ 既表示 key 张量，又表示 KV 头维度。令 $M=N/K$。记号沿用第 3 章：下标表示该维度在哪个网格轴上分片（如 $B_Z$ 表示 batch 维沿 $Z$ 轴切分），$\{U_{YZ}\}$ 表示结果在 $YZ$ 轴上是未求和的部分和。
+        </p>
+<pre><code>X[B, D] = ...  (existing activations, unsharded from previous layer)
+K[B_Z, S, K_Y, H], V[B_Z, S, K_Y, H] = ...  (existing KV cache, batch sharded)
+
+Q[B, N_YZ, H]       = X[B, D] * W_Q[D, N_YZ, H]
+Q[B_Z, N_Y, H]      = AllToAll_{Z->B}(Q[B, N_YZ, H])
+Q[B_Z, K_Y, M, H]   = Reshape(Q[B_Z, N_Y, H])
+O[B_Z, S, K_Y, M]   = Q[B_Z, K_Y, M, H] *_H K[B_Z, S, K_Y, H]
+O[B_Z, S, K_Y, M]   = Softmax_S(O[B_Z, S, K_Y, M])
+O[B_Z, K_Y, M, H]   = O[B_Z, S, K_Y, M] *_S V[B_Z, S, K_Y, H]
+O[B, K_Y, M_Z, H]   = AllToAll_{Z->M}(O[B_Z, K_Y, M, H])
+O[B, N_YZ, H]       = Reshape(O[B, K_Y, M_Z, H])
+X[B, D] {U_YZ}      = W_O[N_YZ, H, D] *_{N,H} O[B, N_YZ, H]
+X[B, D]             = AllReduce(X[B, D] {U_YZ})</code></pre>
+        <p>
+            这挺复杂，但大致能看出怎么运作。新增的通信代价不高，因为它们作用在很小的激活上；换来的是加载 KV（它们原地不动）时节省的大量内存带宽。
+        </p>
+        <ul>
+            <li>序列分片：如果批大小太小，或者上下文很长，可以对 KV cache 做序列分片。同样要付出集合通信的代价，用来跨分片累加注意力结果：先 AllGather Q 激活，再用类似 Flash Attention 的方式累加各分片上的 KV 结果。</li>
+        </ul>
+    </section>
+
+    <section id="t04">
+        <h2>04. 设计一个高效的推理引擎</h2>
+        <p><em>原书小节：Designing an Effective Inference Engine</em></p>
+        <p>
+            前面分别看了怎样单独优化和分片 prefill 和 generate。要真正用好它们，需要设计一个推理引擎（inference engine），按我们在延迟/吞吐帕累托前沿上选定的位置，给这两种操作喂数据。
+        </p>
+        <p>最简单的方法是先跑一批 prefill，再跑一批 generation：</p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/batched-prefill.png" alt="批量 prefill 后批量 generate">
+            <figcaption>图：最简单的设置里，请求被攒在一起，服务器在“跑一批 prefill”和“反复调用 generate 直到所有序列结束”之间交替。（引自原书）</figcaption>
+        </figure>
+        <p>这很容易实现，是大多数代码库里的第一版推理设置，但有不少缺点：</p>
+        <ol>
+            <li>延迟很差。prefill 和 generate 的批大小被绑在一起。prefill 批大小大时 TTFT 很差，要等所有 prefill 完成，用户才能看到任何 token；批大小小时 generate 吞吐很差。</li>
+            <li>短的生成被长的生成拖住。很多序列会比别的先结束，generation 时留下空的 batch 位置，进一步降低吞吐。批大小和生成长度越大，问题越严重。</li>
+            <li>prefill 被填充。prefill 要填充到最长序列的长度，浪费大量算力。有解决办法，但历史上 XLA 很难跳过这些 FLOPs。同样，批大小和 prefill 序列越长越糟。</li>
+            <li>prefill 和 generation 被迫共用一种分片。两者在同一个 slice 上，所以拓扑和分片相同（除非保留两份权重），这通常对性能不利，比如 generate 想要多得多的模型分片。</li>
+        </ol>
+        <p>
+            所以这种方式只推荐用于端侧应用（通常只服务一个用户，硬件的 FLOPs/byte 也较低），以及 Transformer 代码库早期的快速迭代（因为简单）。
+        </p>
+        <p>
+            稍好一点的做法是：prefill 用批大小 1（这时已经算力受限，延迟也合理），generation 时把多个请求拼成 batch：
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/interleaving.png" alt="交错执行 prefill 和 generation">
+            <figcaption>图：交错配置，prefill 以批大小 1 插在 generation 步骤之间。（引自原书）</figcaption>
+        </figure>
+        <p>
+            这样避免了批量 prefill 浪费的 TTFT，同时 generation 吞吐仍然高。这叫交错配置（interleaved configuration），因为 prefill 和 generation 步骤交替进行。它很适合以吞吐为主要目标的批量生成，比如跑评测。调度器可以配置成只要有 generation 位置空出来就优先做 prefill，即使 generation 批大小很大也能保持高利用率。prefill 也不必填充到最大长度，因为它不和别的请求拼 batch。
+        </p>
+        <p>
+            主要缺点是：服务器做 prefill 时，其他所有请求的 generation 都会暂停，因为算力全被 prefill 占了。用户 A 正在解码，会被用户 B 的 prefill 挡住。TTFT 虽然改善了，但 token 生成会一卡一卡的，平均也更慢，对很多应用来说体验不好：别人的 prefill 落在了你这个请求整体延迟的关键路径上。
+        </p>
+        <p>
+            为了解决这个问题，把 decode 和 prefill 分开。Transformer 推理可以在一台服务器上完成，但从延迟角度，常常更好的做法是把两种任务放在两组 TPU/GPU 上。prefill 服务器生成 KV cache，通过网络发给 generate 服务器，后者把多份缓存拼成 batch，为每个请求生成 token。这叫分离式部署（disaggregated serving）。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/disaggregation.png" alt="分离式部署示意图">
+            <figcaption>图：prefill 和 generate 在不同服务器上，KV cache 通过网络从前者传到后者。（引自原书）</figcaption>
+        </figure>
+        <p>好处有几个：</p>
+        <ul>
+            <li>规模化下的低延迟：除非 prefill 容量不够，一个用户的请求不会被别人的请求挡住。请求应该立刻被 prefill，然后发到 generation 服务器，立刻插进 generation 缓冲区。如果预计会有很多并发请求，可以独立于 generate 服务器数量来扩展 prefill 服务器数量，用户就不会在 prefill 队列里等太久。</li>
+            <li>专门化：prefill 和 generate 的最优（按延迟）参数分片策略和硬件拓扑常常差别很大（比如 generate 适合更多模型并行，prefill 不需要）。强迫两者用同一种分片会同时损害两者，保留两份权重又占内存。另外，prefill 挪到自己的服务器后，除了正在处理的那一份，不需要持有任何 KV cache，于是有大量内存可以留给历史缓存（见下一节）或用来优化 prefill 延迟。</li>
+        </ul>
+        <p>
+            缺点之一是 KV cache 要在网络上传输。这通常可以接受，但再次说明了缩小 KV cache 的意义。
+        </p>
+        <blockquote>
+            <p>要点：对延迟敏感、吞吐又高的服务，通常要把 prefill 和 generation 分到不同服务器上，prefill 用批大小 1，generation 把很多并发请求拼成 batch。</p>
+        </blockquote>
+
+        <h3>Continuous batching</h3>
+        <p>
+            上面的问题 (2) 引出了连续批处理（continuous batching）的概念。我们优化并编译两个函数：
+        </p>
+        <ul>
+            <li>一个 prefill 函数：处理可变长度的上下文，把结果插入一个 KV 缓冲区，缓冲区有最大批大小和最大上下文长度/页数。</li>
+            <li>一个 generate 函数：接收 KV cache，对当前所有活跃请求做一步生成。</li>
+        </ul>
+        <p>
+            再加一个调度器（orchestrator）把它们组合起来：它把进来的请求排队，根据可用的 generate 位置调用 prefill 和 generate，处理历史缓存（见下一节），并把 token 流式输出。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/continuous-batching.gif" alt="continuous batching 动画">
+            <figcaption>图：continuous batching。序列一结束，空出的位置就由新请求的 prefill 结果填上。（引自原书）</figcaption>
+        </figure>
+
+        <h3>前缀缓存</h3>
+        <p>
+            prefill 很贵，又是算力受限的（余量更小），降低它成本的最好办法之一就是少做。因为 LLM 是自回归的，查询 [“I”, “like”, “dogs”] 和 [“I”, “like”, “cats”] 的前两个 token 的 KV cache 完全相同。原则上，先算 “I like dogs” 的缓存，再算 “I like cats” 的缓存，只需要做 1/3 的计算。复用缓存可以省掉大部分工作。在几种场景里这特别有用：
+        </p>
+        <ul>
+            <li>聊天机器人：大多数对话是来回交替、严格向后追加的。如果能保存每轮对话的 KV cache，就只需要计算最新的 token。</li>
+            <li>少样本提示（few-shot prompting）：任何 few-shot 提示都可以存下来免费复用。系统指令通常也是这种形式。</li>
+        </ul>
+        <p>
+            唯一的难点是内存。KV cache 很大（常常是好几 GB），缓存要有用，就得一直保留到后续请求到来。一般来说，prefill 服务器上没用到的 HBM 可以拿来做本地缓存。此外，加速器的 CPU 主机通常有大量内存（例如一台 8xTPUv5e 服务器有 128GiB HBM，但有约 450GiB 主机 DRAM）。这些内存比 HBM 慢得多，通常慢到没法做 generation 步骤，但读缓存够快。实践中：
+        </p>
+        <ul>
+            <li>KV cache 存在处理首次请求的那组 TPU 本地，所以需要某种亲和路由（affinity routing），保证后续请求到达同一个副本。这可能给负载均衡带来问题。</li>
+            <li>KV cache 小一些又有帮助：同样空间能存更多份，读取时间也更短。</li>
+            <li>KV cache 和查找结构很自然地可以存成树或 trie（前缀树），按 LRU（最近最少使用）淘汰。</li>
+        </ul>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/prefix-caching-trie.png" alt="LRU trie 实现的前缀缓存">
+            <figcaption>图：用 LRU trie 实现的 KV 前缀缓存。共享前缀可以避免重复存储 KV。来源：Character.ai 博客。（引自原书）</figcaption>
+        </figure>
+
+        <h3>看一个实现：JetStream</h3>
+        <p>
+            Google 开源了一个实现上述逻辑的库，叫 JetStream。服务器有一组“prefill 引擎”和“generate 引擎”，通常在不同的 TPU slice 上，由一个控制器统一调度。prefill 在“prefill 线程”里进行，generation 在“generate 线程”里进行。还有一个“transfer 线程”，负责把 KV cache 从 prefill slice 复制到 generate slice。
+        </p>
+        <p>Engine 接口是任何 LLM 都要实现的通用接口，主要方法有：</p>
+        <ul>
+            <li><code>prefill</code>：输入一组 token，生成 KV cache。</li>
+            <li><code>insert</code>：把一份 KV cache 插入 generate 正在使用的那批 KV cache 里。</li>
+            <li><code>generate</code>：接收一批 KV cache，为 batch 里每个条目生成一个 token，并把这个 token 的 KV cache 追加到对应的解码状态里。</li>
+        </ul>
+        <p>JetStream 也有 PyTorch 版本。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 习题</h2>
+        <p><em>原书小节：Worked Problems</em></p>
+        <p>这一节在 LLaMA-2 13B 的基础上虚构一个新模型：</p>
+        <table>
+            <thead><tr><th>超参数</th><th>值</th></tr></thead>
+            <tbody>
+                <tr><td>L（num_layers）</td><td>64</td></tr>
+                <tr><td>D（d_model）</td><td>4,096</td></tr>
+                <tr><td>F（ffw_dimension）</td><td>16,384</td></tr>
+                <tr><td>N（num_heads）</td><td>32</td></tr>
+                <tr><td>K（num_kv_heads）</td><td>8</td></tr>
+                <tr><td>H（qkv_dim）</td><td>256</td></tr>
+                <tr><td>V（num_embeddings）</td><td>32,128</td></tr>
+            </tbody>
+        </table>
+
+        <h3>习题 1：参数量和每 token 的 KV cache</h3>
+        <p>题目：这个模型有多少参数？int8 下每个 token 的 KV cache 有多大？可以假设输入和输出投影矩阵共享。</p>
+        <p>解答：</p>
+        <ul>
+            <li>MLP 参数量：$L * D * F * 3$</li>
+            <li>注意力参数量：$L * 2 * D * H * (N + K)$</li>
+            <li>词表参数：$D * V$（因为两个矩阵共享）</li>
+        </ul>
+        <p>
+            总参数量是 $L * D * (3F + 2H * (N + K)) + D * V$。代入数字：64 * 4096 * (3*16384 + 2 * 256 * (32 + 8)) + 4096 * 32128 = 18.4e9，约 184 亿参数。
+        </p>
+        <p>int8 下每个 token 的 KV cache 是 $2 * L * K * H$，即 2 * 64 * 8 * 256 = 262kB。</p>
+
+        <h3>习题 2：最多能放多大的 batch</h3>
+        <p>题目：在 TPU v5e 4x4 slice 上部署这个模型，KV cache 能在这个拓扑上完全分片。假设所有东西都用 int8，要支持 128k 长度的序列，最多能放多大的批？如果把 KV 头数降到 1 呢？</p>
+        <p>
+            解答：KV cache 每 token $2 \cdot L \cdot K \cdot H$，int8 下是 2 * 64 * 8 * 256 = 262kB。128k 序列下，每个 batch 条目是 262e3 * 128e3 = 33.5GB。每块 TPU 有 16GB HBM，算上参数，最大批大小是 (16 * 16e9 - 18.4e9) / 33.5e9 = 7。如果 $K=1$，是它的 8 倍，约 56。
+        </p>
+
+        <h3>习题 3：加载全部参数要多久</h3>
+        <p>题目：假设参数在 TPU v5e 4x4 slice 上完全分片、int8 存储，把所有参数从 HBM 加载到 MXU 要多久？这是每步延迟的一个好下界。</p>
+        <p>
+            解答：共 18.4B 参数，int8 下是 18.4e9 字节。每块芯片 HBM 带宽 8.2e11，假设能用满，大约要 18e9 / (8.2e11 * 16) = 1.4ms。
+        </p>
+
+        <h3>习题 4：prefill 和 decode 怎样分片</h3>
+        <p>
+            题目：在 TPU v5e 4x4 slice 上部署这个模型，FLOPs 和参数/激活都用 int8。prefill 和 decode 分别怎样分片？提示，可以先回答这几个问题：4x4 的 ICI 是什么样的？张量并行的 roofline 界限是多少？KV cache 怎样分片？按这种分片，generation 每步的大致延迟是多少？
+        </p>
+        <p>解答：原书没有给出答案。</p>
+
+        <h3>习题 5：把模型改成 MoE</h3>
+        <p>
+            题目：假设上面的模型其实是 MoE（Mixture of Experts，混合专家模型）。MoE 相当于一个有 $E$ 份 FFW 块的稠密模型，每个 token 经过其中 $k$ 个 FFW 块，这 $k$ 个块的输出取平均作为结果。取 $E=16$、$k=2$，其余设置不变。(1) 总参数量和激活参数量各是多少？激活参数指任一 token 实际用到的参数。(2) 在 TPU v5e 上要多大的批大小才能 FLOPs 受限？(3) 每个 token 的 KV cache 多大？(4) $T$ 个 token 的一次前向传播有多少 FLOPs？
+        </p>
+        <p>解答：</p>
+        <p>
+            (1) 作为 MoE，每个 MLP 块现在有 $3 * E * D * F$ 个参数，是稠密版本的 $E$ 倍。总参数量是 $L * D * (3EF + 2H * (N + K)) + D * V$，即 64 * 4096 * (3*16*16384 + 2 * 256 * (32 + 8)) + 4096 * 32128 = 212e9，约为原来的 12 倍。激活参数量把 $E$ 换成 $k$：64 * 4096 * (3*2*16384 + 2 * 256 * (32 + 8)) + 4096 * 32128 = 31.2e9，不到稠密版本的 2 倍。
+        </p>
+        <p>
+            (2) 参数多了 $E$ 倍，FLOPs 只多了 $k$ 倍，所以 HBM roofline 提高 $E/k$ 倍。在 TPU v5e 上需要约 240 * (16 / 2) = 1920 个 token。
+        </p>
+        <p>(3) KV cache 大小不变，MoE 不改变注意力机制。</p>
+        <p>(4) 仍然是 $2 \cdot \text{activated params} \cdot T$，即 $2 \times 31.2\text{e}9 \times T$。</p>
+
+        <h3>习题 6：专家分片</h3>
+        <p>
+            题目：MoE 可以做“专家分片”（expert sharding），把专家沿网格的一个轴切分。按标准记号，第一个 FFW 权重形状是 $[E, D, F]$，分片成 $[E_Z, D_X, F_Y]$，其中 $X$ 只在训练时用作 FSDP 维度。在 TPU v5e 上做推理：(1) 在 TPU v5e 8x16 slice 上、$Y=8$、$Z=16$ 时，上面这个模型的 HBM 权重加载时间是多少？每块 TPU 还剩多少 HBM？(2) 最小能放进多小的 slice？
+        </p>
+        <p>解答：原书没有给出答案。</p>
+
+        <h3>习题 7：2D 模型分片</h3>
+        <p>
+            题目：这道题推导 ESTI 论文里所说的 2D weight-stationary（二维权重驻留）分片。附录 B 有简短介绍，但建议先自己推。基本思路是把权重同时沿 $D$ 和 $F$ 两个轴分片，让每块大致是方的。这样能减少通信量，扩展得更远一些。算法如下：
+        </p>
+<pre><code>In[B, D_X]          = AllGather_YZ(In[B, D_XYZ])
+Tmp[B, F_YZ] {U_X}  = In[B, D_X] *_D W_in[D_X, F_YZ]
+Tmp[B, F_YZ]        = AllReduce_X(Tmp[B, F_YZ] {U_X})
+Out[B, D_X] {U_YZ}  = Tmp[B, F_YZ] *_F W_out[F_YZ, D_X]
+Out[B, D_XYZ]       = ReduceScatter_YZ(Out[B, D_X] {U_YZ})</code></pre>
+        <p>目标是算出这个算法的 $T_\text{math}$ 和 $T_\text{comms}$，并找出它什么时候优于传统的 3D 模型分片。</p>
+        <p>
+            解答：FLOPs 全部分片，所以和之前一样 $T_\text{math} = 4BDF / (N \cdot C)$（$N$ 是芯片总数）。通信现在是：
+        </p>
+        $$T_\text{2D comms} = \frac{2BD}{2X \cdot W_\text{ici}} + \frac{4BF}{YZ \cdot W_\text{ici}} + \frac{2BD}{2X \cdot W_\text{ici}} = \frac{2BD}{X \cdot W_\text{ici}} + \frac{4BF}{YZ \cdot W_\text{ici}}$$
+        <p>
+            这里 AllReduce 的代价是两倍，每个操作的通信量按它所跨的轴数缩放。假设可以自由选择拓扑，并假设 $F=4D$（和 LLaMA-2 一样），用一点微积分可得最优的 $X = \sqrt{N / 8}$、$YZ = \sqrt{8N}$，总通信量是：
+        </p>
+        $$T_\text{2D comms} = \frac{2B}{W_\text{ici}} \left(\frac{D}{X} + \frac{8D}{YZ}\right) = \frac{\sqrt{128} BD}{\sqrt{N} \cdot W_\text{ici}} \approx \frac{11.3 BD}{\sqrt{N} \cdot W_\text{ici}}$$
+        <p>
+            前面得到的普通 1D 模型并行通信量是 $T_\text{model parallel comms} = 4BD / (3 \cdot W_\text{ici})$。新方案的通信什么时候更少？
+        </p>
+        $$T_\text{model parallel comms} > T_\text{2D comms} \iff \frac{4BD}{3 \cdot W_\text{ici}} > \frac{\sqrt{128} BD}{\sqrt{N} \cdot W_\text{ici}} \iff N > 128 \cdot \left(\frac{3}{4}\right)^2 = 72$$
+        <p>对一般的 $F$，这个条件是：</p>
+        $$N > 32 \cdot \left(\frac{F}{D}\right) \cdot \left(\frac{3}{4}\right)^2$$
+        <p>
+            也就是说，芯片超过 72 块时用新方案更好。这个结果有点反常，因为历史上张量并行做到大约 20 路就会 ICI 受限。但在这里，即使通信受限，总通信量也会随芯片总数增加而继续下降。所以可以继续加芯片、加批大小、做更多参数扩展，同时看到延迟下降。
+        </p>
+        <p>第 7 章到此结束。第 8 章看怎样在 TPU 上部署 LLaMA 3。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 附录</h2>
+        <p><em>原书小节：Appendix</em></p>
+
+        <h3>附录 A：批大小大于 240 这条规则有多真实</h3>
+        <p><em>原书小节：Appendix A: How real is the batch size &gt; 240 rule?</em></p>
+        <p>
+            前面给的简单规则，即批大小必须大于 240 个 token 才能算力受限，大体是对的。但它忽略了 TPU 的一种能力：在别的操作没有用满 HBM 带宽时（比如做芯片间通信时）预取权重。
+        </p>
+        <p>
+            下面是一个小 Transformer 的单层时间实测图（单位微秒），$d_\text{model}$ = 8192，$d_\text{ff}$ = 32768，每层只有 2 个矩阵乘法，来自原书的一个 Colab notebook。可以看到步时间在批大小约 240 之前增长很慢，之后线性增长。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/batch-scaling-latency.png" alt="层时间随批大小变化">
+            <figcaption>图：单层时间随批大小的变化，约 240 之后开始线性增长。（引自原书）</figcaption>
+        </figure>
+        <p>
+            下面是实际吞吐（tokens / us），说得更清楚。这一层约 6 亿参数，在这里 4 路分片，预计最短延迟约 365us。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/batch-scaling-throughput.png" alt="吞吐随批大小变化">
+            <figcaption>图：吞吐随批大小的变化。（引自原书）</figcaption>
+        </figure>
+        <p>至少在这个模型上，每个数据并行分片的吞吐确实一直增长到批大小 240 左右。</p>
+
+        <h3>附录 B：2D Weight Stationary 分片</h3>
+        <p><em>原书小节：Appendix B: 2D Weight Stationary sharding</em></p>
+        <p>
+            拓扑变大时，如果能用更高维的网格（TPU 就是这样），可以引入第二个分片轴，做“2D 权重分片”。这叫 2D Weight Stationary，Efficiently Scaling Transformer Inference 论文里有更详细的描述。
+        </p>
+        <p>
+            Megatron 只切分隐藏维 $F$，用 1D 分片时芯片数一多，每块芯片上的 $F$ 分片会比 $E$（即 $d_\text{model}$ 维度）小很多。所以批大小较大时，在 MLP 第一层之后，把一部分集合通信放在隐藏维上做可能更划算。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/2d-weight-stationary.png" alt="1D 与 2D weight-stationary 分片对比">
+            <figcaption>图：1D 和 2D weight-stationary 分片的对比。（引自原书）</figcaption>
+        </figure>
+        <p>图中展示了：</p>
+        <ul>
+            <li>1D weight-stationary 分片，即纯 Megatron 分片：AllGather 之后激活完全复制，权重沿隐藏维 $F$ 完全分片。</li>
+            <li>2D weight-stationary 分片：权重同时沿隐藏维 $F$ 和规约维 $E$ 分片，激活沿 $E$ 维分片。第一层之前在 (yz) 轴上做 AllGather，然后在 (x) 轴上做 ReduceScatter。</li>
+        </ul>
+        <p>
+            注意力层用 Megatron 式分片在芯片数较少时也比较简单。但 Megatron 是在 $n_\text{heads}$ 维度上切的，能分片的程度有上限。把 2D 分片改用在注意力上（不切隐藏维，改切 $n_\text{heads}$ 维），就能扩展得更远。
+        </p>
+
+        <h3>附录 C：受延迟限制的通信</h3>
+        <p><em>原书小节：Appendix C: Latency bound communications</em></p>
+        <p>
+            回顾第 3 章：在 $X$ 块芯片组成的 1D 环上，链路全双工带宽 $W_{ICI}$、延迟 $T_{min}$，把数据 AllGather 成每块 TPU 上大小为 $B$ 的张量，所需时间是：
+        </p>
+        $$T_{total} = \max\left(\frac{T_{min} \cdot |X|}{2}, \frac{B}{W_{ICI}}\right)$$
+        <p>
+            $B$ 很大时，墙钟时间基本不变，因为加芯片时，要搬的数据量和可用总带宽同时增加。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/all-gather.gif" alt="AllGather 动画">
+            <figcaption>图：环上的 AllGather，每一跳把数据传给相邻设备。（引自原书）</figcaption>
+        </figure>
+        <p>
+            以延迟为优化目标的推理里搬的数据量较小，所以激活上的集合通信常常受延迟项限制（批大小小时尤其如此）。延迟可以很直观地看出来：数一数完成通信需要多少跳。
+        </p>
+        <p>
+            在 TPU 上，如果通信中和张量大小相关的部分每跳不到 1 微秒（一跳是相邻两个设备之间的一次通信），瓶颈就可能变成发起集合通信的固定开销。单向 ICI 带宽 4.5e10 时，ICI 通信在 $(\text{bytes} / n_\text{shards}) / 4.5e10 < 1e-6$ 时受延迟限制。对 8 路 Megatron 分片，就是 buffer_size &lt; 360kB 时。这在推理中其实不算小：BS=16、D=8192、int8 时，激活占 16*8192=131kB，已经受延迟限制了。
+        </p>
+        <blockquote>
+            <p>要点：当 $\text{total bytes} < W_{ICI} \times 1e-6$ 时，通信受延迟限制。例如在 $Y$ 上做模型并行时，int8 下 $Y > BD / 45,000$ 就会受限。</p>
+        </blockquote>
+        <p>
+            这和算力 roofline 有相似之处：都是在为一些小操作付固定成本（通信是延迟，矩阵乘法是内存带宽）。
+        </p>
+
+        <h3>附录 D：投机采样</h3>
+        <p><em>原书小节：Appendix D: Speculative Sampling</em></p>
+        <p>
+            如果最看重端到端延迟，还有一个技巧叫投机采样（speculative sampling，也叫投机解码 speculative decoding）。回顾一下，通常大 Transformer 是一个一个地生成 token：
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/spec-sampling1.png" alt="普通自回归逐个生成">
+            <figcaption>图：普通的自回归采样，每步由大模型生成一个 token。（引自原书）</figcaption>
+        </figure>
+        <p>投机采样用一个更小、更便宜的模型先生成 token，再用大模型检查结果。用贪心解码（greedy decoding）最容易理解：</p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/spec-sampling2.png" alt="投机采样示意图">
+            <figcaption>图：小模型先起草若干 token，大模型一次前向传播把它们全部检查一遍。（引自原书）</figcaption>
+        </figure>
+        <ol>
+            <li>从一个更小、更便宜的模型里贪心采样。最好用一个训练成和大模型匹配的模型（比如通过蒸馏），但也可以简单到用 n-gram，或在一小份语料上做 token 匹配。</li>
+            <li>生成 $K$ 个 token 之后，用大模型对目前生成的所有 token 计算下一个 token 的 logits。</li>
+            <li>因为是贪心解码，只需检查小模型生成的每个 token 是否在大模型那里概率最高。如果某个 token 错了，取最长的正确前缀，把第一个错的 token 换成正确的，然后回到 (1)。如果全对，可以用最后一个正确的 logit 再采一个额外的 token，然后回到 (1)。</li>
+        </ol>
+        <p>
+            为什么能降低延迟？这个方案仍然要为每个 token 做相当于大模型一次前向传播的 FLOPs，但可以把一串 token 放在一次前向传播里一起做，利用“没有算力受限”这一点，免费多打几个 token 的分。
+        </p>
+        <p>
+            平均下来，每个被接受的 token 在 FLOPs 上更贵了（有些会被拒绝，还要调用草稿模型），但我们从硬件里榨出了更多 FLOPs，小模型又便宜，所以总体上赢。KV cache 的加载也在多步之间共享，所以长上下文时投机解码也能提高吞吐。因为所有结果都经过大模型检查，采样分布完全不变（不过非贪心解码时具体轨迹会不同）。
+        </p>
+        <p>
+            传统的投机解码依赖于有一个采样分布和目标模型相近的小模型，比如给 LLaMA-2 70B 配 LLaMA-2 2B，但这样的小模型常常不存在。即使有，如果接受率低，小的草稿模型（drafter）仍可能太贵。另一种做法是把草稿模型嵌进主模型，比如在基础模型靠后的某一层加一个专门的 drafter head。这个 head 和主模型共享大部分参数，所以跑得更快，采样分布也更接近。
+        </p>
+        <p>
+            对普通自回归采样，token/s 和步时间是一回事。我们仍然受前面算术强度一节里理论最短步时间的约束（实际上投机采样的步时间通常比普通自回归采样慢不少，但平均每步能出不止一个 token，所以 token/s 能好很多）。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/spec-sampling3.png" alt="投机采样每步延迟与成功率">
+            <figcaption>图：Chinchilla（DeepMind 的 70B 模型）配一个 4B 参数草稿模型时的每步延迟和投机成功率。XSum（自然语言数据集）上最佳投机长度约为往前 3 到 4 个 token；HumanEval（代码数据集）更可预测，更激进的投机也有收益。（引自原书）</figcaption>
+        </figure>
+        <p>
+            非贪心解码怎么办？要复杂一些，大致是一个受 Metropolis-Hastings 启发的算法：从 logits 得到 $P_{\text{draft model}}(\text{chosen token})$ 和 $P_{\text{target model}}(\text{chosen token})$，如果两者之比小于某个阈值，就按概率拒绝这个 token。有两篇论文同时推导出了这个方法，并给出了实践中的例子。
+        </p>
+        <blockquote>
+            <p>要点：投机采样是又一个用吞吐换单 token 延迟的有力杠杆。在批大小受限的场景下（比如硬件规模小或 KV cache 大），它两头都赢。</p>
+        </blockquote>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>线性层：每个副本的 token 批大小大于 $B_\text{crit} = \beta \cdot \alpha_\text{hbm} = C / W_\text{hbm} \cdot (\text{bits per param} / \text{bits per activation})$ 时，矩阵乘法才是算力受限的。TPU v5e 上 bf16 激活是 240 个 token，H100 约 280。</li>
+            <li>prefill 时所有矩阵乘法基本总是算力受限，把 MFU 做到最大就同时优化了成本和 TTFT；除非提示词极短，按提示词拼 batch 做 prefill 只会增加延迟。</li>
+            <li>generation 时 token 总批大小要大于 $B_\text{crit}$（TPU v5e、bf16 参数时为 240）才能让线性层算力受限，这要求把很多请求拼在一起，很难。</li>
+            <li>注意力的算术强度是 $ST/(S+T)$：prefill 时约 $T/2$，序列长于约 480 个 token 就算力受限；generation 时约为 1，总是受内存带宽限制。</li>
+            <li>理论最短步时间 $= (\text{Batch Size} \times \text{KV Cache Size} + \text{Parameter Size}) / \text{Total Memory Bandwidth}$；一般式里 MLP 部分取 FLOPs 时间和参数加载时间的较大者。要 generation 吞吐，就用尽可能大的每芯片批大小（高于 $B_\text{crit}$，通常 120 或 240），必要时加大拓扑；小 batch 换延迟。</li>
+            <li>KV cache 大小 $= 2 \cdot \text{bytes per float} \cdot H \cdot K \cdot L \cdot T$，对推理性能影响很大，要用架构和运行时优化一起控制。</li>
+            <li>GQA、局部注意力、跨层共享 KV、量化、Paged Attention 等优化合起来能把 KV cache 缩小一个数量级以上。</li>
+            <li>prefill 时训练能用的分片几乎都能用：先模型并行到 ICI 界限（单轴约 $F / 2200$），再序列并行。</li>
+            <li>generation 只能用模型并行的变体，移动激活而不移动参数和 KV cache。批大小大时做到 FLOPs-ICI 界限，批大小小时可以多切来降延迟（上限约 $Y > F / (B \cdot \beta)$）；路数超过 KV 头数时 KV 沿 batch 维分片。</li>
+            <li>对延迟敏感又要高吞吐的服务，通常把 prefill 和 generation 放到不同服务器上，prefill 用批大小 1，generation 拼大 batch。</li>
+            <li>附录 C：$\text{total bytes} < W_{ICI} \times 1e-6$ 时通信受延迟限制；在 $Y$ 上做模型并行、int8 时，$Y > BD / 45,000$ 即受限。</li>
+            <li>附录 D：投机采样用吞吐换单 token 延迟；批大小受限时两头都赢。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>How To Scale Your Model · All About Transformer Inference · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

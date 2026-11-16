@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Roofline 分析 | How to Scale Your Model 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="00_导读.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">How to Scale Your Model 目录</a> · 01</span>
+    <span><a href="02_怎样理解TPU.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 1 章 · Roofline 分析</h1>
+        <p class="subtitle">一段计算要花多久，取决于算力、带宽和内存三者中哪一个先到上限；用算术强度判断它是计算受限还是通信受限</p>
+        <div class="author-meta">
+            作者：Jacob Austin、Sholto Douglas 等（Google DeepMind）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://jax-ml.github.io/scaling-book/roofline" target="_blank">All About Rooflines</a>（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            原书对这一章的概括是：在硬件上跑算法时，受三样东西限制：计算机做数学运算有多快（OPs/second），搬运数据的带宽有多大（bytes/second），以及能用来存数据的总内存有多大（bytes）。这几条“roofline”约束可以给一段计算的耗时定出上界和下界。
+        </p>
+        <p>
+            这一章是全书的地基。它定义了 $T_\text{math}$、$T_\text{comms}$、算术强度（Arithmetic Intensity）这几个后面每章都要用的量，推出一条常用规则：bf16 矩阵乘法在大多数 TPU 上要计算受限，每个副本的 token 批大小得超过 240。最后把同样的思路用到芯片之间的网络通信上。读完你应该能拿一张芯片规格表，算出一个矩阵乘法大概要多久、瓶颈在哪里。下一章（第 2 章）讲真实的 TPU 怎样处理 FLOPs 和通信。
+        </p>
+        <ol>
+            <li><a href="#t01">时间花在哪里</a></li>
+            <li><a href="#t02">习题</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 时间花在哪里</h2>
+        <p><em>原书小节：Where Does the Time Go?</em></p>
+        <p>
+            从一个很简单的问题开始：为什么一个算法跑 50ms，而不是 50s 或 5ms？模型内部到底是什么在花时间，我们应该预期它花多久？原书把时间拆成三类来源。
+        </p>
+
+        <h3>计算</h3>
+        <p>
+            深度学习模型基本上就是一堆矩阵乘法，每个矩阵乘法由浮点乘法和加法“运算”组成，这些运算的总数叫 FLOPs（floating point operations）。加速器的速度决定算完这些要多久：
+        </p>
+        $$T_\text{math} = \frac{\text{Computation FLOPs}}{\text{Accelerator FLOPs/s}}$$
+        <p>
+            例如，NVIDIA H100 每秒大约能做 9.89e14 次 bfloat16 FLOPs，TPU v6e 大约 9.1e14 FLOPs/s。（bf16 是 bfloat16 的简写，一种机器学习里常用的 16 位浮点格式。）所以在 H100 上做 1e12 FLOPs 大约要 1e12 / 9.89e14 = 1.01ms，在 TPU v6e 上要 1e12 / 9.1e14 = 1.1ms。原书旁注补充了两点：H100 和 B200 通常只能达到标称峰值 FLOPs 的 80–85% 左右，TPU 在正常使用中能接近 95%；这两种芯片价格不同，这里的比较没有按成本归一化。
+        </p>
+
+        <h3>芯片内部的通信</h3>
+        <p>
+            在一块加速器内部，张量要在加速器内存和计算核心之间来回传。加速器内存叫 HBM（High Bandwidth Memory，高带宽内存，是贴在芯片旁边的大容量显存/片外内存），这条链路的带宽叫“HBM 带宽”（NVIDIA 也叫它 memory bandwidth，内存带宽）。H100 上大约是 3.35TB/s，TPU v6e 上大约是 1.6TB/s。
+        </p>
+
+        <h3>芯片之间的通信</h3>
+        <p>
+            把模型分布到多个加速器上时，张量经常要在加速器之间传输。硬件上通常有几种选择：ICI（Inter-Chip Interconnect，TPU 芯片之间的直连链路）、DCN（Data Center Network，数据中心网络，连接不同机器或 pod 的网络）和 PCIe（主机与加速器之间的总线），它们的带宽各不相同。
+        </p>
+        <p>
+            不管是芯片内还是芯片间的通信，都用 bytes/s 来衡量，总通信时间这样估算：
+        </p>
+        $$T_\text{comms} = \frac{\text{Communication Bytes}}{\text{Network/Memory Bandwidth Bytes/s}}$$
+
+        <h3>上界与下界</h3>
+        <p>
+            通常（但不总是）单芯片内的计算可以和芯片内、芯片间的通信重叠（overlap）进行。所以训练和推理时间的下界可以取计算时间和通信时间中的最大值，上界取两者之和：
+        </p>
+        $$T_\text{lower}=\max(T_\text{math}, T_\text{comms})$$
+        $$T_\text{upper} = T_\text{math} + T_\text{comms}$$
+        <p>
+            实际中我们按最大值来优化，因为代数更简单，而且通过让通信和计算重叠，通常能接近这个下界。如果以最大值为目标，上下界最多差 2 倍，因为 $T_\text{math} + T_\text{comms} \leq 2 \cdot \max(T_\text{math}, T_\text{comms})$。想更精确，就要对“重叠区间”和额外开销建模，这可以借助对具体模型和目标系统的 profiling 来做。
+        </p>
+
+        <h3>计算受限与通信受限</h3>
+        <p>
+            假设通信和计算能完美重叠。当 $T_\text{math} > T_\text{comms}$ 时，硬件被充分利用，这叫计算受限（compute-bound）。当 $T_\text{comms} > T_\text{math}$ 时，往往是通信受限（communication-bound），加速器至少有一部分 FLOPs/s 被浪费在等数据传过来上。（原书说明：书中 communication-bound、comms-bound、memory-bound、bandwidth-bound 几个说法混用，意思相同。）
+        </p>
+        <p>
+            判断一个运算是计算受限还是通信受限，一种办法是看它的“算术强度”（arithmetic intensity，也叫 operational intensity，运算强度）。
+        </p>
+        <p>
+            定义：一个算法的算术强度，是它执行的 FLOPs 总数与它需要通信的字节数（芯片内或芯片间）之比。
+        </p>
+        $$\text{Arithmetic Intensity} = \frac{\text{Computation FLOPs}}{\text{Communication Bytes}}$$
+        <p>
+            算术强度衡量的是一个运算的“每字节 FLOPs 数”。一阶近似下，算术强度高时，$T_\text{math}$ 比 $T_\text{comms}$ 大，通常能用上大部分可用的 FLOPs；反过来，时间更多花在通信上，FLOPs 被浪费。两者交叉的那个点是硬件的“峰值算术强度”（peak arithmetic intensity），等于加速器峰值 FLOPs/s 除以加速器带宽：
+        </p>
+        $$\begin{aligned} T_\text{math} > T_\text{comms} &\Leftrightarrow \frac{\text{Computation FLOPs}}{\text{Accelerator FLOPs/s}} > \frac{\text{Communication Bytes}}{\text{Bandwidth Bytes/s}} \\ &\Leftrightarrow \frac{\text{Computation FLOPs}}{\text{Communication Bytes}} > \frac{\text{Accelerator FLOPs/s}}{\text{Bandwidth Bytes/s}} \\ &\Leftrightarrow \text{Intensity}(\text{Computation}) > \text{Intensity}(\text{Accelerator}) \end{aligned}$$
+        <p>
+            $\text{Intensity}(\text{Accelerator})$ 是加速器达到峰值 FLOPs/s 时所需的算术强度。对 TPU v5e 的 MXU 来说，这个值约为 240 FLOPs/byte，因为 TPU v5e 每秒能做 1.97e14 FLOPs，每秒能从 HBM 加载 8.2e11 字节。（MXU 是 TPU 上的矩阵乘法单元，Matrix Multiply Unit。这里特意说 MXU，是因为 TPU 还有别的计算单元，比如负责逐元素运算的 VPU，Vector Processing Unit，它的峰值 FLOPs/s 不一样。）这意味着如果一个算法的算术强度低于 240 FLOPs/byte，它会受字节加载速度限制，硬件用不满。
+        </p>
+        <p>
+            原书旁注提醒：这只在算法从 HBM 加载权重、并在 MXU 上运行时成立。下一章会讲到，有时可以把参数存在 VMEM 里，VMEM 的带宽高得多；很多算法也在 VPU 上运行，性能特征不同。
+        </p>
+
+        <h3>例子：点积</h3>
+        <p>
+            用 bfloat16 精度计算两个向量的点积 $x \cdot y$：<code>bf16[N], bf16[N] → bf16[1]</code>。需要从内存加载 $x$ 和 $y$，各 $2 \cdot N = 2N$ 字节；做 $N$ 次乘法和 $N-1$ 次加法；再把 $2$ 个字节写回 HBM。
+        </p>
+        $$\text{Intensity}(\text{dot product}) = \frac{\text{Total FLOPs}}{\text{Total Bytes}} = \frac{N + N - 1}{2N + 2N + 2} = \frac{2N - 1}{4N + 2} \rightarrow \frac{1}{2}$$
+        <p>
+            当 $N\rightarrow\infty$ 时，点积的算术强度是 $\frac{1}{2}$，也就是每加载一个字节做 0.5 次浮点运算。这比硬件的算术强度低，所以是通信受限。
+        </p>
+        <p>
+            原书旁注补充：严格说这里不该和 240 比，因为下一章会讲到，点积在 VPU 上做，不在 MXU 上做。TPU v5p 的 VPU 每个核每秒大约能做 7e12 FLOPs，所以它的临界强度约为 3，点积仍然有些通信受限。不管和哪个比，点积的强度低而且是常数，这意味着在大多数硬件上它都很难做到计算受限。
+        </p>
+
+        <h3>roofline 图</h3>
+        <p><em>原书小节：Visualizing rooflines</em></p>
+        <p>
+            内存和计算之间的取舍可以用 roofline 图画出来：纵轴是算法在硬件上能达到的峰值 FLOPs/s（吞吐量），横轴是算法的算术强度。下面是一张双对数坐标的例子：
+        </p>
+        <figure><img src="https://jax-ml.github.io/scaling-book/assets/img/roofline-improved.png" alt="roofline 示意图，两种算法在两种带宽下的峰值吞吐"><figcaption>图：一张 roofline 示意图。两个算术强度不同的算法（Algo 1 和 Algo 2）在两种带宽（BW1 和 BW2）下的理论峰值吞吐。红色区域里，算法在两种带宽下都受带宽限制，浪费了一部分硬件峰值 FLOPs/s。黄色区域只在较低带宽（BW1）下受带宽限制。绿色区域在所有带宽下都是计算受限，这时已经用到加速器的峰值 FLOPs/s，再提高带宽或强度都没有收益（引自原书）</figcaption></figure>
+        <p>
+            从左往右，强度增加，算法性能（FLOPs/s）一开始线性上升，直到碰到硬件的临界算术强度，TPU v5e 是 240。强度低于这个值的算法受带宽（BW）限制，被峰值内存带宽卡住（红色）。右边的算法能用满 FLOPs（绿色）。图里 Algo 1 是通信受限，只用了硬件总 FLOPs/s 的一部分；Algo 2 是计算受限。一般有两种办法提升算法性能：提高它的算术强度，或者增加可用的内存带宽（从 BW1 换到 BW2）。
+        </p>
+
+        <h3>矩阵乘法</h3>
+        <p><em>原书小节：Matrix multiplication</em></p>
+        <p>
+            下面看我们很快就会最喜欢的算法：矩阵乘法（matrix multiplication，简称 matmul）。给定两个矩阵 $X$ 和 $Y$，写作 $X * Y \rightarrow Z$，其中 $X$ 的形状是 $\text{bf16}[B, D]$，$Y$ 是 $\text{bf16}[D, F]$，$Z$ 是 $\text{bf16}[B, F]$。做这个 matmul 需要加载 $2DF + 2BD$ 字节，做 $2BDF$ 次 FLOPs，再写回 $2BF$ 字节。
+        </p>
+        <p>
+            原书旁注说明：严格说是 $BF \times (2D - 1)$ 次 FLOPs，来自 $BDF$ 次乘法和 $BF \cdot (D-1)$ 次加法，取 $2BDF$ 已经够近了，第 4 章有更多细节。matmul 的输出严格说是 float32，但通常会先转回 bfloat16 再拷回 HBM。于是：
+        </p>
+        $$\text{Intensity}(\text{matmul}) = \frac{2BDF}{2BD + 2DF + 2BF} = \frac{BDF}{BD + DF + BF}$$
+        <p>
+            如果假设“批大小” $B$ 相对 $D$ 和 $F$ 很小，可以得到一个很好的化简：
+        </p>
+        $$\frac{BDF}{BD + DF + BF} \approx \frac{BDF}{DF} = B$$
+        $$\text{Intensity}(\text{matmul}) > \text{Intensity}(\text{TPU}) \implies B > \frac{1.97e14}{8.20e11} = 240$$
+        <p>
+            对 Transformer 的矩阵乘法来说这个假设是合理的，因为本地（每个副本）的 token 批大小通常 $B < 1024$（注意是 token 数，不是序列数），而 $D$ 和 $F > 8000$。所以当每个副本的批大小超过 240 个 token 时，通常就变成计算受限。规则很简单。
+        </p>
+        <p>
+            为什么说“每个副本”（per-replica）：如果用某种模型分片把一个 matmul 分到更多芯片上，可用的算力和内存带宽会按同样比例增加，所以临界批大小是针对每一份独立的模型权重副本来说的。
+        </p>
+        <p>
+            <strong>Takeaway：</strong>在大多数 TPU 上，bfloat16 matmul 要做到计算受限，批大小需要大于 240（个 token）。
+        </p>
+        <p>
+            这里的批大小和通常说的不一样，通常的“批大小”指序列数。事实上大多数 roofline 只取决于 token 数，不管这些 token 属于同一条序列还是不同序列。例如，2048 块 GPU 上批大小是 512 条序列、每条 4096 个 token，那么总批大小是 <code>512 * 4096 = 2M</code> 个 token，每块 GPU 的本地批大小是 1k 个 token。
+        </p>
+        <p>
+            这条规则有几个需要注意的地方，后面的习题会讨论，尤其是和量化（quantization）有关的情况，比如把激活量化了但 FLOPs 仍用全精度做。不过它值得记住。GPU 上这个数稍高一些（接近 300），但结论大体相同。
+        </p>
+        <p>
+            把一个大 matmul 拆成小 matmul 时，分块（tile）大小也有影响。做大矩阵乘法时，要把它拆成能放进 VMEM/SMEM/TMEM 的小块（这几种是芯片上带宽更高的片上存储），这会导致某些块被重复加载，所以“只加载 $O(N^2)$ 字节”就不完全成立了。考虑一个 $(m, k) \cdot (k, n)$ 的 matmul，分块大小为 $bm$、$bk$、$bn$，令 $tm = m / bm$，其余类推。总 FLOPs 是 $2 \cdot tm \cdot tn \cdot tk \cdot bm \cdot bn \cdot bk$，总字节数是 $2 \cdot tm \cdot tn \cdot (tk \cdot (bm \cdot bk + bk \cdot bn) + bm \cdot bn)$。忽略最后一项，强度是 $bm \cdot bn / (bm + bn)$，和上面的结果类似。GPU 和 TPU 更底层的细节在下一章讲。
+        </p>
+
+        <h3>网络通信的 roofline</h3>
+        <p><em>原书小节：Network communication rooflines</em></p>
+        <p>
+            到目前为止讨论的 roofline 都是内存带宽 roofline，全在单芯片内部。这不是普遍情况。这本书里我们关心的大多数 roofline 涉及芯片之间的通信，通常是矩阵被分片（sharded）到多块 TPU 上时的矩阵乘法。
+        </p>
+        <p>
+            举一个有点刻意的例子：要乘两个大矩阵 $X\sim \text{bf16}[B, D]$ 和 $Y \sim \text{bf16}[D, F]$，它们沿 $D$ 维均匀切分到 2 块 TPU/GPU 上。第 3 章会讲到，做法是每块 TPU 乘各自的一半：TPU 0 上算 <code>Z0 = X[:, :D // 2] @ Y[:D // 2, :]</code>，TPU 1 上算 <code>Z1 = X[:, D // 2:] @ Y[D // 2:, :]</code>，然后把得到的“部分和”（partial sums）拷到另一块 TPU 上相加。假设每个方向每秒能拷 4.5e10 字节，每块芯片每秒能做 1.97e14 FLOPs。$T_\text{math}$ 和 $T_\text{comms}$ 各是多少？
+        </p>
+        <p>
+            $T_\text{math}$ 显然是原来的一半，因为每块 TPU 只做一半的工作（这里忽略了把两个部分和相加所需的 FLOPs，那是另外 $BF$ 次加法，基本可以忽略）：
+        </p>
+        $$T_\text{math} = \frac{2BDF}{2 \cdot \text{Accelerator FLOPs/s}} = \frac{BDF}{1.97e14}$$
+        <p>
+            $T_\text{comms}$ 现在指的是芯片之间的通信时间，就是发送的总字节数除以网络带宽。每块芯片要发出的部分和是 $\text{bf16}[B, F]$，即 $2BF$ 字节：
+        </p>
+        $$T_\text{comms} = \frac{2BF}{\text{Network Bandwidth}} = \frac{2BF}{4.5e10}$$
+        <p>
+            所以，当 $\text{Intensity}(\text{matmul (2-chips)}) > \text{Intensity}(\text{TPU w.r.t. inter-chip network})$ 时，就变成了计算受限（这次是相对芯片间网络而言）。等价地，当 $\frac{BDF}{2BF} = \frac{D}{2} > \frac{1.97e14}{4.5e10} = 4377$，也就是 $D > 8755$ 时。
+        </p>
+        <p>
+            和前面不同，这里的临界阈值取决于 $D$，跟 $B$ 无关。原书让读者自己想想为什么。（从上面两个式子可以看出：计算量和通信量都和 $B$、$F$ 成正比，相除后只剩下 $D$。）这只是一个例子，但这类 roofline 是判断能否把一个运算并行到多块 TPU 上的依据。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 习题</h2>
+        <p><em>原书小节：A Few Problems to Work</em></p>
+
+        <h3>习题 1：int8 矩阵乘法</h3>
+        <p>
+            题目：要做矩阵乘法 $X[B, D] \cdot_D Y[D, F] \rightarrow Z[B, F]$，用 int8 精度（每个参数 1 字节），而不是 bfloat16（每个参数 2 字节），因为 TPU/GPU 用低精度做矩阵乘法更快。（记号说明：这里和全书都用 $A \cdot_D B$ 表示在 $D$ 维上做收缩，也就是沿 $D$ 求和，这是对 einsum 记号的一种借用。）
+        </p>
+        <ol>
+            <li>需要从内存加载多少字节？需要写回多少字节？</li>
+            <li>总共做了多少次运算（OPs）？</li>
+            <li>算术强度是多少？</li>
+            <li>$T_\text{math}$ 和 $T_\text{comms}$ 的 roofline 估计是多少？整个运算的运行时间合理的上下界是多少？</li>
+        </ol>
+        <p>假设 HBM 带宽是 8.2e11 bytes/s，int8 峰值 OPs/s 是 3.94e14（约为 bfloat16 的 2 倍）。</p>
+        <p>解答：</p>
+        <ol>
+            <li>参数以 int8 存储，每个参数 1 字节，所以从 HBM 加载 $BD + DF$ 字节，写回 $BF$ 字节。</li>
+            <li>运算次数和 bfloat16 一样，仍然是 $2BDF$ 次 OPs，只是理论上 int8 的 OPs/s 更快。</li>
+            <li>算术强度是 $2BDF / (BD + DF + BF)$。和前面一样假设 $B \ll D$、$B \ll F$，得到算术强度约为 $2B$。规则变成 $B > \text{HBM int8 arithmetic intensity} / 2$。用题目给的数，int8 强度是 3.94e14 / 8.2e11 = 480，所以规则是 $B > 480 / 2 = 240$，和 bf16 时基本没变。</li>
+            <li>$T_\text{math} = 2BDF / 3.94e14$，$T_\text{comms} = (BD + DF + BF) / 8.2e11$。合理的下界是 $\max(T_\text{math}, T_\text{comms})$，上界是 $T_\text{math} + T_\text{comms}$。</li>
+        </ol>
+
+        <h3>习题 2：int8 权重 + bf16 计算的矩阵乘法</h3>
+        <p>
+            题目：实际中权重和激活常常用不同的量化方式：权重存成很低的精度，激活（和计算）保持较高精度。假设把权重量化成 int8，激活和计算保持 bfloat16，批大小多大时会变成计算受限？假设 bfloat16 是 1.97e14 FLOPs/s。提示：具体就是 <code>bf16[B, D] * int8[D, F] -> bf16[B, F]</code>，$B$ 是“批大小”。
+        </p>
+        <p>
+            解答：仍假设 $B$ 很小。FLOPs 还是 $2BDF$ 次 bfloat16 运算，但权重只有 $DF$ 字节（bfloat16 时是 $2DF$）。所以强度约为 $2BDF / DF = 2B$，当 $2B > 240$，即 $B > 120$ 时变成计算受限。这个门槛低了很多。也就是说，如果能做 int8 权重量化（这比较容易做）而 FLOPs 仍用 bfloat16，效率会有明显提升（当然直接用 int8 OPs 会更好）。
+        </p>
+
+        <h3>习题 3：画 roofline 图</h3>
+        <p>
+            题目：沿用习题 2 的设定，分别对 $F = D = 4096$ 和 $F = D = 1024$，画出峰值 FLOPs/s 随 $B$ 变化的 roofline 图。要用精确的加载字节数，不要用近似。
+        </p>
+        <p>解答：图如下。</p>
+        <figure><img src="https://jax-ml.github.io/scaling-book/assets/img/roofline-plot-q3.png" alt="F=D=4096 与 F=D=1024 两种情况下峰值 FLOPs/s 随批大小变化的曲线"><figcaption>图：TPU v5e 上 bf16 激活乘 int8 权重时，峰值 bfloat16 FLOPs/s 随批大小的变化，分别对应 F=D=4096 和 F=D=1024（引自原书）</figcaption></figure>
+        <p>
+            两种尺寸最终都能达到硬件峰值 FLOPs/s，但 D/F 更大的那个更早达到。D=F=1024 时临界批大小几乎翻倍。（整理者按下面代码里的精确字节数 $2BD + DF + 2BF$ 解了一下交点：D=F=4096 时约在 $B \approx 136$，D=F=1024 时约在 $B \approx 226$。）生成这张图的代码：
+        </p>
+        <pre><code>import matplotlib.pyplot as plt
+import numpy as np
+
+bs = np.arange(1, 512)
+
+def roofline(B, D, F):
+  total_flops = 2*B*D*F
+  flops_time = total_flops / 1.97e14
+  comms_time = (2*B*D + D*F + 2*B*F) / 8.2e11
+  total_time = np.maximum(flops_time, comms_time)
+  return total_flops / total_time
+
+roofline_big = roofline(bs, 4096, 4096)
+roofline_small = roofline(bs, 1024, 1024)
+
+plt.figure(figsize=(8, 4))
+plt.plot(bs, roofline_big, label='F=D=4096')
+plt.plot(bs, roofline_small, label='F=D=1024')
+plt.legend()
+plt.xlabel('batch size')
+plt.ylabel('peak bfloat16 FLOPs/s on TPU v5e')
+plt.grid()</code></pre>
+
+        <h3>习题 4：每个批元素一个矩阵</h3>
+        <p>
+            题目：如果要做 $\text{int8}[B, D] \cdot_D \text{int8}[B, D, F] \rightarrow \text{int8}[B, F]$，也就是每个批元素都有一个不同的矩阵，这个运算的算术强度是多少？
+        </p>
+        <p>解答：先看总 FLOPs 和总通信量。</p>
+        <ul>
+            <li>总 FLOPs：基本不变。这里做的是 $B$ 个独立的 $[D] \times [D, F]$ 乘积，总工作量和一个 $[B, D] \times [D, F]$ matmul 相同（第 4 章有更多讨论），所以还是 $2BDF$。</li>
+            <li>总通信量：多了很多，变成 $BD + BDF + BF$。</li>
+        </ul>
+        <p>
+            所以算术强度是 $2BDF / (BD + BDF + BF)$。分母里 $BDF$ 占主导，强度大约是 $2$。它不再随批大小变化，基本是常数。这很糟糕，意味着无论怎样，这个运算基本总是通信受限。
+        </p>
+
+        <h3>习题 5：GPU 的内存 roofline</h3>
+        <p>
+            题目：用 NVIDIA 给出的 H100 SXM 规格表，算出 bfloat16 矩阵乘法在批大小多大时变成计算受限。注意规格表上 Tensor Core 的 FLOPs 数是真实值的两倍，因为那个数只有在结构化稀疏（structured sparsity）下才能达到。
+        </p>
+        <p>
+            解答：规格表上 bfloat16 的值是 1.979e15 FLOPs/s，带星号注明“with sparsity”。不用稀疏时的真实值是一半，即 9.89e14 FLOPs/s。内存带宽是 3.35TB/s，即 3.35e12 bytes/s。所以：
+        </p>
+        $$B_\text{crit} = \frac{9.89e14}{3.35e12} = 295$$
+        <p>和 TPU 的 240 相当接近。</p>
+        <p>第 1 部分到此结束。第 2 部分看真实的 TPU 怎样处理 FLOPs 和通信，见 <a href="02_怎样理解TPU.html">第 2 章</a>。</p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>计算时间 $T_\text{math} = \text{FLOPs} / \text{FLOPs/s}$，通信时间 $T_\text{comms} = \text{Bytes} / \text{Bandwidth}$；运行时间下界是 $\max(T_\text{math}, T_\text{comms})$，上界是 $T_\text{math} + T_\text{comms}$，两者最多差 2 倍。</li>
+            <li>算术强度 = FLOPs / 通信字节数。高于硬件峰值强度（峰值 FLOPs/s ÷ 带宽）就是计算受限，低于就是通信受限。TPU v5e MXU 约为 $1.97e14 / 8.2e11 \approx 240$ FLOPs/byte。</li>
+            <li>点积的强度趋近 $\frac{1}{2}$，是常数，在大多数硬件上很难计算受限。</li>
+            <li>bf16 matmul 的强度在 $B \ll D, F$ 时约等于 $B$。<strong>Takeaway：</strong>在大多数 TPU 上，bfloat16 matmul 要计算受限，每个副本的批大小需要大于 240 个 token；GPU 上接近 300（H100：$9.89e14 / 3.35e12 \approx 295$）。</li>
+            <li>批大小按 token 数算，不按序列数算；“每个副本”是因为模型分片会同比增加算力和带宽。</li>
+            <li>int8 权重 + bf16 计算时门槛降到 $B > 120$；全 int8 时仍是 $B > 240$；每个批元素各有一个矩阵时强度约为 2，总是通信受限。</li>
+            <li>芯片间网络也有 roofline：沿 $D$ 切到 2 块芯片的 matmul，在 $D/2 > 1.97e14 / 4.5e10 = 4377$，即 $D > 8755$ 时才是计算受限，阈值取决于 $D$ 而不是 $B$。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>How To Scale Your Model · All About Rooflines · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

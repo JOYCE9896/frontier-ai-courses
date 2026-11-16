@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transformer 需要知道的全部数学 | How to Scale Your Model 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="03_分片矩阵与矩阵乘法.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">How to Scale Your Model 目录</a> · 04</span>
+    <span><a href="05_训练时怎样并行Transformer.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 4 章 · Transformer 需要知道的全部数学</h1>
+        <p class="subtitle">怎样数一个 Transformer 的参数量、训练 FLOPs 和 KV cache 大小，以及 6 × 参数量 × token 数这条经验公式从哪来</p>
+        <div class="author-meta">
+            作者：Jacob Austin、Sholto Douglas 等（Google DeepMind）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://jax-ml.github.io/scaling-book/transformers" target="_blank">All the Transformer Math You Need to Know</a>（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            前三章讲了 roofline、TPU 的结构和分片矩阵乘法，都是在硬件和单个矩阵乘法的层面。这一章把视角拉到整个 Transformer：一层里有哪些矩阵乘法，每个乘法要多少 FLOPs（浮点运算次数），有多少参数，训练时为什么大约是推理的 3 倍。原书不重新介绍 Transformer 结构本身，默认读者已经知道注意力和 MLP 是什么，只做“记账”。
+        </p>
+        <p>
+            读完之后应该能做几件事：给定 $D$、$F$、$L$、$V$ 这些尺寸，算出模型参数量和其中注意力占多少；用 $6 \times$ 参数量 $\times$ token 数估算一次训练的总 FLOPs，再结合实际 GPU 小时数反推硬件利用率；判断上下文多长时注意力的 FLOPs 开始超过 MLP；算出一个 KV cache 占多少字节。后面第 5 章讲训练并行、第 7 章讲推理，都会反复用到这里的公式。章末还附了 Flash Attention 的原理。
+        </p>
+        <ol>
+            <li><a href="#t01">数点积：矩阵乘法的 FLOPs</a></li>
+            <li><a href="#t02">Transformer 结构和记号</a></li>
+            <li><a href="#t03">整个模型的 FLOPs 和参数量</a></li>
+            <li><a href="#t04">其他几笔账：MoE、梯度检查点、KV cache</a></li>
+            <li><a href="#t05">习题</a></li>
+            <li><a href="#t06">附录 A：Flash Attention 是怎么工作的</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 数点积：矩阵乘法的 FLOPs</h2>
+        <p><em>原书小节：Counting Dots</em></p>
+        <p>
+            先看几个最基本的数组：向量 $x$、$y$ 的形状都是 $[P]$，矩阵 $A$ 的形状是 $[N, P]$，矩阵 $B$ 的形状是 $[P, M]$。
+        </p>
+        <ul>
+            <li>点积 $x \cdot y$ 要做 $P$ 次乘法和 $P$ 次加法，一共 $2P$ 次浮点运算（FLOPs，floating-point operations）。</li>
+            <li>矩阵乘向量 $Ax$ 就是沿 $A$ 的每一行各做一次点积，共 $N$ 次，合计 $2NP$ FLOPs。</li>
+            <li>矩阵乘矩阵 $AB$ 是对 $B$ 的 $M$ 列各做一次矩阵乘向量，合计 $2NPM$ FLOPs。</li>
+        </ul>
+        <p>
+            推广到更高维的数组。设 $C$ 和 $D$ 两个数组，它们的一些维度是收缩维（contracting dimension），一些是批维（batching dimension），比如 $C[\textcolor{blue}{GH}IJ\textcolor{red}{KL}]$ 和 $D[\textcolor{blue}{GH}MN\textcolor{red}{KL}]$（蓝色是批维，红色是收缩维）。这次运算的 FLOPs 等于 2 乘以 $C$ 和 $D$ 所有维度的乘积，其中批维和收缩维只算一次，即 $2\textcolor{blue}{GH}IJMN\textcolor{red}{KL}$。
+        </p>
+        <p>
+            这两个词的含义：收缩维是运算中被求和掉的轴，在两个输入里都出现、在输出里不出现，比如矩阵乘法的内维。批维是两个输入共有、原样带到输出里的轴，每个下标对应一个独立的子问题，在 FLOPs 计算里不会被“乘两次”。用 einsum 的话说，两个输入和输出里都有的标签是批维，两个输入都有而输出没有的是收缩维。一个维度只有在两个乘数里都出现时才算批维。另外，如果没有任何收缩维，那只是逐元素乘法，前面的系数 2 就不适用。
+        </p>
+        <table>
+            <thead>
+                <tr><th>运算</th><th>FLOPs</th><th>数据量（元素个数）</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>$x \cdot y$</td><td>$2P$</td><td>$2P$</td></tr>
+                <tr><td>$Ax$</td><td>$2NP$</td><td>$NP + P$</td></tr>
+                <tr><td>$AB$</td><td>$2NPM$</td><td>$NP + PM$</td></tr>
+                <tr><td>$[c_0,\ldots,c_N] \cdot [d_0,\ldots,d_N]$</td><td>$2 \prod c_i \times \prod_{d_j \notin \text{BATCH},\, d_j \notin \text{CONTRACT}} d_j$</td><td>$\prod c_i + \prod d_j$</td></tr>
+            </tbody>
+        </table>
+        <p>
+            矩阵乘矩阵有一个性质要记住：计算量按 $O(N^3)$ 增长，数据传输量只按 $O(N^2)$ 增长。矩阵越大，越容易进入算力饱和（compute-bound）的区间。原书说这种性质在各类运算里很少见，这也是我们偏爱以矩阵乘法为主的模型架构的主要原因：它们适合往大了做。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/matmul-flops.gif" alt="矩阵乘法 FLOPs 的动画">
+            <figcaption>图：矩阵乘法中每个输出元素由一行和一列做点积得到，FLOPs 随三个维度的乘积增长（引自原书）</figcaption>
+        </figure>
+
+        <h3>前向和反向的 FLOPs</h3>
+        <p><em>原书小节：Forward and reverse FLOPs</em></p>
+        <p>
+            训练时我们并不关心某个矩阵乘法的结果本身，关心的是它的导数。算这个导数大约要多花 2 倍，加上前向本身，总共约是单次矩阵乘法的 3 倍。
+        </p>
+        <p>
+            设 $B$ 是大网络中的一个权重矩阵，$A$ 是输入激活（activation），$C = AB$。根据链式法则，损失 $L$ 对 $B$ 的导数是
+        </p>
+        $$\frac{\partial L}{\partial B} = \frac{\partial L}{\partial C}\frac{\partial C}{\partial B} = A^T \left(\frac{\partial L}{\partial C}\right)$$
+        <p>
+            它沿 $N$ 维收缩，需要 $2NPM$ FLOPs。同样，损失对 $A$ 的导数是
+        </p>
+        $$\frac{\partial L}{\partial A} = \frac{\partial L}{\partial C}\frac{\partial C}{\partial A} = \left(\frac{\partial L}{\partial C}\right) B^T$$
+        <p>
+            $\partial L / \partial C$ 是 $[N, M]$ 的矩阵，所以这一项也是 $2NPM$ FLOPs。$\partial L/\partial A$ 不是对参数的导数，但要靠它把梯度继续往前面的层传，就像上面用 $\partial L/\partial C$ 去算 $\partial L/\partial B$ 一样。
+        </p>
+        <p>
+            加起来，训练时一个矩阵乘法总共 $6NPM$ FLOPs：前向 $2NPM$，反向 $4NPM$；推理只有前向的 $2NPM$。$PM$ 是这个矩阵的参数个数，$N$ 可以看成 token 数，于是得到那条有名的近似公式最简单的形式：训练 FLOPs $\approx 6 \times$ 参数量 $\times$ token 数，也就是每个 token 花 $6 \times$ 参数量 的 FLOPs。下一节会给出更严格的推导。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. Transformer 结构和记号</h2>
+        <p><em>原书小节：Transformer Accounting</em></p>
+        <p>
+            原书的态度是：Transformer 就算不是未来，也是现在。几年前它还是众多架构之一，今天值得把它的每个细节都弄清楚。书里不重新介绍架构，推荐读者参考一篇讲解博客和原始的 Transformer 论文（Attention Is All You Need）。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/transformer-diagram.png" alt="Transformer 解码器一层的结构和数组形状">
+            <figcaption>图：标准 Transformer 的一层，从上往下流动。每个运算左上方是输入形状，右上方是参数形状，下方是结果形状，红色是收缩维，蓝色是批维。比如门控 einsum 的输入形状是 BTD，权重形状是 DF（引自原书）</figcaption>
+        </figure>
+        <p>
+            全书用单字母记号表示数组的维度。结合本章后文，常用的有：$B$ 批大小（batch size），$T$ 查询序列长度，$S$ 键值序列长度，$D$ 模型宽度（$d_\text{model}$），$F$ MLP 中间层宽度（$d_\text{ff}$），$N$ 查询头数，$K$ 键值头数，$G = N/K$ 每个键值头对应的查询头数，$H$ 每个头的维度，$L$ 层数，$V$ 词表大小。
+        </p>
+        <p>图下有三条说明：</p>
+        <ul>
+            <li><strong>门控 einsum（gating einsum）。</strong>图里的 MLP 把上投影矩阵拆成两个，$W_\text{In1}$ 和 $W_\text{In2}$，两者的输出逐元素相乘，起“门控函数”的作用。不是所有 LLM 都这么做，有的模型只有一个 $W_\text{In}$，MLP 总参数量是 $2DF$ 而不是 $3DF$；这种情况下通常会把 $D$ 和 $F$ 调大，让参数量和三矩阵版本持平。LLaMA、DeepSeek 等很多模型都用某种门控 einsum。</li>
+            <li>多头注意力（MHA，Multi-Head Attention）。自注意力时 $T$ 和 $S$ 相同，交叉注意力时两者可以不同。标准 MHA 里 $N = K$；多查询注意力（MQA，Multi-Query Attention）里 $K = 1$，所有查询头共用一组键值头；分组多查询注意力（GMQA，Grouped MQA，也常叫 GQA）只要求 $K$ 能整除 $N$。</li>
+            <li>前置归一化和后置归一化（pre-norm vs. post-norm）。图里是 pre-norm 架构，归一化放在残差连接之前，通常写成 <code>x + attn(norm(x))</code>，LLaMA-3 等今天的模型用的是这种。原始 Transformer 论文用的是 post-norm，LayerNorm 放在残差连接之后，即 <code>norm(x + attn(x))</code>。</li>
+        </ul>
+    </section>
+
+    <section id="t03">
+        <h2>03. 整个模型的 FLOPs 和参数量</h2>
+        <p><em>原书小节：Global FLOPs and Params Calculation</em></p>
+        <p>
+            下面按每层计算，这样不用到处乘 $L$。表里给的是训练 FLOPs，它几乎总是推理 FLOPs 的 3 倍，要算只做前向的代价，把总数除以 3 即可。
+        </p>
+
+        <h3>MLP</h3>
+        <p><em>原书小节：MLPs</em></p>
+        <p>Transformer 的 MLP 通常由两个输入矩阵乘法（结果逐元素组合）和一个输出矩阵乘法组成：</p>
+        <table>
+            <thead>
+                <tr><th>运算</th><th>训练 FLOPs</th><th>参数量</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>$A[B,T,\textcolor{red}{D}] \cdot W_{in1}[\textcolor{red}{D}, F]$</td><td>$6BTDF$</td><td>$DF$</td></tr>
+                <tr><td>$A[B,T,\textcolor{red}{D}] \cdot W_{in2}[\textcolor{red}{D}, F]$</td><td>$6BTDF$</td><td>$DF$</td></tr>
+                <tr><td>$\sigma(A_{in1})[B,T,F] * A_{in2}[B,T,F]$</td><td>$O(BTF)$</td><td></td></tr>
+                <tr><td>$A[B,T,\textcolor{red}{F}] \cdot W_{out}[\textcolor{red}{F}, D]$</td><td>$6BTDF$</td><td>$DF$</td></tr>
+                <tr><td>合计</td><td>$\approx 18BTDF$</td><td>$3DF$</td></tr>
+            </tbody>
+        </table>
+        <p>其中 $\sigma$ 是激活函数。逐元素相乘那一步只有 $O(BTF)$，和矩阵乘法相比可以忽略。</p>
+
+        <h3>注意力</h3>
+        <p><em>原书小节：Attention</em></p>
+        <p>
+            考虑一般的分组查询注意力，查询头数 $N$ 和键值头数 $K$ 可以不同，假设 Q、K、V 投影的头维度都是 $H$。先算 Q、K、V、O 四个投影矩阵乘法：
+        </p>
+        <table>
+            <thead>
+                <tr><th>运算</th><th>训练 FLOPs</th><th>参数量</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>$A[B,T,\textcolor{red}{D}] \cdot W_{Q}[\textcolor{red}{D}, N, H]$</td><td>$6BTDNH$</td><td>$DNH$</td></tr>
+                <tr><td>$A[B,T,\textcolor{red}{D}] \cdot W_{K}[\textcolor{red}{D}, K, H]$</td><td>$6BTDKH$</td><td>$DKH$</td></tr>
+                <tr><td>$A[B,T,\textcolor{red}{D}] \cdot W_{V}[\textcolor{red}{D}, K, H]$</td><td>$6BTDKH$</td><td>$DKH$</td></tr>
+                <tr><td>$A[B,T,\textcolor{red}{N}, \textcolor{red}{H}] \cdot W_{O}[\textcolor{red}{N}, \textcolor{red}{H}, D]$</td><td>$6BTDNH$</td><td>$DNH$</td></tr>
+                <tr><td>合计</td><td>$12BTD(N+K)H$</td><td>$2D(N+K)H$</td></tr>
+            </tbody>
+        </table>
+        <p>
+            点积注意力（dot-product attention）本身要复杂一些。它相当于一个 $TH \cdot HS$ 的矩阵乘法（在 $B$、$K$ 两个维度上做批），接一个 softmax，再接一个 $TS \cdot SH$ 的矩阵乘法（同样在 $B$、$K$ 上做批）。下面蓝色标出批维：
+        </p>
+        <table>
+            <thead>
+                <tr><th>运算</th><th>训练 FLOPs</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>$Q[\textcolor{blue}{B}, T, \textcolor{blue}{K}, G, \textcolor{red}{H}] \cdot K[\textcolor{blue}{B}, S, \textcolor{blue}{K}, \textcolor{red}{H}]$</td><td>$6BTSKGH = 6BTSNH$</td></tr>
+                <tr><td>$\text{softmax}_S \; L[B, T, S, K, G]$</td><td>$O(BTSKG) = O(BTSN)$</td></tr>
+                <tr><td>$S[\textcolor{blue}{B}, T, \textcolor{red}{S}, \textcolor{blue}{K}, G] \cdot V[\textcolor{blue}{B}, \textcolor{red}{S}, \textcolor{blue}{K}, H]$</td><td>$6BTSKGH = 6BTSNH$</td></tr>
+                <tr><td>合计</td><td>$\approx 12BTSNH = 12BT^2NH$</td></tr>
+            </tbody>
+        </table>
+        <p>
+            这里 $Q$ 的头维被拆成 $[K, G]$，$KG = N$，所以 $6BTSKGH$ 等于 $6BTSNH$；自注意力时 $S = T$，于是合计是 $12BT^2NH$。
+        </p>
+        <p>
+            关于因果掩码（causal masking）：现在多数 Transformer 用因果掩码，每个位置只看它前面的位置，不做完整的双向注意力。这时两个点积运算里有用的 FLOPs 减半。要在实际中拿到这一半的节省，需要用专门的注意力 kernel，朴素的 einsum 做不到。
+        </p>
+
+        <h3>其他运算</h3>
+        <p><em>原书小节：Other Operations</em></p>
+        <p>
+            Transformer 里还有一些别的运算。LayerNorm 相对便宜，一阶估算时可以忽略；每层通常有两个，一个在注意力前，一个在 MLP 前。另外最后还有一个很大的反嵌入（unembedding）矩阵乘法，整个模型只有一个，不按层重复，作用是把 $D$ 维的隐状态映射成 $V$ 个词的打分。
+        </p>
+        <table>
+            <thead>
+                <tr><th>运算</th><th>训练 FLOPs</th><th>参数量</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>$2 \times \text{layernorm}_D \; A[B,T,\textcolor{red}{D}]$</td><td>$O(BTD)$</td><td>$2D$</td></tr>
+                <tr><td>$A[B,T,\textcolor{red}{D}] \cdot W_{unembed}[\textcolor{red}{D}, V]$</td><td>$6BTDV$</td><td>$DV$</td></tr>
+            </tbody>
+        </table>
+
+        <h3>Transformer FLOPs 的通用经验公式</h3>
+        <p><em>原书小节：General rule of thumb for Transformer FLOPs</em></p>
+        <p>
+            如果忽略点积注意力的代价（对较短上下文的训练这样做是合理的），所有层的总 FLOPs 是
+        </p>
+        $$\begin{aligned} (18BTDF + 12BTD(N+K)H)L &= 6 \cdot BT \cdot (3DF + 2D(N+K)H)L \\ &= 6 \cdot \text{num tokens} \cdot \text{parameter count} \end{aligned}$$
+        <p>
+            $BT$ 是 token 数，$(3DF + 2D(N+K)H)L$ 是所有层的参数量。这就是估算稠密 Transformer FLOPs 的那条有名的经验公式：<strong>训练 FLOPs ≈ 6 × token 数 × 参数量</strong>，它忽略了注意力的 FLOPs。反嵌入也是一个普通矩阵乘法，$6BTDV$ FLOPs、$DV$ 个参数，同样符合这条公式。
+        </p>
+
+        <h3>注意力的 FLOPs 占比怎样随上下文长度变化</h3>
+        <p><em>原书小节：Fractional cost of attention with context length</em></p>
+        <p>
+            如果把点积注意力也算进来，并按常见设定取 $F = 4D$、$D = NH$、$N = K$，那么点积注意力的 FLOPs 和所有矩阵乘法 FLOPs（含注意力投影）之比是：
+        </p>
+        $$\frac{\text{attention FLOPs}}{\text{matmul FLOPs}} = \frac{12BT^2NH}{18BTDF + 24BTDNH} = \frac{12BT^2D}{4 \cdot 18 BTD^2 + 24 BTD^2} = \frac{12BT^2D}{96 BTD^2} = \frac{T}{8D}$$
+        <p>
+            结论是，训练时只有 $T > 8D$ 时点积注意力的 FLOPs 才占主导。$D$ 约 8k 时，这个长度约是 64K token。这也说得通：MLP 越宽，注意力的 FLOPs 就越不重要。对大模型来说，注意力的平方代价并不是长上下文训练的大障碍。小模型就不同了，比如 Gemma-27B 的 $D = 4608$，序列长度到 37k 左右注意力就占主导。（原书补充：一些新的开源模型用了局部注意力或其他优化，降低了注意力的代价，这个界线也会跟着变。Flash Attention 也能减轻长上下文的代价，见附录 A。）
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 其他几笔账：MoE、梯度检查点、KV cache</h2>
+        <p><em>原书小节：Miscellaneous Math</em></p>
+
+        <h3>稀疏性和混合专家模型</h3>
+        <p><em>原书小节：Sparsity and Mixture-of-Experts</em></p>
+        <p>
+            混合专家模型（MoE，Mixture of Experts）把标准 Transformer 里单个稠密的 MLP 块换成一组互相独立的 MLP（称为专家，expert），每个 token 动态地路由到其中几个。一阶近似下，MoE 就是一个每层有 $E$ 个 MLP 块而不是 1 个的稠密模型。每个 token 激活其中 $k$ 个专家，通常 $k \ll E$。$E/k$ 叫稀疏度（sparsity），一般在 8 到 64 之间，比如 DeepSeek v3 实际上是 $k = 8$、$E = 256$。和对应的稠密版本相比，MoE 的参数量增加 $O(E)$ 倍，而每个 token 实际激活的参数量乘以 $k$。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/moe.png" alt="一个有 n 个专家的 MoE 层">
+            <figcaption>图：一个有 $n$ 个专家的 MoE 层。门控网络把每个 token 路由到其中 $k$ 个专家，再把这 $k$ 个 MLP 的输出相加。参数量是单个专家的 $n$ 倍，但每个 token 只用到 $k$ 个（引自原书，原书注明另有出处）</figcaption>
+        </figure>
+        <p>
+            和稠密模型相比，MoE 带来了新的通信，主要是两次 AllToAll：一次在 MoE 块之前，把 token 发到它对应专家所在的设备；一次在之后，把结果送回 token 原来的设备。（AllToAll 是一种集合通信，每个设备给其他每个设备各发一块不同的数据。）原书的旁注说明，严格讲只有当数据或序列沿着和专家相同的轴分片时才需要这两次通信；而且按上一章的结论，在双向环上每次 AllToAll 的代价只有同一轴上 AllGather 的 1/4。
+        </p>
+
+        <h3>梯度检查点</h3>
+        <p><em>原书小节：Gradient checkpointing</em></p>
+        <p>
+            反向传播这个算法是用内存换计算。它不需要 $O(n_\text{layers}^2)$ 的 FLOPs，代价是 $O(n_\text{layers})$ 的内存：前向过程中产生的所有中间激活都要存下来。这比平方级的计算好，但内存开销极大。举例：一个模型每批 $B \cdot T = 4\text{M}$ 个 token，$L = 64$，$D = 8192$，如果要完全避免反向时的重复计算，大约要存
+        </p>
+        $$2 \cdot 20 \cdot B \cdot T \cdot D \cdot L = 84\text{TB}$$
+        <p>
+            的 bfloat16 激活（前面的 2 是 bfloat16 每个数 2 字节）。20 这个数来自大致数一遍上面 Transformer 结构图里的每个中间节点。原因可以看一个例子：
+        </p>
+        $$f(x) = \exp(g(x)), \qquad \frac{df}{dx} = \exp(g(x)) \cdot \frac{dg}{dx}$$
+        <p>
+            要想反向时不重算，就得把前向时的 $g(x)$ 和 $\exp(g(x))$ 都存下来。为了不存这么多，可以只保存一部分中间激活，反向时把缺的重新算出来。这种做法叫梯度检查点（gradient checkpointing），也叫重物化（rematerialization，简称 remat）。原书列了常用的几种策略：
+        </p>
+        <ul>
+            <li>块级 remat（block remat）：只保存每一层的输入。这是最激进的做法，每层只存 1 个检查点，上面的例子里只需存 4.2TB。代价是反向时几乎要把前向的 FLOPs 全部重做一遍，总 FLOPs 从 $6 \cdot \text{num params} \cdot \text{num tokens}$ 涨到约 $8 \cdot \text{num params} \cdot \text{num tokens}$。</li>
+            <li>只存大矩阵乘法（big matmuls only）：只保存大矩阵乘法的输出。反向时不用重算任何大矩阵乘法，但其他激活函数和注意力的一部分还要重算。这样每层要存的量从上面的 20 降到 7 左右。</li>
+        </ul>
+        <p>
+            这远不是全部的策略。在 JAX 里，这些通常用 <code>jax.remat</code> / <code>jax.checkpoint</code> 控制（<a href="https://jax.readthedocs.io/en/latest/_autosummary/jax.checkpoint.html" target="_blank">文档</a>）。
+        </p>
+
+        <h3>键值缓存</h3>
+        <p><em>原书小节：Key-Value (KV) caching</em></p>
+        <p>
+            第 7 章会讲到，LLM 推理分两个阶段：预填充（prefill）和生成（generation，也叫 decode）。
+        </p>
+        <ul>
+            <li>预填充：处理一段长提示词，把注意力的激活，具体是注意力块里的 key 和 value 投影，存进键值缓存（KV cache），供生成阶段使用。这样生成每个新 token 时不必为前面的 token 重算 key 和 value。</li>
+            <li>生成：把多个 KV cache 放在一起做批处理，从每个序列里逐个采样新 token。</li>
+        </ul>
+        <p>
+            每个 KV cache 实际上是一个形状为 $[2, S, L, K, H]$ 的数组，2 对应 key 和 value 两份。它很大。用 int8 存储时，KV cache 的总字节数是 $2SLKH$。一个中等规模的模型，上下文 8k、64 层、$KH = NH = D = 8192$，KV cache 是
+        </p>
+        $$2 \cdot 8192 \cdot 64 \cdot 8192 = 8\text{GiB}$$
+        <p>
+            这也说明了为什么要用 $K \ll N$ 的 GMQA：键值头越少，KV cache 越小。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 习题</h2>
+        <p><em>原书小节：A Few Problems to Work</em></p>
+
+        <h3>习题 1：参数量、注意力占比和每个 token 的 KV cache</h3>
+        <p>题目：一个模型 $D = 4096$，$F = 4 \cdot D$，$V = 32{,}000$，$L = 64$，有多少参数？其中注意力参数占多大比例？每个 token 的 KV cache 有多大？可以假设 $N \cdot H = D$，使用多头注意力，KV 用 int8 存储。</p>
+        <p>解答：</p>
+        <ol>
+            <li>总参数量约为 $L \cdot (3DF + 4DNH + 2D) + 2DV$，其中 $2D$ 是每层两个 LayerNorm，$2DV$ 是嵌入和反嵌入矩阵。</li>
+            <li>代入：$64 \cdot (3 \cdot 4\text{e}3 \cdot 16\text{e}3 + 4 \cdot 4\text{e}3 \cdot 4\text{e}3 + 2 \cdot 4\text{e}3) + 2 \cdot 4\text{e}3 \cdot 32\text{e}3 = 16\text{e}9$，约 160 亿（16B）参数。</li>
+            <li>注意力参数占比一般为 $4DNH / (4DNH + 3DF) = 4D^2 / (4D^2 + 12D^2) = 1/4$，约四分之一的参数在注意力里。</li>
+            <li>每个 token 的 KV cache 是 $2 \cdot L \cdot N \cdot H = 2 \cdot 64 \cdot 4096$ 个 int8 数，即 512 KiB / token。</li>
+        </ol>
+
+        <h3>习题 2：分片矩阵乘法的总 FLOPs 和每芯片 FLOPs</h3>
+        <p>题目：在网格 <code>{'X': 4, 'Y': 8, 'Z': 4}</code> 上做 $A[B_X, D_Y] \cdot_D W[D_Y, F]$（沿 $D$ 收缩，$B$ 沿 X 轴分片，$D$ 沿 Y 轴分片），总共需要多少 FLOPs？每块 TPU 做多少 FLOPs？</p>
+        <p>解答：</p>
+        <ol>
+            <li>这次运算“理论上”的总 FLOPs 是 $2 \cdot B \cdot D \cdot F$。</li>
+            <li>但计算没有沿 Z 轴分片，Z 轴上的 4 组设备在重复做同样的事，实际总量要乘以 Z，即 $2 \cdot B \cdot D \cdot F \cdot Z$。</li>
+            <li>计算沿另外两个轴分片，所以每块设备大约做 $2 \cdot B \cdot D \cdot F / (X \cdot Y)$ FLOPs。</li>
+        </ol>
+
+        <h3>习题 3：高维收缩的 FLOPs</h3>
+        <p>题目：$A[I,J,K,L] * B[I,J,M,N,O] \rightarrow C[K,L,M,N,O]$ 需要多少 FLOPs？</p>
+        <p>解答：按第 01 节的规则，$I$ 和 $J$ 是收缩维，$K$、$L$、$M$、$N$、$O$ 是非收缩维。这里没有批维，所以 FLOPs 就是所有轴的乘积再乘 2：$2 \cdot I \cdot J \cdot K \cdot L \cdot M \cdot N \cdot O$。如果有共享的批维，它只算一次。</p>
+
+        <h3>习题 4：分组多查询注意力的算术强度</h3>
+        <p>题目：分组多查询注意力（不算 Q/K/V/O 投影）的算术强度是多少？用 Q 序列长度 $T$、KV 序列长度 $S$ 和多查询因子 $G$ 表示。上下文多长时注意力是 FLOPs 受限（compute-bound）的？结合 TPU 的 HBM 带宽，画出注意力相对 FFW 块的有效代价随上下文长度的变化。提示：假设用的是高效的注意力实现，没有多余的读写；分别考虑 $T = S$ 和 $T \ll S$ 两种极限。</p>
+        <p>（算术强度 Arithmetic Intensity 是 FLOPs 除以搬运的字节数，第 1 章讲过：它高于硬件的 FLOPs/带宽比时，运算受算力限制，否则受内存带宽限制。）</p>
+        <p>解答：</p>
+        <ol>
+            <li>自注意力要从 HBM 读入 $Q$、$K$、$V$ 激活，算 $\text{softmax}(Q \cdot K) \cdot V$，再把结果写回 HBM。实际会用 Flash Attention 实现，所以下面的算法有些细节上的出入，但大体上，bf16 下自注意力做的是：
+                $$\text{Q[B,T,N,H]} \rightarrow_\text{reshape} \text{Q[B, T, K, G, H]} \cdot \text{K[B, S, K, H]} \rightarrow \text{O[B, T, S, K, G]}$$
+                $$U=\text{softmax}_S(\text{O[B, T, S, K, G]})$$
+                $$\text{U[B, T, S, K, G]} \cdot \text{V[B, S, K, H]} \rightarrow \text{X[B, T, K, G, H]}$$
+            </li>
+            <li>总字节数是 $2 \cdot \text{sizeof}(Q) + 2 \cdot \text{sizeof(K or V)} = 4BTNH + 4BSKH = 4BHK \cdot (TG + S)$（$Q$ 读一次、输出写一次，大小相同；$K$、$V$ 各读一次；bf16 每个数 2 字节）。总 FLOPs 是 $4BTSNH + O(BTSN)$，算术强度是 $4BTSKGH / (4BHK \cdot (TG + S))$。</li>
+            <li>预填充时 $S = T$，算术强度为 $4BT^2KGH / (4BHKT \cdot (G+1)) = TG/(G + 1) = O(T)$。</li>
+            <li>生成时 $T = 1$，算术强度为 $4BSKGH / (4BHK \cdot (G + S)) = SG / (G + S)$，$S$ 很大时趋近 $G$。</li>
+            <li>结论：看你怎么理解题目，在预填充或训练时，假设没有序列分片，自注意力在 $S = 240$ 时就是 compute-bound 的。生成时永远不会 compute-bound，因为 $G$ 很小。不过可以看出，增大 $G$ 会让我们更接近 compute-bound。</li>
+        </ol>
+        <p>（原书的答案没有给出题目里要求画的那张图。）</p>
+
+        <h3>习题 5：自注意力 FLOPs 何时等于 QKVO 投影 FLOPs</h3>
+        <p>题目：序列多长时，自注意力的 FLOPs 等于 QKVO 投影的 FLOPs？</p>
+        <p>解答：只需解 $24BTDNH = 12BT^2NH$（左边是 $N = K$ 时 QKVO 投影的训练 FLOPs）。化简得 $2D = T$。比如 $D = 4096$ 时，$T = 8192$。这说明在大多数合理的上下文长度下，矩阵乘法的 FLOPs 更多。</p>
+
+        <h3>习题 6：只存 7 个矩阵乘法输出时要重算多少 FLOPs</h3>
+        <p>题目：假设前向时每层只保存 7 个主要矩阵乘法的输出（Q、K、V、O 和三个 FFW 矩阵），反向时需要额外“重物化”多少 FLOPs？</p>
+        <p>解答：</p>
+        <ol>
+            <li>只存这 7 个矩阵乘法的输出（Q、K、V、O、W₁、W₂、W₃），意味着反向时为了得到 $\frac{\partial L}{\partial W_\text{O}}$，必须重算两个注意力矩阵乘法：
+                $$QK^{\top} \quad\text{and}\quad \operatorname{softmax}(QK^{\top})V$$
+            </li>
+            <li>每个都是 $T \times T$ 的矩阵乘法，在 $B$ 条序列和 $N$ 个头上做批，所以额外的 FLOPs 是
+                $$4 \; B \, T^{2} \, N \, H$$
+            </li>
+            <li>其他需要重算的运算：算 $\frac{\partial L}{\partial W_\text{In1}}$ 和 $\frac{\partial L}{\partial W_\text{In2}}$ 时有 $O(BTD)$；算 $\frac{\partial L}{\partial W_\text{Out}}$ 时有 $O(BTF)$。</li>
+        </ol>
+
+        <h3>习题 7：DeepSeek v3 的硬件利用率</h3>
+        <p>题目：DeepSeek v3 称训练用了 279 万 H800 GPU 小时、14.8T token。它有 37B 激活参数，大约达到了多少硬件利用率？提示：他们用的是 FP8 FLOPs，没有用结构化稀疏。</p>
+        <p>解答：</p>
+        <ol>
+            <li>查<a href="https://lenovopress.lenovo.com/lp1814.pdf" target="_blank">规格表</a>，H800 的 FP8 算力带稀疏时是 3,026 TFLOPs/s，不带稀疏一般取一半，即 $1.513\text{e}15$ FLOPs/s。</li>
+            <li>279 万 H800 小时对应的总算力是 $2.79\text{e}6 \times 1.513\text{e}15 \times 60 \times 60 = 1.52\text{e}25$ FLOPs。</li>
+            <li>按 37B 激活参数，这次训练应该用了约 $6 \times 37\text{e}9 \times 14.8\text{e}12 = 3.3\text{e}24$ FLOPs。</li>
+            <li>所以 FLOPs 利用率约为 $3.3\text{e}24 / 1.52\text{e}25 = 21.7\%$。</li>
+        </ol>
+
+        <h3>习题 8：MoE 要多大批量才能 compute-bound</h3>
+        <p>题目：MoE 模型有 $E$ 份标准稠密 MLP 块，每个 token 激活 $k$ 个专家。权重用 int8 时，在 TPU v5e 上要多大的批量（按 token 计）才能 compute-bound？DeepSeek 有 256 个（路由）专家、$k = 8$，这个数是多少？</p>
+        <p>解答：</p>
+        <ol>
+            <li>因为每个专家各有一份权重，int8 下每个权重矩阵要加载 $E \cdot D \cdot F$ 字节。</li>
+            <li>每个 token 激活 $k$ 个专家，所以每个权重矩阵的 FLOPs 是 $2 \cdot k \cdot B \cdot D \cdot F$。</li>
+            <li>权重 int8、计算用 bfloat16 FLOPs 时，要 compute-bound，算术强度（每加载一个字节做的 FLOPs）需要超过 TPU 的约 240 FLOPs/byte，也就是 $(2 \cdot k \cdot BDF) / EDF > 240$，即 $k \cdot B / E > 120$。</li>
+            <li>所以需要 $B > 120 \cdot E / k$。对 DeepSeek，$B > 120 \cdot 256 / 8 = 3840$。对生成阶段来说，这个批量相当大。</li>
+        </ol>
+        <p>第 4 章到此结束，第 5 章讲怎样扩展 Transformer 训练。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 附录 A：Flash Attention 是怎么工作的</h2>
+        <p><em>原书小节：Appendix A: How does Flash Attention work?</em></p>
+        <p>
+            反对把 Transformer 扩展到超长上下文的传统理由是：注意力的 FLOPs 和内存都随上下文长度平方增长。注意力的 QK 乘积形状确实是 $[B, T, S, N]$（$B$ 批大小，$T$、$S$ 是 Q 和 K 的序列维，$N$ 头数），但这个说法有几个重要的前提：
+        </p>
+        <ul>
+            <li>前面算过，虽然是平方增长，注意力的 FLOPs 只有在 $T > 8 \cdot D$ 时才占主导。训练时，单个注意力矩阵的内存和存在内存里的全部权重、激活检查点相比很小，分片之后就更小了。</li>
+            <li>算注意力不需要把整个注意力矩阵物化（materialize，即完整地在内存里存出来）。可以算局部的和与最大值，任何时刻只保留数组的一小块。总 FLOPs 仍是平方级，但内存压力大大降低。</li>
+        </ul>
+        <p>
+            第二点最早由 Rabe 等人（2021）提出，后来 Flash Attention 论文（Dao 等人，2022）也提出了。基本思路是按 K/V 分块计算注意力：每一块算出局部 softmax 和几个辅助统计量，传给下一块，下一块把它们和自己的局部结果合并。具体维护三个量：
+        </p>
+        <ul>
+            <li>M：沿序列维的 $q \cdot k$ 的累积最大值（running max）。</li>
+            <li>O：沿序列维的累积注意力 softmax 输出。</li>
+            <li>L：累积分母 $\sum_i \exp(q \cdot k_i - \text{running max})$。</li>
+        </ul>
+        <p>
+            有了这三个量，只用常数量的内存就能算出新的最大值、新的累积和以及新的输出。粗略地说，注意力是这样一个运算：
+        </p>
+        $$\text{Attn}(Q, K, V) = \sum_i \frac{\exp(Q \cdot K_i - \max_j Q \cdot K_j) V_i}{\sum_l \exp(Q \cdot K_l - \max_j Q \cdot K_j)}$$
+        <p>
+            减去最大值是为了数值稳定，它不影响结果，因为 $\sum_i \exp(a_i + b) = \exp(b) \sum \exp(a)$，分子分母同时多出的因子会约掉。只看分母：假设有两段相邻的 key 向量 $K^1$ 和 $K^2$，分别算出局部 softmax 和 $L^1$、$L^2$：
+        </p>
+        $$L^1 = \sum_i \exp(Q \cdot K_i^1 - \max_j Q \cdot K_j^1)$$
+        $$L^2 = \sum_i \exp(Q \cdot K_i^2 - \max_j Q \cdot K_j^2)$$
+        <p>那么两段合起来的完整 softmax 和可以这样合并：</p>
+        $$L^\text{combined} = \exp(M^1 - \max(M^1, M^2)) \cdot L^1 + \exp(M^2 - \max(M^1, M^2)) \cdot L^2$$
+        <p>其中</p>
+        $$M^1 = \max_j Q \cdot K_j^1 \quad \text{and} \quad M^2 = \max_j Q \cdot K_j^2$$
+        <p>
+            对完整的 softmax 输出也能这样做，于是可以累积任意长度的 softmax 和。下图是 Flash Attention 论文里的完整算法。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/flash-algo.png" alt="Flash Attention 论文中的算法伪代码">
+            <figcaption>图：Flash Attention 论文中的前向算法，外层循环遍历 K/V 块，内层循环遍历 Q 块，在片上 SRAM 里维护累积统计量（引自原书）</figcaption>
+        </figure>
+        <p>
+            从硬件角度看，这样可以把一块 Q 放进 VMEM（TPU 上的片上向量内存，上面算法里叫 on-chip SRAM），每次迭代只需加载 KV 块，算术强度因此提高。累积统计量也可以留在 VMEM 里。
+        </p>
+        <p>
+            最后还有一个容易被忽略的点：注意力 softmax 的一个性质，让 Flash 的 VJP（反向模式导数，vector-Jacobian product）在训练中变得可行。定义中间的 softmax 数组：
+        </p>
+        $$S_{ij} = \frac{e^{\tau q_i \cdot k_j}}{\sum_l e^{\tau q_i \cdot k_l}}$$
+        <p>注意力反向时，$dS$ 由反向模式的 $dO$ 和 $V$ 得到：</p>
+        $$dS_{ij} = dO_{id} \cdot_d V_{jd} = \sum_d dO_{id} V_{jd}$$
+        <p>把这个梯度继续传回 Q 和 K 时：</p>
+        $$d(q_i \cdot k_j) = (dS_{ij} - S_{ij} \cdot_j dS_{ij}) S_{ij}$$
+        <p>
+            这里用到一个恒等式，把沿很长的 key 长度维的收缩，换成沿特征深度维的局部收缩：
+        </p>
+        $$\begin{aligned} S_{ij} \cdot_j dS_{ij} &= \sum_j \frac{e^{\tau q_i \cdot k_j}}{\sum_k e^{\tau q_i \cdot k_k}} \sum_d dO_{id} V_{jd} \\ &= \sum_d dO_{id} \sum_j \frac{e^{\tau q_i \cdot k_j}}{\sum_k e^{\tau q_i \cdot k_k}} V_{jd} \\ &= \sum_d dO_{id} O_{id} \\ &= dO_{id} \cdot_d O_{id} \end{aligned}$$
+        <p>
+            第二步交换了求和顺序，第三步用到前向输出 $O_{id} = \sum_j S_{ij} V_{jd}$。这样一来，这一项只需要每个查询位置自己的 $dO$ 和 $O$，不用遍历整条 key 序列。这个替换让 VJP 可以按序列块局部计算，也使 ring attention 这类更巧妙的分片方案成为可能。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <p>原书 “What Should You Take Away from this Section?” 一节：Transformer 的参数量和 FLOPs 都不难算。假设使用 MHA，批大小 $B$，词表大小 $V$，序列长度 $T$，$D = d_\text{model}$，$F = d_\text{ff}$：</p>
+        <table>
+            <thead>
+                <tr><th>组件</th><th>每层参数量</th><th>每层训练 FLOPs</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>MLP</td><td>$3DF$</td><td>$18BTDF$</td></tr>
+                <tr><td>注意力</td><td>$4DNH$</td><td>$24BTDNH + 12BT^2NH$</td></tr>
+                <tr><td>其他</td><td>$2D$</td><td>$BTD$</td></tr>
+                <tr><td>词表</td><td>$DV$（整个模型合计）</td><td>$12BTDV$</td></tr>
+            </tbody>
+        </table>
+        <ul>
+            <li>MLP 块的参数量在总参数量里占大头；只要序列长度 $T &lt; 8D$，MLP 块在 FLOPs 预算里也占大头。</li>
+            <li>在合理的上下文长度下，训练的总 FLOPs 可以很好地用 $6 \cdot \text{num params} \cdot \text{num tokens}$ 近似。</li>
+            <li>推理时，每个 KV cache 大约是 $2 \cdot S \cdot L \cdot K \cdot H$（$K$ 是 KV 头数），不过架构上的改动通常能把它降下来。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>How To Scale Your Model · All the Transformer Math You Need to Know · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

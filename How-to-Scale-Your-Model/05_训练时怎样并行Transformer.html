@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>训练时怎样并行 Transformer | How to Scale Your Model 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="04_Transformer的全部数学.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">How to Scale Your Model 目录</a> · 05</span>
+    <span><a href="06_在TPU上训练LLaMA3.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 5 章 · 训练时怎样并行 Transformer</h1>
+        <p class="subtitle">数据并行、FSDP、张量并行、两者混合、流水线和跨 pod 扩展，各自要付多少通信，批大小降到多少时开始被通信卡住</p>
+        <div class="author-meta">
+            作者：Jacob Austin、Sholto Douglas 等（Google DeepMind）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://jax-ml.github.io/scaling-book/training" target="_blank">How to Parallelize a Transformer for Training</a>（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            前几章分别讲了单芯片的 roofline、TPU 的结构、分片矩阵乘法要做哪些集合通信，以及 Transformer 每一层的 FLOPs 和参数量。这一章把它们合在一起，回答训练时最实际的问题：一个稠密 Transformer 要分到几千块芯片上训练，应该怎么切，切到什么程度开始被芯片间通信拖慢。
+        </p>
+        <p>
+            书里把 Transformer 简化成一摞 MLP 块，每种并行方案都用“输入、两个权重矩阵、输出各自怎么分片”来定义。对每种方案，作者算出计算时间 $T_\text{math}$ 和通信时间 $T_\text{comms}$，再求出两者相等时的临界点。读完这一章，你能用几个数（每芯片算力 $C$、ICI 带宽 $W_\text{ici}$、$d_{ff}$、批大小、芯片数）判断：纯数据并行够不够，张量并行最多开几路，FSDP 和张量并行怎么配比，跨 pod 时每个 pod 至少要多大的批。下一章会把这些公式直接套到 LLaMA 3 上。
+        </p>
+        <ol>
+            <li><a href="#t01">“扩展”指的是什么</a></li>
+            <li><a href="#t02">数据并行</a></li>
+            <li><a href="#t03">全分片数据并行（FSDP）</a></li>
+            <li><a href="#t04">张量并行</a></li>
+            <li><a href="#t05">FSDP 和张量并行组合使用</a></li>
+            <li><a href="#t06">流水线并行</a></li>
+            <li><a href="#t07">跨 pod 扩展</a></li>
+            <li><a href="#t08">TPU 上训练 LLM 的结论汇总</a></li>
+            <li><a href="#t09">习题</a></li>
+            <li><a href="#t10">附录 A：反向传播的通信怎么推出来</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. “扩展”指的是什么</h2>
+        <p><em>原书小节：What Do We Mean By Scaling?</em></p>
+        <p>
+            “模型扩展”（model scaling）的目标是：训练或推理用的芯片数增加多少倍，吞吐量就线性增加多少倍。书里把这种情况叫强扩展（strong scaling）。单芯片的性能取决于内存带宽和 FLOPs 之间的取舍；到了集群层面，性能取决于能不能把芯片间通信藏在有用的计算后面，也就是让通信和计算重叠（overlap）进行。这件事不容易做到，因为芯片一多，通信量变大，每块芯片分到的计算却变少，能用来掩盖通信的计算也就少了。第 3 章讲过，分片矩阵乘法经常需要代价不小的 AllGather 或 ReduceScatter，它们会让 TPU 停下来等。这一章要找出这些通信在什么时候变得太贵。
+        </p>
+        <p>
+            这一章讨论四种常见的并行方案：纯数据并行（data parallelism）、全分片数据并行（fully-sharded data parallelism，FSDP，也叫 ZeRO 分片）、张量并行（tensor parallelism，也叫模型并行），以及简单介绍的流水线并行（pipeline parallelism）。对每一种，书里都给出它的通信代价，以及这个代价从什么时候开始压过计算。
+        </p>
+        <p>
+            几点范围说明（原书旁注）：这里只看通信上的瓶颈。内存容量也重要，但预训练时用了重算（rematerialization，也叫激活检查点 activation checkpointing，即前向时只存少量中间结果、反向时重新算出来）并且芯片数很多，内存通常不会成为限制。这里也不讨论 MoE 的专家并行（expert parallelism），它会大大扩展设计空间，本章只看稠密 Transformer。另外，这一节可以只关心芯片间通信，因为只要单芯片的批足够大，HBM 到 MXU 的数据搬运已经和计算重叠了。（HBM 是芯片旁边的高带宽显存，MXU 是 TPU 里做矩阵乘法的单元。）
+        </p>
+
+        <h3>记号</h3>
+        <table>
+            <thead><tr><th>记号</th><th>含义（模型参数）</th></tr></thead>
+            <tbody>
+                <tr><td>$D$</td><td>$d_\text{model}$，隐藏维度，也就是残差流（residual stream）的宽度</td></tr>
+                <tr><td>$F$</td><td>$d_{ff}$，前馈层（feed-forward）的中间维度</td></tr>
+                <tr><td>$B$</td><td>批维度，批里的 token 总数（全局总数，不是每块芯片的）</td></tr>
+                <tr><td>$T$</td><td>序列长度</td></tr>
+                <tr><td>$L$</td><td>模型层数</td></tr>
+            </tbody>
+        </table>
+        <table>
+            <thead><tr><th>记号</th><th>含义（硬件特性）</th></tr></thead>
+            <tbody>
+                <tr><td>$C$</td><td>每块芯片每秒能做的 FLOPs</td></tr>
+                <tr><td>$W$</td><td>网络带宽（双向），常带下标，如 $W_\text{ici}$ 或 $W_\text{dcn}$</td></tr>
+                <tr><td>$X$</td><td>网格轴 X 上的芯片数</td></tr>
+                <tr><td>$Y$</td><td>另一条网格轴 Y 上的芯片数</td></tr>
+                <tr><td>$Z$</td><td>第三条网格轴 Z 上的芯片数</td></tr>
+            </tbody>
+        </table>
+        <p>
+            ICI（Inter-Chip Interconnect）是同一个 TPU pod 里芯片之间的高速直连；DCN（Data-Center Network）是 pod 之间走的数据中心网络，慢得多。“网格轴”指 TPU 拓扑里的一个方向，比如 4x4x4 的切片有三条轴。
+        </p>
+
+        <h3>简化后的 Transformer 层</h3>
+        <p>
+            为了好算，书里把 Transformer 近似成一摞 MLP 块。第 4 章算过，对较大的模型，注意力占 FLOPs 的比例比较小。门控矩阵乘法（gating matmul）也先忽略。这样每一层只剩下两个矩阵：$W_\text{in}$: bf16[D, F]（上投影，up-projection）和 $W_\text{out}$: bf16[F, D]（下投影，down-projection），输入是 In: bf16[B, D]。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/transformer-layer.png" alt="简化的 Transformer 层">
+            <figcaption>图：简化的 Transformer 层。每个 FFW 块看作两个矩阵 W<sub>in</sub>[D, F] 和 W<sub>out</sub>[F, D]，输入是 In[B, D]（引自原书）</figcaption>
+        </figure>
+        <p>
+            下面是这个小 Transformer 不做任何并行时的完整算法。记号 <code>*_D</code> 表示沿维度 D 做收缩（contraction），也就是矩阵乘法里被求和掉的那一维。后面加了通信的版本都可以和它对照。
+        </p>
+<pre><code>Forward pass: need to compute Loss[B]
+  Tmp[B, F]  = In[B, D]  *_D W_in[D, F]
+  Out[B, D]  = Tmp[B, F] *_F W_out[F, D]
+  Loss[B]    = ...
+
+Backward pass: need to compute dW_out[F, D], dW_in[D, F]
+  dOut[B, D]   = ...
+  dW_out[F, D] = Tmp[B, F]  *_B dOut[B, D]
+  dTmp[B, F]   = dOut[B, D] *_D W_out[F, D]
+  dW_in[D, F]  = In[B, D]   *_B dTmp[B, F]
+  dIn[B, D]    = dTmp[B, F] *_F W_in[D, F]   (needed for previous layers)</code></pre>
+
+        <h3>四种并行方案的定义</h3>
+        <p>每种方案都可以由 In、$W_\text{in}$、$W_\text{out}$、Out 四个数组的分片方式唯一确定。下标表示那一维沿哪条网格轴切开，比如 $B_X$ 表示批维度切成 $X$ 份。</p>
+        <ol>
+            <li>
+                <strong>数据并行</strong>：激活沿批维度分片，参数和优化器状态在每块设备上各存一份完整副本。通信只发生在反向传播。
+                $$\text{In}[B_X, D] \cdot_D W_\text{in}[D, F] \cdot_F W_\text{out}[F, D] \rightarrow \text{Out}[B_X, D]$$
+            </li>
+            <li>
+                全分片数据并行（FSDP 或 ZeRO-3）：激活沿批维度分片（和纯数据并行一样），参数沿同一条网格轴分片，在前向用到之前临时 AllGather 回来。优化器状态也沿批那条轴分片。这样减少了重复存储。
+                $$\text{In}[B_X, D] \cdot_D W_\text{in}[D_X, F] \cdot_F W_\text{out}[F, D_X] \rightarrow \text{Out}[B_X, D]$$
+            </li>
+            <li>
+                张量并行（也叫 Megatron 分片或模型并行）：激活沿 $D$（$d_\text{model}$）分片，参数沿 $F$（$d_{ff}$）分片。每个块之前对激活做 AllGather，之后做 ReduceScatter。可以和 FSDP 一起用。
+                $$\text{In}[B, D_Y] \cdot_D W_\text{in}[D, F_Y] \cdot_F W_\text{out}[F_Y, D] \rightarrow \text{Out}[B, D_Y]$$
+            </li>
+            <li>
+                流水线并行：权重沿层的维度分片，激活切成微批（microbatch）沿层的方向一站站往下传。流水线各阶段之间的通信很少，只是把激活传到相邻的一跳。借用一下记号：
+                $$\text{In}[L_Z, B, D][i] \cdot_D W_\text{in}[L_Z, D, F][i] \cdot_F W_\text{out}[L_Z, F, D][i] \rightarrow \text{Out}[L_Z, B, D][i]$$
+            </li>
+        </ol>
+    </section>
+
+    <section id="t02">
+        <h2>02. 数据并行</h2>
+        <p><em>原书小节：Data Parallelism</em></p>
+        <p>记法：$\text{In}[B_X, D] \cdot_D W_\text{in}[D, F] \cdot_F W_\text{out}[F, D] \rightarrow \text{Out}[B_X, D]$</p>
+        <p>
+            如果模型连同一个很小的批（超过 240 个 token，这样单芯片才是计算受限）都能放进一块芯片，就应该直接用简单的数据并行。纯数据并行把激活分到任意多块 TPU 上，只要 TPU 数比批大小小。前向传播不需要通信；每一步结束时，每块 TPU 对本地梯度做一次 AllReduce（把所有芯片上的数组逐元素加起来，结果每块芯片都拿到一份），同步之后再更新参数。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/data-parallelism.png" alt="纯数据并行示意图">
+            <figcaption>图：纯数据并行的前向传播。激活（左）沿批维度完全分片，权重完全复制，每块 TPU 有一份相同的权重。权重占的总内存因此放大 N 倍，但前向传播完全不用通信（引自原书）</figcaption>
+        </figure>
+        <p>下面是前向和反向的完整算法。为了简洁，dL/dOut 写成 dOut。<code>{U_X}</code> 表示这个结果在 X 轴上还没有归约（unreduced），每块芯片上只是部分和。</p>
+<pre><code>Pure Data Parallelism Algorithm:
+
+Forward pass: need to compute Loss[B_X]
+  Tmp[B_X, F] = In[B_X, D]  *_D W_in[D, F]
+  Out[B_X, D] = Tmp[B_X, F] *_F W_out[F, D]
+  Loss[B_X]   = ...
+
+Backward pass: need to compute dW_out[F, D], dW_in[D, F]
+  dOut[B_X, D]        = ...
+  dW_out[F, D] {U_X}  = Tmp[B_X, F] *_B dOut[B_X, D]
+  dW_out[F, D]        = AllReduce(dW_out[F, D] {U_X})  (not on critical path, can be done async)
+  dTmp[B_X, F]        = dOut[B_X, D] *_D W_out[F, D]
+  dW_in[D, F] {U_X}   = In[B_X, D] *_B dTmp[B_X, F]
+  dW_in[D, F]         = AllReduce(dW_in[D, F] {U_X})   (not on critical path, can be done async)
+  dIn[B_X, D]         = dTmp[B_X, F] *_F W_in[D, F]    (needed for previous layers)</code></pre>
+        <p>
+            损失函数的细节省略了。最终的损失是 AllReduce(Loss[B_X]) 的平均，但真正需要做 AllReduce 的只有反向传播里对权重梯度求平均那一步。
+        </p>
+        <p>
+            前向传播没有任何通信，全部在反向传播里。反向传播还有一个好性质：这些 AllReduce 不在“关键路径”（critical path）上，也就是说每个 AllReduce 什么时候方便就什么时候做，不会挡住后面的运算。如果总通信量超过总计算量，它仍然会成为瓶颈，但在实现上宽容得多。后面会看到张量并行没有这个性质。
+        </p>
+        <p>
+            为什么用它：纯数据并行把激活沿批维度切开，降低了激活的内存压力。只要有更多芯片来分批维度，批大小几乎可以任意加大。训练时激活往往占内存的大头，这一点很有用。
+        </p>
+        <p>
+            为什么不用它：纯数据并行对参数和优化器状态的内存压力毫无帮助。所以当模型大到参数加优化器状态放不进一块 TPU 时，它基本没用。量级上，参数用 bf16、优化器状态用 fp32 的 Adam（Adam 要存参数、一阶和二阶累积量；参数 bf16 占 2 字节，两份 fp32 状态占 8 字节，合计每个参数 10 字节），能放下的最大模型是 $\text{TPU memory} / 10$ 个参数。TPU v5p 每块芯片有 96GB HBM，纯数据并行下大约是 9B 参数。
+        </p>
+        <p>
+            <strong>结论：用 Adam 和纯数据并行能训练的最大模型是 $\text{num\_params} = \text{HBM per device} / 10$，TPU v5p 上约 9B 参数。</strong>（这个数没算梯度检查点，实际上用不了；它是批只有 1 个 token 时的绝对下界。）要让数据并行在真实模型上可用，至少要把模型参数或优化器状态部分分片。
+        </p>
+
+        <h3>什么时候被通信卡住</h3>
+        <p>
+            上面的算法里每层有两个 AllReduce，每个大小是 $2DF$ 字节（bf16 权重）。设 $C$ 为每芯片 FLOPs/s，$W_\text{ici}$ 为双向网络带宽，$X$ 为批被切成的份数（假设这个切分在 ICI 网格上做，所以相关带宽是 $W_\text{ici}$）。前向没有通信，所以只需要算反向传播的 $T_\text{math}$ 和 $T_\text{comms}$。
+        </p>
+        <p>
+            通信时间：前面章节讲过，一维网格上的 AllReduce 时间只取决于被归约数组的总字节数和 ICI 带宽，具体是 $2 \cdot \text{total bytes} / W_\text{ici}$。$W_\text{in}$ 和 $W_\text{out}$ 各要一次，每层两次，每次是 $DF$ 个参数也就是 $2DF$ 字节。合起来，一层的 AllReduce 时间是
+        </p>
+        $$T_\text{comms} = \frac{2 \cdot 2 \cdot 2 \cdot D \cdot F}{W_\text{ici}}$$
+        <p>
+            矩阵乘法时间：每层前向有两个矩阵乘法，反向有四个，每个需要 $2(B/X)DF$ FLOPs。所以一层的反向传播是
+        </p>
+        $$T_\text{math} = \frac{2 \cdot 2 \cdot 2 \cdot B \cdot D \cdot F}{X \cdot C}$$
+        <p>因为计算和通信重叠，每层总时间取两者的较大值：</p>
+        $$T \approx \max\left(\frac{8 \cdot B \cdot D \cdot F}{X \cdot C}, \frac{8 \cdot D \cdot F}{W_\text{ici}}\right) = 8 \cdot D \cdot F \cdot \max\left(\frac{B}{X \cdot C}, \frac{1}{W_\text{ici}}\right)$$
+        <p>当 $T_\text{math}/T_\text{comms} &gt; 1$ 时是计算受限（compute-bound），也就是</p>
+        $$\frac{B}{X} &gt; \frac{C}{W_\text{ici}}$$
+        <p>
+            要让数据并行保持计算受限，每块设备的批大小 $B/X$ 必须超过 ICI 的运算强度（operational intensity）$C/W_\text{ici}$。原因是计算时间随每设备批大小增长，而通信时间和它无关，因为传的是模型权重。这个条件和第 1 章单芯片的计算受限规则 $B &gt; 240$ 很像：那里也是计算时间随批大小增长，而数据传输量（在 $B \ll F, D$ 的情况下）和批大小无关。
+        </p>
+        <p>
+            代入真实数字。TPU v5p 的 $C = 4.6\text{e}14$，一维数据并行走 ICI 时 $W = 2 \times 9\text{e}10$，所以每块芯片的批至少要 2,550 个 token 才不会被通信卡住。数据并行可以同时用多条轴；如果把 TPU v5p pod 的三条轴全部用来做纯数据并行，$W_\text{ici}$ 变成 3 倍，每块 TPU 的批可以降到 850，整个 pod（8960 块芯片）每批 7.6M token。可见纯数据并行不太容易被通信卡住。
+        </p>
+
+        <h3>关于上下文并行</h3>
+        <p>
+            本节的 $B$ 一直是批里的 token 总数。批其实由很多条序列组成，这怎么处理？对 MLP 来说，token 就是 token，属于同一条序列还是不同序列没有区别。所以可以同时在批维度和序列维度上做数据并行，这叫上下文并行（context parallelism）或序列并行（sequence parallelism），可以把它看成另一种数据并行。注意力比 MLP 麻烦，因为它有跨位置的计算，但可以在注意力期间收集 K、V 或 Q，并仔细地让 FLOPs 和通信重叠来处理（通常用一种叫 ring attention 的方法）。本节后面忽略序列维度，默认做了一定程度的批并行或序列并行。
+        </p>
+
+        <h3>关于多条网格轴</h3>
+        <p>
+            一种并行策略用多条网格轴时，可用带宽会变多。定义：$M_X$（以及 $M_Y$、$M_Z$ 等）是某个并行策略跨越的硬件网格轴数。效果（带宽受限时）：用 $M$ 条轴，总链路带宽约为 $M$ 倍，集合通信时间按 $\propto 1/M_X$ 缩短。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 全分片数据并行（FSDP）</h2>
+        <p><em>原书小节：Fully-Sharded Data Parallelism (FSDP)</em></p>
+        <p>记法：$\text{In}[B_X, D] \cdot_D W_\text{in}[D_X, F] \cdot_F W_\text{out}[F, D_X] \rightarrow \text{Out}[B_X, D]$</p>
+        <p>
+            全分片数据并行（常叫 FSDP 或 ZeRO 分片）把模型的优化器状态和权重分到各个数据并行分片上，需要时再高效地收集（gather）和散发（scatter）。和纯数据并行相比，FSDP 大幅降低每块设备的内存占用，还省掉了反向传播里的重复 FLOPs，额外开销很小。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/fsdp.png" alt="FSDP 示意图">
+            <figcaption>图：FSDP 把 W<sub>in</sub> 的收缩维度和 W<sub>out</sub> 的输出维度沿数据轴分片。这样省了内存，但按第 3 章的规则，做矩阵乘法前要先把权重 gather 回来。激活（左）没有沿收缩维度分片，这就是必须 gather 的原因。权重的优化器状态同样沿收缩维度分片（引自原书）</figcaption>
+        </figure>
+        <p>
+            第 3 章讲过，一个 AllReduce 可以拆成一个 AllGather 加一个 ReduceScatter。AllGather 把每块芯片上的分片拼成完整数组发给所有芯片；ReduceScatter 先把各芯片的数组逐元素相加，再把结果切开，每块芯片只留一片。所以与其像标准数据并行那样做完整的梯度 AllReduce，不如把权重和优化器状态分片存放，前向时每一层 AllGather 权重，反向时对梯度做 ReduceScatter，总代价不变。完整算法如下：
+        </p>
+<pre><code>Fully-Sharded Data Parallelism (FSDP):
+
+Forward pass: need to compute Loss[B_X]
+  W_in[D, F]   = AllGather(W_in[D_X, F])   (not on critical path, can do it during previous layer)
+  Tmp[B_X, F]  = In[B_X, D] *_D W_in[D, F]  (can throw away W_in[D, F] now)
+  W_out[F, D]  = AllGather(W_out[F, D_X])  (not on critical path, can do it during previous layer)
+  Out[B_X, D]  = Tmp[B_X, F] *_F W_out[F, D]
+  Loss[B_X]    = ...
+
+Backward pass: need to compute dW_out[F, D_X], dW_in[D_X, F]
+  dOut[B_X, D]       = ...
+  dW_out[F, D] {U_X} = Tmp[B_X, F] *_B dOut[B_X, D]
+  dW_out[F, D_X]     = ReduceScatter(dW_out[F, D] {U_X})  (not on critical path, can be done async)
+  W_out[F, D]        = AllGather(W_out[F, D_X])           (can be done ahead of time)
+  dTmp[B_X, F]       = dOut[B_X, D] *_D W_out[F, D]       (can throw away W_out[F, D] here)
+  dW_in[D, F] {U_X}  = In[B_X, D] *_B dTmp[B_X, F]
+  dW_in[D_X, F]      = ReduceScatter(dW_in[D, F] {U_X})   (not on critical path, can be done async)
+  W_in[D, F]         = AllGather(W_in[D_X, F])            (can be done ahead of time)
+  dIn[B_X, D]        = dTmp[B_X, F] *_F W_in[D, F]        (needed for previous layers) (can throw away W_in[D, F] here)</code></pre>
+        <p>
+            这也叫 ZeRO 分片，来自 Zero Redundancy Optimizer，意思是不做任何多余的计算、不存任何多余的状态。ZeRO-1、ZeRO-2、ZeRO-3 分别指用这种方式分片优化器状态、梯度、权重。三者通信代价相同（严格说，FSDP 在前向传播里加了纯数据并行没有的通信，但它和反向传播成同样比例，不影响通信 roofline。ZeRO-3 把反向的一个 AllReduce 换成一个 AllGather 加一个 ReduceScatter，总通信量相同），所以基本上总可以直接用 ZeRO-3，把参数、梯度和优化器状态都分到一组设备上。
+        </p>
+        <p>
+            为什么要这样做：标准数据并行里有大量重复工作。每块 TPU 都 AllReduce 完整梯度，然后更新完整的优化器状态（所有 TPU 上做一模一样的事），再更新参数（同样完全重复）。用 ZeRO 分片时，不做 AllReduce，改成 ReduceScatter 梯度，每块芯片只更新自己那一片优化器状态和参数，前向需要时再 AllGather 参数。
+        </p>
+
+        <h3>什么时候被通信卡住</h3>
+        <p>
+            FLOPs 和通信的相对代价和纯数据并行完全一样，因为反向里的每个 AllReduce 变成了 AllGather 加 ReduceScatter，而 AllReduce 本来就是用这两步实现的，每步各占一半代价。这里按前向传播建模，它的 FLOPs 和通信之比与反向相同：
+        </p>
+        $$\begin{aligned} T_\text{math} &= \frac{2 \cdot 2 \cdot B \cdot D \cdot F}{X \cdot C} \\ T_\text{comms} &= \frac{2 \cdot 2 \cdot D \cdot F}{W_\text{ici}} \\ T &\approx \max\left(\frac{4 \cdot B \cdot D \cdot F}{X \cdot C}, \frac{4 \cdot D \cdot F}{W_\text{ici}}\right) \\ T &\approx 4 \cdot D \cdot F \cdot \max\left(\frac{B}{X \cdot C}, \frac{1}{W_\text{ici}}\right) \end{aligned}$$
+        <p>
+            所以和纯数据并行一样，当 $B / X &gt; C / W_\text{ici}$ 时是计算受限，也就是每设备批大小超过 ICI 运算强度 $C/W_\text{ici}$（v5p 上是 4.59e14 / 1.8e11 = 2550）。这对我们很有利：只要每设备批大小够让纯数据并行保持计算受限，就可以直接升级成 FSDP，不用担心掉出计算受限区间，同时省下大量参数和优化器状态的内存。前向传播虽然多了通信，但它和前向的 FLOPs 重叠，代价可以忽略。
+        </p>
+        <p><strong>结论：在 TPU v5 上，当每设备批大小小于 $2550 / M_X$ 时，FSDP 和纯数据并行都会变成带宽受限，$M_X$ 是所用网格轴数。</strong></p>
+        <p>
+            举例：DeepSeek-V2（近期少数公开训练批大小的强模型之一）用了约 40M token 的批。按这个条件，可以扩展到约 47,000 块芯片，也就是约 5 个 TPU v5 pod，才碰到带宽上限。
+        </p>
+        <p>
+            再看 LLaMA-3 70B。它的训练量约 6.3e24 FLOPs（15e12 × 70e9 × 6）。一个 16M token 的批可以分到大约 16e6 / (2550 / 3) = 18,823 块芯片上（约 2 个 8960 芯片的 pod）。每块芯片 4.59e14 FLOPs/s，按峰值 FLOPs 的 50% 利用率（这个比例常叫 MFU，Model FLOPs Utilization，即实际用于模型计算的 FLOPs 占硬件峰值的比例）运行，大约 17 天能训完。后面看能不能做得更好。
+        </p>
+
+        <h3>关于临界批大小</h3>
+        <p>
+            有点反直觉：芯片数固定时，总批越小，越容易被通信卡住。数据并行和 FSDP 让我们可以扩展到任意多芯片，前提是批能一直加大。可实际训练中，批越大收益越递减，因为梯度几乎已经没有噪声了，有时还会出现训练不稳定。所以在“算力不限”的情况下找最优分片方案，通常是从一个由 scaling law 决定的固定批大小和已知的大量芯片出发，去找一种分法，让这个偏小的批也能铺满这么多芯片。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 张量并行</h2>
+        <p><em>原书小节：Tensor Parallelism</em></p>
+        <p>记法：$\text{In}[B, D_Y] \cdot_D W_\text{in}[D, F_Y] \cdot_F W_\text{out}[F_Y, D] \rightarrow \text{Out}[B, D_Y]$（用 $Y$ 是为了后面和 FSDP 组合）</p>
+        <p>
+            FSDP 在芯片之间搬的是权重。另一种做法是沿模型的前馈维度切开，在层内搬激活，这叫“一维模型并行”或 Megatron 分片。它能让每个 pod 在更小的批下仍然高效。下图是单个矩阵这样切的例子：
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/model-parallelism.png" alt="张量并行示意图">
+            <figcaption>图：基本的张量并行。激活只沿 Y 分片（FSDP 是沿 X），所以激活在 X 上是复制的。用本书的记法是 A[B, D<sub>Y</sub>] * B[D, F<sub>Y</sub>] -&gt; C[B, F<sub>Y</sub>]。因为只切了其中一个收缩维度，通常要在矩阵乘法前先 AllGather 激活 A（引自原书）</figcaption>
+        </figure>
+        <p>
+            按上面的记法，In[B, D_Y] *_D W_in[D, F_Y] *_F W_out[F_Y, D] -&gt; Out[B, D_Y] 意味着第一个矩阵乘法之前要把激活 gather 回来。当激活比权重小时，这比 ZeRO 分片便宜。这一般只在同时加了一些 ZeRO 分片（让 gather 的数据变小）时才成立，这也是人们常把 ZeRO 分片和张量并行混用的原因之一。算法如下：
+        </p>
+<pre><code>Tensor Parallelism:
+
+Forward pass: need to compute Loss[B]
+  In[B, D]         = AllGather(In[B, D_Y])      (on critical path)
+  Tmp[B, F_Y]      = In[B, D] *_D W_in[D, F_Y]  (not sharded along contracting, so no comms)
+  Out[B, D] {U_Y}  = Tmp[B, F_Y] *_F W_out[F_Y, D]
+  Out[B, D_Y]      = ReduceScatter(Out[B, D] {U_Y})  (on critical path)
+  Loss[B]          = ...
+
+Backward pass: need to compute dW_out[F_Y, D], dW_in[D, F_Y]
+  dOut[B, D_Y]     = ...
+  dOut[B, D]       = AllGather(dOut[B, D_Y])    (on critical path)
+  dW_out[F_Y, D]   = Tmp[B, F_Y] *_B dOut[B, D]
+  dTmp[B, F_Y]     = dOut[B, D] *_D W_out[F_Y, D]  (can throw away dOut[B, D] here)
+  In[B, D]         = AllGather(In[B, D_Y])      (this can be skipped by sharing with (1) from the forward pass)
+  dW_in[D, F_Y]    = In[B, D] *_B dTmp[B, F_Y]
+  dIn[B, D] {U_Y}  = dTmp[B, F_Y] *_F W_in[D, F_Y]  (needed for previous layers)
+  dIn[B, D_Y]      = ReduceScatter(dIn[B, D] {U_Y})  (on critical path)</code></pre>
+        <p>
+            张量并行和前向传播里的两个矩阵配合得很好。朴素的做法是两个矩阵之后各做一次 AllReduce。这里先做 In[B, D_Y] * W_in[D, F_Y] -&gt; Tmp[B, F_Y]，再做 Tmp[B, F_Y] * W_out[F_Y, D] -&gt; Out[B, D_Y]，于是只需要开头 AllGather 一次 In，结尾 ReduceScatter 一次 Out，省掉了 AllReduce。注意这些通信都在关键路径上，这和数据并行不同。
+        </p>
+
+        <h3>代价有多大</h3>
+        <p>
+            只算前向，反向就是每个操作的转置。一维张量并行在第一个矩阵乘法前 AllGather 激活，第二个之后 ReduceScatter，每个元素 2 字节（bf16）。
+        </p>
+        $$\begin{aligned} T_\text{math} &= \frac{4 \cdot B \cdot D \cdot F}{Y \cdot C} \\ T_\text{comms} &= \frac{2 \cdot 2 \cdot (B \cdot D)}{W_\text{ici}} \\ T &\approx \max \left(\frac{4 \cdot B \cdot D \cdot F}{Y \cdot C}, \frac{2 \cdot 2 \cdot (B \cdot D)}{W_\text{ici}}\right) \end{aligned}$$
+        <p>要计算代价大于通信代价：</p>
+        $$\frac{4 \cdot B \cdot D \cdot F}{Y \cdot C} &gt; \frac{2 \cdot 2 \cdot (B \cdot D)}{W_\text{ici}} \;\Rightarrow\; \frac{F}{Y \cdot C} &gt; \frac{1}{W_\text{ici}} \;\Rightarrow\; F &gt; Y \cdot \frac{C}{W_\text{ici}}$$
+        <p>
+            $B$ 在两边约掉了，所以这个条件和批大小无关。以 TPU v5p 为例，bf16 下 $C / W_\text{ici} = 2550$，张量并行最多只能开到 $Y &lt; F / 2550$。如果用多条 ICI 轴，$T_\text{comms}$ 缩小 $M_Y$ 倍，条件变成 $Y &lt; M_Y \cdot F / 2550$。
+        </p>
+        <p><strong>结论：当 $Y &gt; M_Y \cdot F / 2550$ 时，张量并行变成通信受限。对多数模型，这个上限在 8 到 16 路之间。</strong></p>
+        <p>
+            这个结论和计算精度无关。比如 int8 时，TPU v5p 上 $C_\text{int8} / W_\text{ici}$ 是 5100 而不是 2550，但通信量也减半，两个 2 倍相互抵消。
+        </p>
+        <p>几个例子：</p>
+        <ul>
+            <li>TPU v5p 上的 LLaMA 3-70B，$D = 8192$、$F \approx 30{,}000$，可以放心做 8 路张量并行，16 路就会通信受限。8 路模型分片需要的 $F$ 是 20k。</li>
+            <li>Gemma 7B 的 $F \approx 50\text{k}$，到 19 路张量并行时通信受限，所以 16 路大概仍然性能不错。</li>
+        </ul>
+    </section>
+
+    <section id="t05">
+        <h2>05. FSDP 和张量并行组合使用</h2>
+        <p><em>原书小节：Combining FSDP and Tensor Parallelism</em></p>
+        <p>记法：$\text{In}[B_X, D_Y] \cdot_D W_\text{in}[D_X, F_Y] \cdot_F W_\text{out}[F_Y, D_X] \rightarrow \text{Out}[B_X, D_Y]$</p>
+        <p>
+            FSDP 和张量并行可以组合。把 $W_\text{in}$ 和 $W_\text{out}$ 沿两条轴都切开，既省内存又省计算。因为 $B$ 沿 X 切，张量并行的 AllGather 变小了；因为 $F$ 沿 Y 切，FSDP 的通信开销也变小了。两者组合能把有效批大小压得比前面任何一种都低。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/mixed-fsdp-model-parallelism.png" alt="FSDP 与张量并行组合示意图">
+            <figcaption>图：FSDP 与张量并行组合。和其他几种情况不同，这里模型参数没有任何重复存储（引自原书）</figcaption>
+        </figure>
+        <p>下面是混合 FSDP + 张量并行的完整算法。通信操作很多，但每个 AllGather 和 ReduceScatter 都更小，因为激活已经按批分片，权重也按张量切得更细。</p>
+<pre><code>Forward pass: need to compute Loss[B]
+  In[B_X, D]          = AllGather_Y(In[B_X, D_Y])      (on critical path)
+  W_in[D, F_Y]        = AllGather_X(W_in[D_X, F_Y])    (can be done ahead of time)
+  Tmp[B_X, F_Y]       = In[B_X, D] *_D W_in[D, F_Y]
+  W_out[F_Y, D]       = AllGather_X(W_out[F_Y, D_X])   (can be done ahead of time)
+  Out[B_X, D] {U_Y}   = Tmp[B_X, F_Y] *_F W_out[F_Y, D]
+  Out[B_X, D_Y]       = ReduceScatter_Y(Out[B_X, D] {U_Y})  (on critical path)
+  Loss[B_X]           = ...
+
+Backward pass: need to compute dW_out[F_Y, D_X], dW_in[D_X, F_Y]
+  dOut[B_X, D_Y]        = ...
+  dOut[B_X, D]          = AllGather_Y(dOut[B_X, D_Y])  (on critical path)
+  dW_out[F_Y, D] {U_X}  = Tmp[B_X, F_Y] *_B dOut[B_X, D]
+  dW_out[F_Y, D_X]      = ReduceScatter_X(dW_out[F_Y, D] {U_X})
+  W_out[F_Y, D]         = AllGather_X(W_out[F_Y, D_X])  (can be done ahead of time)
+  dTmp[B_X, F_Y]        = dOut[B_X, D] *_D W_out[F_Y, D]  (can throw away dOut[B, D] here)
+  In[B_X, D]            = AllGather_Y(In[B_X, D_Y])    (not on critical path + this can be shared with (2) from the previous layer)
+  dW_in[D, F_Y] {U_X}   = In[B_X, D] *_B dTmp[B_X, F_Y]
+  dW_in[D_X, F_Y]       = ReduceScatter_X(dW_in[D, F_Y] {U_X})
+  W_in[D, F_Y]          = AllGather_X(W_in[D_X, F_Y])  (can be done ahead of time)
+  dIn[B_X, D] {U_Y}     = dTmp[B_X, F_Y] *_F W_in[D, F_Y]  (needed for previous layers)
+  dIn[B_X, D_Y]         = ReduceScatter_Y(dIn[B_X, D] {U_Y})  (on critical path)</code></pre>
+
+        <h3>FSDP 和 TP 怎么配比</h3>
+        <p>
+            有一句简单但要紧的话：<strong>FSDP 搬权重，张量并行搬激活。</strong>所以批越小（尤其是数据并行做得越多时），每个分片上的激活越小，张量并行就越便宜。
+        </p>
+        <ul>
+            <li>张量并行做的是 $\mathbf{AllGather}_Y([B_X, D_Y])$，$X$ 越大它越小。</li>
+            <li>FSDP 做的是 $\mathbf{AllGather}_X([D_X, F_Y])$，$Y$ 越大它越小。</li>
+        </ul>
+        <p>
+            两者组合，每个副本的最小批还能再往下压。最优配比可以照前面的方法算。设 $X$ 是用于 FSDP 的芯片数，$Y$ 是用于张量并行的芯片数，$N = XY$ 是切片里的芯片总数。$M_X$ 和 $M_Y$ 是 FSDP 和 TP 各自占用的网格轴数（两者加起来大致是 3）。只对前向建模，因为它每个 FLOP 对应的通信最多。把上面算法里的通信加起来：
+        </p>
+        $$T_\text{FSDP comms}(B, X, Y) = \frac{2\cdot 2\cdot D \cdot F}{Y \cdot W_\text{ici} \cdot M_X}$$
+        $$T_\text{TP comms}(B, X, Y) = \frac{2 \cdot 2 \cdot B \cdot D}{X \cdot W_\text{ici} \cdot M_Y}$$
+        <p>总 FLOPs 时间是</p>
+        $$T_\text{math} = \frac{2\cdot 2 \cdot B \cdot D \cdot F}{N \cdot C}$$
+        <p>
+            为了简化分析，做两个假设：一是允许 $X$、$Y$ 取非整数（只要为正且满足 $XY=N$）；二是 X 轴和 Y 轴上的通信可以完全相互重叠。在第二个假设下，总通信时间是
+        </p>
+        $$T_\text{comms} = \max\left(T_\text{FSDP comms}, T_\text{TP comms}\right)$$
+        <p>
+            先不问什么时候计算受限，先找让总通信最少的 $X$ 和 $Y$。FLOPs 和 $X$、$Y$ 无关，所以最优配比就是让通信最小的那个。把 $T_\text{comms}$ 写成 $X$ 和 $N$ 的函数（$N$ 是系统芯片数，固定）：
+        </p>
+        $$T_\text{comms} (X) = \frac{4D}{W_\text{ici}} \max\left(\frac{F \cdot X}{N \cdot M_X}, \frac{B}{X \cdot M_Y}\right)$$
+        <p>
+            $T_\text{FSDP comms}$ 随 $X$ 单调递增，$T_\text{TP comms}$ 随 $X$ 单调递减，所以两者相等时最大值最小：
+        </p>
+        $$\frac{F X_{opt}}{M_X} = \frac{B N}{X_{opt} M_Y} \;\Rightarrow\; X_{opt} = \sqrt{\frac{B}{F} \frac{M_X}{M_Y} N}$$
+        <p>
+            这个式子很好用：给定 $B$、$F$、$N$，就能算出 FSDP 该开多少。代入实际数值：$N = 64$（4x4x4 的芯片阵列）、$B = 48{,}000$、$F = 32768$，得到 $X \approx 13.9$。所以会选 $X = 16$、$Y = 4$，接近算出的最优值。
+        </p>
+        <p>结论：训练时最优的 FSDP 路数一般是 $X_{opt} = \sqrt{\frac{B}{F} \frac{M_X}{M_Y} N}$。</p>
+
+        <h3>组合之后什么时候计算受限</h3>
+        <p>计算和通信可以重叠，所以计算受限的条件是</p>
+        $$\max\left(T_\text{FSDP comms}, T_\text{TP comms}\right) &lt; T_\text{math}$$
+        <p>令 $\alpha \equiv C / W_\text{ici}$（ICI 算术强度），可以化简为</p>
+        $$\max\left(\frac{F}{Y \cdot M_X}, \frac{B}{X \cdot M_Y}\right) &lt; \frac{B \cdot F}{N \cdot \alpha}$$
+        <p>$X_{opt}$ 让左边两项相等，代入任一项即可（注意 $Y_{opt} = N/X_{opt}$）：</p>
+        $$\frac{F}{N \cdot W_\text{ici} \cdot M_X} \sqrt{\frac{B}{F} \frac{M_X}{M_Y} N} &lt; \frac{B \cdot F}{N \cdot C}$$
+        <p>继续化简：</p>
+        $$\sqrt{\frac{B\cdot F}{M_X \cdot M_Y \cdot N}} &lt; \frac{B \cdot F}{N \cdot \alpha}$$
+        <p>
+            左边正比于通信时间，右边正比于计算时间。计算时间随批大小线性增长（这和用什么并行无关），通信时间却只随批大小的平方根增长。所以两者之比也按批大小的平方根增长：
+        </p>
+        $$\frac{T_\text{math}}{T_\text{comms}} = \frac{\sqrt{BF}\sqrt{M_X M_Y}}{\alpha \sqrt{N}}$$
+        <p>要这个比值大于 1，也就是计算受限，需要</p>
+        $$\frac{B}{N} &gt; \frac{\alpha^2}{M_X M_Y F}$$
+        <p>
+            代入 $F = 32{,}768$、$\alpha = 2550$、$M_X M_Y = 2$（3D 网格必然如此），得到大约 $B/N &gt; 99$。和纯数据并行（或 FSDP）相比大约赢了 8 倍：3D 网格上那时的 $B/N$ 需要超过约 850 才能计算受限。
+        </p>
+        <p>结论：张量并行和 FSDP 组合，可以把 $B/N$ 降到 $2550^2 / 2F$，每块芯片的批小到约 100 也能处理，比只用 FSDP 小约 8 倍。</p>
+
+        <h3>图上看三种方案</h3>
+        <p>
+            下图在一个代表性的 4x4x4 芯片阵列上画出混合 FSDP + TP 的 FLOPs 时间与通信时间之比，并和只用张量并行、只用 FSDP 对比。批很大时纯 FSDP 最好；在“批大小除以芯片数”大约处于 100 到 850 之间时，只有混合 FSDP + TP 才能计算受限。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/mixed-fsdp-comms-2.png" alt="混合 FSDP/TP 的 FLOPs 与通信时间之比">
+            <figcaption>图：TPU v5p 4x4x4 切片、F=30k 时，最优混合 FSDP/TP 的 FLOPs 与通信时间之比。张量并行的比值不随批大小变化；理想的混合 FSDP + TP 按 $\sqrt{B}$ 增长；FSDP 按 $B$ 增长。在中间的批大小区间，只有 FSDP + TP 的比值大于 1（引自原书）</figcaption>
+        </figure>
+        <p>再看 TPU v5p 16x16x16 上不同分片方案的 FLOPs 时间和通信时间随批大小的变化：</p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/math-comms-time.png" alt="不同并行方案的通信时间">
+            <figcaption>图：不同并行方案的通信时间。黑色虚线是矩阵乘法 FLOPs 的耗时，任何高于它的曲线都是通信受限。批大小低于 6e5 时所有策略都通信受限，和预期的 4096 × 2550² / (2 × 8192 × 4) = 4e5 相符（引自原书）</figcaption>
+        </figure>
+        <p>
+            黑色曲线是模型 FLOPs 花的时间，凡是它低于所有通信代价的批大小，都一定通信受限。黑色曲线和绿色曲线大约在 4e5 处相交，和预测一致。
+        </p>
+        <p>
+            原书这里还有一个交互动画：TPU v5p 16x16x16（$D=8192$、$F=32768$）上前向 MLP 的计算时间和通信时间随批大小变化，用的就是上面的 $T_\text{FSDP comms}$、$T_\text{TP comms}$ 和 $T_\text{math}$，拖动滑块可以改变 FSDP/TP 的配比，阴影区里的批大小都是通信受限。结果和上面一致：最好的配比是 FSDP=512、TP=8，批大小超过约 4e5 后变成计算受限；张量并行更多的配比在所有批大小下都通信受限；张量并行更少的配比则需要更大的批。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 流水线并行</h2>
+        <p><em>原书小节：Pipelining</em></p>
+        <p>
+            前面几节一直没讲流水线。流水线是 GPU 上占主导的并行策略，在 TPU 上没那么必要。简单说，流水线训练把模型的层分到多块设备上，前向和反向时在流水线各阶段（stage）之间传激活。算法大致是：
+        </p>
+        <ol>
+            <li>在 TPU 0 上初始化数据，权重沿层维度分片（同时用 FSDP 和张量并行时是 $W_\text{in}[L_Z, D_X, F_Y]$）。</li>
+            <li>在 TPU 0 上算第一层，把得到的激活复制到 TPU 1，如此重复直到最后一块 TPU。</li>
+            <li>计算损失函数及其导数 $\partial L / \partial x_L$。</li>
+            <li>在最后一个流水线阶段计算导数 $\partial L / \partial W_L$ 和 $\partial L / \partial x_{L-1}$，把 $\partial L / \partial x_{L-1}$ 复制到前一个阶段，重复直到回到 TPU 0。</li>
+        </ol>
+        <p>下面是一段能跑的 Python 伪代码（在 Cloud TPU VM 上可以运行）。它效率不高也不现实，但能看出数据在设备之间怎么流动。</p>
+<pre><code>batch_size = 32
+d_model = 128
+d_ff = 4 * d_model
+
+num_layers = len(jax.devices())
+
+key = jax.random.PRNGKey(0)
+
+# Pretend each layer is just a single matmul.
+x = jax.random.normal(key, (batch_size, d_model))
+weights = jax.random.normal(key, (num_layers, d_model, d_model))
+
+def layer_fn(x, weight):
+  return x @ weight
+
+# Assume we have num_layers == num_pipeline_stages
+intermediates = [x]
+for i in range(num_layers):
+  x = layer_fn(x, weights[i])
+  intermediates.append(x)
+
+  if i != num_layers - 1:
+    x = jax.device_put(x, jax.devices()[i+1])
+
+def loss_fn(batch):
+  return jnp.mean(batch ** 2)  # make up some fake loss function
+
+loss, dx = jax.value_and_grad(loss_fn)(x)
+
+for i in range(num_layers - 1, -1, -1):
+  _, f_vjp = jax.vjp(layer_fn, intermediates[i], weights[i])
+  dx, dw = f_vjp(dx)  # compute the jvp dx @ J(L)(x[i], W[i])
+  weights[i] = weights[i] - 0.01 * dw  # update our weights
+
+  if i != 0:
+    dx = jax.device_put(dx, jax.devices()[i-1])</code></pre>
+        <p>
+            好处：流水线阶段之间通信代价低，所以即使互联带宽不高也能训练很大的模型。这在 GPU 上常常很有用，因为 GPU 之间没有像 TPU 那样用 ICI 密集连接。
+        </p>
+        <p>
+            麻烦在哪：上面的伪代码里，TPU 0 几乎一直闲着，只在流水线的第一步和最后一步干活。这段空闲叫流水线气泡（pipeline bubble），很难处理。通常先用微批（microbatching）来缓解：把多个小批依次送进流水线，让 TPU 0 在整步时间里有更大比例在工作。
+        </p>
+        <p>
+            第二种办法是仔细地重叠三种矩阵乘法：前向的 $W_i @ x_i$、反向求 $dx$ 的 $W_i @ \partial L / \partial x_{i+1}$、求 $dW$ 的 $\partial L / \partial x_{i+1} @ x_i$。它们各自都需要一些 FLOPs，重叠起来可以把气泡完全藏掉。下面是 DeepSeek v3 论文里的“无气泡”流水线调度：
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/deepseek-pipeline.png" alt="DeepSeek v3 流水线调度">
+            <figcaption>图：DeepSeek v3 的流水线调度（来自其论文）。橙色是前向矩阵乘法，绿色是 dL/dx 矩阵乘法，蓝色是 dL/dW 矩阵乘法。优先做反向的 dL/dx 乘法，可以避免 FLOPs 被“搁浅”（引自原书）</figcaption>
+        </figure>
+        <p>
+            因为 TPU 的互联 pod 更大，流水线对 TPU 没那么关键，书里不深入讲。但弄懂流水线的主要瓶颈是个不错的练习。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 跨 pod 扩展</h2>
+        <p><em>原书小节：Scaling Across Pods</em></p>
+        <p>
+            最大的 TPU 切片是 TPU v5p SuperPod，8960 块芯片（2240 台主机）。想再往上扩，就要跨过数据中心网络（DCN）的边界。每台 TPU 主机装有一块或几块网卡（NIC，Network Interface Card），通过以太网连到其他 TPU v5p pod。TPU 那一章说过，每台主机约有 200Gbps（25GB/s）的全双工 DCN 带宽，摊到每块 TPU 约 6.25GB/s 的全双工（出口，egress）带宽。
+        </p>
+        <p>
+            超出单个 pod 时，通常在 ICI 域内做某种模型并行或 FSDP，再在多个 pod 之间做纯数据并行。设 $N$ 是要扩展到的 TPU 总数，$M$ 是每个 ICI 连通切片里的 TPU 数。在 DCN 上做 AllReduce 可以在 pod 之间做环形归约（ring reduction），反向传播里有：
+        </p>
+        $$T_\text{math} = \frac{2 \cdot 2 \cdot 2 \cdot BDF}{N \cdot C}$$
+        $$T_\text{comms} = \frac{2 \cdot 2 \cdot 2 \cdot DF}{M \cdot W_\text{dcn}}$$
+        <p>
+            通信带宽随 $M$ 增长：和 ICI 不同，ICI 域越大，网卡越多，总 DCN 带宽也越大。化简后，$T_\text{math} &gt; T_\text{comms}$ 的条件是
+        </p>
+        $$\frac{B}{\text{slice}} &gt; \frac{C}{W_\text{dcn}}$$
+        <p>
+            TPU v5p 上 $C/W_\text{dcn}$ 约为 4.59e14 / 6.25e9 = 73,440。也就是说，要高效地跨 DCN 扩展，每个 ICI 域需要一个最小批大小，才能撑满每个节点的出口带宽。
+        </p>
+
+        <h3>例子：LLaMA-3 70B，批 2M token</h3>
+        <p>这个限制有多严重？假设要在 TPU v5p 上用 2M token 的批训练 LLaMA-3 70B，它的 $F \approx 30{,}000$。由前几节可知：</p>
+        <ul>
+            <li>张量并行最多开到 $Y = M_Y \cdot F / 2550 \approx 11 \cdot M_Y$。</li>
+            <li>FSDP 只要 $B / N &gt; 2550 / M_X$ 就行。批 2M、三条轴都做数据并行时，最多只能用约 2400 块芯片，约四分之一个 TPU v5p pod。</li>
+            <li>FSDP + 张量并行组合时，当 $B / N &lt; 2550^2 / (2 \cdot 30000) = 108$ 才变成通信受限，所以能扩展到约 18k 块芯片。但 TPU v5p pod 最多 8k 块芯片，超出就要走 DCN。</li>
+        </ul>
+        <p>
+            简单说：批 1M 时有一套好用的方案，大约 X（FSDP）= 1024、Y（TP）= 8；批 2M 时就需要用 DCN。DCN 的算术强度是 73,440，只要保证每个 ICI 域的批大于它。这很容易：用 2 个 pod 时每个 pod 的批是 1M，每块 TPU 的批是 111，没问题（可能有点贴边，但理论上成立）。
+        </p>
+        <p>结论：只要每个 pod 的批至少 73k token，用纯数据并行跨多个 TPU pod 扩展比较直接。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. TPU 上训练 LLM 的结论汇总</h2>
+        <p><em>原书小节：Takeaways from LLM Training on TPUs</em></p>
+        <ul>
+            <li>增加并行度或减小批大小，都会让我们更偏向通信受限，因为每块芯片做的计算变少了。</li>
+            <li>在合理的上下文长度内（约 32k），可以把 Transformer 当作一摞 MLP 块来建模，每种并行方案由它怎样切分每层的两三个主要矩阵乘法来定义。</li>
+            <li>训练时主要考虑 4 种并行方案，各有自己的带宽和计算要求：数据并行、FSDP、张量并行、FSDP + 张量并行混合。</li>
+        </ul>
+        <table>
+            <thead><tr><th>策略</th><th>说明</th></tr></thead>
+            <tbody>
+                <tr><td>数据并行</td><td>激活按批分片，其他全部完整复制，反向传播时对梯度做 all-reduce</td></tr>
+                <tr><td>FSDP</td><td>激活、权重和优化器状态都按批分片，权重用之前 gather，梯度做 reduce-scatter</td></tr>
+                <tr><td>张量并行（又称 Megatron、模型并行）</td><td>激活沿 $d_\text{model}$ 分片，权重沿 $d_{ff}$ 分片，W<sub>in</sub> 之前 gather 激活，W<sub>out</sub> 之后 reduce-scatter 结果</td></tr>
+                <tr><td>FSDP + 张量并行混合</td><td>以上两者都做，FSDP 去 gather 已经按模型切开的权重</td></tr>
+            </tbody>
+        </table>
+        <p>各方法的“公式”：</p>
+        $$\small \begin{array}{cc} \text{Strategy} & \text{Formula}\\ \hline \text{DP} & \text{In}[B_X, D] \cdot_D W_\text{in}[D, F] \cdot_F W_\text{out}[F, D] \rightarrow \text{Out}[B_X, D] \\ \text{FSDP} & \text{In}[B_X, D] \cdot_D W_\text{in}[D_X, F] \cdot_F W_\text{out}[F, D_X] \rightarrow \text{Out}[B_X, D] \\ \text{TP} & \text{In}[B, D_Y] \cdot_D W_\text{in}[D, F_Y] \cdot_F W_\text{out}[F_Y, D] \rightarrow \text{Out}[B, D_Y] \\ \text{TP + FSDP} & \text{In}[B_X, D_Y] \cdot_D W_\text{in}[D_X, F_Y] \cdot_F W_\text{out}[F_Y, D_X] \rightarrow \text{Out}[B_X, D_Y] \\ \hline \end{array}$$
+        <p>每种策略都有一个按每设备计算量和通信量决定的临界点。下表是每层的计算量和通信量，$X$ 是 FSDP，$Y$ 是张量并行：</p>
+        <table>
+            <thead><tr><th>策略</th><th>每层计算量（忽略门控 einsum）<br>前向 + 反向</th><th>每层通信量（字节）<br>前向 + 反向</th></tr></thead>
+            <tbody>
+                <tr><td>DP</td><td>$4BDF/X + 8BDF/X$</td><td>$0 + 8DF$</td></tr>
+                <tr><td>FSDP</td><td>$4BDF/X + 8BDF/X$</td><td>$4DF + 8DF$</td></tr>
+                <tr><td>TP</td><td>$4BDF/Y + 8BDF/Y$</td><td>$4BD + 4BD$</td></tr>
+                <tr><td>FSDP + TP</td><td>$4BDF/(XY) + 8BDF/(XY)$</td><td>$(4BD/X + 4DF/Y) + (8BD/X + 8DF/Y)$</td></tr>
+            </tbody>
+        </table>
+        <ul>
+            <li>纯数据并行很少有用，因为模型加优化器状态占的字节数是参数量的 10 倍，内存里很难放下超过几十亿参数。</li>
+            <li>当 $\text{batch size per shard} &lt; C / W$（网络的算术强度）时，数据并行和 FSDP 变成通信受限。ICI 上这个值是 2,550，DCN 上约 71,000（正文按 v5p 算出的是 73,440，汇总处原书写约 71,000）。用更多并行轴可以提高带宽。</li>
+            <li>当 $\lvert Y\rvert &gt; F / 2550$ 时张量并行变成通信受限，多数模型在 8 到 16 路左右，和批大小无关。</li>
+            <li>FSDP + 张量并行混合可以把批大小降到 $2550^2 / 2F \approx 100$，这个值相当低。</li>
+            <li>跨 pod 的数据并行要求每个 pod 的批至少约 71,000，否则会被 DCN 卡住。</li>
+            <li>总的来说，批很大或模型很小时事情很简单：要么数据并行，要么 FSDP 加跨 DCN 的数据并行。有意思的情况在中间。</li>
+        </ul>
+    </section>
+
+    <section id="t09">
+        <h2>09. 习题</h2>
+        <p><em>原书小节：Some Problems to Work</em></p>
+        <p>这一节用 LLaMA-2 13B 当基础模型，参数如下：</p>
+        <table>
+            <thead><tr><th>超参数</th><th>值</th></tr></thead>
+            <tbody>
+                <tr><td>L</td><td>40</td></tr>
+                <tr><td>D</td><td>5,120</td></tr>
+                <tr><td>F</td><td>13824</td></tr>
+                <tr><td>N</td><td>40</td></tr>
+                <tr><td>K</td><td>40</td></tr>
+                <tr><td>H</td><td>128</td></tr>
+                <tr><td>V</td><td>32,000</td></tr>
+            </tbody>
+        </table>
+        <p>LLaMA-2 的输入嵌入矩阵和输出矩阵是分开的，MLP 块带门控。（N 是 query 头数，K 是 KV 头数，H 是每个头的维度，V 是词表大小。）</p>
+
+        <h3>习题 1：LLaMA-2 13B 有多少参数</h3>
+        <p>题目：LLaMA-2 13B 有多少参数？（这问题有点傻，但请算一下。）和第 4 章一样，LLaMA 有 3 个大 FFW 矩阵，两个上投影、一个下投影。本章忽略了两个“门控”einsum 矩阵，它们的行为和本章的 $W_\text{in}$ 一样。</p>
+        <p>解答：</p>
+        <ul>
+            <li>FFW 参数：$3LDF$ = 8.5e9</li>
+            <li>注意力参数：$4DNHL$ = 4.2e9</li>
+            <li>词表参数：$2VD$ = 0.33e9</li>
+            <li>合计：8.5e9 + 4.2e9 + 0.33e9 = 13.0e9，和名字对得上。</li>
+        </ul>
+
+        <h3>习题 2：训练时总内存</h3>
+        <p>题目：用 16M token 的批和 Adam 训练。先不管并行，模型参数、优化器状态和激活一共占多少内存？假设参数用 bf16，优化器状态用 fp32，每层存三次激活检查点（在三个大 FFW 矩阵乘法之后）。</p>
+        <p>解答：</p>
+        <ol>
+            <li>参数（bf16）加两份优化器状态（fp32 的一阶和二阶矩累积量）：(2 + 4 + 4) × 13e9 ≈ 130GB。</li>
+            <li>按前面的 Transformer 图，前两个矩阵乘法之后的激活形状是 $BF$，最后一个之后是 $BD$。bf16 下激活总内存是 $2 \cdot L \cdot (BD + 2BF) = 2LB \cdot (D + 2F)$。</li>
+            <li>代入 $B$ = 16e6：2 × 40 × 16e6 × 5,120 × (1 + 2 × 2.7) ≈ 4.2e13 = 42TB。其他激活基本可以忽略。</li>
+        </ol>
+
+        <h3>习题 3：在 TPU v5p 16x16x16 上训练</h3>
+        <p>题目：用 32k 序列长度、3M token 的总批，在 TPU v5p 16x16x16 切片上训练，权重 bfloat16，优化器 float32，同上。</p>
+        <ol>
+            <li>能用纯数据并行吗？为什么？</li>
+            <li>能用纯 FSDP 而不被通信卡住吗？为什么？纯 FSDP 时每块设备用多少内存（假设只在 3 个大 FFW 矩阵之后做梯度检查点）？</li>
+            <li>能用混合 FSDP + 张量并行吗？如果能，$X$ 和 $Y$ 取多少？每块设备存多少内存？只用 roofline FLOPs 估算、忽略注意力，在 40% MFU 下每个训练步要多久？</li>
+        </ol>
+        <p>解答：先列数字。32k 序列长度、3M 批，相当于 96 条序列。TPU v5p 16x16x16 切片共有 393TB HBM。</p>
+        <ol>
+            <li>不能用纯数据并行。它在每块芯片上复制参数和优化器状态，这部分已经约 130GB（见习题 2），比每块芯片的 HBM（96GB）还多。</li>
+            <li>先只看内存。把习题 2 的 16M 换成 3M，激活检查点总共约 7.86e12 字节，加上 1.3e11 的参数和优化器状态，总计几乎正好 8e12 = 8TB。切片总 HBM 是 393TB，远在上限之内。再看是计算受限还是通信受限：4096 块芯片、3 条并行轴时，最小批是 850 × 4096 = 3.48M token，比我们的 3M 批略大。所以其实是通信受限。结论是不能只用 FSDP 而不被通信卡住。</li>
+            <li>现在知道主要问题是通信。前面得出，混合 FSDP + 张量并行时每芯片批需要超过 $2550^2 / 2F$，这里是 235。3M / 4096 ≈ 732，高于它，所以理论上可行。用 $X_{opt} = \sqrt{(B / F) \cdot (M_X / M_Y) \cdot N}$，这里是 sqrt(3e6 × 2 × 4096 / 13824) = 1333，所以大约做 1024 路数据并行（FSDP）和 4 路张量并行。每块 TPU 的内存和第 2 小问一样（总量约 8TB，摊到 4096 块芯片）。步时间就是 6 × 3e6 × 13e9 / (4096 × 4.6e14 × 0.4) ≈ 300ms。</li>
+        </ol>
+        <p>原书第 5 章到此结束，第 6 章把这些内容用到真实的 LLaMA 模型上。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 附录 A：反向传播的通信怎么推出来</h2>
+        <p><em>原书小节：Appendix A: Deriving the backward pass comms</em></p>
+        <p>
+            前面把 Transformer 层的前向简化成 Out[B, D] = In[B, D] *_D W_in[D, F] *_F W_out[F, D]。反向传播需要哪些通信，怎么推？
+        </p>
+        <p>这可以从上一章单个矩阵乘法 $Y = X A$ 的规则直接得到：</p>
+        $$\frac{dL}{dA} = \frac{dL}{dY}\frac{dY}{dA} = X^T \left(\frac{dL}{dY}\right)$$
+        $$\frac{dL}{dX} = \frac{dL}{dY}\frac{dY}{dX} = \left(\frac{dL}{dY}\right) A^T$$
+        <p>用它可以得到下面几个式子（Tmp[B, F] 表示 In[B, D] * W_in[D, F]）：</p>
+<pre><code>dW_out[F, D] = Tmp[B, F]  *_B dOut[B, D]
+dTmp[B, F]   = dOut[B, D] *_D W_out[F, D]
+dW_in[D, F]  = In[B, D]   *_B dTmp[B, F]
+dIn[B, D]    = dTmp[B, F] *_F W_in[D, F]</code></pre>
+        <p>
+            这些只是数学关系，没有涉及分片。反向传播的任务就是算出这四个量。要知道需要哪些通信，只要取出四个式子里参与矩阵乘法的各个量（Tmp、dOut、W_out、W_in）的分片方式（由并行方案决定），再用分片矩阵乘法的规则判断要做什么通信。dOut 的分片方式和 Out 相同。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>用 Adam 和纯数据并行能训练的最大模型是 $\text{num\_params} = \text{HBM per device} / 10$，TPU v5p 上约 9B 参数。</li>
+            <li>每设备批大小小于 $2550 / M_X$ 时，FSDP 和纯数据并行在 TPU v5 上变成带宽受限，条件是 $B/X &gt; C/W_\text{ici}$。</li>
+            <li>当 $Y &gt; M_Y \cdot F / 2550$ 时张量并行通信受限，多数模型在 8 到 16 路之间，和批大小无关。</li>
+            <li>训练时最优的 FSDP 路数一般是 $X_{opt} = \sqrt{\frac{B}{F} \frac{M_X}{M_Y} N}$。</li>
+            <li>张量并行和 FSDP 组合，可以把 $B/N$ 降到 $2550^2 / 2F$，每芯片批约 100，比只用 FSDP 小约 8 倍。</li>
+            <li>只要每个 pod 的批至少 73k token（$B/\text{slice} &gt; C/W_\text{dcn}$），就可以用纯数据并行比较直接地跨多个 TPU pod 扩展。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>How To Scale Your Model · How to Parallelize a Transformer for Training · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

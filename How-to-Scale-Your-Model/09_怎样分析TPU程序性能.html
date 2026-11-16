@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>怎样分析 TPU 程序的性能 | How to Scale Your Model 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="08_在TPU上部署LLaMA3_70B.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">How to Scale Your Model 目录</a> · 09</span>
+    <span><a href="10_用JAX给TPU编程.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 9 章 · 怎样分析 TPU 程序的性能</h1>
+        <p class="subtitle">从 JAX 代码到 HLO、LLO 的编译链，再到用 JAX profiler 的 Trace Viewer、Graph Viewer 和 Memory Profile 读懂一次真实运行，并拿前面章节的 roofline 估算去核对实测时间</p>
+        <div class="author-meta">
+            作者：Jacob Austin、Sholto Douglas 等（Google DeepMind）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://jax-ml.github.io/scaling-book/profiling" target="_blank">How to Profile TPU Programs</a>（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            前面八章都在纸上算：一次矩阵乘法、一次 AllReduce、一个解码步理论上要多久。这一章讲怎样在真实程序里看到这些时间，判断程序离 roofline 还有多远。先简单过一遍 TPU 的软件栈：JAX 代码怎样一层层编译成 TPU 上跑的机器码，中间的 HLO 长什么样。然后介绍 JAX profiler（性能分析器）的几个主要工具，教你读一行 XLA op，最后拿一个小 Transformer 的 profile 逐段核对：前馈层的矩阵乘法、ReduceScatter 实测时间和估算对得上。
+        </p>
+        <p>
+            读完应该能做到：看懂 profile 里一行 HLO 的名字、形状、布局和内存位置；从 profile 反推出程序用了什么分片和多大的矩阵；用 roofline 判断某个 op 是不是已经跑满。下一章（第 10 章）讲 JAX 里怎样写并行程序。
+        </p>
+        <ol>
+            <li><a href="#t01">TPU 软件栈的鸟瞰</a></li>
+            <li><a href="#t02">JAX Profiler：一个多用途的 TPU 性能分析器</a>（含 Trace Viewer、读 XLA op、Graph Viewer、实例 profile、Memory Profile）</li>
+            <li><a href="#t03">习题</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. TPU 软件栈的鸟瞰</h2>
+        <p><em>原书小节：A Thousand-Foot View of the TPU Software Stack</em></p>
+        <p>
+            Google 提供了一系列给 TPU 编程的 API，从高层的 JAX 代码到底层的 Pallas 或 HLO。大多数人只写 JAX：用类似 NumPy 的写法写抽象的线性代数程序，自动编译成能在 TPU 上高效运行的代码。（Pallas 是 JAX 里写自定义 kernel 的扩展；HLO 是 High Level Operations，XLA 编译器的中间表示。）
+        </p>
+        <p>下面是一个简单例子，一个把两个矩阵相乘的 JAX 程序：</p>
+<pre><code>import jax
+import jax.numpy as jnp
+
+def multiply(x, y):
+  return jnp.einsum('bf,fd-&gt;db', x, y)
+
+y = jax.jit(multiply)(jnp.ones((128, 256)), jnp.ones((256, 16), dtype=jnp.bfloat16))</code></pre>
+        <p>
+            调用 <code>jax.jit</code> 时，JAX 会追踪（trace）这个函数，生成一种更底层的 IR（Intermediate Representation，中间表示）StableHLO。StableHLO 是一种与平台无关的 ML 计算 IR，再由 XLA 编译器降级（lower）成 HLO。编译器会跑很多遍优化，决定算子融合（fusion）、内存布局等，最终得到 JAX profile 里能看到的 HLO。这份 HLO 以 LLVM 风格的图表示 JAX 代码里所有核心线性代数操作（矩阵乘法、逐元素操作、卷积等）。下面是上面那个程序的 HLO 的简化版（要拿到这份 HLO，可以运行 <code>jax.jit(f).lower(*args, **kwargs).compile().as_text()</code>）：
+        </p>
+<pre><code>ENTRY %main.5 (Arg_0.1: f32[128,256], Arg_1.2: bf16[256,16]) -&gt; f32[16,128] {
+  %Arg_1.2 = bf16[256,16]{1,0} parameter(1), metadata={op_name="y"}
+  %convert.3 = f32[256,16]{1,0} convert(bf16[256,16]{1,0} %Arg_1.2),
+  %Arg_0.1 = f32[128,256]{1,0} parameter(0), metadata={op_name="x"}
+  ROOT %dot.4 = f32[16,128]{1,0} dot(f32[256,16]{1,0} %convert.3, f32[128,256]{1,0} %Arg_0.1), lhs_contracting_dims={0}, rhs_contracting_dims={1},
+}</code></pre>
+        <p>
+            HLO 的语法马上会解释，这里先注意它和上面的 JAX 代码对应得相当好。比如
+        </p>
+<pre><code>ROOT %dot.4 = f32[16,128]{1,0} dot(f32[256,16]{1,0} %convert.3, f32[128,256]{1,0} %Arg_0.1), lhs_contracting_dims={0}, rhs_contracting_dims={1}</code></pre>
+        <p>
+            就是上面那个矩阵乘法：两个 f32 矩阵分别沿第 0 维和第 1 维做收缩。（另外可以看到，bf16 的 <code>y</code> 先被 <code>convert</code> 成了 f32，因为 <code>x</code> 是 f32。）
+        </p>
+        <p>
+            要把 HLO 变成能在 TPU 上执行的代码，XLA 编译器先把它降级成 LLO（low-level optimizer，低层优化器）IR。LLO 直接给 TPU 编程：安排不同内存之间的拷贝、把数组推进脉动阵列（systolic array，MXU 里做矩阵乘法的乘加单元网格）等。LLO 代码里的原语负责把缓冲区推进脉动阵列、把结果取出来，以及调度在 TPU 不同内存之间传数据的 DMA（Direct Memory Access，不经计算核心直接搬数据的硬件通道）。降级到 LLO 后，再编译成机器码，加载进 TPU 的 IMEM（指令内存）执行。
+        </p>
+        <p>
+            程序跑得比预期慢时，主要还是在 JAX 这一层改。不过这往往要求理解一些 HLO 的语义，以及代码在 TPU 上实际怎么运行。如果问题出在更底层，还有一条退路：用 Pallas 写自定义 kernel。要查看程序的 HLO 和运行时统计，用的就是 JAX profiler。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. JAX Profiler：一个多用途的 TPU 性能分析器</h2>
+        <p><em>原书小节：The JAX Profiler: A Multi-Purpose TPU Profiler</em></p>
+        <p>
+            JAX 提供了一个多用途的 TPU profiler，带有一堆工具，用来理解程序运行时 TPU 上发生了什么。用 <code>jax.profiler</code> 模块可以在程序运行时做追踪，记录每个子部分的耗时、每个程序的 HLO、内存使用等。比如下面的代码会把一份 trace 写到 <code>/tmp/tensorboard</code>，可以在 TensorBoard 里查看（原书给了一份<a href="https://docs.jax.dev/en/latest/profiling.html#tensorboard-profiling" target="_blank">分步指南</a>）。
+        </p>
+<pre><code>import jax
+with jax.profiler.trace("/tmp/tensorboard"):
+  key = jax.random.key(0)
+  x = jax.random.normal(key, (1024, 1024))
+  y = x @ x
+  y.block_until_ready()
+
+# Now you can load TensorBoard in a Google Colab with
+#
+# !pip install -U xprof
+# !pip install -U protobuf
+# %load_ext tensorboard
+# %tensorboard --logdir=/tmp/tensorboard
+#
+# or externally with
+#
+# &gt; tensorboard --logdir=/tmp/tensorboard
+#</code></pre>
+        <p>下面是 profiler 能做的事情的概览：</p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/xprof-overview.png" alt="JAX profiler 在 TensorBoard 中的界面概览">
+            <figcaption>图：TensorBoard 里 JAX profiler 的主要功能概览（引自原书）</figcaption>
+        </figure>
+        <p>进入 TensorBoard 后，profiler 有几个主要标签页：</p>
+        <ul>
+            <li>Trace Viewer：一条详细的时间线，显示 TPU 上实际发生了什么。</li>
+            <li>Graph Viewer：显示 HLO 图，可以看出程序哪些部分互相喂数据，以及各部分怎么分片。</li>
+            <li>Memory Profile 和 Memory Viewer：显示程序用了多少内存。</li>
+        </ul>
+        <p>
+            profile 不太好分享，不过原书给了一个 <a href="https://ui.perfetto.dev/#!/?s=fa9f13b487bde622707c1a503f9227c34594760a" target="_blank">Perfetto 链接</a>，里面至少有一个简单 Transformer 的 Trace Viewer 部分。这份 <a href="https://colab.research.google.com/drive/1_6krERgtolH7hbUIo7ewAMLlbA4fqEF8?usp=sharing" target="_blank">Colab</a> 可以生成完整的 JAX/TensorBoard trace，自己动手看。
+        </p>
+
+        <h3>Trace Viewer</h3>
+        <p>
+            Trace Viewer 大概是 profiler 里最有用的部分。下面的例子是一个标注了各部分的简单 Transformer，名字来自代码里提供的标签。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/trace-viewer.png" alt="Trace Viewer 中一个简单 Transformer 的时间线">
+            <figcaption>图：Trace Viewer 里一个简单 Transformer 的时间线，各段已按代码标签标注（引自原书）</figcaption>
+        </figure>
+        <p>
+            Trace Viewer 按时间顺序显示每个 TPU 核上的所有动作。这里只看 TPU:0，因为通常所有 TPU 执行相同的指令。几点说明：
+        </p>
+        <ul>
+            <li>最上面一行（XLA Ops）是 TPU 实际执行的操作，名字是 HLO 名。其余各行都是根据 <code>jax.named_scope</code>、<code>jax.named_call</code> 和 Python 调用栈得到的近似 trace。</li>
+            <li>注意那些重复的块，可以从中单独拿出一层来看。结合代码和对 Transformer 的理解，还能看出哪些部分是注意力，哪些是 MLP。</li>
+            <li>点击一个 XLA op，可以看到它来自代码的哪一处（有助于理解 trace），还有跳到 Graph Viewer 的链接。</li>
+        </ul>
+        <div class="takeaway">
+            <p>
+                提示：Trace Viewer 可以用“打游戏”式的按键操作：A/D 左右平移，W/S 放大缩小。用这几个键浏览会方便很多。
+            </p>
+        </div>
+
+        <h3>怎样读一个 XLA op</h3>
+        <p>
+            HLO 其实不难读，而且读懂它对理解 trace 中某一段对应什么很有帮助。下面是一个叫 fusion.3 的 op：
+        </p>
+<pre><code>%fusion.3 = bf16[32,32,4096]{2,1,0:T(8,128)(2,1)S(1)} fusion(bf16[32,32,8192]{2,1,0:T(8,128)(2,1)S(1)} %fusion.32), kind=kCustom, calls=%all-reduce-scatter.3</code></pre>
+        <p>拆开来看：</p>
+        <table>
+            <thead><tr><th>部分</th><th>本例</th><th>含义</th></tr></thead>
+            <tbody>
+                <tr><td>Op 名</td><td><code>fusion.3</code></td><td>dot 或 fusion op 是一组操作，最多包含 1 个矩阵乘法，可能还带一串相关的逐元素 VPU 操作（VPU 是 Vector Processing Unit，TPU 上做逐元素运算的向量单元）。</td></tr>
+                <tr><td>形状</td><td><code>bf16[32,32,4096]</code></td><td>op 的输出形状。dtype 是 bf16（每个元素 2 字节），形状是 [32,32,4096]。</td></tr>
+                <tr><td>布局</td><td><code>{2,1,0:T(8,128)(2,1)}</code></td><td>各轴在内存里的顺序（列优先、行优先等）以及数组的填充（padding），下面细讲。</td></tr>
+                <tr><td>内存位置</td><td><code>S(1)</code></td><td>S(1) 表示这个数组放在 VMEM（TPU 核内的向量内存，比 HBM 小得多也快得多）。S(0)（有时省略）是 HBM。S(2) 和 S(3) 是其他内存空间。</td></tr>
+                <tr><td>参数</td><td><code>bf16[32,32,8192]{2,1,0:T(8,128)(2,1)S(1)} %fusion.32</code></td><td>这个 op 有一个输入，是一个叫 fusion.32 的 bf16 数组，形状如上。由此能知道是哪个函数在给它喂数据。</td></tr>
+            </tbody>
+        </table>
+        <p>再仔细看这套记法。拿一个简单的例子：</p>
+<pre><code>f32[3,5]{1,0:T(2,2)}</code></pre>
+        <p>
+            意思是这个 op 返回一个形状为 [3, 5] 的 float32 数组，带有特定的分块方式（tiling）<code>{1,0:T(2,2)}</code>。tiling 一般不太影响结果，简单说，它告诉我们一个 N 维数组怎样按顺序排在内存里。下图是这个数组在内存中的排布：
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/tiling.png" alt="f32[3,5] 在 T(2,2) tiling 下的内存排布">
+            <figcaption>图：f32[3,5]{1,0:T(2,2)} 在内存中的排布，按 (2, 2) 分块并填充到 [4, 6]（引自原书）</figcaption>
+        </figure>
+        <p>
+            在 <code>{1,0:T(2,2)}</code> 里，<code>1,0</code> 这部分给出数组各维在物理内存中的顺序，从最内层（most minor）到最外层（most major）。从右往左读，对应到 <code>f32[3,5]</code> 里的各维，就能得出数组的物理布局。本例的物理布局是 [3,5]，和逻辑形状一样。
+        </p>
+        <p>
+            后面的 <code>T(2,2)</code> 表示数组按 (2, 2) 的块来分，每个块内先行后列（行优先），即 (0, 0) 后面是 (0, 1)，然后是 (1, 0) 和 (1, 1)。因为有 T(2, 2) 的分块，数组被填充成 [4, 6]，内存占用增加约 1.6 倍（$24 / 15 = 1.6$）。
+        </p>
+        <p>
+            前面那个大 bf16 数组 <code>bf16[32,32,8192]{2,1,0:T(8,128)(2,1)S(1)}</code> 用的是 <code>T(8,128)(2,1)</code>，表示有两级分块：外层是 (8, 128) 的块，块内再有 (2, 1) 的小块。内层的 (2,1) 是给 bf16 用的，保证每次加载都是 4 字节的倍数。例如下图是 <code>bf16[4,8]{1,0:T(2,4)(2,1)}</code>，颜色表示 (2,4) 的块，红框是 (2,1) 的块：
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/tiling2.png" alt="bf16[4,8] 在两级 tiling 下的内存排布">
+            <figcaption>图：bf16[4,8]{1,0:T(2,4)(2,1)} 的两级分块，颜色是 (2,4) 块，红框是 (2,1) 块（引自原书）</figcaption>
+        </figure>
+        <p>
+            tiling 会影响张量的各块能多高效地加载进 VMEM。XLA 有时会在程序里插入拷贝，给张量“重新分块”或“重新布局”，有时开销不小。
+        </p>
+        <p>
+            （原书注：JAX 有一个实验性功能可以绕开这个问题，让 XLA 为程序的输入算出它“偏好”的布局。用 <code>jax.jit</code> 做即时编译时，一般会传入“模拟”输入，告诉 JAX 输入的形状和 dtype，这些输入通常也带着 tiling 信息，而这些信息未必最优。可以把输入布局指定为 AUTO，<code>jax.jit</code> 会返回编译后程序偏好的布局。之后显式按这个布局加载张量，就能避免程序内部产生拷贝。）
+        </p>
+
+        <h3>Graph Viewer</h3>
+        <p>
+            上面有些 fusion 看起来很复杂，XLA Graph Viewer 能让它们更容易看懂。比如下面是一个相当复杂的 fusion 的视图：
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/graph-viewer.png" alt="Graph Viewer 中一个复杂 fusion 的图">
+            <figcaption>图：Graph Viewer 中一个复杂 fusion 的 HLO 图（引自原书）</figcaption>
+        </figure>
+        <p>
+            多看一些 HLO 图，试着把 HLO op 对应到正在分析的代码上，很有帮助。鼠标悬停在一个方框上，常常能看到定义这个函数的那行代码。
+        </p>
+
+        <h3>看一个接近真实的 profile 例子</h3>
+        <p><em>原书小节：Looking at a real(ish) example profile</em></p>
+        <p>
+            <a href="https://colab.research.google.com/drive/1_6krERgtolH7hbUIo7ewAMLlbA4fqEF8?usp=sharing" target="_blank">这份 Colab</a> 里有一个假 Transformer 的示例 profile。赶时间的话，可以看这个 <a href="https://ui.perfetto.dev/#!/?s=fa9f13b487bde622707c1a503f9227c34594760a" target="_blank">Perfetto 链接</a>，至少能看到 Trace Viewer。作者这次比平时更用心地用 <code>jax.named_scope</code> 标注了 trace，方便认出每一段在做什么。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/transformer-xprof.png" alt="假 Transformer 的完整 profile">
+            <figcaption>图：示例 Transformer 的 profile 全貌（引自原书）</figcaption>
+        </figure>
+        <p>
+            看一看这个 profile，试着真正弄懂每一部分在做什么。先从 FFW 块（前馈层）开始拆：
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/transformer-ffw.png" alt="放大后的 FFW 块">
+            <figcaption>图：放大后的 FFW 块，选中的是上投影矩阵乘法（引自原书）</figcaption>
+        </figure>
+        <p>
+            放大到 FFW 块后，可以看到上投影（up-projection）op 是一个 fusion（矩阵乘法），输入是 <code>bf16[8, 1024, 8192]</code> 和 <code>bf16[8192, 16384]</code>，输出是 <code>bf16[8, 1024, 16384]</code>。作者知道（因为代码是他写的）这是一个 4 路数据并行（DP）、2 路模型并行（MP）分片的矩阵乘法在单个设备上的局部视图，所以实际做的是
+        </p>
+<pre><code>X: bf16[32, 1024, 8192] * Win: bf16[8192, 32768] -&gt; Tmp: bf16[32, 1024, 32768]</code></pre>
+        <p>
+            预期它要多久？首先，每个数据并行分片上的批大小是 $8 \times 1024 = 8192$，稳稳处在计算受限区间。这是在 8 个 TPU v2 核上跑的，预期耗时约
+        </p>
+        $$\frac{2 \times 32 \times 1024 \times 8192 \times 32768}{23\text{e}12 \times 8} = 95.6\text{ms}$$
+        <p>
+            实际耗时 96ms，几乎完全一样。这说明 FLOPs 利用率很好。
+        </p>
+        <p>
+            注意 Google Colab 已经不再提供 TPU v2-8 切片。想拿到真正的 8 核切片跟着做，可以用 <a href="https://www.kaggle.com/" target="_blank">Kaggle</a>（目前仍免费提供），或者在 GCP 上开一个 8 核切片。（原书注：如果只想在假问题上练分片，也可以在 CPU 上模拟 8 个设备：<code>import jax; jax.config.update("jax_num_cpu_devices", 8)</code>，需要 jax 大约 0.4.27 以上，然后 <code>print(jax.devices())</code>。这只适用于玩具问题，反映不了真实性能。）
+        </p>
+        <p>
+            通信呢？第二个矩阵乘法末尾藏着一个小 fusion，点开会看到
+        </p>
+<pre><code>%fusion.1 = bf16[8,1024,4096]{2,1,0:T(8,128)(2,1)} fusion(bf16[8,1024,8192]{2,1,0:T(8,128)(2,1)} %fusion.31), kind=kCustom, calls=%all-reduce-scatter.1</code></pre>
+        <p>
+            它基本上是一个小的 ReduceScatter（规约散射：先把各设备上的数组逐元素相加，再把结果切开，每个设备只留一份）。下面是它在 Graph Viewer 里的样子：
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/reduce-scatter-xprof.png" alt="Graph Viewer 中的 ReduceScatter">
+            <figcaption>图：Graph Viewer 中的这个 ReduceScatter fusion（引自原书）</figcaption>
+        </figure>
+        <p>
+            预期它要多久？这是在 TPU v2 4x2 上做 ReduceScatter，只需要一跳，双向带宽 1.2e11。数组大小是 $2 \times 32 \times 1024 \times 8192$（字节），批轴切成 4 份，所以每个分片是 $2 \times 8 \times 1024 \times 8192 = 128\text{MB}$。这应该大约要 1.1ms。实际呢？profile 里报的是 1.13ms，离 roofline 很近。
+        </p>
+        <p>再看注意力部分。下面是注意力组件的 profile：</p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/attn-xprof.png" alt="注意力部分的 profile">
+            <figcaption>图：注意力部分的 profile，选中的是 Q 投影（引自原书）</figcaption>
+        </figure>
+        <p>
+            图里选中的是 Q 投影 op，它用的矩阵 $W_Q$ 形状是 [dmodel = 8192, nheads = 32, dqkv = 256]。这里沿 head 维做 Megatron 分片（Megatron sharding，把注意力头分到不同设备上的模型并行方式）。原书留给读者照同样的方法算一算这些 op 应该要多久。
+        </p>
+
+        <h3>Memory Profile</h3>
+        <p>
+            Memory Profile 能直接看到程序内存随时间的变化，对排查 OOM（Out Of Memory，内存溢出）很有用。图里大约 7.5GB 分配给了模型参数，还有约 8.5GB 空闲，所以还能放进很多东西。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/memory-viewer.png" alt="Memory Profile 视图">
+            <figcaption>图：Memory Profile，约 7.5GB 用于模型参数，约 8.5GB 空闲（引自原书）</figcaption>
+        </figure>
+    </section>
+
+    <section id="t03">
+        <h2>03. 习题</h2>
+        <p><em>原书小节：Worked Problems</em></p>
+
+        <h3>习题 1：从 profile 看出程序在做什么</h3>
+        <p>
+            题目：看一看<a href="https://colab.research.google.com/drive/1LfLO3OTr-_MWFPxUN36KJ3cqH0BcAoli?usp=sharing" target="_blank">这份 Colab/profile</a>，找出哪里看起来可疑、发生了什么。能不能准确说出发生了哪些计算、每个操作在做什么？涉及的每个矩阵真实形状是什么，怎么分片的？先只看 profile，不要读代码。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/all-reduce-profile.png" alt="习题 1 的 profile">
+            <figcaption>图：习题 1 的 profile（引自原书）</figcaption>
+        </figure>
+        <p>解答：</p>
+        <p>这是两次矩阵乘法，具体就是：</p>
+<pre><code>def matmul(w1, w2, x):
+  return jnp.einsum('wf,bf-&gt;bw', w2, jnp.einsum('fw,bw-&gt;bf', w1, x))</code></pre>
+        <p>
+            profile 里能看到一个 reduce、两个大 fusion 和一个 all-reduce。第一个大 fusion 是：
+        </p>
+<pre><code>%fusion.1 = bf16[4096]{0:T(1024)(128)(2,1)} fusion(bf16[4096,8192]{1,0:T(8,128)(2,1)} %param.1, bf16[8192]{0:T(1024)(128)(2,1)} %reduce.6), kind=kLoop, calls=%fused_computation.1</code></pre>
+        <ol>
+            <li>从这一行看出单个分片上的形状是 <code>bf16[8192] * bf16[4096, 8192] -&gt; bf16[4096]</code>，在 8192 那一维上做收缩。</li>
+            <li>再看最后的 AllReduce，它带有 <code>replica_groups={{0,16,32,48,64,80,96,112}, ...}</code>，说明做的是 8 路模型并行。</li>
+            <li>所以真实形状是 <code>bf16[8, 8192] * bf16[32768, 8192] -&gt; bf16[8, 32768]</code>。</li>
+        </ol>
+
+        <h3>习题 2：给一个朴素 Transformer 修分片</h3>
+        <p>
+            题目：前面那份 <a href="https://colab.research.google.com/drive/1_6krERgtolH7hbUIo7ewAMLlbA4fqEF8?usp=sharing" target="_blank">Transformer Colab</a> 实现了一个简单的模拟 Transformer。Colab 已不再提供 TPU v2-8，需要在 Kaggle 或 GCP 的 8 核切片上跑。按 Colab 里的说明，测出用 GSPMD 分区的朴素 Transformer 的基准时间。每部分要多久？应该要多久？用的是什么分片？试着修好分片。提示：用 <code>jax.lax.with_sharding_constraint</code> 约束分片行为。修好之后，最好能达到多少 MFU？（GSPMD 是 XLA 的自动分片分区器，根据少量标注推断整个程序的分片；MFU 是 Model FLOPs Utilization，实际有效 FLOPs 占硬件峰值的比例。）
+        </p>
+        <p>
+            作为参考，初始版本大约每层 184ms，优化后的 profile 每层 67ms。做完之后，试着盯着 profile，只从 profile 回答这些问题：
+        </p>
+        <ul>
+            <li>这是什么分片策略？</li>
+            <li>批大小、$d_\text{model}$、$d_\text{ff}$ 分别是多少？</li>
+            <li>注意力和 MLP 块各占多少比例的时间？</li>
+            <li>在 roofline 上，每个 op 应该占多少比例的时间？</li>
+        </ul>
+        <p>
+            注：这道题写完以后，XLA 编译器变好了。初始版本现在大约每层 90ms，优化后的 profile 只快了约 10ms，每层 80ms。仍然值得动手试试，看能不能做得更好。
+        </p>
+        <p>
+            解答：这是动手练习，原书只给了上面的参考耗时，没有给出完整解答。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <p>原书这一章没有单独的 Takeaway 框，下面列出正文里的提示和主要结论。</p>
+        <ul>
+            <li>编译链：JAX 代码经 <code>jax.jit</code> 追踪成 StableHLO，XLA 降级成 HLO（决定 fusion 和布局），再降级成 LLO（调度内存拷贝、脉动阵列和 DMA），最后编译成机器码载入 TPU IMEM。性能问题主要在 JAX 层解决，底层问题用 Pallas 自定义 kernel。查看 HLO：<code>jax.jit(f).lower(*args, **kwargs).compile().as_text()</code>。</li>
+            <li>JAX profiler 的三类工具：Trace Viewer（时间线，最上一行 XLA Ops 是真实 TPU 操作）、Graph Viewer（HLO 图和分片）、Memory Profile / Memory Viewer（内存占用，用来排查 OOM）。</li>
+            <li>提示：Trace Viewer 用 A/D 平移、W/S 缩放。</li>
+            <li>读一行 HLO：op 名、输出形状和 dtype、布局 <code>{维度顺序:T(分块)}</code>、内存位置 <code>S(0)</code>=HBM、<code>S(1)</code>=VMEM、输入参数。tiling 会带来填充（例：f32[3,5] 在 T(2,2) 下填充到 [4,6]，约 1.6 倍内存），XLA 有时会插入重新布局的拷贝。</li>
+            <li>用 roofline 核对实测：FFW 上投影估算 $2 \times 32 \times 1024 \times 8192 \times 32768 / (23\text{e}12 \times 8) = 95.6\text{ms}$，实测 96ms；128MB 分片的 ReduceScatter 估算约 1.1ms，实测 1.13ms。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>How To Scale Your Model · How to Profile TPU Programs · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

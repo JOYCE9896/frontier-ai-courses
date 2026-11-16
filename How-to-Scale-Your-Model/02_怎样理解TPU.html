@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>怎样理解 TPU | How to Scale Your Model 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="01_Roofline分析.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">How to Scale Your Model 目录</a> · 02</span>
+    <span><a href="03_分片矩阵与矩阵乘法.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 2 章 · 怎样理解 TPU</h1>
+        <p class="subtitle">一块 TPU 由哪些部件组成，芯片之间怎样连成网络，各层带宽和算力是多少，以及怎样用这些数字估算一次计算要花多久</p>
+        <div class="author-meta">
+            作者：Jacob Austin、Sholto Douglas 等（Google DeepMind）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://jax-ml.github.io/scaling-book/tpus" target="_blank">How to Think About TPUs</a>（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            第 1 章讲了 roofline 分析：一段计算的耗时由“做乘法的时间”和“搬数据的时间”中较大的那个决定。要把这个方法用到真实硬件上，得知道硬件的具体数字：每秒能做多少次浮点运算，内存带宽多大，芯片之间的连线有多快。这一章把 Google 的 TPU 从里到外拆一遍：芯片内部的 TensorCore、MXU、VPU、VMEM 和 HBM，芯片怎样组成托盘（tray）、切片（slice）和 Pod，以及 ICI、PCIe、DCN 三种网络的带宽。
+        </p>
+        <p>
+            读完这一章，你可以拿一张规格表回答这类问题：一个 200B 参数的模型放在 32 块 TPU v6e 上，生成一个 token 至少要多久；一次矩阵乘法在多大的 batch 下才不被内存带宽卡住；把一个大数组从主机内存搬到某一块芯片上，瓶颈在哪一段。下一章（第 3 章）会在这些数字的基础上讲分片矩阵和跨芯片通信。原书在开头还提到，第 12 章专门讲 NVIDIA GPU，可以对照阅读。
+        </p>
+        <ol>
+            <li><a href="#t01">TPU 是什么</a></li>
+            <li><a href="#t02">TPU 网络</a></li>
+            <li><a href="#t03">要点与 TPU 规格表</a></li>
+            <li><a href="#t04">例题</a></li>
+            <li><a href="#t05">附录 A：TPU 内部的更多细节</a></li>
+            <li><a href="#t06">附录 B：脉动阵列怎样工作</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. TPU 是什么</h2>
+        <p><em>原书小节：What Is a TPU?</em></p>
+
+        <p>
+            一块 TPU 可以简化成两部分：一个专门做矩阵乘法的计算核心，叫 TensorCore；以及挂在它旁边的一叠高速内存，叫 HBM（High Bandwidth Memory，高带宽内存，就是芯片自带的显存）。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/tpu-chip.png" alt="TPU 芯片的基本组成">
+            <figcaption>图：TPU 芯片的基本组成。左边灰色方框是 TensorCore，里面有矩阵乘法单元（MXU）、向量单元（VPU）和向量内存（VMEM）（引自原书）</figcaption>
+        </figure>
+
+        <h3>TensorCore 里的三个关键单元</h3>
+        <p>
+            TensorCore 基本上就是一台很强的矩阵乘法机器，但它还有几样别的功能。原书列出三个关键单元。
+        </p>
+        <p>
+            MXU（Matrix Multiply Unit，矩阵乘法单元）是 TensorCore 的核心。在 TPU7x 上，它每 4 个时钟周期完成一次 <code>bf16[8,256] @ bf16[256,256] -> f32[8,256]</code> 的矩阵乘法，靠的是一种叫脉动阵列（systolic array）的结构（附录 B 细讲）。按 TPU7x 2.2GHz 的主频，每个 MXU 大约是 5.8e14 bf16 FLOPs/s。每块 TPU7x 芯片有 2 个 TensorCore，每个 TensorCore 有 2 个 MXU，所以整块芯片的 bf16 算力约 2.3e15 FLOPs/s。TPU 也支持更低精度的矩阵乘法，吞吐量更高，例如每块 TPU7x 可以做 4.6e15 次 fp8 运算每秒。
+        </p>
+        <p>
+            把这个数自己验算一遍：一次 $[8,256]\times[256,256]$ 的乘法有 $8\times256\times256$ 次乘加，每次乘加算 2 个 FLOPs，每 4 个周期一次，所以
+        </p>
+        $$\frac{2 \times 8 \times 256 \times 256}{4} \times 2.2\times 10^{9} \approx 5.8\times 10^{14}\ \text{FLOPs/s}$$
+        <p>
+            VPU（Vector Processing Unit，向量处理单元）做一般的数学运算，比如 ReLU 激活，向量之间的逐元素加法、乘法。求和这类归约（reduction）也在这里做。附录 A 有更多细节。
+        </p>
+        <p>
+            VMEM（Vector Memory，向量内存）是 TensorCore 里的一块片上暂存区（scratchpad），离计算单元很近。它比 HBM 小得多（TPU7x 每块芯片 128 MiB VMEM，HBM 是 192 GiB），但到 MXU 的带宽高得多。VMEM 有点像 CPU 上的 L1/L2 缓存，不过容量大得多，而且由程序员自己控制放什么。HBM 里的数据必须先拷进 VMEM，TensorCore 才能拿它做计算。
+        </p>
+        <p>
+            TPU 做矩阵乘法极快，这是它的主要工作。TPU7x 是目前最强的 TPU 之一，每个核心 1.15e15 bf16 FLOPs/s，每块芯片 2.3e15 bf16 FLOPs/s。一个 9216 块芯片的 Pod 能达到 21 bf16 exaFLOPs/s，相当于世界上最强的超级计算机之一，而 Google 有很多这样的 Pod。TPU 和它的脉动阵列之所以能做成这么强的加速器，是因为矩阵乘法是少数几个用 $O(n^3)$ 计算量只需要 $O(n^2)$ 字节数据的算法之一。这样一来，普通的 ALU 很容易被算力卡住，而不是被内存带宽卡住。
+        </p>
+        <p>
+            图里还有 SMEM 和标量单元（scalar unit）等部件，它们负责控制流，附录 A 会简单讲，但对理解全局不重要。HBM 则很重要，而且很简单。
+        </p>
+
+        <h3>HBM</h3>
+        <p>
+            HBM 是一大块高速内存，存放 TensorCore 要用的张量。容量一般在几十到几百 GB 的量级，例如 TPU7x 的 HBM 是 192GiB。
+        </p>
+        <p>
+            计算需要某个张量时，它从 HBM 经过 VMEM 流进 MXU，结果再从 VMEM 写回 HBM。
+        </p>
+        <p>
+            HBM 和 TensorCore 之间（经过 VMEM）的带宽叫“HBM 带宽”，TPU7x 约 7TB/s。在内存受限（memory-bound，指搬数据比算更慢）的任务里，它决定了计算最快能多快。
+        </p>
+
+        <h3>流水线：搬数据和计算重叠</h3>
+        <p>
+            TPU 上的操作一般都是流水线化、相互重叠的。要算一次矩阵乘法 $X \cdot A \to Y$，TPU 先把 $A$ 和 $X$ 的分块从 HBM 拷进 VMEM，再送进 MXU，MXU 每次乘一个 $8\times256$ 的 $X$ 分块和一个 $256\times256$ 的 $A$ 分块，结果再一块一块拷回 HBM。为了高效，这个过程做成流水线，VMEM 进出的拷贝和 MXU 的计算同时进行。这样 MXU 不用停下来等数据，矩阵乘法保持计算受限（compute-bound），而不是内存受限。
+        </p>
+        <p>下面是一个从 HBM 读数据做逐元素乘积的例子：</p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/pointwise-product.gif" alt="TPU 上逐元素乘积的动画">
+            <figcaption>图：在 TPU 上做逐元素乘积的动画，字节从 HBM 读出。数据按块从内存流出，部分结果流水线式写回，不用等整个数组都准备好（引自原书）</figcaption>
+        </figure>
+        <p>
+            矩阵乘法看起来几乎一样，区别是数据送进 MXU 而不是 VPU，读写顺序也不同，因为同一个权重分块要和多个激活分块相乘。动画里可以看到数据分块流进 VMEM，再进 VREG（vector registers，向量寄存器），再进向量单元，然后回到 VMEM 和 HBM。后面会看到，如果从 HBM 到 VMEM 的加载比向量单元（或 MXU）的计算慢，VPU 或 MXU 就会“饿着”，这时我们是“带宽受限”（bandwidth bound）。
+        </p>
+        <p>
+            <strong>要点：</strong>TPU 很简单。它把权重从 HBM 读进 VMEM，再从 VMEM 送进脉动阵列，脉动阵列每秒能做约 290 万亿次乘加。HBM $\leftrightarrow$ VMEM 和 VMEM $\leftrightarrow$ 脉动阵列这两段带宽，从根本上限定了 TPU 能高效完成哪些计算。
+        </p>
+
+        <h3>VMEM 与算术强度</h3>
+        <p>
+            VMEM 比 HBM 小得多，但到 MXU 的带宽高得多。第 1 章讲过，这意味着如果一个算法的输入输出能全部放进 VMEM，它就不太容易碰到通信瓶颈。对算术强度（Arithmetic Intensity，每搬一个字节做多少次浮点运算）低的计算，这一点特别有用。TPU7x 的 VMEM 带宽约是 HBM 带宽的 7 倍，所以一次从 VMEM 读写的 MXU 运算，只需要从 HBM 读写时约 1/7 的算术强度就能跑满算力。换句话说，如果权重能放进 VMEM 而不是 HBM，矩阵乘法在小得多的 batch 下就能是 FLOPs 受限；算术强度本来就低的算法也能跑得高效。难处在于 VMEM 太小。
+        </p>
+        <p>
+            （原书旁注：有时会说 VMEM 预取（prefetching），指提前把权重加载进 VMEM，掩盖矩阵乘法的加载开销。例如在普通 Transformer 里，有时可以在算 attention 的同时把大的前馈层权重读进 VMEM，在内存带宽受限时藏住权重加载的时间。前提是权重足够小，或者分片得足够细，一层的权重能放进 VMEM 还留有余量。）
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/tpu-bandwidth.png" alt="TPU 各级存储之间的带宽">
+            <figcaption>图：TPU 内部 HBM、VMEM 与计算单元之间的带宽层级（引自原书）</figcaption>
+        </figure>
+
+        <h3>一块芯片上的核心：megacore</h3>
+        <p>
+            一块 TPU 芯片通常（不总是）有两个 TPU 核心，它们共享内存，可以看作一个算力翻倍的大加速器，这种配置叫 megacore。TPU v4、v5、v6 是这样。TPU v7 去掉了 megacore，改成在两个核心之间加一条高带宽连接。更老的芯片（TPU v3 及以前）两个核心的内存是分开的，被当作两个独立的加速器。TPU v5e 这类面向推理优化的芯片，每块芯片只有一个核心。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/cores.png" alt="不同代 TPU 芯片上的核心配置">
+            <figcaption>图：不同代 TPU 芯片的核心配置（引自原书）</figcaption>
+        </figure>
+
+        <h3>托盘、主机与 PCIe</h3>
+        <p>
+            芯片以 4 块为一组装在一个“托盘”（tray）上，通过 PCIe 网络连到一台 CPU 主机（host）。大多数读者熟悉的就是这种形态：Colab 或单个 TPU-VM 暴露出来的 4 块芯片（TPU7x 每块芯片有两个 TensorCore，所以是 8 个核心；有些老一代把它们合成 4 个逻辑上的 megacore）。TPU v6e 这类推理芯片每台主机挂 2 个托盘，但每块芯片只有 1 个核心，所以是 8 块芯片 = 8 个核心。（旁注：在 Cloud TPU VM 上，每个托盘作为一个单独 VM 的一部分暴露出来，所以看到的又是 4 个核心。）
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/pcie.png" alt="托盘通过 PCIe 连接 CPU 主机">
+            <figcaption>图：4 块芯片组成一个托盘，通过 PCIe 连到 CPU 主机（引自原书）</figcaption>
+        </figure>
+        <p>
+            PCIe 带宽有限。和 HBM $\leftrightarrow$ VMEM 那段一样，CPU $\leftrightarrow$ HBM 的 PCIe 连接也有固定带宽，限制了从主机内存加载到 HBM（或反过来）的速度。例如 TPU v4 的 PCIe 带宽是每个方向 16GB/s，比 HBM 慢将近 100 倍。数据可以卸载到主机（CPU）内存，也可以从那里读回来，只是不快。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. TPU 网络</h2>
+        <p><em>原书小节：TPU Networking</em></p>
+
+        <h3>ICI 与环面拓扑</h3>
+        <p>
+            在一个 Pod 里，芯片之间通过 ICI 网络相连。ICI（inter-chip interconnect，芯片间互联）是芯片和芯片直接相连的高速链路，不经过主机。在 Trillium（TPU v6e）上，每块芯片和最近的 4 个邻居相连（边上的芯片再用回绕链路接起来，组成二维环面 2D torus），这是推理优化芯片的典型做法。TPU7x 的每块芯片则连接最近的 6 个邻居，组成三维环面（3D torus），给训练任务提供更多 ICI 带宽。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/ici-wraparound.png" alt="ICI 的回绕连接">
+            <figcaption>图：ICI 网络中的回绕（wraparound）连接，把一条线首尾相接成环（引自原书）</figcaption>
+        </figure>
+        <p>
+            环面结构把任意两个节点之间的最大距离从 $N$ 降到 $N/2$，通信快得多。TPU 还有一种“扭曲环面”（twisted torus）配置，像莫比乌斯带那样把环面扭一下再接上，进一步缩短节点之间的平均距离。
+        </p>
+
+        <h3>Pod 能做多大</h3>
+        <p>
+            用 ICI 连起来的 TPU Pod 可以做得很大。TPU7x 的最大 Pod（叫 superpod）有 9216 块芯片，由 4x4x4 的可重构立方体组成，立方体之间用可以重新配置的光学回绕链路连接，能连出很大的拓扑。（旁注：可重构的意思是，通过一个共享的光路交换机 OCS（optical circuit switch），这些立方体可以动态拼成任意 4n x 4m x 4k 的三维拓扑。OCS 就是一个可重配的连接，带宽和 ICI 相同，它让立方体之间相连的同时还保留回绕链路。）
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/tpu-rack.png" alt="TPU 机架与 4x4x4 立方体">
+            <figcaption>图：TPU 机架，由 4x4x4 的芯片立方体组成（引自原书）</figcaption>
+        </figure>
+        <p>
+            也可以申请更小的拓扑（例如 2x2x1、2x2x2），但这些没有回绕链路。这一点要特别注意，因为没有回绕，大多数通信的时间通常会翻倍。完整立方体的任意整数倍（例如 4x4x4 或 4x4x8）会有光交换机提供的回绕。（旁注：2x2x4 也没有回绕，因为回绕由光交换机提供，而光交换机只在完整立方体上才有。TPU v6e 的 8x16 在长轴上则有回绕，因为它不用可重构光网络。）
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/subslices.png" alt="TPU7x 的子切片">
+            <figcaption>图：可以申请的较小拓扑（子切片）（引自原书）</figcaption>
+        </figure>
+        <p>
+            TPU v5e 和 Trillium（TPU v6e）的 Pod 是单个 16x16 的二维环面，凡是长度为 16 的轴都有回绕（所以 8x16 在长轴上有回绕）。这两代的拓扑最大只到 16x16，但 Pod 之间仍可以通过标准的数据中心网络 DCN（data-center networking，连接各台 TPU 主机的普通网络）通信。同样可以申请更小的拓扑，长度小于 16 的维度上没有回绕。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/more-subslices.png" alt="TPU v5e/v6e 的子切片">
+            <figcaption>图：TPU v5e / v6e 上的各种子切片拓扑（引自原书）</figcaption>
+        </figure>
+
+        <h3>和 GPU 的区别</h3>
+        <p>
+            只连最近邻居，是 TPU 和 GPU 的一个主要区别。GPU 之间通过多层交换机相连，近似于每两块 GPU 之间都有点对点连接，不像 TPU 那样只连本地邻居。一般来说，一个节点内的 GPU（H100 是 8 块，B200 NVL72 多达 72 块）是直接相连的，更大的拓扑里任意两块 GPU 之间要经过 $O(\log N)$ 跳。好处是 GPU 能在很少的跳数内把数据发给任意一块 GPU。另一方面，TPU 便宜得多（NVLink 交换机很贵），接线更简单，而且能扩展到大得多的拓扑，因为每个设备的链路数和带宽是固定的。原书第 12 章的网络部分有更多讨论。
+        </p>
+
+        <h3>各层网络的带宽</h3>
+        <p>ICI 比 DCN 快得多，但仍比 HBM 带宽慢。以 TPU7x 为例：</p>
+        <ul>
+            <li>每块芯片的 HBM 带宽是 7.4e12 字节/秒（7380 GB/s）。</li>
+            <li>每块芯片的双向 ICI 带宽是 1.2e12 字节/秒（1200 GB/s），每个轴 4e11 字节/秒（400 GB/s）。（旁注：ICI 链路的带宽会因操作类型略有不同，一般直接用本书的数字就行。）</li>
+            <li>每块芯片的 DCN（出口）带宽是 1.25e10 字节/秒（12.5 GB/s）。</li>
+        </ul>
+        <p>
+            所以把模型切到多块芯片上时，要小心别让较慢的跨设备通信拖住 MXU。
+        </p>
+
+        <h3>多切片训练</h3>
+        <p>
+            一组用 ICI 连起来的 TPU 叫一个切片（slice）。不同切片之间可以用 DCN 连接，比如把不同 Pod 上的切片连起来，这叫多切片训练（multi-slice training）。DCN 比 ICI 慢得多，所以应该尽量减少计算等待 DCN 数据的时间。DCN 是主机到主机的网络，要通过 DCN 把一块缓冲区从一块 TPU 传到另一块 TPU，得先经 PCIe 传到本机主机，再从网络出口发出，进入目标主机的网络入口，最后经 PCIe 进入目标芯片的 HBM。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 要点与 TPU 规格表</h2>
+        <p><em>原书小节：Key Takeaways / TPU specs</em></p>
+        <ul>
+            <li>TPU 很简单，多数情况下可以看作一个矩阵乘法单元，连着三样东西：内存（极快）、通过 ICI 连接的其他芯片（相当快）、通过 DCN 连接的数据中心其余部分（还算快）。</li>
+            <li>通信受各级网络带宽限制，从快到慢依次是：
+                <ul>
+                    <li>HBM 带宽：TensorCore 和它的 HBM 之间。</li>
+                    <li>ICI 带宽：一块 TPU 芯片和它最近的 4 个或 6 个邻居之间。</li>
+                    <li>PCIe 带宽：CPU 主机和它的芯片托盘之间。</li>
+                    <li>DCN 带宽：多台 CPU 主机之间，通常是没有 ICI 相连的主机。</li>
+                </ul>
+            </li>
+            <li>在一个切片内，TPU 只通过 ICI 和最近的邻居相连。切片里相距较远的两块芯片通过 ICI 通信，要先经过中间的芯片逐跳转发。</li>
+            <li>权重矩阵的两个维度都要补齐（padding）到 256 的倍数（TPU v6e 之前是 128），才能填满 MXU。更小的轴实际上会被补到 256。</li>
+            <li>低精度矩阵乘法通常更快。TPU v6e 做 int8 / int4 矩阵乘法分别比 bfloat16 快 2 倍 / 4 倍，TPU7x 做 fp8 矩阵乘法的 FLOPs 是 bfloat16 的 2 倍。VPU 运算仍以 fp32 或 bf16 进行（TPU v6e 之前的各代 VPU 只支持 fp32）。</li>
+            <li>为了不让 TPU 的计算单元成为瓶颈，每条通道上的通信量要和它的速度成比例。</li>
+        </ul>
+
+        <h3>TPU 规格</h3>
+        <p>下面是各代芯片的具体数字：</p>
+        <table>
+            <thead>
+                <tr><th>型号</th><th>Pod 规模</th><th>主机规模</th><th>每芯片 HBM 容量</th><th>每芯片 HBM 带宽（字节/秒）</th><th>每芯片 FLOPs/s（bf16）</th><th>每芯片 FLOPs/s（int8）</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>TPU v3</td><td>32x32</td><td>4x2</td><td>32GiB</td><td>9.0e11</td><td>1.4e14</td><td>1.4e14</td></tr>
+                <tr><td>TPU v4p</td><td>16x16x16</td><td>2x2x1</td><td>32GiB</td><td>1.2e12</td><td>2.75e14</td><td>2.75e14</td></tr>
+                <tr><td>TPU v5p</td><td>16x20x28</td><td>2x2x1</td><td>96GiB</td><td>2.8e12</td><td>4.59e14</td><td>9.18e14</td></tr>
+                <tr><td>TPU v5e</td><td>16x16</td><td>4x2</td><td>16GiB</td><td>8.2e11</td><td>1.97e14</td><td>3.94e14</td></tr>
+                <tr><td>TPU v6e</td><td>16x16</td><td>4x2</td><td>32GiB</td><td>1.6e12</td><td>9.20e14</td><td>1.84e15</td></tr>
+                <tr><td>TPU7x</td><td>4x4x576</td><td>2x2x1</td><td>192GiB</td><td>7.4e12</td><td>2.31e15</td><td>4.61e15（fp8）</td></tr>
+            </tbody>
+        </table>
+        <p>
+            主机规模指连到一台主机上的 TPU 拓扑（例如 TPU v5e 的一台 CPU 主机连 8 块 TPU，排成 4x2）。最新一代的更多细节见 <a href="https://docs.cloud.google.com/tpu/docs/tpu7x" target="_blank">TPU7x 官方文档</a>。下面是互联带宽：
+        </p>
+        <table>
+            <thead>
+                <tr><th>型号</th><th>每条链路 ICI 带宽（单向，字节/秒）</th><th>每条链路 ICI 带宽（双向，字节/秒）</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>TPU v3</td><td>1.0e11</td><td>2.0e11</td></tr>
+                <tr><td>TPU v4p</td><td>4.5e10</td><td>9.0e10</td></tr>
+                <tr><td>TPU v5p</td><td>9.0e10</td><td>1.8e11</td></tr>
+                <tr><td>TPU v5e</td><td>4.5e10</td><td>9.0e10</td></tr>
+                <tr><td>TPU v6e</td><td>9.0e10</td><td>1.8e11</td></tr>
+                <tr><td>TPU7x</td><td>9.0e10</td><td>1.8e11</td></tr>
+            </tbody>
+        </table>
+        <p>
+            表里同时给出单向（unidirectional）和双向（bidi, bidirectional）带宽。单向带宽更贴近硬件本身，但双向带宽在涉及完整环的公式里出现得更多。双向带宽指一条链路两个方向加起来能传的总字节数，也等于一块 TPU 沿某个轴向外发出的总字节数，前提是两侧的链路都能被高效利用。这要求有一个完整的环，也就是这个轴上有回绕连接：推理芯片上需要完整的长度 16 的轴，训练芯片（v*p 系列）上需要轴长是 4 的倍数。本书偏向用双向带宽，因为它在双向通信的计算里经常出现。
+        </p>
+        <p>
+            PCIe 带宽一般约为每块 TPU 1.6e10 字节/秒（TPU v6e 是 3.2e10）。DCN 带宽一般约为每块 TPU 6.25e9 字节/秒（TPU v6e 和 TPU7x 是 12.5e9，TPU v5e 是 3.125e9）。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 例题</h2>
+        <p><em>原书小节：Worked Problems</em></p>
+        <p>
+            这些数字有点枯燥，但有了它们就能对模型性能做基本的 roofline 估算。下面几道题说明它们怎么用，第 3 章还会有更多例子。
+        </p>
+
+        <h3>习题 1：估算 LLM 延迟的下限</h3>
+        <p>题目：要从一个 200B 参数、bf16 精度的模型采样，模型分布在 32 块 TPU v6e 上。把所有参数从 HBM 读进脉动阵列一遍要多久？</p>
+        <p>解答：要读的总字节数是 sizeof(bf16) × 200e9 = 400e9 字节，分到 32 块芯片上，每块 12.5e9 字节。每块芯片的 HBM 带宽是 1.6e12 字节/秒，所以读一遍约需</p>
+        $$\frac{12.5\times10^{9}}{1.6\times10^{12}} \approx 7.8\ \text{ms}$$
+        <p>
+            这个数很有用，它给出了从这个模型采样的延迟的合理下限。每一步采样都要把所有参数从 HBM 读一遍，所以一步不可能少于 7.8ms。实际中在小 batch 下，可以做到接近这个值。
+        </p>
+
+        <h3>习题 2：TPU Pod 的规模</h3>
+        <p>题目：考虑一个完整的 TPU v5e Pod。一共有多少台 CPU 主机？多少个 TensorCore？整个 Pod 的总 FLOPs/s 是多少？总 HBM 多大？再对 TPU v5p Pod 做一遍。</p>
+        <p>解答：TPU v5e 的 Pod 是 16x16，每台主机管 4x2 的切片，所以主机数是 $16\times16/8 = 32$。TPU v5e 每块芯片只有一个核心，所以有 256 个 TensorCore。bf16 总算力是 $16\times16\times2\times10^{14} = 5.1\times10^{16}$ FLOPs/s。每块芯片 16GiB HBM，总共 $256\times16 = 4$TiB。</p>
+        <p>完整的 TPU v5p Pod 有 16x20x28 块芯片，每台主机管 2x2x1，所以主机数是 $(16\times20\times28)/(2\times2) = 2240$。TPU v5p 每块芯片有两个 TensorCore，所以核心数是 $8960\times2 = 17920$。bf16 总算力是 $8960\times4.59\times10^{14} = 4.1\times10^{18}$ FLOPs/s。每块芯片 96GiB HBM，总共 $8960\times96 \approx 840$TiB。</p>
+
+        <h3>习题 3：PCIe 上的运算强度</h3>
+        <p>题目：假设我们不得不把一个 $\text{bf16}[D, F]$ 的大权重矩阵 $A$ 和一个 $\text{bf16}[B, D]$ 的激活 $x$ 都存在主机 DRAM 里，要拿它们做矩阵乘法。只用一台主机，上面挂一块 TPU v6e。假设 $B \ll D$，$F = 4D$（后面几章会讲为什么这些假设合理）。要在 PCIe 上保持 FLOPs 受限，batch 大小 $B$ 最小是多少？PCIe 带宽按 1.6e10 字节/秒算。</p>
+        <p>解答：要做 $2BDF$ 次浮点运算，芯片每秒能做 9.2e14 次，所以计算时间是 $2BDF / 9.2\times10^{14}$ 秒。要从 DRAM 读 $2DF + 2BD$ 字节，再写回 $2BF$ 字节。瓶颈在 PCIe，所以传输时间是 $2(BD + DF + BF) / 1.6\times10^{10}$ 秒。假设权重加载能和计算完全重叠，我们希望计算时间比传输时间长：</p>
+        $$\frac{2BDF}{9.2\times10^{14}} > \frac{2(BD + DF + BF)}{1.6\times10^{10}}$$
+        <p>用 $B \ll D$ 和 $F = 4D$ 化简：左边是 $8BD^2$，右边括号里 $DF = 4D^2$ 占主导（$BD$ 和 $BF$ 都远小于它），得到</p>
+        $$\frac{8BD^2}{9.2\times10^{14}} > \frac{8D^2}{1.6\times10^{10}}$$
+        <p>即</p>
+        $$B > \frac{9.2\times10^{14}}{1.6\times10^{10}} \simeq 57{,}500$$
+
+        <h3>习题 4：一般矩阵乘法的耗时</h3>
+        <p>题目：要把一个 int8[16384, 4096] 的权重矩阵和一个 int8[B, 4096] 的激活矩阵相乘，B 是未知的 batch 大小。先假设在 1 块 TPU v5e 上。</p>
+        <ol>
+            <li>这次乘法要多久，写成 B 的函数？提示：分别算出从 HBM 读数组要多久、乘法本身要多久，看哪个是瓶颈。</li>
+            <li>如果从 VMEM 运行这次运算，作为 B 的函数要多久？</li>
+        </ol>
+        <p>解答：（1）需要的运算次数是 $2 \cdot 4096 \cdot 16384 \cdot B = 1.3\times10^{8} \cdot B$，所以 $T_{\text{math}} = (1.3\times10^{8} \cdot B) / 3.94\times10^{14}$ 秒（v5e 的 int8 算力）。要从 HBM 读 $16384 \cdot 4096 + 4096 \cdot B$ 字节到 VMEM，再从 VMEM 写回 $16384 \cdot B$ 字节到 HBM，所以 $T_{\text{comms}} = (6.7\times10^{7} + 2\times10^{4} \cdot B) / 8.2\times10^{11}$ 秒。假设通信和计算尽可能重叠，整次乘法约需</p>
+        $$\max\{T_{\text{math}}, T_{\text{comms}}\} = \max\left\{\frac{1.3\times10^{8} \cdot B}{3.94\times10^{14}}, \frac{6.7\times10^{7} + 2\times10^{4} \cdot B}{8.2\times10^{11}}\right\}$$
+        <p>当</p>
+        $$\frac{6.7\times10^{7} + 2\times10^{4} \cdot B}{8.2\times10^{11}} < \frac{1.3\times10^{8} \cdot B}{3.94\times10^{14}}$$
+        <p>时是 FLOPs 受限，等价于 $B > 267$。这比第 1 章推出的 240 略大，因为这里把 $D$ 和 $F$ 的完整影响算进去了。</p>
+        <p>（2）如果改从 VMEM 读，按 VMEM 到 MXU 的带宽是 HBM $\leftrightarrow$ VMEM 带宽的 22 倍来算（这是题目里 v5e 的假设）。数据加载那一项的分母从 8.2e11 变成 1.80e13，得到 $B > 11$。实际中 VMEM 带宽不可能全部用来读权重矩阵，所以实际值更接近 20。</p>
+
+        <h3>习题 5：ICI 带宽</h3>
+        <p>题目：有一个 TPU v5e 4x4 切片，要把一个 bf16[8, 128, 8192] 的数组从 TPU{0,0} 发到 TPU{3,3}。TPU v5e 每一跳的延迟按 $1\mu s$ 算。</p>
+        <ol>
+            <li>第一个字节多久到达目的地？</li>
+            <li>整个传输要多久？</li>
+        </ol>
+        <p>解答：TPU v5e 是二维连接。这里只有 4x4 切片（没有长度 16 的轴），所以没有回绕连接。于是目标芯片只有两个端口能收数据，源芯片也只有两个端口能发数据。要传的数据量是 $2 \times 8 \times 128 \times 8192 = 1.7\times10^{7}$ 字节。两个端口可以同时发（一半往右发，一半往下发），所以速率是 $2 \times 4.5\times10^{10} = 9\times10^{10}$ 字节/秒，传完整个数组约需 $1.7\times10^{7} / 9\times10^{10} \approx 188\mu s$（假设带宽受限）。</p>
+        <p>在 4x4 切片里，$(0,0)$ 到 $(3,3)$ 要走 6 跳，因为长度小于 16 的轴没有回绕链路。每跳延迟约 $1\mu s$，所以第一个字节约 $6\mu s$ 到达；整个传输约 $188 + 6 = 194\mu s$，因为最后一个字节离开源芯片后同样要走完这 6 跳。一般来说，延迟项和带宽项是相加的，只是这里延迟是个小修正。</p>
+
+        <h3>习题 6：综合题（难）</h3>
+        <p>题目：有一个大矩阵 A: int8[128 * 1024, 128 * 1024]，均匀分片在一个 TPU v5e 4x4 切片上，但被卸载到了每块芯片所属主机的 DRAM 里。要把整个数组拷到 TPU{0,0} 上，再和一个 bf16[8, 128 * 1024] 的向量相乘。这要多久？</p>
+        <p>解答：先列出要做的操作。数组约 16GB。由规格表，TPU v5e 一台主机是 4x2 拓扑，所以 4x4 切片有 2 台主机。数组均匀分片，每台主机上有一半，即 8GB。要把这些分块都拷到 TPU{0,0}，有两种做法：</p>
+        <ol>
+            <li>通过 DCN 拷过去，再把整个未分片的数组经 PCIe 读进 HBM。</li>
+            <li>先把各分片读进各自对应的 TPU，再在 ICI 上做一次 gather（收集），最后在 TPU{0,0} 上做矩阵乘法。</li>
+        </ol>
+        <p>做法 2 更好。DCN 比 ICI 慢，而且把大数组分到很多条 PCIe 链路上读，比只用少数几条（主机 0 上的 8 条）快得多。下图是系统的一部分：TPU 通过 ICI 和邻居相连（跨主机也是），所有 TPU 经 PCIe 连到各自的主机 CPU，主机之间通过 DCN 相连。</p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/challenge-problem.png" alt="习题 6 的系统示意图">
+            <figcaption>图：习题 6 涉及的部分系统。其实每块芯片都有自己到主机的 PCIe 链路，为了清楚图里只画了一条（引自原书）</figcaption>
+        </figure>
+        <p>逐段估算时间：</p>
+        <ul>
+            <li>PCIe 加载：16GB 分到 16 条 PCIe 链路上，每条 1.6e10 字节/秒，约需 63ms。</li>
+            <li>ICI 拷贝：现在每块 TPU 上有 16GB / 16 = 1GB。ICI 带宽是每条链路双向 9e10 字节/秒，从图上可以看出，在这个拓扑里 TPU{0,0} 的 4 条 ICI 链路只用到 2 条。TPU{0,0} 要沿 2 个轴总共接收 15GB，每条链路 4.5e10 字节/秒，所以时间下限是 $15\times10^{9} / (4.5\times10^{10} \times 2) \approx 167$ms。实际中可能达不到，因为负载很不均衡，但应该在 2 倍以内。第 3 章会看到，做一次完整的 AllGather 也大约要 $16\times10^{9} / (4.5\times10^{10} \times 2)$，所以这已接近最优。</li>
+            <li>HBM $\rightarrow$ MXU 加载：最后的矩阵乘法要把这 16e9 字节，加上 bf16[8, 128 * 1024] 的向量（约 2MB，可忽略），经 HBM 带宽读进 MXU，需要 $16\times10^{9} / 8.2\times10^{11} \approx 20$ms。</li>
+            <li>FLOPs：总共要做 $2 \cdot 8 \cdot 128 \cdot 1024 \cdot 128 \cdot 1024 = 2.7\times10^{11}$ 次运算，按 1.97e14 bf16 FLOPs/s 算，约 1.4ms。</li>
+        </ul>
+        <p>把这些时间加起来是总时间的上界。但 TPU 通常能让这些操作重叠，所以可以把它看成一个流水线问题，由最慢的那一段决定。假设能完全重叠，答案至少是 167ms，考虑到重叠不完美，更可能接近 200ms。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 附录 A：TPU 内部的更多细节</h2>
+        <p><em>原书小节：Appendix A: More on TPU internals</em></p>
+        <p>这里更深入地看 TPU 内部的运作。除非另外说明，规格都按 TPU7x 给出。</p>
+
+        <h3>VPU</h3>
+        <p>
+            VPU 是 TPU 的向量运算核心。它由两部分组成：一台二维 SIMD 向量机（也叫 VPU），做 vadd（向量加）、vmax（逐元素取最大）这类逐元素运算；以及一组叫 VREG 的向量寄存器，存放 VPU 和 MXU 要用的数据。（SIMD 指一条指令同时作用在很多个数据上。）
+        </p>
+        <p>
+            <strong>VREG：</strong>每个 TPU7x 核心有 64 个 32 位 VREG（TPU v4 是 32 个），每个核心的 VREG 总容量约 $64 \times 8 \times 128 \times 4 = 256$kB（整块芯片有两个核心，所以是这个的 2 倍）。TPU7x 每个周期能从 VMEM 读 3 个寄存器、向 VMEM 写 2 个寄存器，但每周期读写合计最多 4 个，所以要么 3 读 1 写，要么 2 读 2 写。
+        </p>
+        <p>
+            对于 float32 输入的程序，VREG 里每个 32 位字存一个 float32 元素。处理更低精度的数据类型时，可以把多个元素打包进一个 32 位字，更高效地利用 VMEM 和 VREG，有些操作也要求操作数按这种方式打包。
+        </p>
+        <p>
+            VPU 本身是一个形状为 (8, 128) 的二维向量运算单元，128 那一维叫 lane 轴，8 那一维叫 sublane 轴。TPU7x 上每个 (lane, sublane) 位置有 4 个相互独立的标准浮点 ALU。VPU 的大多数算术指令（比如 vadd）在每个 ALU 上一个周期执行一次，延迟 2 个周期，所以 TPU7x 每个周期每个位置可以从 VREG 取 4 对 f32 值相加。一条典型的 VPU 指令长这样：<code>{v2 = vadd.8x128.f32 v0, v1}</code>，v0 和 v1 是输入 VREG，v2 是输出 VREG。各代 TPU 的 ALU 都支持逐元素的整数、位运算和逻辑运算，TPU v6e 和 TPU7x 还能直接在打包的 bfloat16 VREG 上做逐元素算术。
+        </p>
+        <p>
+            所有 lane 和 sublane 每个周期执行同一段程序，是纯 SIMD 方式；但不同的 ALU 可以做不同的操作。所以一个周期里可以同时处理 1 条 vadd 和 1 条 vsub，每条都作用在两个完整的 VREG 上，结果写到第三个 VREG。
+        </p>
+
+        <h4>小测验：计算 VPU 吞吐量</h4>
+        <p>题目：根据上面的信息，算出 TPU7x 每秒能做多少向量 FLOPs。TPU7x 主频约 2.2GHz。</p>
+        <p>解答：每个周期，每个核心能在 $8 \times 128$ 个位置上执行 4 条向量指令，即每核每周期 $8 \times 128 \times 4$ FLOPs，也就是</p>
+        $$8 \times 128 \times 4 \times 2.2\times10^{9} \approx 9\times10^{12}\ \text{FLOPs/s}$$
+        <p>（bfloat16 是 1.8e13 FLOPs/s，因为打包的 bfloat16 VREG 装的元素数是 float32 的两倍）。这比每核约 1.2e15 的 MXU 算力小得多（bfloat16 下约小 64 倍）。</p>
+
+        <h4>归约</h4>
+        <p>
+            一般来说，沿 sublane 维度的通信或归约比沿 lane 维度容易。例如 VPU 支持一种 lane 内的 shuffle 操作，能在约一个周期内沿长度 8 的轴滚动。用它可以高效地沿 sublane 维度归约：分别 shuffle 4、2、1，做 3 次两两逐元素求和就行。
+        </p>
+        <p>
+            跨 lane 的归约难得多，要用一个单独的硬件单元，叫 XLU（cross lane unit，跨 lane 单元），它又慢又贵。
+        </p>
+
+        <h4>和 GPU 对比</h4>
+        <p>
+            熟悉 NVIDIA GPU 的读者可以这样对应：VPU 里的每个 ALU 类似一个 CUDA core，一条 VPU lane 类似一个“Warp Scheduler”，也就是通常 32 个一组、以 SIMD 方式做运算的 CUDA core。lane 内的归约很容易，但如果要跨 lane，至少要经过 VMEM / XLU / SMEM，慢得多。更多内容见第 12 章 GPU 部分。
+        </p>
+
+        <h3>标量核心（Scalar Core）</h3>
+        <p>
+            标量核心是 TPU 的控制单元。它取指令、分发所有指令，执行从 HBM 到 VMEM 的传输，也可以编程做标量的元数据工作。标量核心是单线程的，一个副作用是 TPU 的每个核心每个周期只能发起一个 DMA 请求（DMA 指不经过计算单元、直接在内存之间搬数据的传输）。
+        </p>
+        <p>
+            放到整体里看：一个标量核心要控制一个 VPU（4096 个 ALU）、2 个 MXU、2 个 XLU 和多个 DMA 引擎。每单位算力分到的控制逻辑极少，这是硬件效率高的一个来源，但也限制了做依赖数据内容的向量化的能力。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 附录 B：脉动阵列怎样工作</h2>
+        <p><em>原书小节：Appendix B: How does a systolic array work?</em></p>
+        <p>
+            TPU 的 MXU 核心是一个 256x256 的脉动阵列（TPU v6e 之前是 128x128）。完全跑满时，脉动阵列每 4 个时钟周期（TPU v6e 之前是 8 个）完成一次 <code>bf16[8,256] @ bf16[256,256] -> f32[8,256]</code> 的乘法。这个写法的意思是：一个元素为 bfloat16 的 8x256 矩阵乘一个元素为 bfloat16 的 256x256 矩阵，结果存成元素为 float32 的 8x256 矩阵。（旁注：MXU 每 4 个周期能读入 8 行 <code>f32</code> 输入并转成 <code>bf16</code>，或者每 8 个周期读入 16 行 <code>bf16</code> 输入；两种情况折算下来都是每 4 个周期 8 行 <code>bf16</code> 输入。）
+        </p>
+        <p>
+            脉动阵列本身是一个 256x256（=65,536 个）ALU 组成的二维网格，每个 ALU 能做一次乘法和一次加法。
+        </p>
+        <p>
+            权重（W，256x256 的那个输入）从上方传下来，叫 RHS（right-hand side，右操作数）；输入（X，8x256 的那个输入）从左边传进来，叫 LHS（左操作数）。
+        </p>
+        <p>
+            下面是一个简化的动画，把一组权重（蓝色）和一组激活（绿色）相乘。可以看到，权重（RHS）先沿对角线部分加载，然后激活也沿对角线送进来。每一帧里，所有重叠的绿色和蓝色单元相乘，乘积加上从上方传来的部分和，再把结果往下传一格。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/systolic-array.gif" alt="脉动阵列乘法的简化动画">
+            <figcaption>图：脉动阵列中权重（蓝）与激活（绿）相乘的简化动画（引自原书）</figcaption>
+        </figure>
+        <p>下面是一个更一般的版本，可以看到输出从计算中流出：</p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/systolic-array2.gif" alt="脉动阵列输出流出的动画">
+            <figcaption>图：输出结果从脉动阵列中流出（引自原书）</figcaption>
+        </figure>
+        <p>下面这张图展示怎样在多组 RHS 和 LHS 之间做流水线：</p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/systolic-array-pipelining.png" alt="脉动阵列在多组输入上的流水线">
+            <figcaption>图：多组 RHS 与 LHS 在脉动阵列上流水线执行（引自原书）</figcaption>
+        </figure>
+        <p>
+            一开始加载权重（RHS）和激活（LHS）时有一段流水线气泡（pipeline bubble，硬件空转等待的时间）。过了这段之后，新的输入和权重可以接着送进来，不再产生额外的气泡。
+        </p>
+        <p>
+            下面是一个画得比较粗糙的动画，演示 bf16[2, 3] x bf16[3, 3] 的矩阵乘法，可以想象成一个 2x3 的权重矩阵乘一个 batch 为 1、维度为 3 的输入激活。它相对前面的图旋转了方向，输入向右流出而不是向下，但大致结构能看清。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/systolic-array-bad.gif" alt="2x3 与 3x3 矩阵乘法的脉动阵列动画">
+            <figcaption>图：bf16[2, 3] x bf16[3, 3] 矩阵乘法在脉动阵列上的过程（引自原书）</figcaption>
+        </figure>
+        <p>
+            这样的流水线可以高效地乘大矩阵，气泡不会太大。不过，矩阵的形状要大于 MXU 的边长，也就是 128x128 或 256x256。有些 TPU（从 TPU v3 起）有多个 MXU：TPU v3、TPU v6e 和 TPU7x 有 2 个，TPU v4/5 有 4 个。所以要保证分块（tiling）的维度大于 256（老一代是 128）乘以 MXU 个数。原书还推荐了一篇<a href="https://fleetwood.dev/posts/domain-specific-architectures#google-tpu" target="_blank">博客文章</a>，里面有另一个很好的动画，演示固定权重矩阵下的脉动阵列乘法。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>TPU 很简单：把权重从 HBM 读进 VMEM，再从 VMEM 送进脉动阵列，脉动阵列每秒约做 290 万亿次乘加。HBM $\leftrightarrow$ VMEM 和 VMEM $\leftrightarrow$ 脉动阵列两段带宽决定了 TPU 能高效完成哪些计算。</li>
+            <li>TPU 多数情况下可以看作一个矩阵乘法单元，连着内存（极快）、通过 ICI 相连的其他芯片（相当快）和通过 DCN 相连的数据中心其余部分（还算快）。</li>
+            <li>通信带宽从快到慢：HBM 带宽（TensorCore 与 HBM 之间）、ICI 带宽（芯片与最近的 4 或 6 个邻居之间）、PCIe 带宽（CPU 主机与芯片托盘之间）、DCN 带宽（主机之间）。以 TPU7x 为例，每芯片 HBM 7.4e12 字节/秒，双向 ICI 1.2e12 字节/秒（每轴 4e11），DCN 1.25e10 字节/秒。</li>
+            <li>切片内 TPU 只和最近邻相连，远距离通信要逐跳经过中间的芯片。环面把最大距离从 $N$ 降到 $N/2$；没有回绕的小拓扑，大多数通信时间会翻倍。</li>
+            <li>权重矩阵两个维度都要补齐到 256 的倍数（TPU v6e 之前是 128）才能填满 MXU。</li>
+            <li>低精度矩阵乘法更快：TPU v6e 的 int8 / int4 比 bf16 快 2 / 4 倍，TPU7x 的 fp8 是 bf16 的 2 倍。VPU 运算仍用 fp32 或 bf16。</li>
+            <li>为了不让计算单元成为瓶颈，每条通道上的通信量要和它的速度成比例。一个常用的估算方式是 $T \approx \max\{T_{\text{math}}, T_{\text{comms}}\}$。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>How To Scale Your Model · How to Think About TPUs · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

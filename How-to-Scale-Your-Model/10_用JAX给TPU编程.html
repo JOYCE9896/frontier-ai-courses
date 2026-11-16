@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>用 JAX 给 TPU 编程 | How to Scale Your Model 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="09_怎样分析TPU程序性能.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">How to Scale Your Model 目录</a> · 10</span>
+    <span><a href="11_结语与延伸阅读.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 10 章 · 用 JAX 给 TPU 编程</h1>
+        <p class="subtitle">JAX 写多设备程序的三种方式：交给编译器自动分片、由 JAX 在类型里显式传播分片、用 shard_map 在单设备视角下手写通信，并用 collective matmul 演示怎样让通信和计算重叠</p>
+        <div class="author-meta">
+            作者：Jacob Austin、Sholto Douglas 等（Google DeepMind）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://jax-ml.github.io/scaling-book/jax-stuff" target="_blank">Programming TPUs in JAX</a>（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            第 3 章到第 7 章用一套记号讨论了分片矩阵乘法、AllGather、ReduceScatter、AllReduce 以及各种并行方式，第 9 章讲了怎样在 profile 里看这些操作。这一章落到代码上：在 JAX 里，这些分片和通信具体怎么写。
+        </p>
+        <p>
+            JAX 给了三种模式。Auto 模式下，你只给输入标上分片，XLA 的 Shardy 编译器决定中间结果怎么分、在哪里插通信。Explicit 模式下，分片是 JAX 类型的一部分，由 JAX 来传播，遇到有歧义的地方直接报错让你选。Manual 模式用 <code>jax.shard_map</code>，你看到的是每个设备上的局部数组，所有通信都自己写。章末用 <code>shard_map</code> 实现了一个 collective matmul，把 AllGather 藏进矩阵乘法里，实测从 311us 降到 244us。习题包括分片内求平均、简单的 MoE（混合专家）实现，以及各种 collective matmul。
+        </p>
+        <ol>
+            <li><a href="#t01">JAX 里的并行是怎么回事</a>（含 Auto、Explicit、shard_map 三种模式）</li>
+            <li><a href="#t02">习题</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. JAX 里的并行是怎么回事</h2>
+        <p><em>原书小节：How Does Parallelism Work in JAX?</em></p>
+        <p>JAX 支持三种多设备编程的思路：</p>
+        <ol>
+            <li>“编译器，你来开！”让 XLA 编译器自动切分数组，并决定给程序加哪些通信。这样一个在单设备上跑的程序，不用改任何东西就能自动在几千个设备上跑。</li>
+            <li>“JAX，你来开！”自动并行很好，但编译器有时会做出离谱的事。显式分片（Explicit sharding）让你照常写单设备代码，但分片传播交给 JAX 负责（Auto 模式下这件事归编译器）。这样在意图不清楚时，JAX 可以要求你说明。</li>
+            <li>“让我照我的意思写！”编译器虽好，有时会做错，加上你不想要的通信。有时我们想明确规定要跑哪些通信。</li>
+        </ol>
+        <table>
+            <thead><tr><th>模式</th><th>视角</th><th>显式分片？</th><th>显式集合通信？</th></tr></thead>
+            <tbody>
+                <tr><td>Auto</td><td>全局</td><td>否</td><td>否</td></tr>
+                <tr><td>Explicit</td><td>全局</td><td>是</td><td>否</td></tr>
+                <tr><td>Manual</td><td>每个设备</td><td>是</td><td>是</td></tr>
+            </tbody>
+        </table>
+        <p>
+            （集合通信 collective：多个设备一起参与的通信操作，比如 AllGather 把各设备的分片拼成完整数组发给每个设备，AllReduce 把各设备的数组相加后让每个设备都拿到结果。）对应地，JAX 为每种模式提供了 API：
+        </p>
+        <ol>
+            <li><code>jax.jit</code>（配 Auto 网格轴）：拿任何现有的 JAX 函数，用分片过的输入调用即可。JAX 会用 XLA 的 <a href="https://openxla.org/shardy" target="_blank">Shardy</a> 编译器自动并行化程序。需要时 XLA 会替你加上通信（AllGather、ReduceScatter、AllReduce 等）以支持现有操作。它不完美，但通常能不改代码就把程序扩展到任意数量的芯片上，效果过得去。</li>
+            <li><code>jax.jit</code> 配 Explicit 网格轴：看起来和 (1) 差不多，但分片传播由 JAX 处理，XLA 不再参与。这意味着数组的分片是 JAX 类型系统的一部分，JAX 检测到有歧义的通信时会报错，让用户来解决。</li>
+            <li><code>jax.shard_map</code>：更手动的那一种。你拿到程序的设备局部视角，想要什么通信都得自己写。手上有一个分片数组，想让每个设备都有完整的一份？加一个 <code>jax.lax.all_gather</code>。想把一个数组在所有设备上求和？加一个 <code>jax.lax.psum</code>（即 AllReduce）。编程更难，但做出你不想要的事的可能性小得多。</li>
+        </ol>
+
+        <h3>Auto 分片模式</h3>
+        <p><em>原书小节：Auto sharding mode</em></p>
+        <p>
+            <code>jax.jit</code> 在 JAX 里有两个作用。一是如名字所示，把 Python 函数“即时”（just-in-time）编译成字节码（经过 XLA/HLO/LLO），让它跑得更快。二是如果输入是分片的，或者用户指定了 <code>in_sharding</code> 或 <code>out_sharding</code>，它还会让 XLA 把计算分布到多个设备上，并按需加通信。下面是用 <code>jax.jit</code> 写一个分片矩阵乘法的例子：
+        </p>
+<pre><code>import jax
+import jax.numpy as jnp
+
+Auto = jax.sharding.AxisType.Auto
+
+# This creates a fake set of 8 CPU devices so you can run this on a CPU without TPUs.
+jax.config.update("jax_num_cpu_devices", 8)
+
+# This creates a 2D 4x2 mesh with axis names X and Y that JAX uses by default.
+# We explicitly tell JAX to let the XLA compiler infer sharding along these axes.
+mesh = jax.make_mesh(axis_sizes=(4, 2), axis_names=('X', 'Y'), axis_types=(Auto, Auto))
+jax.set_mesh(mesh)
+
+# We create a matrix W and input activations In sharded across our devices.
+In = jnp.zeros((8, 2048), dtype=jnp.bfloat16, device=jax.NamedSharding(mesh, jax.P('X', 'Y')))
+W = jnp.zeros((2048, 8192), dtype=jnp.bfloat16, device=jax.NamedSharding(mesh, jax.P('Y', None)))
+
+def matmul_square(In, W):
+  return jnp.einsum('bd,df-&gt;bf', jnp.square(In), W)
+
+# We can explicitly compile the sharded matmul function here. This adds all the
+# necessary comms (e.g. an AllReduce after the matmul).
+jit_matmul = jax.jit(matmul_square, out_shardings=jax.P('X', None)).lower(In, W).compile()
+
+out = jit_matmul(In, W)</code></pre>
+        <p>
+            这段代码对任何分片都能自动运行，并把计算分到各设备上。那在硬件层面实际发生了什么？
+        </p>
+        <ol>
+            <li>
+                先创建分布在各设备上的 <code>In</code> 和 <code>W</code>。<code>W</code> 沿收缩维切成 2 份；<code>In</code> 切成 8 份，沿输入维（批维）4 份、沿收缩维 2 份。对应的分片是 $W[D_Y, F]$ 和 $\text{In}[B_X, D_Y]$，可以看成一种模型并行加数据并行。（网格 mesh：把一组设备排成带名字的多维网格，这里是 4x2，两个轴叫 X 和 Y。）
+                <br>（原书注：这里创建带分片数组的方式是给创建函数加 <code>device</code> 参数。另一种是先正常用 <code>jnp.array(....)</code> 创建，再用 <code>jax.device_put(..., jax.P('X', 'Y'))</code>。还有一种是写一个创建所需数组的函数，用你想要的 <code>out_shardings</code> 去 jit 编译它。）
+            </li>
+            <li>
+                如果在本地（单设备）运行，<code>matmul_square</code> 只是把输入平方再做一次普通矩阵乘法。但因为指定了 <code>out_shardings</code> 为 <code>P('X', None)</code>，输出沿批维分片、在模型维上复制，所以需要一次 AllReduce 来算出结果。
+            </li>
+        </ol>
+        <p>用前面章节的记号，它大概会这样做：</p>
+        $$\text{Out}[B_X, F]\{U_Y\} = \text{In}[B_X, D_Y] *_D W[D_Y, F]$$
+        $$\text{Out}[B_X, F] = \text{AllReduce}(\text{Out}[B_X, F]\{U_Y\})$$
+        <p>
+            （$\{U_Y\}$ 表示结果在 Y 轴上还没规约，每个设备手里只是部分和。）<code>jax.jit</code> 会自动替我们加上这些。可以用 <code>jit_matmul.as_text()</code> 打印 HLO，看到下面这些（大幅删节）：
+        </p>
+<pre><code># This fusion is the actual matmul of the sharded inputs and matrix
+%fusion = bf16[2,8192]{1,0:T(4,128)(2,1)S(1)} fusion(bf16[2,1024]{1,0:T(4,128)(2,1)} %param, bf16[8192,1024]{1,0:T(8,128)(2,1)S(1)} %copy-done)
+
+# We reduce the partially summed results across devices
+ROOT %AllReduce = bf16[2,8192]{1,0:T(4,128)(2,1)} AllReduce(bf16[2,8192]{1,0:T(4,128)(2,1)S(1)} %fusion)</code></pre>
+        <p>
+            上面能看到矩阵乘法（那个 fusion）和 AllReduce。注意形状：<code>bf16[2, 1024]</code> 是激活的局部视图，因为 batch_size=8 分到了 4 个设备上，d_model=2048 同样分成 2 份。
+        </p>
+        <p>
+            这很神奇：不管程序多复杂，Shardy 和 jit 都会尝试给所有中间激活找到分片，并按需加通信。不过 Shardy 也有缺陷，会出错。有时你看 profile 会发现不对劲：一个巨大的 AllGather 占了 profile 的 80%，而它本来不需要。这时可以用 <code>jax.lax.with_sharding_constraint</code> 显式标注中间张量，试着纠正编译器。比如有两个矩阵乘法时，可以这样强制中间激活沿 y 维分片（这并不一定是好主意）：
+        </p>
+<pre><code>import jax
+import jax.numpy as jnp
+
+Auto = jax.sharding.AxisType.Auto
+
+mesh = jax.make_mesh((4, 2), ('X', 'Y'), (Auto, Auto))
+jax.set_mesh(mesh)
+
+def matmul(x, W_in, W_out):
+  hidden = jnp.einsum('bd,df-&gt;bf', x, W_in)
+  hidden = jax.lax.with_sharding_constraint(hidden, jax.P('X', 'Y'))
+  return jnp.einsum('bf,df-&gt;bd', hidden, W_out)</code></pre>
+        <p>
+            在自动分区的世界里，通过 <code>jax.lax.with_sharding_constraint</code> 控制中间分片，大约占了 JAX 并行编程的 60%。但“挠编译器痒痒”（compiler tickling）这种编程方式出了名地不好玩：你可以给每个中间变量都加标注，却仍然不知道能不能得到正确的结果。那如果 JAX 自己能处理和控制分片传播呢？
+        </p>
+
+        <h3>Explicit 分片模式</h3>
+        <p><em>原书小节：Explicit sharding mode</em></p>
+        <p>
+            显式分片（也叫“类型中的分片”，sharding in types）看起来很像自动分片，但分片传播发生在 JAX 层。每个 JAX 操作都有一条分片规则：输入是操作参数的分片，输出是结果的分片。可以用 <code>jax.typeof</code> 查看结果的分片：
+        </p>
+<pre><code>import jax
+import jax.numpy as jnp
+import numpy as np
+
+Explicit = jax.sharding.AxisType.Explicit
+
+# Running on a TPU v5e 2x2. This assigns names to the two physical axes of the hardware.
+mesh = jax.make_mesh(axis_sizes=(2, 2), axis_names=('X', 'Y'), axis_types=(Explicit, Explicit))
+
+# This tells JAX to use this mesh for all operations, so you can just specify the PartitionSpec P.
+jax.set_mesh(mesh)
+
+x = jax.device_put(np.arange(16, dtype=np.float32).reshape(8, 2), jax.P('X', 'Y'))
+
+@jax.jit
+def f(x):
+  print(jax.typeof(x))  # float32[8@X,2@Y]
+  out = x * 2
+  print(jax.typeof(out))  # float32[8@X,2@Y]
+  return out
+
+f(x)</code></pre>
+        <p>
+            可以看到，JAX 把分片从输入 <code>x</code> 传播到了输出 <code>out</code>，在追踪时就能用 <code>jax.typeof</code> 查看。对大多数操作，这些规则简单明了，因为只有一种合理的选择（比如逐元素操作保持原来的分片）。但有些操作的结果怎么分片有歧义，这时 JAX 会在追踪时报错，要求程序员显式提供 <code>out_sharding</code> 参数（比如 <code>jnp.einsum</code>、<code>jnp.reshape</code> 等）。再看一个有冲突的例子：
+        </p>
+<pre><code># We create a matrix W and input activations In sharded across our devices.
+In = jnp.zeros((8, 2048), dtype=jnp.bfloat16, out_sharding=jax.P('X', 'Y'))
+W = jnp.zeros((2048, 8192), dtype=jnp.bfloat16, out_sharding=jax.P('Y', None))
+
+@jax.jit
+def matmul_square(In, W):
+  print(jax.typeof(In))  # bfloat16[8@X, 2048@Y]
+  print(jax.typeof(W))  # bfloat16[2048@Y, 8192]
+  return jnp.einsum('bd,df-&gt;bf', jnp.square(In), W)
+
+matmul_square(In, W)  # This will error</code></pre>
+        <p>这段代码会报错：</p>
+<pre><code>Contracting dimensions are sharded and it is ambiguous how the output should be sharded.
+Please specify the output sharding via the `out_sharding` parameter.
+Got lhs_contracting_spec=('Y',) and rhs_contracting_spec=('Y',)</code></pre>
+        <p>
+            这个报错很有用，因为 einsum 的输出该怎么分片确实有歧义。输出分片可以是：
+        </p>
+        <ul>
+            <li><code>P('X', 'Y')</code>，会引出一次 ReduceScatter；</li>
+            <li><code>P('X', None)</code>，会引出一次 AllReduce。</li>
+        </ul>
+        <p>
+            和 Auto 模式不同，Explicit 模式检测到有歧义的通信时会报错，要求用户解决。所以这里可以写：
+        </p>
+<pre><code>@jax.jit
+def matmul_square(In, W):
+  return jnp.einsum('bd,df-&gt;bf', jnp.square(In), W, out_sharding=jax.P('X', 'Y'))
+
+out = matmul_square(In, W)
+print(jax.typeof(out))  # bfloat16[8@X,8192@Y]</code></pre>
+        <p>
+            Auto 模式和 Explicit 模式可以通过 <code>jax.sharding.auto_axes</code> 和 <code>jax.sharding.explicit_axes</code> 这两个 API 组合使用。更多信息可以读这份<a href="https://docs.jax.dev/en/latest/notebooks/explicit-sharding.html" target="_blank">文档</a>。
+        </p>
+
+        <h3>用 shard_map 的手动分片模式</h3>
+        <p><em>原书小节：Manual sharding mode via shard_map</em></p>
+        <p>
+            Shardy 是“编译器来开”的模式，而 <code>jax.shard_map</code> 把一切交到你手里。你像在 <code>jax.jit</code> 里一样指定输入的分片，但所有通信都要显式写出来。<code>jax.jit</code> 给你的是程序跨设备的全局视角，<code>shard_map</code> 给你的是每个设备的局部视角。
+        </p>
+        <p>
+            下面是一个例子，试着想想这个函数在做什么（原书注：想在 Colab 里模拟网格自己试，可以运行 <code>import jax; jax.config.update('jax_num_cpu_devices', 8)</code>）：
+        </p>
+<pre><code>import jax
+import jax.numpy as jnp
+
+Explicit = jax.sharding.AxisType.Explicit
+
+mesh = jax.make_mesh((2, 4), ('x', 'y'), (Explicit, Explicit))
+jax.set_mesh(mesh)
+
+x = jnp.arange(0, 512, dtype=jnp.int32, out_sharding=jax.P(('x', 'y')))
+
+# This function will operate on 1/8th of the array.
+@jax.shard_map(in_specs=jax.P(('x', 'y')), out_specs=jax.P())
+def slice_and_average(x):
+  assert x.shape == (512 // 8,)
+  return jax.lax.pmean(x[:4], axis_name=('x', 'y'))
+
+out = slice_and_average(x)
+assert out.shape == (4,)</code></pre>
+        <p>
+            它做了什么？<code>slice_and_average</code> 在每块 TPU 上运行，拿到数组的 1/8，从中切出前 4 个元素，然后在整个网格上求平均。所以实际上算的是 <code>mean(x[:4], x[64:68], x[128:132], …)</code>。这很妙，因为用别的方式在 JAX 里不容易表达这个操作。
+        </p>
+        <p>
+            为什么不用 <code>jax.jit</code>？如果用 <code>jax.jit</code>，<code>slice_and_average</code> 看到的是数组的全局视角（完整的 [512,] 数组）。我们得切出这个不均匀的切片再求平均，还要指望 XLA 正确理解。XLA 可能加错通信，或者搞糊涂。用 <code>shard_map</code> 则看到局部视角，只写需要的通信。
+        </p>
+
+        <h4>例子：Collective Matmul</h4>
+        <p>
+            看一个更实际的例子。假设要实现模型并行，激活一开始就按模型维分片，即 $A[B_X, D_Y] *_D W[D, F_Y] \to \text{Out}[B_X, F_Y]$。朴素做法是先对 A 做 AllGather，再做本地矩阵乘法：
+        </p>
+        $$A[B_X, D] = \text{AllGather}_Y(A[B_X, D_Y])$$
+        $$\text{Out}[B_X, F_Y] = A[B_X, D] *_D W[D, F_Y]$$
+        <p>
+            可惜这样不好，因为通信和计算没法重叠（overlap，即一边传数据一边算，两者时间互相掩盖）。要重叠它们，可以用 <a href="https://dl.acm.org/doi/pdf/10.1145/3567955.3567959" target="_blank">Wang et al. 2023</a> 里描述的 “collective matmul”（集合矩阵乘法）。算法大致是：
+        </p>
+        <ul>
+            <li>对 Y 轴的每个分片，拿本地那块 A 和本地那块 W 做矩阵乘法，得到形状为 $[B / X, F / Y]$ 的结果。同时对 A 做置换（permute），让下一块 A 传到本地，再做矩阵乘法，把结果累加起来。</li>
+        </ul>
+        <p>用 <code>jax.shard_map</code> 很容易实现：</p>
+<pre><code>import functools
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+Explicit = jax.sharding.AxisType.Explicit
+
+# This is intended to run on a TPU v5e-8 runtime. If you can't get this,
+# try setting jax.config.update('jax_num_cpu_devices', 8).
+#
+mesh = jax.make_mesh(axis_sizes=(2, 4), axis_names=('X', 'Y'), axis_types=(Explicit, Explicit))
+jax.set_mesh(mesh)
+
+B, D, F = 1024, 2048, 8192
+A = jnp.arange(np.prod((B, D))).reshape((B, D))
+W = jnp.arange(np.prod((D, F))).reshape((D, F))
+
+A = jax.device_put(A, jax.P('X', 'Y'))
+W = jax.device_put(W, jax.P(None, 'Y'))
+
+@functools.partial(jax.jit, out_shardings=jax.P('X', 'Y'))
+def matmul(lhs, rhs):
+  return lhs @ rhs
+
+def collective_matmul_allgather_lhs_contracting(lhs, rhs):
+  # lhs is the looped operand; rhs is the local operand
+  axis_size = jax.lax.axis_size('Y')  # axis_size = 4 for this example
+  idx = jax.lax.axis_index('Y')
+
+  chunk_size = lhs.shape[1]
+  assert rhs.shape[0] % chunk_size == 0
+
+  def f(i, carrys):
+    accum, lhs = carrys
+    rhs_chunk = jax.lax.dynamic_slice_in_dim(rhs, (idx + i) % axis_size * chunk_size, chunk_size)
+    # Matmul for a chunk
+    update = lhs @ rhs_chunk
+    # Circular shift to the left
+    lhs = jax.lax.ppermute(
+        lhs,
+        axis_name='Y',
+        perm=[(j, (j - 1) % axis_size) for j in range(axis_size)]
+    )
+    return accum + update, lhs
+
+  accum = jnp.zeros((lhs.shape[0], rhs.shape[1]), dtype=lhs.dtype)
+  accum = jax.lax.pcast(accum, ('X', 'Y'), to='varying')
+  accum, lhs = jax.lax.fori_loop(0, axis_size - 1, f, (accum, lhs), unroll=True)
+
+  # Compute the last chunk after the final permute to leave lhs in the state we found it
+  i = axis_size - 1
+  rhs_chunk = jax.lax.dynamic_slice_in_dim(rhs, (idx + i) % axis_size * chunk_size, chunk_size)
+  update = lhs @ rhs_chunk
+  return accum + update
+
+jit_sharded_f = jax.jit(jax.shard_map(
+  collective_matmul_allgather_lhs_contracting,
+  in_specs=(jax.P('X', 'Y'), jax.P(None, 'Y')), out_specs=jax.P('X', 'Y')))
+
+shmapped_out = jit_sharded_f(A, W)
+expected_out = matmul(A, W)
+
+np.testing.assert_array_equal(shmapped_out, expected_out)</code></pre>
+        <p>
+            这里每个设备手上的 <code>lhs</code> 是 A 沿 D 维的一块，<code>rhs</code> 是本地那份 W 的全部 D 行。每一轮用 <code>dynamic_slice_in_dim</code> 从 W 里取出和当前 A 块对应的那几行做乘法，同时用 <code>ppermute</code> 把 A 块沿 Y 轴循环左移一格，交给邻居。转完 <code>axis_size</code> 轮，每个设备就把所有 A 块都乘过一遍。
+        </p>
+        <p>
+            这个实现还快很多。用默认的 jit 矩阵乘法，profile 显示要 311us，开头有一个很大的阻塞式 AllGather：
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/not-overlapped.png" alt="未重叠的 jit 矩阵乘法 profile">
+            <figcaption>图：默认 jit 矩阵乘法的 profile，开头有一个阻塞的 AllGather，共 311us（引自原书）</figcaption>
+        </figure>
+        <p>
+            上面 <code>shard_map</code> 版本要 244us。profile 里没有 AllGather 了，全是有用的计算，FLOPs 利用率也高得多。
+        </p>
+        <figure>
+            <img src="https://jax-ml.github.io/scaling-book/assets/img/overlapped.png" alt="collective matmul 的 profile">
+            <figcaption>图：collective matmul 版本的 profile，通信藏在计算里，共 244us（引自原书）</figcaption>
+        </figure>
+        <p>
+            作为对照，收缩维不分片时矩阵乘法要 224us，所以这里离不分片的基线已经很近。这是为了提高 TPU 利用率可能要做的那类性能工程的一个好例子。更多 <code>shard_map</code> 的例子，可以看<a href="https://jax.readthedocs.io/en/latest/notebooks/shard_map.html#example-1-all-gather-on-one-side" target="_blank">这篇笔记</a>。
+        </p>
+        <p>下面是几道可以用 <code>jax.jit</code> 或 <code>shard_map</code> 动手实现的习题。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 习题</h2>
+        <p><em>原书小节：Worked Problems</em></p>
+        <p>
+            作者说这是一些零散的 JAX 相关题目，以后还会再加。所有题都需要一定数量的 TPU。Colab 已不再提供 TPU v2-8 切片，可以用 <a href="https://www.kaggle.com/" target="_blank">Kaggle</a>（仍然免费提供）或 GCP 上的 8 核切片。（原书注：如果只想在假问题上模拟网格，也可以用 <code>import jax; jax.config.update('jax_num_cpu_devices', 8)</code> 在 CPU 上模拟 8 个设备，需要 jax 大约 0.4.27 以上，但这反映不了真实性能。）下面假设有 N 个设备可用。
+        </p>
+
+        <h3>习题 1：分片内求平均与分片内 roll</h3>
+        <p>
+            题目：设 A 是形状为 $\text{float32}[S_X, D_Y]$ 的激活数组，$X \times Y = N$。完成以下两件事：
+        </p>
+        <ol>
+            <li>用 JAX 写一个函数，计算每个 (X, Y) 分片内部的平均值，即返回一个大小为 [X, Y] 的数组，其中 <code>arr[i, j]</code> 是分片 (i, j) 上的平均值。分别用 <code>jax.jit</code> 和 <code>shard_map</code> 实现。各自 profile 一下，看要多久。有没有加通信？提示：应该没有，但 XLA 有时还是会加。</li>
+            <li>用 JAX 写一个函数，在沿 X 的每个分片内部返回 <code>roll(x, shift, axis=0) - x</code>，shift 是某个位移。作者说他还没受虐到让你用 <code>jax.jit</code> 做这个，所以只用 <code>shard_map</code> 做。</li>
+        </ol>
+        <p>解答：</p>
+        <p>第 1 部分。注意 <code>jax.jit</code> 的解法需要比较复杂的 reshape：</p>
+<pre><code>import numpy as np
+
+import jax
+import jax.numpy as jnp
+
+Auto = jax.sharding.AxisType.Auto
+
+mesh = jax.make_mesh((4, 2), ('X','Y'), (Auto, Auto))
+
+average_shmap = jax.shard_map(
+    lambda x: x.mean(keepdims=True),
+    mesh=mesh,
+    in_specs=jax.P('X','Y'), out_specs=jax.P('X','Y')
+)
+
+def average(x):
+  X, Y = mesh.axis_sizes
+  return x.reshape(X, x.shape[0] // X, Y, x.shape[1] // Y).mean(axis=(1, 3))
+
+average_jit = jax.jit(average, out_shardings=jax.NamedSharding(mesh, jax.P('X','Y')))
+
+x = jnp.arange(8 * 64 * 8, dtype=jnp.float32).reshape(8 * 64, 8)
+x = jax.device_put(x, jax.NamedSharding(mesh, jax.P('X','Y')))
+
+y1 = average_shmap(x)
+y2 = average_jit(x)
+
+np.testing.assert_array_equal(y1, y2)</code></pre>
+        <p>
+            <code>shard_map</code> 版本里每个设备只看到自己那块，直接 <code>mean(keepdims=True)</code> 得到形状 [1, 1] 的结果，拼起来就是 [X, Y]。<code>jax.jit</code> 版本面对的是全局数组，要先 reshape 成 <code>[X, S/X, Y, D/Y]</code>，再在第 1、3 维上求平均。
+        </p>
+        <p>第 2 部分，解法类似。题目要的是 <code>shard_map</code> 版本，这里也附上 <code>jax.jit</code> 版本作对比：</p>
+<pre><code>import numpy as np
+
+import jax
+import jax.numpy as jnp
+
+import functools
+
+Auto = jax.sharding.AxisType.Auto
+
+mesh = jax.make_mesh((4, 2), ('X','Y'), (Auto, Auto))
+
+def shift_shmap(x, shift: int):
+  shmapped = jax.shard_map(
+      lambda x: jnp.roll(x, shift, axis=0) - x,
+      mesh=mesh,
+      in_specs=jax.P('X','Y'), out_specs=jax.P('X','Y')
+  )
+  return shmapped(x)
+
+@functools.partial(jax.jit, static_argnames=['shift'], out_shardings=jax.NamedSharding(mesh, jax.P('X','Y')))
+def shift_jit(x, shift: int):
+  X, Y = mesh.axis_sizes
+  reshaped = x.reshape(X, x.shape[0] // X, -1)
+  return (jnp.roll(reshaped, shift, axis=1) - reshaped).reshape(x.shape[0], x.shape[1])
+
+x = jnp.arange(8 * 64 * 8, dtype=jnp.float32).reshape(8 * 64, 8)
+x = jax.device_put(x, jax.NamedSharding(mesh, jax.P('X','Y')))
+
+y1 = shift_shmap(x, 5)
+y2 = shift_jit(x, 5)
+
+np.testing.assert_array_equal(y1, y2)</code></pre>
+
+        <h3>习题 2：一个简单的混合专家（MoE）模型</h3>
+        <p>
+            题目：这里一起做一个基础的“混合专家”（Mixture of Experts，MoE：模型里有多组 FFN 权重，每个 token 只送给其中一组或几组去算）模型。设 $W: \text{float32}[E_X, D, F]$ 是 E 个“专家”矩阵。设 $A: \text{float32}[S_X, D]$ 是激活，$B: \text{int32}[S_X]$ 是一组“路由分配”，其中 <code>B[i]</code> 是 [0, E) 范围内的整数，表示第 i 个激活要用哪个矩阵处理。要写一个 JAX 函数，返回 <code>Out[i] = A[i] @ W[B[i]]</code>。
+        </p>
+        <ol>
+            <li>先完全不管分片。把这些张量都做得足够小，能放进一个设备。写这个函数的本地实现。注意不要实例化形状为 [S, D, F] 的数组！提示：有几种做法。最简单的是遍历每个专家，把整个 A 乘以 <code>W[e]</code>，再把没有路由到专家 e 的 token 掩掉。另一种是按专家把 token 排序，放进一个形状为 [E, S, D] 的填充缓冲区，做一次批量矩阵乘法，再掩掉填充部分（想一想为什么第二维要是 S？）。<code>jax.lax.ragged_dot</code> 能做排序版本而不需要填充。</li>
+            <li>如果直接对上面的方法用 <code>jax.jit</code>，会发生一些事。profile 一下，看它决定做什么通信。要多久？</li>
+            <li>上面会出现一个问题：它很可能在本地把整组激活 A 都收集过来，即 $\text{AllGather}_X([S_X, D])$。这不仅通信开销大，如果整组激活放不进本地，内存开销也大得吓人。用 <code>shard_map</code> 和显式通信实现上面的函数。
+                <ol>
+                    <li>第一遍，最简单的可能是用 <code>jax.lax.all_gather</code>，然后像第 1 步那样重新排序。</li>
+                    <li>第二遍，尽量不要实例化任何大小为 [E, S, D] 的数组，也就是用 ragged（不规则）方式计算：在 <code>jax.lax.while_loop</code> 里用 <code>jax.lax.all_to_all</code>。这样可以不实例化全部激活，也不在填充上浪费计算。这比原来的实现快多少？</li>
+                </ol>
+            </li>
+            <li>大多数 MoE 会把每个 token 路由到多个（k 个）专家，再把结果平均。重构上面的代码来实现这一点。这时 $B: \text{int32}[S_X, k]$，表示要路由到的 k 个专家。</li>
+        </ol>
+        <p>解答（原书只给了部分答案）：</p>
+        <p>
+            第 1 部分：选择很多。最简单的做法是遍历专家并做掩码，从不对 token 排序：
+        </p>
+<pre><code>def moe_local(W: jnp.ndarray, A: jnp.ndarray, B: jnp.ndarray) -&gt; jnp.ndarray:
+    S, _ = A.shape
+    E, _, F = W.shape
+
+    def expert_forward(carry, e):
+        output = carry  # [S, F]
+        mask = (B == e)[:, None]  # [S, 1]
+        expert_result = A @ W[e]  # [S, F] - this expert's transform of ALL tokens
+        output = output + expert_result * mask  # Only keep results for assigned tokens
+        return output, None
+
+    output = jnp.zeros((S, F))
+    output, _ = jax.lax.scan(expert_forward, output, jnp.arange(E))
+
+    return output</code></pre>
+        <p>
+            这样会浪费计算，因为每个专家都处理了所有 token。更高效的做法是按专家对 token 排序，再用 <code>jax.lax.ragged_dot</code>：它接收排好序的激活和每个专家分到的 token 数，做矩阵乘法时不需要任何填充或掩码。
+        </p>
+        <p>
+            第 3 部分：原书只给了伪代码草图（作者说如果有干净的解法欢迎补充）：
+        </p>
+<pre><code>chunk_size = 128
+def matmul(W, x, B):
+  i = 0
+  outs = []
+  x = # sort x according to assignments
+  while (chunk := x[i:i+chunk_size]).any():
+     chunk = all_to_all(chunk)
+     outs.append(matmul_local(W, chunk))
+     i += chunk_size
+  return concat(outs)</code></pre>
+        <p>
+            基本思路是：一块一块地遍历数组，对每块排序并做一次 all_to_all（全交换：每个设备把自己数据的不同部分分别发给不同设备），然后在本地做 FLOPs。第 2、4 部分原书没有给答案。
+        </p>
+
+        <h3>习题 3：把 collective matmul 扩展到整个 Transformer 块</h3>
+        <p>
+            题目：上面的 collective matmul 例子和真实的 LLM 关系很大。把它改一改，做完整的 Transformer 层。
+        </p>
+        <ol>
+            <li>作为练习，先实现一个 AllReduce collective matmul，即 $A[B_X, D_Y] *_D W[D_Y, F] \to \text{Out}[B_X, F]$。注意输出只沿 X 分片，也就是在 Y 上是复制的。朴素算法上面讨论过，就是本地矩阵乘法后接一个 AllReduce。试着写一个通信重叠的“collective”版本。提示：沿输出维分块，可以随意用 <code>jax.lax.psum</code>（即 AllReduce）。注意：由于 XLA 处理这种情况的方式，它实际上可能不比基线快。</li>
+            <li>和上面 AllReduce collective matmul 互补的是 ReduceScatter collective matmul，例如 $\text{Tmp}[B_X, F_Y] *_F W_2[F_Y, D] \to \text{Out}[B_X, D_Y]$。这出现在 Transformer 的下投影矩阵里。用 JAX 实现它的 collective、通信重叠版本。注意只传必需的最少数据。提示：试着在累加结果的同时对结果做置换。</li>
+            <li>把正文里的 AllGather collective matmul 和 (2) 里的 ReduceScatter collective matmul 组合成一个端到端的 Transformer 块，以重叠通信的方式完成 $\text{In}[B_X, D_Y] *_D W_\text{in}[D, F_Y] *_F W_\text{out}[F_Y, D] \to \text{Out}[B_X, D_Y]$。（原书注：和前面一样，不能先算 $W_{in} \cdot W_{out}$，因为这里省略了中间的一个非线性。）这比 <code>jax.jit</code> 实现快多少？</li>
+        </ol>
+        <p>解答：原书没有给出答案。</p>
+
+        <h3>习题 4：双向通信的 collective matmul</h3>
+        <p>
+            题目：上面实现的所有 collective matmul 都是单向的，只朝一个方向置换。把 collective AllReduce matmul 和 collective ReduceScatter matmul 改写成使用双向通信。它们会快多少？
+        </p>
+        <p>
+            解答：原书没有给出答案。（第 2 章讲过，TPU 的 ICI 链路是双向的。）
+        </p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <p>原书这一章没有单独的 Takeaway 框，下面按出现顺序列出主要结论。</p>
+        <ul>
+            <li>三种模式：Auto（<code>jax.jit</code> + Auto 网格轴，全局视角，XLA 的 Shardy 自动传播分片并插入通信）、Explicit（<code>jax.jit</code> + Explicit 网格轴，分片是 JAX 类型的一部分，有歧义时在追踪时报错）、Manual（<code>jax.shard_map</code>，每设备局部视角，所有集合通信手写，如 <code>jax.lax.all_gather</code>、<code>jax.lax.psum</code>、<code>jax.lax.ppermute</code>）。</li>
+            <li>Auto 模式下 Shardy 可能出错（比如插入一个占 profile 80% 的多余 AllGather），可以用 <code>jax.lax.with_sharding_constraint</code> 约束中间张量的分片，但这种“挠编译器痒痒”的方式不可靠。</li>
+            <li>Explicit 模式下用 <code>jax.typeof</code> 查看分片（如 <code>float32[8@X,2@Y]</code>）；收缩维被分片时，输出分片 <code>P('X','Y')</code> 对应 ReduceScatter，<code>P('X', None)</code> 对应 AllReduce，需要用 <code>out_sharding</code> 指定。两种模式可以用 <code>jax.sharding.auto_axes</code> / <code>explicit_axes</code> 组合。</li>
+            <li>Collective matmul：$A[B_X, D_Y] *_D W[D, F_Y] \to \text{Out}[B_X, F_Y]$ 跳过开头的 AllGather，逐块相乘的同时用 <code>ppermute</code> 轮转 A 的分块，把通信藏进计算。实测从 311us（带阻塞 AllGather）降到 244us，收缩维不分片的基线是 224us。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>How To Scale Your Model · Programming TPUs in JAX · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>
