@@ -54,6 +54,7 @@ Stanford、CMU、Harvard 和 MIT 2025-2026 学年 AI 课程的中文笔记，附
 | [吴恩达 Agentic AI](https://joyce9896.github.io/frontier-ai-courses/Andrew-Ng-Agentic-AI/) | DeepLearning.AI 的 Agent 构建课，5 个模块 31 节视频：反思、工具使用与 MCP、评测与错误分析、规划、多 Agent 协作 |
 | [AI Engineer 大会直播](https://joyce9896.github.io/frontier-ai-courses/AI-Engineer-Livestreams/) | AI Engineer 大会 YouTube 全部 38 条直播（2023–2026），37 篇、670 节演讲笔记，每节附直播时间点链接：RAG、Agent、MCP、评测、编程 Agent、Harness 工程 |
 | [Dwarkesh Podcast](https://joyce9896.github.io/frontier-ai-courses/Dwarkesh-Podcast/) | 2025-09 到 2026-11 最好的 21 期 AI 访谈加一篇短文合集，22 篇、211 节：Karpathy、Ilya、Sutton、Dario、Satya、黄仁勋、Musk、Dylan Patel、Reiner Pope、递归自我改进讨论 |
+| [Lauren Tan](https://joyce9896.github.io/frontier-ai-courses/Lauren-Tan-Grok-Bot/) | Grok Bot 工程负责人“土豆姐”2026 年 9–11 月的 3 期访谈和演讲，34 节：团队在用的 Bot、一个月 11,000 个 PR 怎样守住质量、AI 同事的身份和权限 |
 | [How to Scale Your Model](https://joyce9896.github.io/frontier-ai-courses/How-to-Scale-Your-Model/) | Google DeepMind 的大模型扩展书，导读加 12 章：roofline、TPU/GPU、分片与集合通信、训练并行、推理、LLaMA 3 算例，含习题解答 |
 
 ### 产业与系统
