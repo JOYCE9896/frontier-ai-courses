@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>仔细看 Scaling Laws | Lil'Log 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="01_自我改进的Harness工程.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Lil'Log 笔记目录</a> · 02</span>
+    <span><a href="03_模型为什么要思考.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>仔细看 Scaling Laws</h1>
+        <p class="subtitle">从早期学习曲线到 Kaplan 与 Chinchilla 的分歧，再到数据不够用时的修正公式，以及拟合 scaling law 时那些容易被忽略的细节</p>
+        <div class="author-meta">
+            作者：Lilian Weng · 发表于 2026 年 6 月 24 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/" target="_blank">Scaling Laws, Carefully</a>（Lil'Log；本文依据原文英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原文，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这篇文章讲什么</h2>
+        <p>
+            Scaling law（缩放定律）说的是：模型越大、数据越多、算力越多，训练出来的 loss 会按一条可以预测的幂律曲线往下降。这篇文章把这条经验规律从头梳理了一遍。先看 1990 年代到 2020 年之前的学习曲线研究，再看语言模型领域两篇最有影响的论文 Kaplan et al. 2020 和 Chinchilla（Hoffmann et al. 2022），以及后来的研究怎样解释两者结论为什么差那么多。接着讨论两个更现实的问题：为什么会是幂律；高质量数据不够、必须重复训练时，公式要怎样改。
+        </p>
+        <p>
+            最后一部分讲实际拟合 scaling law 有多“脆”：参数怎么数、loss 保留几位小数、Huber loss 是求和还是求平均，这些看似无关紧要的选择，外推到大几个数量级的模型时都可能让结论差很多。读完你应该能看懂 $C \approx 6ND$ 从哪来，会推 Chinchilla 的最优 $N$、$D$ 分配公式，也知道一条拟合出来的 scaling law 该带着多少怀疑去用。
+        </p>
+        <ol>
+            <li><a href="#t01">引言与符号</a></li>
+            <li><a href="#t02">早期：机器学习 loss 的可预测性</a></li>
+            <li><a href="#t03">数据无限时的 Scaling Laws</a></li>
+            <li><a href="#t04">数据有限时的 Scaling Laws</a></li>
+            <li><a href="#t05">现实中拟合 Scaling Laws 的难处</a></li>
+            <li><a href="#tref">主要参考文献</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 引言与符号</h2>
+        <p><em>原文小节：（开篇引言，无标题）</em></p>
+        <p>
+            作者把 scaling law 称为深度学习里最重要的经验发现之一。形式很简单：当我们放大模型规模 $N$、数据规模 $D$ 和计算量 $C$ 时，训练 loss $L$ 会可预测地下降，遵循一条幂律（power law）曲线。幂律指 $y = a x^{k}$ 这种关系，两边取对数后变成 $\log y = \log a + k \log x$，所以在 log-log 坐标图上是一条直线。
+        </p>
+        <p>
+            可以把 scaling law 看成一个描述算力、loss、模型大小和数据量之间关系的框架。它最核心的用途，是回答一个很实际的问题：手里的算力有限，应该怎样在 $N$（多加参数）和 $D$（多喂 token）之间分配。
+        </p>
+        <p>
+            这种可预测性让 scaling law 在实践中很有用。常见的做法是：先跑几组小模型，在它们身上拟合 scaling law，再外推（extrapolate）到大模型，估算大模型需要多少 token、多少算力。
+        </p>
+        <p>全文用到的符号：</p>
+        <table>
+            <thead>
+                <tr><th>符号</th><th>含义</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>$N$</td><td>模型大小，按参数量计。</td></tr>
+                <tr><td>$D$</td><td>训练数据规模，通常按 token 数计。</td></tr>
+                <tr><td>$C$</td><td>训练计算量，单位 FLOPs。一个好用的近似是 $C \approx 6ND$（<a href="https://arxiv.org/abs/2001.08361" target="_blank">Kaplan et al. 2020</a>），其中 $2ND$ 是前向传播，$4ND$ 是反向传播。</td></tr>
+                <tr><td>$E$</td><td>不可约 loss（irreducible loss），无论模型多大、数据多多都降不下去的那部分。</td></tr>
+                <tr><td>$L, \hat{L}(.)$</td><td>测试 loss，以及测试 loss 的预测函数；也可以指训练 loss，因为两者强相关。</td></tr>
+                <tr><td>$\epsilon$</td><td>泛化误差（generalization error）。</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section id="t02">
+        <h2>02. 早期：机器学习 loss 的可预测性</h2>
+        <p><em>原文小节：Early days: ML loss predictability</em></p>
+        <p>
+            在 scaling law 成为主流概念之前，“泛化误差随规模变化是否可预测”这个问题已经有人研究了。
+        </p>
+
+        <h3>Amari et al. 1992：四类学习曲线</h3>
+        <p>
+            <a href="https://ieeexplore.ieee.org/document/6796972" target="_blank">Amari et al. (1992)</a> 用贝叶斯方法加退火近似（annealed approximation），推导出四类学习曲线。学习曲线指泛化误差 $\epsilon$ 随训练数据量 $D$ 变化的曲线。
+        </p>
+        <ul>
+            <li>确定性学习算法、无噪声数据、只有唯一解：$\epsilon \sim c \cdot D^{-1}$，$c$ 是某个常数。</li>
+            <li>确定性学习算法、无噪声数据、有多个等价解：$\epsilon \sim c \cdot D^{-2}$。每多一个数据点学得更快，因为模型只需要学到参数的最优流形（manifold），用不着找到唯一那个解点。</li>
+            <li>确定性学习算法、有噪声数据：$\epsilon \sim c \cdot D^{-1/2}$。数据里的噪声让学习变难。</li>
+            <li>随机学习算法、有噪声数据：$\epsilon \sim c \cdot D^{-1} + E$。这里的不可约 loss $E$ 是随机学习器没法再降下去的残差，例如数据很大时模型容量用完了。</li>
+        </ul>
+        <p>四类学习曲线都服从同一个幂律形式：</p>
+        $$\epsilon \sim c \cdot D^\alpha + E$$
+        <p>
+            其中 $E$ 可以为 0，$\alpha = -2, -1, -1/2$。虽然他们的理论设定是一个简化的二分类任务，但它给“用经验公式预测机器学习 loss”指了一个有用的方向。
+        </p>
+
+        <h3>Hestness et al. 2017：四个领域的经验规律</h3>
+        <p>
+            最早的实证研究之一是 <a href="https://arxiv.org/abs/1712.00409" target="_blank">Hestness et al. (2017)</a>，它研究了泛化误差、模型大小和数据量之间的关系。做法是：对每个给定的训练数据量，用网格搜索（grid search）找出拟合最好的模型大小，然后把 loss 对训练数据量画出来。他们在深度学习的四个领域（神经机器翻译、图像分类、语言建模、语音识别）里都看到了同一个模式：
+        </p>
+        <ul>
+            <li>泛化误差随一组因素（例如数据量）按幂律变化。</li>
+            <li>改进模型会让误差曲线整体平移，但似乎不改变幂律的指数。</li>
+            <li>有意思的一点：换架构会改变幂律拟合的偏移量（$E$），但不改变指数（$\alpha$）。幂律的斜率看上去是问题领域的属性，和模型架构无关。</li>
+            <li>拟合一个大小为 $D$ 的数据集所需的参数量 $N$，也随 $D$ 按幂律增长。</li>
+        </ul>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/hestness-1.png" alt="Hestness et al. 2017 学习曲线">
+            <figcaption>图：左边是 Deep-Speech-2（DS2）和注意力语音模型的学习曲线，右边是不同大小的 DS2 模型的学习曲线。训练数据变大时，小模型的 loss 会进入平台期（图源 Hestness et al. 2017，引自原文）</figcaption>
+        </figure>
+        <p>
+            他们还给出了一张概念示意图，把学习曲线分成三段。数据很少的区域里学习信号不够，模型只比随机猜好一点。中间是“幂律区”（power-law region），loss、数据量和模型大小之间是幂律关系。最后是不可约误差区，原因可能是数据里的噪声等。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/hestness-2.png" alt="幂律学习曲线的三个阶段">
+            <figcaption>图：幂律学习曲线的几个阶段示意（图源 Hestness et al. 2017，引自原文）</figcaption>
+        </figure>
+
+        <h3>Rosenfeld et al. 2020：把 $N$ 和 $D$ 放进一个公式</h3>
+        <p>
+            <a href="https://arxiv.org/abs/1909.12673" target="_blank">Rosenfeld et al. (2020)</a> 往前推了一步，尝试把误差建模成模型大小 $N$ 和数据量 $D$ 的联合函数。实验覆盖了多种架构（ResNet、WRN、LSTM、Transformer）和优化器（Adam、SGD 的几种变体）。经验上他们观察到，固定一个轴，误差在另一个轴上按幂律衰减：
+        </p>
+        $$\hat{L}(D,N) \approx \frac{A}{N^{\alpha}} + E_N,\quad \hat{L}(D,N) \approx \frac{B}{D^{\beta}} + E_D$$
+        <p>两者可以合成一个联合形式：</p>
+        $$\hat{L}(D, N) \approx \frac{A}{N^{\alpha}} + \frac{B}{D^{\beta}} + E$$
+        <p>
+            其中 $A > 0, B > 0, \alpha \geq 0, \beta \geq 0$ 是标量常数，$E$ 与 $N$、$D$ 都无关。这个形式后面会反复出现，Chinchilla 的第三种方法用的就是它。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/rosenfeld-1.png" alt="数据量、模型大小、泛化误差的三维等高线图">
+            <figcaption>图：数据量、模型大小和泛化误差在 log-log-log 坐标下的 3D 等高线图。蓝点来自实验，曲面是蓝点之间的线性插值（图源 Rosenfeld et al. 2020，引自原文）</figcaption>
+        </figure>
+        <p>
+            于是他们可以搭一个预测模型：一个简单的参数化函数，参数是 $\boldsymbol{\theta} = \langle A, B, E, \alpha, \beta \rangle$。只在较小的训练配置（$(D, N)$ 低于某个阈值）上训练和拟合，就能预测更大配置（$(D, N)$ 高于阈值）的期望 loss。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/rosenfeld-2.png" alt="小规模拟合并外推到大规模">
+            <figcaption>图：在小规模配置上拟合参数化误差模型，再外推到更大的模型/数据规模。(a) 实验设置示意；(b) ImageNet、(c) WikiText-103、(d) CIFAR100 上的误差估计结果，涉及三种架构（WRN、VGG、DenseNet）和两种优化器（SGD、Adam）（图源 Rosenfeld et al. 2020，引自原文）</figcaption>
+        </figure>
+        <p>
+            作者在这里加了一段旁注。这些早期工作借用了经典学习理论的直觉，比如用 <a href="https://en.wikipedia.org/wiki/Vapnik%E2%80%93Chervonenkis_dimension" target="_blank">VC 维</a>（一个模型能“打散”的最大点集的大小，用来衡量模型容量）来代表模型容量。但在现代深度学习里，VC 维往往太粗，解释不了实际行为。经验得到的幂律反而比理论给出的最坏情况界（worst-case bound）干净得多，也实用得多。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 数据无限时的 Scaling Laws</h2>
+        <p><em>原文小节：Scaling Laws in Data-Infinite Region</em></p>
+        <p>
+            这一节的前提是数据“无限”：每个训练 token 都只见一次，不重复。经典的 Kaplan 和 Chinchilla 都在这个设定下。
+        </p>
+
+        <h3>Kaplan et al. 的 Scaling Laws</h3>
+        <p><em>原文小节：Kaplan et al.’s Scaling Laws</em></p>
+        <p>
+            <a href="https://arxiv.org/abs/2001.08361" target="_blank">Kaplan et al. (2020)</a> 让 scaling law 这个概念在语言模型圈子里流行起来。他们发现，交叉熵测试 loss $L$ 分别随模型大小 $N$（不含 embedding 层）、数据量 $D$ 和训练计算量 $C$ 按幂律变化，跨越很多个数量级。这和上一节的早期工作一致，不同之处是 Kaplan et al. 专门针对 Transformer 语言模型，在更大规模上做实验，把概念形式化了。原文写的实验范围是：模型大小从 768M 到 1.5B 非 embedding 参数，数据量从 22M 到 23B token。所有训练都用同一种学习率调度：3000 步线性 warmup（学习率从很小逐步升到目标值），然后 cosine 衰减到 0。
+        </p>
+        <p>主要发现：</p>
+        <ul>
+            <li>loss $L$ 分别随 $N$、$D$、$C$ 按幂律变化；想要最优性能，三者要一起放大。</li>
+            <li>训练曲线遵循可预测的幂律，其参数大致与模型大小无关。</li>
+            <li>大模型的样本效率更高（more sample-efficient）：达到同样的 loss，大模型需要的优化步数和数据点都比小模型少。</li>
+            <li>架构细节（宽度、长宽比 aspect ratio 等）远不如规模本身重要。</li>
+            <li>训练 loss 和测试 loss 正相关。作者说这听起来像废话，但它是预训练工作的基础；另一方面，预训练 loss 的改善能不能传到后训练（post-training）的评测上，需要单独研究。</li>
+            <li>给定固定算力预算，训练一个很大的模型并在收敛之前停下，比把一个小模型一直训到收敛更划算。<strong>Chinchilla 在这一条上和 Kaplan 有分歧：Kaplan et al. 拟合出来的指数偏大，所以高估了最优模型大小。</strong></li>
+        </ul>
+        <p>他们用一个公式概括了 loss 对 $N$ 和 $D$ 的联合依赖：</p>
+        $$\hat{L}(N,D) = \left[ \left(\frac{a}{N}\right)^{\frac{\alpha}{\beta}} + \frac{b}{D} \right]^{\beta}$$
+        <p>
+            这个形式有个好处：过拟合（模型太复杂或数据太少）的程度主要取决于比值 $N^{\alpha / \beta} / D$。这说明为了不让训练被数据卡住（data-limited），数据量要随模型大小按一个特定比例增长。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/kaplan-1.png" alt="Kaplan 2020 测试 loss 随算力、数据量和参数量的幂律">
+            <figcaption>图：测试 loss 分别随算力、数据量、参数量按幂律下降，跨越多个数量级（图源 Kaplan et al. 2020，引自原文）</figcaption>
+        </figure>
+        <p>
+            最有影响、事后看也最有争议的结论是算力最优分配（compute-optimal allocation）。Kaplan et al. 得到 $N_\text{opt} \propto C^{0.73}$，结论是模型大小应该比数据量长得快。具体说，算力增加 10 倍时，他们建议模型放大约 5.5 倍，训练 token 只增加约 1.8 倍。后来 Chinchilla 推翻了这个建议，认为照这样做大模型会严重训练不足（undertrained）。
+        </p>
+
+        <h4>$C \approx 6ND$ 是怎么来的</h4>
+        <p>
+            Kaplan et al. 里另一个有用的分析，是根据 $D$ 和 $N$ 近似估算训练所需的 FLOPs。FLOPs 是浮点运算次数；每次乘加（multiply-add）算约 2 个 FLOPs。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/kaplan-2.png" alt="Transformer 各组件的参数量和计算量估算">
+            <figcaption>图：Transformer 各组件的参数量和计算量估算。符号：层数 $n_\text{layer}$，模型宽度 $d_\text{model}$（等于 $d_\text{embed}$，原表符号不统一），前馈层维度 $d_\text{ff}$（通常等于 $4 d_\text{model}$），注意力维度 $d_\text{attn}$（通常等于 $d_\text{model}$），上下文长度 $n_\text{ctx}$，词表大小 $n_\text{vocab}$（图源 Kaplan et al. 2020，引自原文）</figcaption>
+        </figure>
+        <p>
+            取标准配置 $d_\text{attn} = d_\text{model} = d_\text{ff}/4$，$N$ 和每个 token 的前向计算量都不算 embedding 层。参数量这样数：注意力的 Q、K、V 投影是 $d_\text{model} \cdot 3 d_\text{attn}$，输出投影是 $d_\text{attn} d_\text{model}$，前馈层两个矩阵是 $2 d_\text{model} d_\text{ff}$，每层都有，乘以 $n_\text{layer}$：
+        </p>
+        $$\begin{aligned}
+        N &= n_\text{layer} d_\text{model} 3 d_\text{attn} + n_\text{layer} d_\text{attn} d_\text{model} + n_\text{layer} 2 d_\text{model} d_\text{ff} && \small{\text{; no embedding layer}} \\
+        &= 2\;n_\text{layer} d_\text{model}(2d_\text{attn} + d_\text{ff}) && \\
+        &= 12\;n_\text{layer} d_\text{model}^2 && \\
+        \\
+        C_\text{fwd} &= 2 n_\text{layer} (d_\text{model} 3 d_\text{attn} + n_\text{ctx}d_\text{attn} + d_\text{attn}d_\text{embed} + 2 d_\text{model} d_\text{ff}) && \\
+        &= 2 n_\text{layer} (12 d_\text{model}^2 + n_\text{ctx}d_\text{attn}) && \\
+        &= 2N + 2 n_\text{layer}n_\text{ctx}d_\text{attn} && \\
+        &\approx 2N && \small{\text{; assuming }n_\text{ctx} \lt 12 d_\text{model} \text{ and the }n_\text{ctx}\text{ term is relatively small.}}
+        \end{aligned}$$
+        <p>
+            前向计算里多出来的 $n_\text{ctx}d_\text{attn}$ 一项来自注意力分数的计算（每个 token 要和上下文里所有 token 做点积），上下文不太长时它相对很小，所以每个 token 的前向计算约 $2N$。
+        </p>
+        <p>
+            反向传播的 FLOPs 按前向的两倍算，因为反向要做两次矩阵乘法：一次求对输入激活的梯度，一次求对权重的梯度。所以每个训练 token 约需 $6N$ FLOPs，在 $D$ 个 token 上训练的总计算量就是 $C \approx 6ND$。
+        </p>
+
+        <h3>Chinchilla Scaling Laws</h3>
+        <p><em>原文小节：Chinchilla Scaling Laws</em></p>
+        <p>
+            Chinchilla 论文（<a href="https://arxiv.org/abs/2203.15556" target="_blank">Hoffmann et al. 2022</a>）研究的问题是：在<em>固定</em>算力预算 $C$ 下，最优模型大小 $N$（总参数量，<em>包括</em> embedding）和 token 数 $D$ 之间是什么关系。它的实验设计更仔细，得出的答案和 Kaplan et al. 有些不同。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/animal.png" alt="一只龙猫">
+            <figcaption>图：作者附了一张龙猫（chinchilla）的样子，图由 ChatGPT 生成（引自原文）</figcaption>
+        </figure>
+        <p>
+            核心问题是在约束 $\text{FLOPs}(N, D) = C \approx 6ND$ 下怎样分配资源。换句话说，FLOPs 有限（一定数量的 GPU 跑一定时间）时，多要 token 和多要参数之间该怎么选：
+        </p>
+        $$N_\text{opt}(C), D_\text{opt}(C) = \operatorname*{arg\,min}_{\text{s.t. } \text{FLOPs}(N,D) = C} \hat{L}(N, D)$$
+        <p>
+            Chinchilla 论文给出了三种设计得很巧的拟合方法。实验扫了 400 多个模型，大小从 70M 到 16B 以上参数，训练 token 从 5B 到 500B。实验假设每个训练 token 都是唯一的（数据无限的设定）。所有训练都用 cosine 学习率调度，在整个训练期内衰减 10 倍。扫一遍模型大小，就能描出算力最优的边界（compute-optimal frontier）。
+        </p>
+
+        <h4>方法 1：固定模型大小，改变 token 预算</h4>
+        <p>
+            对每个参数量 $N$，用不同的 token 预算训练好几次，记录每个 FLOP 预算 $C$ 下能达到的最小 loss。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/chinchilla-1.png" alt="Chinchilla 方法 1">
+            <figcaption>图：Chinchilla 方法 1，一组不同大小模型的训练 loss 随 FLOP 预算变化的曲线（图源 Hoffmann et al. 2022，引自原文）</figcaption>
+        </figure>
+
+        <h4>方法 2：IsoFLOP 曲线</h4>
+        <p>
+            固定一个算力预算 $C$，把最终 loss 对参数量 $N$ 画出来。IsoFLOP 指“等算力”，每条曲线上所有点花的 FLOPs 一样。每条 iso-FLOP 曲线在对数坐标下大致是一条抛物线，最低点就是这个预算下的最优模型大小。在多个预算上重复，这些最低点在图上连成一条幂律直线。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/chinchilla-2.png" alt="Chinchilla 方法 2 IsoFLOP 抛物线">
+            <figcaption>图：Chinchilla 方法 2，IsoFLOP 抛物线；每条曲线的最低点是该预算下算力最优的模型大小（图源 Hoffmann et al. 2022，引自原文）</figcaption>
+        </figure>
+
+        <h4>方法 3：参数化拟合</h4>
+        <p>
+            直接拟合和 <a href="https://arxiv.org/abs/1909.12673" target="_blank">Rosenfeld et al. (2020)</a> 相同的参数化函数：
+        </p>
+        $$\hat{L}(N, D) = \frac{A}{N^\alpha} + \frac{B}{D^\beta} + E$$
+        <p>
+            在约束 $\text{FLOPs}(N,D) = C \approx 6ND$ 下最小化 $\hat{L}(N, D)$，可以得到最优 $N_\text{opt}(C), D_\text{opt}(C)$ 的闭式近似。先把 $D = C/(6N)$ 代进去，让式子只剩 $N$，再对 $N$ 求导令其为零：
+        </p>
+        $$\begin{aligned}
+        \hat{L}(N) &= A N^{-\alpha} + B \Big(\frac{C}{6}\Big)^{-\beta}N^\beta + E \\
+        \hat{L}'(N) &= -\alpha A N^{-\alpha-1} + \beta B \Big(\frac{C}{6}\Big)^{-\beta} N^{\beta -1} = 0 && \small{\text{; derivative wrt }N\text{ should be zero.}} \\
+        \text{Thus}\quad & \alpha A N^{-\alpha-1} = \beta B \Big(\frac{C}{6}\Big)^{-\beta} N^{\beta -1} \\
+        & \alpha A = \beta B \Big(\frac{C}{6}\Big)^{-\beta} N^{\alpha + \beta} \\
+        & N_\text{opt} = \Big(\frac{\alpha A}{\beta B}\Big)^{\frac{1}{\alpha + \beta}} \Big(\frac{C}{6}\Big)^{\frac{\beta}{\alpha+\beta}} \\
+        & D_\text{opt} = \frac{C}{6 N_\text{opt}} = \Big(\frac{\beta B}{\alpha A}\Big)^{\frac{1}{\alpha + \beta}} \Big(\frac{C}{6}\Big)^{\frac{\alpha}{\alpha+\beta}}
+        \end{aligned}$$
+        <p>
+            所以 $N_\text{opt} \propto C^{\beta/(\alpha+\beta)}$，$D_\text{opt} \propto C^{\alpha/(\alpha+\beta)}$。当 $\alpha \approx \beta$ 时，两个指数都接近 0.5，模型大小和训练 token 应该以相同速度增长。
+        </p>
+        <p>
+            为了找到最优的 $\boldsymbol{\theta} = \langle A, B, E, \alpha, \beta\rangle$，Chinchilla 论文用 <a href="https://en.wikipedia.org/wiki/Huber_loss" target="_blank">Huber loss</a>（误差小时是平方损失、误差大时变成线性，对离群点不敏感；$\delta=10^{-3}$），配合 <a href="https://en.wikipedia.org/wiki/Limited-memory_BFGS" target="_blank">L-BFGS 算法</a>（一种拟牛顿优化方法，适合参数很少的曲线拟合）：
+        </p>
+        $$\begin{aligned}
+        &\min_{A,B,E,\alpha,\beta} \sum_{\text{runs }\{i\}} \text{Huber}_\delta (\log \hat{L}(N_i, D_i) - \log L_i) \\
+        &\text{ where }\text{Huber}_\delta (x) = \begin{cases}\frac{1}{2} x^2 & \text{for }\vert x \vert \leq \delta \\ \delta \cdot (\vert x \vert - \frac{1}{2}\delta), & \text{otherwise.}\end{cases}
+        \end{aligned}$$
+        <p>
+            Chinchilla 用三种互补的方法得到答案，三者的最终结果彼此吻合，这是它的结论让人信服的一个原因。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/chinchilla-3.png" alt="三种方法的算力最优边界">
+            <figcaption>图：三种方法在算力最优边界上一致，都给出 $N_\text{opt} \propto C^{0.5}$，但和 Kaplan et al. 不一致。方法 3 的结果和另外两种略有偏差，原因在第 05 节解释（图源 Hoffmann et al. 2022，引自原文）</figcaption>
+        </figure>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/chinchilla-4.png" alt="Chinchilla 三种方法与 Kaplan 的预测">
+            <figcaption>图：Chinchilla 三种方法的预测和 Kaplan et al. (2020) 的预测对比。三种方法都说明当时几个主流 LLM 训练不足（图源 Hoffmann et al. 2022，引自原文）</figcaption>
+        </figure>
+        <p>
+            Chinchilla 论文说当时（约 2022 年）多数大模型都训练不足，支撑这个说法的是一个有名的对照实验。Gopher（<a href="https://arxiv.org/abs/2112.11446" target="_blank">Rae et al. 2021</a>）有 280B 参数，训练了 300B token。在和 Gopher 相同的算力预算下，他们训练了 Chinchilla：70B 参数、1.4T token。这个模型小了 4 倍，训练 token 多了大约 4 倍，结果在各项评测上全面超过 Gopher。
+        </p>
+
+        <h3>调和 Kaplan 与 Chinchilla</h3>
+        <p><em>原文小节：Reconciling Kaplan and Chinchilla</em></p>
+        <p>Chinchilla 和 Kaplan et al. 的分歧在两处：</p>
+        <ul>
+            <li>Kaplan 说“模型要比数据长得快”（$N_\text{opt} \propto C^{0.73}$）；Chinchilla 说模型大小每翻一倍，训练 token 也要翻一倍（$N_\text{opt} \propto C^{0.5}$）。</li>
+            <li>Kaplan 说“训一个大模型，没收敛就停”；Chinchilla 说应该用更多数据训一个更小的模型。</li>
+        </ul>
+        <p>
+            两篇论文同意同一个底层原则，分歧在于模型大小和 token 数之间的最优取舍点在哪里。为什么差这么多？作者给出两个原因。
+        </p>
+        <p>
+            差异 1：Kaplan et al. 主要在小模型上做实验。Chinchilla 的实验规模比 Kaplan 大 10 倍以上。在 log-log 空间里外推时，拟合上的一点小差别会带来很大的预测差别（第 05 节的玩具模拟演示了这一点）。
+        </p>
+        <p>
+            差异 2：小模型里 embedding 参数的占比不能忽略。参数量小时，embedding 参数占总量相当一部分，算不算它们影响很大。<a href="https://arxiv.org/abs/2406.12907" target="_blank">Pearce &amp; Song (2024)</a> 沿这个思路做了细致分析。用 $N_{\setminus E}, C_{\setminus E}$ 表示不含 embedding 的模型大小和计算量，$N, C$ 表示按总参数计的量：
+        </p>
+        <ul>
+            <li>Kaplan et al.：$N^*_{\setminus E} \propto C^{0.73}_{\setminus E}$（不含 embedding）</li>
+            <li>Chinchilla：$N^* \propto C^{0.50}$（总参数）</li>
+        </ul>
+        <p>
+            为了把两者接起来，他们拟合了总参数 $N$ 和非 embedding 参数 $N_{\setminus E}$ 之间的关系，$\omega$ 是某个常数：
+        </p>
+        $$N = N_{\setminus E} + \omega\, N_{\setminus E}^{1/3}.$$
+        <p>
+            这个形式有两个好性质：它严格递增；而且模型越大，两者越接近，因为 $\frac{N}{N_{\setminus E}} = 1 + \omega {N_{\setminus E}}^{- \frac{2}{3}}$，当 $N_{\setminus E} \to \infty$ 时 $\frac{N}{N_{\setminus E}} \to 1$。
+        </p>
+        <p>把它代进 Chinchilla 的公式：</p>
+        $$\begin{aligned}
+        L(N_{\setminus E}, C_{\setminus E}) &= A(N_{\setminus E} + \omega\, N_{\setminus E}^{1/3})^{-\alpha} + B \Big(\frac{C_{\setminus E}}{6}\Big)^{-\beta} N_{\setminus E}^\beta + E \\
+        L'(N_{\setminus E}, C_{\setminus E}) &= - \alpha A (N_{\setminus E} + \omega N_{\setminus E}^{1/3})^{-\alpha -1}(1 + \frac{\omega}{3}N_{\setminus E}^{-2/3}) + \beta B \Big(\frac{C_{\setminus E}}{6}\Big)^{-\beta} N_{\setminus E}^{\beta -1} = 0 && \small{\text{; derivative wrt }N_{\setminus E}\text{ should be zero.}} \\
+        \text{Rearrange to get }& \alpha A (N^{*}_{\setminus E} + \omega {N^{*}_{\setminus E}}^{1/3})^{-\alpha -1}(1 + \frac{\omega}{3} {N^{*}_{\setminus E}}^{-2/3}) = \beta B \Big(\frac{C_{\setminus E}}{6}\Big)^{-\beta} {N^{*}_{\setminus E}}^{\beta -1} \\
+        & 6^{-\beta}\frac{\alpha A}{\beta B} ({N^{*}_{\setminus E}} + \omega {N^{*}_{\setminus E}}^{1/3})^{-\alpha -1}(1 + \frac{\omega}{3}{N^{*}_{\setminus E}}^{-2/3}) {N^{*}_{\setminus E}}^{1 - \beta} = C_{\setminus E}^{-\beta} \\
+        & 6 \Big(\frac{\beta B}{\alpha A}\Big)^{\frac{1}{\beta}} ({N^{*}_{\setminus E}} + \omega {N^{*}_{\setminus E}}^{1/3})^{\frac{1 + \alpha}{\beta}} ({N^{*}_{\setminus E}} + \frac{\omega}{3}{N^{*}_{\setminus E}}^{1/3})^{-\frac{1}{\beta}} {N^{*}_{\setminus E}} = C_{\setminus E}
+        \end{aligned}$$
+        <p>
+            上面最后一行里 $C_{\setminus E}$ 和 $N_{\setminus E}$ 的关系已经不是干净的幂律了。只能在局部近似成 $N^*_{\setminus E} \overset{\propto}{\sim} C_{\setminus E}^g$，这里 $g$ 是基于一阶导数的局部指数（记号 $\overset{\propto}{\sim}$ 表示局部成比例），并非全局幂律指数，由 $g = \frac{\mathrm{d} \log C_{\setminus E}}{\mathrm{d} \log N_{\setminus E}}$ 给出。$g$ 怎样近似的完整推导见 <a href="https://arxiv.org/abs/2406.12907" target="_blank">Pearce &amp; Song (2024)</a> 附录 A.1。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/pearce-1.png" alt="局部幂律指数 g 随计算量变化">
+            <figcaption>图：局部幂律指数 $g$ 随 $C_{\setminus E}$ 增长的变化（图源 Pearce &amp; Song 2024，引自原文）</figcaption>
+        </figure>
+        <p>
+            如图所示，$C_{\setminus E}$ 越大，$g$ 越收敛到 Chinchilla 的估计。他们用上面的方程生成合成训练曲线，在 Kaplan et al. 用的模型大小范围（768M 到 1.5B）里，估出来的 $g$ 接近 Kaplan 的系数 0.73。也就是说，两篇论文的分歧有相当一部分可以用“小模型 + 不算 embedding”解释。
+        </p>
+
+        <h3>为什么是幂律？</h3>
+        <p><em>原文小节：Why power law?</em></p>
+        <p>
+            幂律在 AI 之外的很多领域都能看到，比如 <a href="https://en.wikipedia.org/wiki/Zipf%27s_law" target="_blank">Zipf 定律</a>（词频与排名成反比）、<a href="https://en.wikipedia.org/wiki/Scale-free_network" target="_blank">无标度网络</a>、<a href="https://en.wikipedia.org/wiki/Urban_scaling" target="_blank">城市缩放规律</a>，以及许多其他复杂系统。反复出现的模式是：大事件少，小事件多，事件大小和频率之间的关系在 log-log 坐标上常常是一条直线。
+        </p>
+        <p>那 LLM 的 scaling law 为什么也是幂律的形状？</p>
+        <p>
+            一个早期解释来自 <a href="https://arxiv.org/abs/2004.10802" target="_blank">Sharma &amp; Kaplan (2020)</a>，部分灵感来自不同领域的指数不同（<a href="https://arxiv.org/abs/1712.00409" target="_blank">Hestness et al. 2017</a>）。他们假设语言建模可以看作在数据的低维流形上做回归。模型参数越多，能把数据流形切分得越细，泛化误差就越小。最简单地说，如果有效大小为 $N$ 的模型把一个 $d$ 维流形切成 $O(N)$ 个区域，每个区域的典型线性尺度（分辨率）大约是 $\sim N^{-1/d}$。这和上面 scaling law 的幂律形式类似。这个理论在数据无限、欠拟合的设定下最贴切，但现实中估计一个数据流形的内在维度（intrinsic dimension）很难。
+        </p>
+        <p>
+            后来的一个假设（<a href="https://arxiv.org/abs/2303.13506" target="_blank">Michaud et al. 2023</a>、<a href="https://arxiv.org/abs/2412.07942" target="_blank">Brill 2024</a>）认为，知识或技能是一块一块学会的（“量子化”，quantized），这些技能出现的频率服从幂律分布。模型先学常见技能，后学罕见技能，加起来就是 loss 的平滑幂律下降。
+        </p>
+        <p>
+            作者说这里只列了两种假设，还有更多研究从数据的谱尾（spectral tails）、核函数特征值、自然语言统计规律、训练动态中的相变等角度解释幂律形状。参考文献里的 <a href="https://arxiv.org/abs/2102.06701" target="_blank">Bahri et al. 2021</a> 是其中一篇。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 数据有限时的 Scaling Laws</h2>
+        <p><em>原文小节：Scaling Laws in Data-Limited Region</em></p>
+        <p>
+            经典 scaling law 假设唯一数据（unique data）实际上无限：不重复、不做多 epoch 训练（epoch 指把整个数据集完整过一遍）。但模型越来越大，高质量的唯一 token 快不够用了。有关 AI 的 scaling 还能持续多久的争论，有不少就围绕我们是否撞上了“数据墙”（data wall）。
+        </p>
+        <p>
+            作者也强调，$D$ 背后的数据集默认是已经清洗过的。预训练数据流水线往往是有效预训练的一大块工作，常见步骤有：去重（精确去重和模糊去重）、质量过滤、去掉模板化内容（boilerplate removal）、安全过滤、个人信息（PII）和版权内容遮盖、评测集去污染（benchmark decontamination，删掉和评测题重合的数据），以及按语言、质量、内容类型等仔细调整数据配比。即使两个数据集 token 数 $D$ 一样，高质量数据和互联网垃圾内容（Internet slop）带来的算力效率也可能差得很远。
+        </p>
+
+        <h3>Hernandez et al. 2022：少量重复数据的影响</h3>
+        <p>
+            <a href="https://arxiv.org/abs/2205.10487" target="_blank">Hernandez et al. (2022)</a> 研究的是一个受控版本：数据集大部分唯一，只有一小部分重复。从一个大数据集出发，保留 90% 不重复的数据，把剩下 10% 换成原数据中一小块内容的反复重复。用 Transformer 训练 100B token 后，他们观察到双重下降（double descent）现象：随着重复数据被强调的程度变化，测试 loss 可能先<em>变差</em>再变好；重复部分占比越大，这个效应越明显。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/hernandez-1.png" alt="重复数据比例增大时测试 loss 的双重下降">
+            <figcaption>图：重复比例增大时测试 loss 出现双重下降（左图 90% 重复，右图 50%）（图源 Hernandez et al. 2022，引自原文）</figcaption>
+        </figure>
+        <p>
+            训练中段 loss 持平甚至上升，可能是模型在记忆重复数据。这种形状的学习曲线会让 scaling law 拟合不准。他们还得出结论：重复数据会伤害部分 OOD（out-of-distribution，分布外）评测和下游微调。不过他们的数据配比是更像实验室的构造，现实数据里的重复要复杂得多（例如不同数据的重复程度不同，还有语义上的重复等）。
+        </p>
+        <p>
+            作者更关心的问题是：既然高质量唯一数据有限，训练时多半得重复数据，那 scaling law 该怎么拟合。
+        </p>
+
+        <h3>Muennighoff et al. 2023：给重复的数据打折</h3>
+        <p>
+            <a href="https://arxiv.org/abs/2305.16264" target="_blank">Muennighoff et al. (2023)</a> 研究的是数据受限时算力怎样最优分配。他们做了大约 400 组实验来测数据重复的影响，模型 10M 到 9B 参数，数据量最高 900B token，最多 1500 个 epoch。每个 epoch 用完全相同的数据集，epoch 之间打乱顺序，在留出的测试集上评估。
+        </p>
+        <p>
+            建模上的关键调整，是把总 token 数 $D$ 拆成两部分：(i) 唯一 token 数 $U_D$，(ii) 重复次数 $R_D$（即 epoch 数减 1）。于是 $D = U_D(1 + R_D)$。设唯一数据预算为 $D_\text{uniq}$，按定义 $U_D = \min \{ D_\text{uniq}, D\}$，$R_D = (D / U_D) - 1$。他们用 Chinchilla scaling law 找出拟合 $U_D$ 的最优模型大小 $U_N$，并把多出来的模型大小定义为 $R_N = (N / U_N) - 1$。
+        </p>
+        <p>
+            然后他们修改 Chinchilla 的参数化拟合（方法 3），用有效（打过折的）数据量 $D'$ 和模型大小 $N'$ 代替原始量：
+        </p>
+        $$\hat{L}(N, D) = \frac{A}{N'^\alpha} + \frac{B}{D'^\beta} + E \quad\text{ where } D' = U_D + U_D\, r_D\left(1 - \exp\!\left(-\frac{R_D}{r_D}\right)\right).$$
+        <p>
+            直觉是：一个 token 被重复时，它的价值按<em>指数</em>衰减。在他们的建模里，每重复一次，这个 token 剩余价值的 $(1 - 1/r_D)$ 被扣掉，$r_D$ 是一个可学习的“半衰期”参数。当 $R_D = 0$ 或 $R_D \ll r_D$ 时，回到 $D' \approx D$。重复次数趋于无穷时，$D'$ 趋于上限 $U_D(1 + r_D)$，再怎么重复也只相当于这么多唯一数据。
+        </p>
+        <p>
+            模型大小也有一个对称的写法：$N' = U_N + U_N r_N(1 - \exp(-R_N / r_N))$，表达的意思是“larger models overfit more quickly on repeated data”以及“a model can be too large for its dataset”。作者觉得这一部分不太直观，她找不到满意的解释说明为什么模型大小要用和重复数据对称的形式出现。后来 <a href="https://arxiv.org/abs/2605.01640" target="_blank">Lovelace et al. (2026)</a> 改掉了这个假设。
+        </p>
+        <p>
+            他们的经验拟合发现，<em>多余参数的价值比重复数据衰减得更快</em>，即 $r_N \lt r_D$。所以数据受限时，资源应该更多投到多跑几个 epoch 上，少投到加模型参数上。作者们自己也指出了这个建模的一个弱点：对于“失败”的模型（训练中途 loss 开始上升的模型，例如训练了 44 个 epoch 的模型），它会严重低估最终测试 loss。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/muennighoff-1.png" alt="数据受限下的 scaling 拟合">
+            <figcaption>图：考虑重复的数据受限 scaling 拟合比不考虑数据的拟合更贴近实验结果；重复 token 的价值按指数衰减并趋于一个上限。epoch 越多拟合越差，因为高度重复会让测试 loss 在训练中途上升，图中没有画出（图源 Muennighoff et al. 2023，引自原文）</figcaption>
+        </figure>
+
+        <h3>Lovelace et al. 2026：显式的过拟合惩罚项</h3>
+        <p>
+            最近 <a href="https://arxiv.org/abs/2605.01640" target="_blank">Lovelace et al. (2026)</a> 用另一种思路重新研究了这个问题。他们没有把过参数化（overparameterization，参数相对数据太多）建模成有效模型大小的收益递减，而是显式地建模“模型大小 $\times$ 数据重复”之间的相互作用。实验上训练了约 300 个模型，参数从 15M 到 1B，唯一 token 从 50M 到 6B。
+        </p>
+        <p>
+            固定模型大小，把不同重复程度下的拟合残差（residual，实际 loss 减预测 loss）画出来，观察结果很直观：epoch 越多，伤害越大；有意思的是，<em>模型越大，对重复越敏感</em>。这暗示 loss 惩罚很可能同时是模型大小和数据量的函数。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/lovelace-1.png" alt="有效大小拟合的残差">
+            <figcaption>图：有效大小拟合的残差显示，过拟合的伤害随 epoch 数和模型大小一起增长（图源 Lovelace et al. 2026，引自原文）</figcaption>
+        </figure>
+        <p>
+            他们引入了一个显式的过拟合惩罚项，围绕容量比（capacity ratio）$N / U_D$（参数量相对唯一 token 数）构造：
+        </p>
+        $$\hat{L}(N, U_D, R_D) = E + \frac{A}{N^\alpha} + \frac{B}{\big(U_D (1 + R_D)\big)^\beta} + \color{red}{P \cdot R_D^\delta \cdot \left(\frac{N}{U_D}\right)^\kappa}$$
+        <p>其中：</p>
+        <ul>
+            <li>$R_D$ 是重复次数；</li>
+            <li>标量 $P$ 是一个可学习参数；</li>
+            <li>指数 $\kappa$（第 2 个可学习参数）让惩罚随容量比 $N / U_D$ 非线性变化；</li>
+            <li>重复次数上的单独指数 $\delta$（第 3 个可学习参数）把重复的非线性和 $\kappa$ 分开。</li>
+        </ul>
+        <p>
+            红色这一项是直接的过拟合惩罚：数据重复得越多、模型相对可用的唯一数据越过参数化，它就越大。注意这里数据项用的是原始的 $U_D(1+R_D)$，没有打折，重复的代价全部放进了惩罚项。
+        </p>
+        <p>
+            他们还做了一个案例研究，看数据受限时 weight decay（权重衰减，训练时把权重往 0 拉的正则化手段）对训练的影响，发现强 weight decay 能减小数据重复造成的过拟合惩罚。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2026-06-24-scaling-laws/lovelace-2.png" alt="强 weight decay 降低重复数据的过拟合惩罚">
+            <figcaption>图：强 weight decay 降低了数据重复带来的过拟合惩罚（图源 Lovelace et al. 2026，引自原文）</figcaption>
+        </figure>
+        <p>
+            Muennighoff et al. 和 Lovelace et al. 的两种建模都来自经验曲线拟合，所以数据受限的 scaling law 为什么恰好是这些形式、每个自由参数为什么必要，目前还不清楚。作者表示很想看到这方向更多的理论工作。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 现实中拟合 Scaling Laws 的难处</h2>
+        <p><em>原文小节：Trickiness of Fitting Scaling Laws in Reality</em></p>
+        <p>
+            公式看着干净，实践中拟合 scaling law 却会对一些看似无关紧要的流程选择出奇地敏感：参数怎么数，精度怎么取整，loss 是求和还是求平均，等等。
+        </p>
+        <p>
+            原因在于，scaling law 只能在我们训得起的（相对小、相对便宜的）模型上拟合，而预测要<em>外推</em>到大好几个数量级的模型。这种设定下，看起来像舍入误差的选择也可能导致预测天差地别。
+        </p>
+        <p>
+            同时，拟合 scaling law 默认唯一在变的因素是<em>规模</em>。也就是说，模型架构、优化器、学习率调度、batch 大小的爬升方式（batch ramp）、数据配比、tokenizer 等其他设计选择都应该保持不变。另一个隐含假设是这些设置都已经仔细调过，因为像训练不足这样的情况会导出不同的结论。
+        </p>
+        <p>
+            Kaplan et al. 和 Chinchilla 结果之间的分歧，就是拟合 scaling law 有多微妙的一个例子。
+        </p>
+        <p>
+            第二个例子是一项后续分析，研究 Chinchilla 方法 3 为什么和另外两种方法略有偏差。<a href="https://arxiv.org/abs/2404.10102" target="_blank">Besiroglu et al. (2024)</a> 从 Hoffmann et al. (2022) 的 Figure 4 中提取出原始的 $(N, D, L)$ 数据点，重新跑了方法 3 的参数化拟合，找到几个具体问题：
+        </p>
+        <ul>
+            <li>L-BFGS-B 优化器里的 loss 尺度太高：原论文把各样本的 Huber loss 取了平均，没有求和，导致优化提前终止。原始拟合和 bootstrap（自助法，反复重采样数据来估计置信区间）时的优化都过早停止，结果是估计值前后不一致，置信区间窄得不合理。</li>
+            <li>报告的 $\alpha$ 和 $\beta$ 只保留了 2 位精度，这让由它们推出来的 $A$、$B$ 看起来比实际偏得更多。</li>
+        </ul>
+
+        <h3>玩具模拟</h3>
+        <p><em>原文小节：Toy simulation</em></p>
+        <p>
+            原文这里嵌了一个交互式玩具模拟小组件（作者说是 ChatGPT 做的），用来演示三种具体的失效方式。
+        </p>
+        <p>假设真实函数是：</p>
+        $$\hat{L}(N, D) = 482.01 \cdot N^{-0.3478} + 2085.43 D^{-0.3658} + 1.8172$$
+        <p>
+            由此 $N_\text{opt} \propto C^{0.5126}, D_\text{opt} \propto C^{0.4874}$。这组数是 <a href="https://arxiv.org/abs/2404.10102" target="_blank">Besiroglu et al. (2024)</a> 的估计。（可以用第 03 节的公式核对：$\beta/(\alpha+\beta) = 0.3658/0.7136 \approx 0.5126$。）
+        </p>
+        <p>
+            模拟图画的是 loss 预测 $\hat{L}$ 随数据量 $D$ 的变化，并提供几个滑块来展示：
+        </p>
+        <ul>
+            <li>Loss 精度：把 loss 从保留较多小数位改成保留较少，拟合出的参数值就会变。</li>
+            <li>Loss 噪声：只给 loss 加上千分之一（0.001，即 milli-loss）量级的扰动，就会得到不同的拟合。</li>
+            <li>拟合区间敏感性：只用小模型、只用中等模型、或用全部模型去拟合，会得到看上去不同的 scaling law。</li>
+        </ul>
+        <p>
+            页面上的交互组件这里没有搬过来，想亲手拖滑块可以去原文页面的 Toy simulation 一节。
+        </p>
+    </section>
+
+    <section id="tref">
+        <h2>主要参考文献</h2>
+        <ol>
+            <li>Amari, Fujita &amp; Shinomoto 1992. <a href="https://ieeexplore.ieee.org/document/6796972" target="_blank">“Four Types of Learning Curves”</a>（Neural Computation）</li>
+            <li>Hestness et al. 2017. <a href="https://arxiv.org/abs/1712.00409" target="_blank">“Deep Learning Scaling is Predictable, Empirically”</a></li>
+            <li>Rosenfeld et al. 2020. <a href="https://arxiv.org/abs/1909.12673" target="_blank">“A Constructive Prediction of the Generalization Error Across Scales”</a></li>
+            <li>Kaplan et al. 2020. <a href="https://arxiv.org/abs/2001.08361" target="_blank">“Scaling Laws for Neural Language Models”</a></li>
+            <li>Hoffmann et al. 2022. <a href="https://arxiv.org/abs/2203.15556" target="_blank">“Training Compute-Optimal Large Language Models”</a></li>
+            <li>Pearce &amp; Song 2024. <a href="https://arxiv.org/abs/2406.12907" target="_blank">“Reconciling Kaplan and Chinchilla Scaling Laws”</a></li>
+            <li>Bahri et al. 2021. <a href="https://arxiv.org/abs/2102.06701" target="_blank">“Explaining Neural Scaling Laws”</a></li>
+            <li>Sharma &amp; Kaplan 2020. <a href="https://arxiv.org/abs/2004.10802" target="_blank">“A Neural Scaling Law from the Dimension of the Data Manifold”</a></li>
+            <li>Hernandez et al. 2022. <a href="https://arxiv.org/abs/2205.10487" target="_blank">“Scaling Laws and Interpretability of Learning from Repeated Data”</a></li>
+            <li>Muennighoff et al. 2023. <a href="https://arxiv.org/abs/2305.16264" target="_blank">“Scaling Data-Constrained Language Models”</a></li>
+            <li>Lovelace et al. 2026. <a href="https://arxiv.org/abs/2605.01640" target="_blank">“Prescriptive Scaling Laws for Data Constrained Training”</a></li>
+            <li>Besiroglu et al. 2024. <a href="https://arxiv.org/abs/2404.10102" target="_blank">“Chinchilla Scaling: A Replication Attempt”</a></li>
+            <li>Michaud et al. 2023. <a href="https://arxiv.org/abs/2303.13506" target="_blank">“The Quantization Model of Neural Scaling”</a></li>
+            <li>Brill 2024. <a href="https://arxiv.org/abs/2412.07942" target="_blank">“Neural Scaling Laws Rooted in the Data Distribution”</a></li>
+            <li>Rae et al. 2021. <a href="https://arxiv.org/abs/2112.11446" target="_blank">“Scaling Language Models: Methods, Analysis &amp; Insights from Training Gopher”</a></li>
+        </ol>
+    </section>
+
+    <footer class="document-footer">
+        <p>Lil'Log · Scaling Laws, Carefully · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

@@ -58,6 +58,7 @@ Stanford、CMU、Harvard 和 MIT 2025-2026 学年 AI 课程的中文笔记，附
 | [How to Scale Your Model](https://joyce9896.github.io/frontier-ai-courses/How-to-Scale-Your-Model/) | Google DeepMind 的大模型扩展书，导读加 12 章：roofline、TPU/GPU、分片与集合通信、训练并行、推理、LLaMA 3 算例，含习题解答 |
 | [Smol Training Playbook](https://joyce9896.github.io/frontier-ai-courses/Smol-Training-Playbook/) | Hugging Face 训练 SmolLM3 的完整记录，导读加 8 章：消融实验、架构与超参数、数据配方、训练中排错、SFT/偏好优化/RL 后训练、GPU 集群基础设施 |
 | [Ultra-Scale Playbook](https://joyce9896.github.io/frontier-ai-courses/Ultra-Scale-Playbook/) | Hugging Face 的 GPU 集群训练手册，导读加 12 篇：显存账、数据并行与 ZeRO、张量/序列/上下文/流水线/专家并行、5D 组合与选配置、GPU kernel、FlashAttention、FP8 混合精度 |
+| [Lilian Weng 博客](https://joyce9896.github.io/frontier-ai-courses/Lilian-Weng-Blog/) | Lil'Log 15 篇长综述：2024 年以来全部 7 篇（harness 工程、scaling law、测试时思考、奖励作弊、幻觉、视频扩散、人类数据）加 agent、prompt、推理优化等 8 篇经典 |
 
 ### 产业与系统
 

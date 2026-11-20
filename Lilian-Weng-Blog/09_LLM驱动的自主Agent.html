@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM 驱动的自主 Agent | Lil'Log 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="08_LLM的对抗攻击.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Lil'Log 笔记目录</a> · 09</span>
+    <span><a href="10_Prompt_Engineering.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>LLM 驱动的自主 Agent</h1>
+        <p class="subtitle">把 LLM 当作 agent 的核心控制器，再配上规划、记忆和工具使用三个组件：每个组件有哪些代表方法，ChemCrow、Generative Agents、AutoGPT、GPT-Engineer 这些案例怎么搭，以及目前还有哪些限制</p>
+        <div class="author-meta">
+            作者：Lilian Weng · 发表于 2023 年 6 月 23 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://lilianweng.github.io/posts/2023-06-23-agent/" target="_blank">LLM Powered Autonomous Agents</a>（Lil'Log；本文依据原文英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原文，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这篇文章讲什么</h2>
+        <p>
+            Agent（智能体）在这里指能自己拆解任务、调用外部能力、根据结果继续行动的程序。这篇文章讨论的是一种具体搭法：让 LLM 充当 agent 的“大脑”，也就是核心控制器，外面再接上规划（Planning）、记忆（Memory）和工具使用（Tool Use）三类组件。作者以 2023 年上半年流行的 AutoGPT、GPT-Engineer、BabyAGI 等演示项目为起点，把相关论文按这三个组件归类整理。
+        </p>
+        <p>
+            文章顺序是：先给出整体框架图；然后讲规划，包括任务分解（CoT、Tree of Thoughts、LLM+P）和自我反思（ReAct、Reflexion、Chain of Hindsight、Algorithm Distillation）；接着讲记忆，从人脑的记忆分类对应到 LLM，再介绍向量检索常用的几种近似最近邻算法；然后讲工具使用（MRKL、TALM、Toolformer、HuggingGPT、API-Bank）；最后看几个案例（科学发现 agent、Generative Agents 小镇模拟、AutoGPT 和 GPT-Engineer 的系统提示），并列出三条共同的限制。读完你应该能说清一个 LLM agent 由哪些部分组成，每部分有哪些代表做法和已知结论。
+        </p>
+        <ol>
+            <li><a href="#t01">引言</a></li>
+            <li><a href="#t02">Agent 系统总览</a></li>
+            <li><a href="#t03">组件一：规划</a></li>
+            <li><a href="#t04">组件二：记忆</a></li>
+            <li><a href="#t05">组件三：工具使用</a></li>
+            <li><a href="#t06">案例研究</a></li>
+            <li><a href="#t07">挑战</a></li>
+            <li><a href="#tref">主要参考文献</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 引言</h2>
+        <p><em>原文小节：（开篇，无小标题）</em></p>
+        <p>
+            作者开篇说，用 LLM（large language model，大语言模型）做核心控制器来搭 agent 是个很酷的想法。几个概念验证（proof-of-concept）演示项目，比如 <a href="https://github.com/Significant-Gravitas/Auto-GPT" target="_blank">AutoGPT</a>、<a href="https://github.com/AntonOsika/gpt-engineer" target="_blank">GPT-Engineer</a> 和 <a href="https://github.com/yoheinakajima/babyagi" target="_blank">BabyAGI</a>，都给了人启发。
+        </p>
+        <p>
+            她的判断是：LLM 的潜力不止于写出漂亮的文案、故事、论文和程序，它可以被看作一个强大的通用问题求解器（general problem solver）。这篇文章就是在这个视角下，看怎样把 LLM 组织成能自己完成任务的系统。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. Agent 系统总览</h2>
+        <p><em>原文小节：Agent System Overview</em></p>
+        <p>
+            在 LLM 驱动的自主 agent 系统里，LLM 承担 agent 大脑的角色，周围配几个关键组件。
+        </p>
+        <h3>规划（Planning）</h3>
+        <ul>
+            <li><em>子目标与分解</em>：agent 把大任务拆成更小、好处理的子目标，从而高效地处理复杂任务。</li>
+            <li><em>反思与改进</em>：agent 可以对过去的行动做自我批评和自我反思（self-criticism / self-reflection），从错误里学习，在后续步骤里修正，最终结果的质量因此提高。</li>
+        </ul>
+        <h3>记忆（Memory）</h3>
+        <ul>
+            <li><em>短期记忆</em>：作者把所有的 in-context learning（上下文内学习，指模型不更新权重，只靠 prompt 里给的信息和示例来完成任务，详见她的 <a href="https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/" target="_blank">Prompt Engineering</a> 一文）都看作模型在用短期记忆学习。</li>
+            <li><em>长期记忆</em>：让 agent 能在很长时间里保存和回忆（可以是无限量的）信息，通常靠外部向量数据库（vector store）加快速检索实现。</li>
+        </ul>
+        <h3>工具使用（Tool use）</h3>
+        <ul>
+            <li>agent 学会调用外部 API，获取模型权重里缺少的信息（权重在预训练之后通常很难改），包括最新信息、代码执行能力、专有信息源等。</li>
+        </ul>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-06-23-agent/agent-overview.png" alt="LLM 驱动的自主 agent 系统总览">
+            <figcaption>图：LLM 驱动的自主 agent 系统总览。中间是 agent，连着规划、记忆、工具和行动几个部分（引自原文）</figcaption>
+        </figure>
+    </section>
+
+    <section id="t03">
+        <h2>03. 组件一：规划</h2>
+        <p><em>原文小节：Component One: Planning</em></p>
+        <p>
+            一个复杂任务通常包含很多步。agent 需要知道这些步骤是什么，并提前做计划。
+        </p>
+
+        <h3>任务分解</h3>
+        <p><em>原文小节：Task Decomposition</em></p>
+        <p>
+            <a href="https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/#chain-of-thought-cot" target="_blank">Chain of thought</a>（CoT，思维链；<a href="https://arxiv.org/abs/2201.11903" target="_blank">Wei et al. 2022</a>）已经是提升模型在复杂任务上表现的标准提示技巧。做法是让模型“think step by step”（一步一步想），用更多的测试时计算（test-time computation，即推理阶段多生成一些中间文字、多花一些算力）把难题拆成更小更简单的步骤。CoT 把大任务变成多个可管理的小任务，也让人能部分看到模型的思考过程。
+        </p>
+        <p>
+            Tree of Thoughts（思维树；<a href="https://arxiv.org/abs/2305.10601" target="_blank">Yao et al. 2023</a>）在 CoT 的基础上，每一步都探索多种推理可能。它先把问题分成多个思考步骤，每步生成多个想法（thought），于是形成一棵树。搜索可以用 BFS（广度优先搜索）或 DFS（深度优先搜索），每个状态由一个分类器（通过 prompt 实现）或多数投票来评估。
+        </p>
+        <p>任务分解有三种做法：</p>
+        <ol>
+            <li>让 LLM 用简单提示来分解，比如 <code>"Steps for XYZ.\n1."</code>、<code>"What are the subgoals for achieving XYZ?"</code>；</li>
+            <li>用针对具体任务的指令，比如写小说时用 <code>"Write a story outline."</code>；</li>
+            <li>由人来输入。</li>
+        </ol>
+        <p>
+            另一种很不一样的路子是 LLM+P（<a href="https://arxiv.org/abs/2304.11477" target="_blank">Liu et al. 2023</a>），它把长程规划（long-horizon planning）交给外部的经典规划器（classical planner）。中间接口是 PDDL（Planning Domain Definition Language，规划领域定义语言，一种在自动规划领域用来形式化描述“状态、动作、目标”的语言）。流程分三步：
+        </p>
+        <ol>
+            <li>LLM 把问题翻译成“Problem PDDL”；</li>
+            <li>请经典规划器基于已有的“Domain PDDL”生成一份 PDDL 计划；</li>
+            <li>LLM 再把 PDDL 计划翻译回自然语言。</li>
+        </ol>
+        <p>
+            换句话说，规划这一步外包给了外部工具。前提是要有特定领域的 PDDL 描述和合适的规划器。作者指出，这在某些机器人场景里很常见，但在很多其他领域并不具备。
+        </p>
+
+        <h3>自我反思</h3>
+        <p><em>原文小节：Self-Reflection</em></p>
+        <p>
+            自我反思让自主 agent 能通过修正过去的行动决策、纠正之前的错误来迭代改进。现实任务里免不了试错，所以它很重要。
+        </p>
+
+        <h4>ReAct</h4>
+        <p>
+            ReAct（<a href="https://arxiv.org/abs/2210.03629" target="_blank">Yao et al. 2023</a>）把推理（reasoning）和行动（acting）合到 LLM 里。它扩展了动作空间，让它同时包含任务相关的离散动作和语言空间。前者让 LLM 能和环境交互（比如调用 Wikipedia 搜索 API），后者让 LLM 用自然语言生成推理过程（reasoning trace）。
+        </p>
+        <p>ReAct 的 prompt 模板里有显式的思考步骤，大致格式是：</p>
+<pre><code>Thought: ...
+Action: ...
+Observation: ...
+... (Repeated many times)</code></pre>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-06-23-agent/react.png" alt="ReAct 推理轨迹示例">
+            <figcaption>图：知识密集型任务（如 HotpotQA、FEVER）和决策类任务（如 AlfWorld Env、WebShop）上的推理轨迹示例。出处：<a href="https://arxiv.org/abs/2210.03629" target="_blank">Yao et al. 2023</a>（引自原文）</figcaption>
+        </figure>
+        <p>
+            在知识密集型任务和决策类任务两类实验上，<code>ReAct</code> 都比去掉 <code>Thought: …</code> 这一步、只保留行动的 <code>Act</code> 基线更好。
+        </p>
+
+        <h4>Reflexion</h4>
+        <p>
+            Reflexion（<a href="https://arxiv.org/abs/2303.11366" target="_blank">Shinn &amp; Labash 2023</a>）是一个给 agent 配上动态记忆和自我反思能力、用来提升推理能力的框架。它采用标准的强化学习（RL，reinforcement learning：agent 在环境里行动、拿到奖励、据此改进策略）设置：奖励模型只给简单的二值奖励（成功或失败），动作空间沿用 ReAct 的设置，即在任务相关动作之外加上语言，以支持复杂的推理步骤。每做完一个动作 $a_t$，agent 会算一个启发式值 $h_t$，并根据自我反思的结果，可以选择<em>重置</em>环境，开始一次新的尝试（trial）。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-06-23-agent/reflexion.png" alt="Reflexion 框架示意">
+            <figcaption>图：Reflexion 框架示意。出处：<a href="https://arxiv.org/abs/2303.11366" target="_blank">Shinn &amp; Labash, 2023</a>（引自原文）</figcaption>
+        </figure>
+        <p>
+            启发式函数负责判断一条轨迹什么时候效率太低或者出现了幻觉，应该停下来。“低效规划”指轨迹花了太长时间仍没成功。“幻觉”在这里的定义是：遇到一串连续相同的动作，在环境里得到的都是同样的观察结果。
+        </p>
+        <p>
+            自我反思的内容是这样产生的：给 LLM 看两个示例（two-shot），每个示例是一对（失败的轨迹，用来指导后续计划修改的理想反思）。生成的反思被加进 agent 的工作记忆，最多保留三条，作为之后查询 LLM 时的上下文。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-06-23-agent/reflexion-exp.png" alt="Reflexion 在 AlfWorld 和 HotpotQA 上的实验">
+            <figcaption>图：在 AlfWorld Env 和 HotpotQA 上的实验。在 AlfWorld 里，幻觉比低效规划更常见。出处：<a href="https://arxiv.org/abs/2303.11366" target="_blank">Shinn &amp; Labash, 2023</a>（引自原文）</figcaption>
+        </figure>
+
+        <h4>Chain of Hindsight</h4>
+        <p>
+            Chain of Hindsight（CoH；<a href="https://arxiv.org/abs/2302.02676" target="_blank">Liu et al. 2023</a>）的思路是把一串过去的输出摆在模型面前，每个输出都附上反馈，让模型学会在自己的输出上改进。
+        </p>
+        <p>
+            人类反馈数据是一个集合 $D_h = \{(x, y_i , r_i , z_i)\}_{i=1}^n$，其中 $x$ 是 prompt，$y_i$ 是模型的一个补全，$r_i$ 是人对 $y_i$ 的打分，$z_i$ 是对应的人写的事后反馈（hindsight feedback）。假设这些反馈元组按奖励排好序，$r_n \geq r_{n-1} \geq \dots \geq r_1$。训练过程是监督微调（SFT，supervised fine-tuning：用现成的输入输出对直接训练模型），数据是这样一个序列：$\tau_h = (x, z_i, y_i, z_j, y_j, \dots, z_n, y_n)$，其中 $i \leq j \leq n$（原文这里的下界缺了一个符号）。模型被微调成只预测最后的 $y_n$，条件是前面的序列前缀。这样模型就能根据反馈序列做自我反思，产出更好的输出。测试时，模型还可以选择和人工标注者进行多轮指令交互。
+        </p>
+        <p>
+            为了防止过拟合，CoH 加了一个正则项，最大化预训练数据集的对数似然。为了防止走捷径和直接复制（反馈序列里有很多常见词），训练时会随机遮掉 0% 到 5% 的历史 token。
+        </p>
+        <p>
+            实验用的训练数据是三个数据集的组合：<a href="https://huggingface.co/datasets/openai/webgpt_comparisons" target="_blank">WebGPT comparisons</a>、<a href="https://github.com/openai/summarize-from-feedback" target="_blank">summarization from human feedback</a> 和 <a href="https://github.com/anthropics/hh-rlhf" target="_blank">human preference dataset</a>。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-06-23-agent/CoH.png" alt="CoH 微调后的效果">
+            <figcaption>图：用 CoH 微调之后，模型能按指令产出一串逐步改进的输出。出处：<a href="https://arxiv.org/abs/2302.02676" target="_blank">Liu et al. 2023</a>（引自原文）</figcaption>
+        </figure>
+
+        <h4>Algorithm Distillation</h4>
+        <p>
+            CoH 的想法是：在上下文里展示一段逐步改进的输出历史，训练模型顺着这个趋势产出更好的输出。Algorithm Distillation（AD，算法蒸馏；<a href="https://arxiv.org/abs/2210.14215" target="_blank">Laskin et al. 2023</a>）把同样的想法用到强化学习任务里跨 episode（一个 episode 指从开始到结束的一整局交互）的轨迹上，把一个<em>算法</em>封装进一个以长历史为条件的策略（policy）里。agent 和环境交互很多次，每个 episode 都会变好一点；AD 把这段学习历史拼接起来喂给模型，于是我们会期望模型预测的下一个动作比之前的尝试表现更好。目标是学会强化学习的<em>过程</em>，而不是训练一个只针对某个任务的策略。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-06-23-agent/algorithm-distillation.png" alt="Algorithm Distillation 工作方式">
+            <figcaption>图：Algorithm Distillation（AD）的工作方式。出处：<a href="https://arxiv.org/abs/2210.14215" target="_blank">Laskin et al. 2023</a>（引自原文）</figcaption>
+        </figure>
+        <p>
+            论文的假设是：任何能产生一组学习历史的算法，都可以通过对动作做行为克隆（behavioral cloning，直接模仿数据里的动作，用监督学习来训练策略）蒸馏进一个神经网络。历史数据由一组源策略（source policy）生成，每个源策略针对一个具体任务训练。训练阶段，每次 RL 运行时随机抽一个任务，取多 episode 历史中的一段子序列来训练，这样学到的策略与具体任务无关（task-agnostic）。
+        </p>
+        <p>
+            实际上模型的上下文窗口长度有限，所以每个 episode 要足够短，才能拼出多 episode 的历史。要学到接近最优的上下文内强化学习（in-context RL）算法，需要 2 到 4 个 episode 的多 episode 上下文。in-context RL 的出现需要足够长的上下文。
+        </p>
+        <p>
+            论文和三个基线做了比较：ED（expert distillation，专家蒸馏，用专家轨迹而不是学习历史做行为克隆）；源策略（用 <a href="https://lilianweng.github.io/posts/2018-01-23-multi-armed-bandit/#upper-confidence-bounds" target="_blank">UCB</a> 生成用于蒸馏的轨迹）；RL^2（<a href="https://arxiv.org/abs/1611.02779" target="_blank">Duan et al. 2017</a>；因为它需要在线 RL，所以被当作上界）。结果是 AD 展示出了 in-context RL，虽然只用离线 RL，表现却接近 RL^2，而且学得比其他基线快得多。在以源策略的部分训练历史为条件时，AD 的改进速度也比 ED 基线快得多。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-06-23-agent/algorithm-distillation-results.png" alt="AD、ED、源策略和 RL^2 的比较">
+            <figcaption>图：在需要记忆和探索的环境里比较 AD、ED、源策略和 RL^2，只给二值奖励。源策略在“dark”系列环境用 <a href="https://lilianweng.github.io/posts/2018-04-08-policy-gradient/#a3c" target="_blank">A3C</a> 训练，在 watermaze 用 <a href="http://lilianweng.github.io/posts/2018-02-19-rl-overview/#deep-q-network" target="_blank">DQN</a> 训练。出处：<a href="https://arxiv.org/abs/2210.14215" target="_blank">Laskin et al. 2023</a>（引自原文）</figcaption>
+        </figure>
+    </section>
+
+    <section id="t04">
+        <h2>04. 组件二：记忆</h2>
+        <p><em>原文小节：Component Two: Memory</em></p>
+        <p>
+            作者在这一节开头写了一句说明：感谢 ChatGPT 帮她起草这一节，她在和 ChatGPT 的<a href="https://chat.openai.com/share/46ff149e-a4c7-4dd7-a800-fc4a642ea389" target="_blank">对话</a>里学到了很多关于人脑和快速 MIPS 数据结构的知识。
+        </p>
+
+        <h3>记忆的类型</h3>
+        <p><em>原文小节：Types of Memory</em></p>
+        <p>
+            记忆可以定义为获取、存储、保持并在之后提取信息的一系列过程。人脑里有几种记忆。
+        </p>
+        <ul>
+            <li>
+                <em>感觉记忆（Sensory Memory）</em>：记忆的最早阶段，在原始刺激结束后还能保留感官信息（视觉、听觉等）的印象。感觉记忆一般最多持续几秒。子类包括图像记忆（iconic memory，视觉）、回声记忆（echoic memory，听觉）和触觉记忆（haptic memory）。
+            </li>
+            <li>
+                <em>短期记忆（Short-Term Memory，STM）或工作记忆（Working Memory）</em>：存放我们当前意识到的、执行学习和推理等复杂认知任务所需的信息。一般认为短期记忆的容量大约是 7 项（<a href="http://psychclassics.yorku.ca/Miller/" target="_blank">Miller 1956</a>），持续 20 到 30 秒。
+            </li>
+            <li>
+                <em>长期记忆（Long-Term Memory，LTM）</em>：能把信息保存很久，从几天到几十年，存储容量基本没有上限。LTM 有两个子类：
+                <ul>
+                    <li>外显 / 陈述性记忆（explicit / declarative memory）：关于事实和事件的记忆，指那些能有意识地回想起来的记忆，包括情景记忆（episodic memory，事件和经历）和语义记忆（semantic memory，事实和概念）。</li>
+                    <li>内隐 / 程序性记忆（implicit / procedural memory）：无意识的，包括自动执行的技能和惯常动作，比如骑自行车、敲键盘。</li>
+                </ul>
+            </li>
+        </ul>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-06-23-agent/memory.png" alt="人类记忆的分类">
+            <figcaption>图：人类记忆的分类（引自原文）</figcaption>
+        </figure>
+        <p>作者给出一个大致的对应关系：</p>
+        <ul>
+            <li>感觉记忆，对应为原始输入（文本、图像或其他模态）学习 embedding 表示（embedding，把输入变成一个稠密向量）；</li>
+            <li>短期记忆，对应 in-context learning。它短而有限，受 Transformer 有限的上下文窗口长度限制；</li>
+            <li>长期记忆，对应 agent 在查询时可以访问的外部向量数据库，通过快速检索取用。</li>
+        </ul>
+
+        <h3>最大内积搜索（MIPS）</h3>
+        <p><em>原文小节：Maximum Inner Product Search (MIPS)</em></p>
+        <p>
+            外部记忆可以缓解注意力范围有限的问题。标准做法是把信息的 embedding 表示存进一个向量数据库，这个数据库要支持快速的最大内积搜索（<a href="https://en.wikipedia.org/wiki/Maximum_inner-product_search" target="_blank">MIPS</a>，给定一个查询向量，找出和它内积最大的那些向量）。为了加快检索，常见选择是<em>近似最近邻（approximate nearest neighbors，ANN）</em>算法，它返回近似的 top k 个最近邻，牺牲一点点准确率换来大幅提速。
+        </p>
+        <p>几种常用于快速 MIPS 的 ANN 算法：</p>
+        <ul>
+            <li>
+                <a href="https://en.wikipedia.org/wiki/Locality-sensitive_hashing" target="_blank">LSH</a>（Locality-Sensitive Hashing，局部敏感哈希）：引入一个<em>哈希</em>函数，让相似的输入以高概率被映射到同一个桶里，桶的数量远少于输入的数量。
+            </li>
+            <li>
+                <a href="https://github.com/spotify/annoy" target="_blank">ANNOY</a>（Approximate Nearest Neighbors Oh Yeah）：核心数据结构是<em>随机投影树</em>（random projection trees），也就是一组二叉树，每个非叶节点代表一个把输入空间切成两半的超平面，每个叶子存一个数据点。这些树相互独立、随机构建，所以在某种程度上它模拟了一个哈希函数。搜索时在所有树里进行，每棵树都迭代地往离查询更近的那一半走，最后汇总结果。思路和 KD 树很接近，但可扩展性强得多。
+            </li>
+            <li>
+                <a href="https://arxiv.org/abs/1603.09320" target="_blank">HNSW</a>（Hierarchical Navigable Small World，分层可导航小世界图）：灵感来自<a href="https://en.wikipedia.org/wiki/Small-world_network" target="_blank">小世界网络</a>，即大多数节点都能在很少几步内到达任何其他节点，比如社交网络的“六度分隔”。HNSW 把这种小世界图建成多层，最底层放真正的数据点，中间层建立捷径来加速搜索。搜索时从最顶层的一个随机节点出发，朝目标移动；走不动了就下到下一层，直到最底层。上层的每一步可以在数据空间里跨很远，下层的每一步负责把搜索结果修得更准。
+            </li>
+            <li>
+                <a href="https://github.com/facebookresearch/faiss" target="_blank">FAISS</a>（Facebook AI Similarity Search）：基于这样一个假设：在高维空间里，节点之间的距离服从高斯分布，因此数据点应该存在<em>聚类</em>。FAISS 用向量量化（vector quantization）把向量空间切成若干簇，再在簇内做更细的量化。搜索时先用粗量化找候选簇，再在每个簇里用细量化查找。
+            </li>
+            <li>
+                <a href="https://github.com/google-research/google-research/tree/master/scann" target="_blank">ScaNN</a>（Scalable Nearest Neighbors）：主要创新是<em>各向异性向量量化</em>（anisotropic vector quantization）。它把数据点 $x_i$ 量化成 $\tilde{x}_i$ 时，目标是让量化后的内积尽量接近原来的内积 $\langle q, x_i \rangle$（原文写作“as similar to the original distance of $\angle q, \tilde{x}_i$”，按上下文指量化后的 $\langle q, \tilde{x}_i \rangle$），而不是简单地挑最近的量化中心点。
+            </li>
+        </ul>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-06-23-agent/mips.png" alt="MIPS 算法比较">
+            <figcaption>图：几种 MIPS 算法的比较，指标是 recall@10。出处：<a href="https://ai.googleblog.com/2020/07/announcing-scann-efficient-vector.html" target="_blank">Google Blog, 2020</a>（引自原文）</figcaption>
+        </figure>
+        <p>
+            更多 MIPS 算法和性能比较可以看 <a href="https://ann-benchmarks.com/" target="_blank">ann-benchmarks.com</a>。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 组件三：工具使用</h2>
+        <p><em>原文小节：Component Three: Tool Use</em></p>
+        <p>
+            使用工具是人类一个显著的、有区分度的特征。人会制造、改造和利用外部物体，去做超出自己身体和认知极限的事。给 LLM 配上外部工具，可以大幅扩展模型的能力。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-06-23-agent/sea-otter.png" alt="海獭用石头砸开贝壳">
+            <figcaption>图：一只海獭漂在水面上，用石头砸开贝壳。有些动物也会用工具，但复杂程度和人类没法比。出处：<a href="https://www.popularmechanics.com/science/animals/g39714258/animals-using-tools/" target="_blank">Animals using tools</a>（引自原文）</figcaption>
+        </figure>
+
+        <h3>MRKL</h3>
+        <p>
+            MRKL（<a href="https://arxiv.org/abs/2205.00445" target="_blank">Karpas et al. 2022</a>）是“Modular Reasoning, Knowledge and Language”（模块化推理、知识与语言）的缩写，是一种用于自主 agent 的神经符号（neuro-symbolic）架构。一个 MRKL 系统包含一组“专家”模块，通用 LLM 充当路由器，把请求转给最合适的专家模块。这些模块可以是神经的（比如深度学习模型），也可以是符号的（比如数学计算器、汇率换算器、天气 API）。
+        </p>
+        <p>
+            他们以算术为测试场景，做了微调 LLM 调用计算器的实验。结果显示，文字描述的数学题比直接写出算式的题更难解，因为 LLM（7B 的 Jurassic1-large 模型）没法可靠地抽取出基本算术所需的正确参数。作者从中得出：在外部符号工具本身可靠的情况下，<em>知道什么时候用、怎样用工具</em>很重要，而这取决于 LLM 的能力。
+        </p>
+
+        <h3>TALM、Toolformer 与实际产品</h3>
+        <p>
+            TALM（Tool Augmented Language Models；<a href="https://arxiv.org/abs/2205.12255" target="_blank">Parisi et al. 2022</a>）和 Toolformer（<a href="https://arxiv.org/abs/2302.04761" target="_blank">Schick et al. 2023</a>）都是微调一个 LM，让它学会使用外部工具 API。数据集的扩充依据是：新加的 API 调用标注能不能提升模型输出的质量。更多细节见作者 Prompt Engineering 一文的 <a href="https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/#external-apis" target="_blank">“External APIs” 一节</a>。
+        </p>
+        <p>
+            ChatGPT <a href="https://openai.com/blog/chatgpt-plugins" target="_blank">Plugins</a> 和 OpenAI API 的 <a href="https://platform.openai.com/docs/guides/gpt/function-calling" target="_blank">function calling</a> 是工具增强 LLM 在实际中落地的好例子。工具 API 的集合可以由其他开发者提供（Plugins 的方式），也可以自己定义（function call 的方式）。
+        </p>
+
+        <h3>HuggingGPT</h3>
+        <p>
+            HuggingGPT（<a href="https://arxiv.org/abs/2303.17580" target="_blank">Shen et al. 2023</a>）是一个框架：用 ChatGPT 当任务规划器，根据模型描述在 HuggingFace 平台上挑选可用的模型，再根据执行结果汇总出回答。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-06-23-agent/hugging-gpt.png" alt="HuggingGPT 工作方式">
+            <figcaption>图：HuggingGPT 的工作方式。出处：<a href="https://arxiv.org/abs/2303.17580" target="_blank">Shen et al. 2023</a>（引自原文）</figcaption>
+        </figure>
+        <p>系统分四个阶段。</p>
+        <p>
+            <em>（1）任务规划</em>：LLM 作为大脑，把用户请求解析成多个任务。每个任务有四个属性：任务类型、ID、依赖关系和参数。他们用 few-shot 示例（在 prompt 里给几个示范）引导 LLM 做任务解析和规划。指令如下：
+        </p>
+<pre><code>The AI assistant can parse user input to several tasks: [{"task": task, "id", task_id, "dep": dependency_task_ids, "args": {"text": text, "image": URL, "audio": URL, "video": URL}}]. The "dep" field denotes the id of the previous task which generates a new resource that the current task relies on. A special tag "-task_id" refers to the generated text image, audio and video in the dependency task with id as task_id. The task MUST be selected from the following options: {{ Available Task List }}. There is a logical relationship between tasks, please note their order. If the user input can't be parsed, you need to reply empty JSON. Here are several cases for your reference: {{ Demonstrations }}. The chat history is recorded as {{ Chat History }}. From this chat history, you can find the path of the user-mentioned resources for your task planning.</code></pre>
+        <p>
+            <em>（2）模型选择</em>：LLM 把任务分配给专家模型，请求被组织成一道选择题，LLM 面前是一个可选模型列表。由于上下文长度有限，需要先按任务类型过滤。指令如下：
+        </p>
+<pre><code>Given the user request and the call command, the AI assistant helps the user to select a suitable model from a list of models to process the user request. The AI assistant merely outputs the model id of the most appropriate model. The output must be in a strict JSON format: "id": "id", "reason": "your detail reason for the choice". We have a list of models for you to choose from {{ Candidate Models }}. Please select one model from the list.</code></pre>
+        <p>
+            <em>（3）任务执行</em>：专家模型执行具体任务，记录结果。指令如下：
+        </p>
+<pre><code>With the input and the inference results, the AI assistant needs to describe the process and results. The previous stages can be formed as - User Input: {{ User Input }}, Task Planning: {{ Tasks }}, Model Selection: {{ Model Assignment }}, Task Execution: {{ Predictions }}. You must first answer the user's request in a straightforward manner. Then describe the task process and show your analysis and model inference results to the user in the first person. If inference results contain a file path, must tell the user the complete file path.</code></pre>
+        <p>
+            <em>（4）回答生成</em>：LLM 收到执行结果，给用户提供汇总后的结果。
+        </p>
+        <p>要把 HuggingGPT 用到真实场景，还要解决几个问题：</p>
+        <ol>
+            <li>效率需要提升，因为 LLM 的多轮推理和与其他模型的交互都会拖慢整个过程；</li>
+            <li>它依赖很长的上下文窗口，才能在复杂的任务内容上沟通；</li>
+            <li>LLM 输出和外部模型服务的稳定性都需要提升。</li>
+        </ol>
+
+        <h3>API-Bank</h3>
+        <p>
+            API-Bank（<a href="https://arxiv.org/abs/2304.08244" target="_blank">Li et al. 2023</a>）是一个评测工具增强 LLM 的基准。它包含 53 个常用 API 工具、一套完整的工具增强 LLM 工作流，以及 264 段标注好的对话，其中涉及 568 次 API 调用。API 种类很多样，包括搜索引擎、计算器、日历查询、智能家居控制、日程管理、健康数据管理、账户认证流程等。因为 API 数量多，LLM 先要通过一个 API 搜索引擎找到该调用的 API，再根据对应文档发起调用。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-06-23-agent/api-bank-process.png" alt="API-Bank 中 LLM 调用 API 的伪代码">
+            <figcaption>图：API-Bank 中 LLM 发起 API 调用的伪代码。出处：<a href="https://arxiv.org/abs/2304.08244" target="_blank">Li et al. 2023</a>（引自原文）</figcaption>
+        </figure>
+        <p>在 API-Bank 的工作流里，LLM 要做好几个决策，每一步都可以评估决策的准确度。这些决策包括：</p>
+        <ul>
+            <li>是否需要调用 API；</li>
+            <li>找到正确的 API 来调用：如果结果不够好，LLM 需要反复修改 API 的输入（比如为搜索引擎 API 决定搜索关键词）；</li>
+            <li>根据 API 返回的结果作答：如果结果不满意，模型可以选择改进后再调用一次。</li>
+        </ul>
+        <p>这个基准从三个层级评估 agent 的工具使用能力：</p>
+        <ul>
+            <li>Level-1 评估<em>调用 API</em> 的能力。给定一个 API 的描述，模型要判断是否调用它、正确地调用，并对 API 的返回做出恰当的回应。</li>
+            <li>Level-2 考察<em>检索 API</em> 的能力。模型要搜索可能满足用户需求的 API，并通过读文档学会怎么用。</li>
+            <li>Level-3 评估<em>在检索和调用之外做 API 规划</em>的能力。面对不明确的用户请求（比如安排小组会议、为一次旅行订机票、酒店和餐厅），模型可能要发起多次 API 调用才能解决。</li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. 案例研究</h2>
+        <p><em>原文小节：Case Studies</em></p>
+
+        <h3>科学发现 Agent</h3>
+        <p><em>原文小节：Scientific Discovery Agent</em></p>
+        <p>
+            ChemCrow（<a href="https://arxiv.org/abs/2304.05376" target="_blank">Bran et al. 2023</a>）是一个特定领域的例子：给 LLM 配上 13 个由专家设计的工具，完成有机合成、药物发现和材料设计方面的任务。它的工作流用 <a href="https://github.com/hwchase17/langchain" target="_blank">LangChain</a> 实现，体现了前面讲过的 ReAct 和 MRKL 的思路，把 CoT 推理和任务相关的工具结合起来：
+        </p>
+        <ul>
+            <li>给 LLM 一个工具列表，包括工具名、用途描述、预期输入输出的细节；</li>
+            <li>然后指示它在必要时使用这些工具回答用户给出的 prompt。指令建议模型遵循 ReAct 格式：<code>Thought, Action, Action Input, Observation</code>。</li>
+        </ul>
+        <p>
+            一个有意思的现象：基于 LLM 的评估认为 GPT-4 和 ChemCrow 表现差不多，但由专家进行、侧重方案完成度和化学正确性的人工评估显示，ChemCrow 大幅胜过 GPT-4。这说明在需要深厚专业知识的领域，用 LLM 评估自己的表现可能有问题：缺乏专业知识会让 LLM 意识不到自身缺陷，也就没法很好地判断任务结果是否正确。
+        </p>
+        <p>
+            <a href="https://arxiv.org/abs/2304.05332" target="_blank">Boiko et al. (2023)</a> 也研究了用于科学发现的 LLM agent，让它自主设计、规划和执行复杂的科学实验。这个 agent 能用工具浏览互联网、阅读文档、执行代码、调用机器人实验 API，还能调用其他 LLM。
+        </p>
+        <p>
+            例如，收到请求 <code>"develop a novel anticancer drug"</code>（开发一种新的抗癌药）时，模型给出的推理步骤是：
+        </p>
+        <ol>
+            <li>查询抗癌药物发现的当前趋势；</li>
+            <li>选定一个靶点；</li>
+            <li>请求一个针对这些化合物的骨架（scaffold）；</li>
+            <li>确定化合物之后，尝试合成它。</li>
+        </ol>
+        <p>
+            他们也讨论了风险，特别是非法药物和生物武器方面。他们做了一个测试集，里面是一批已知的化学武器制剂，让 agent 去合成。11 个请求里有 4 个（36%）被接受，agent 给出了合成方案，并试图查阅文档来执行流程。另外 7 个被拒绝；这 7 个里，5 个是在做了一次网页搜索之后拒绝的，2 个是只看 prompt 就拒绝了。
+        </p>
+
+        <h3>Generative Agents 模拟</h3>
+        <p><em>原文小节：Generative Agents Simulation</em></p>
+        <p>
+            Generative Agents（<a href="https://arxiv.org/abs/2304.03442" target="_blank">Park, et al. 2023</a>）是作者口中“super fun”的实验：25 个虚拟角色，每个由一个 LLM 驱动的 agent 控制，在一个受《模拟人生》（The Sims）启发的沙盒环境里生活和互动。生成式 agent 为交互式应用创造可信的人类行为模拟。
+        </p>
+        <p>
+            它的设计把 LLM 和记忆、规划、反思机制结合起来，让 agent 的行为能以过去的经历为条件，并能和其他 agent 互动。
+        </p>
+        <ul>
+            <li>
+                <em>记忆流（Memory stream）</em>：一个长期记忆模块（外部数据库），用自然语言完整记录 agent 的经历。
+                <ul>
+                    <li>每个元素是一条<em>观察</em>（observation），即 agent 直接得到的一个事件。agent 之间的交流也会产生新的自然语言陈述。</li>
+                </ul>
+            </li>
+            <li>
+                <em>检索模型（Retrieval model）</em>：根据相关性、时近性和重要性，把对 agent 行为有用的上下文找出来。
+                <ul>
+                    <li>时近性（Recency）：越近的事件得分越高；</li>
+                    <li>重要性（Importance）：区分平淡的记忆和核心记忆，直接问语言模型；</li>
+                    <li>相关性（Relevance）：根据它和当前情境或查询的关联程度。</li>
+                </ul>
+            </li>
+            <li>
+                <em>反思机制（Reflection）</em>：随时间把记忆综合成更高层的推断，指导 agent 未来的行为。这些反思是<em>对过去事件的高层总结</em>（作者提醒，这和前面讲的自我反思有点不同）。
+                <ul>
+                    <li>用最近 100 条观察提示语言模型，让它根据这组观察或陈述提出 3 个最突出的高层问题，再让语言模型回答这些问题。</li>
+                </ul>
+            </li>
+            <li>
+                <em>规划与反应（Planning &amp; Reacting）</em>：把反思和环境信息转化成行动。
+                <ul>
+                    <li>规划的目的是在当下和一段时间里都优化行为的可信度（believability）；</li>
+                    <li>Prompt 模板：<code>{Intro of an agent X}. Here is X's plan today in broad strokes: 1)</code></li>
+                    <li>agent 之间的关系、一个 agent 对另一个 agent 的观察，都会在规划和反应时被考虑进去；</li>
+                    <li>环境信息以树结构呈现。</li>
+                </ul>
+            </li>
+        </ul>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-06-23-agent/generative-agents.png" alt="Generative Agents 架构">
+            <figcaption>图：生成式 agent 的架构。出处：<a href="https://arxiv.org/abs/2304.03442" target="_blank">Park et al. 2023</a>（引自原文）</figcaption>
+        </figure>
+        <p>
+            这个模拟出现了涌现的社会行为，比如信息扩散、关系记忆（例如两个 agent 接着上次的话题聊下去），以及社交活动的协调（例如办一场派对并邀请很多人）。
+        </p>
+
+        <h3>概念验证示例</h3>
+        <p><em>原文小节：Proof-of-Concept Examples</em></p>
+        <h4>AutoGPT</h4>
+        <p>
+            <a href="https://github.com/Significant-Gravitas/Auto-GPT" target="_blank">AutoGPT</a> 让很多人开始关注用 LLM 做主控制器来搭自主 agent 的可能性。由于接口是自然语言，它有不少可靠性问题，但作为概念验证演示还是很酷。AutoGPT 的很多代码都在做格式解析。
+        </p>
+        <p>下面是 AutoGPT 用的系统消息（system message），其中 <code>{{...}}</code> 是用户输入：</p>
+<pre><code>You are {{ai-name}}, {{user-provided AI bot description}}.
+Your decisions must always be made independently without seeking user assistance. Play to your strengths as an LLM and pursue simple strategies with no legal complications.
+
+GOALS:
+
+1. {{user-provided goal 1}}
+2. {{user-provided goal 2}}
+3. ...
+4. ...
+5. ...
+
+Constraints:
+1. ~4000 word limit for short term memory. Your short term memory is short, so immediately save important information to files.
+2. If you are unsure how you previously did something or want to recall past events, thinking about similar events will help you remember.
+3. No user assistance
+4. Exclusively use the commands listed in double quotes e.g. "command name"
+5. Use subprocesses for commands that will not terminate within a few minutes
+
+Commands:
+1. Google Search: "google", args: "input": "&lt;search&gt;"
+2. Browse Website: "browse_website", args: "url": "&lt;url&gt;", "question": "&lt;what_you_want_to_find_on_website&gt;"
+3. Start GPT Agent: "start_agent", args: "name": "&lt;name&gt;", "task": "&lt;short_task_desc&gt;", "prompt": "&lt;prompt&gt;"
+4. Message GPT Agent: "message_agent", args: "key": "&lt;key&gt;", "message": "&lt;message&gt;"
+5. List GPT Agents: "list_agents", args:
+6. Delete GPT Agent: "delete_agent", args: "key": "&lt;key&gt;"
+7. Clone Repository: "clone_repository", args: "repository_url": "&lt;url&gt;", "clone_path": "&lt;directory&gt;"
+8. Write to file: "write_to_file", args: "file": "&lt;file&gt;", "text": "&lt;text&gt;"
+9. Read file: "read_file", args: "file": "&lt;file&gt;"
+10. Append to file: "append_to_file", args: "file": "&lt;file&gt;", "text": "&lt;text&gt;"
+11. Delete file: "delete_file", args: "file": "&lt;file&gt;"
+12. Search Files: "search_files", args: "directory": "&lt;directory&gt;"
+13. Analyze Code: "analyze_code", args: "code": "&lt;full_code_string&gt;"
+14. Get Improved Code: "improve_code", args: "suggestions": "&lt;list_of_suggestions&gt;", "code": "&lt;full_code_string&gt;"
+15. Write Tests: "write_tests", args: "code": "&lt;full_code_string&gt;", "focus": "&lt;list_of_focus_areas&gt;"
+16. Execute Python File: "execute_python_file", args: "file": "&lt;file&gt;"
+17. Generate Image: "generate_image", args: "prompt": "&lt;prompt&gt;"
+18. Send Tweet: "send_tweet", args: "text": "&lt;text&gt;"
+19. Do Nothing: "do_nothing", args:
+20. Task Complete (Shutdown): "task_complete", args: "reason": "&lt;reason&gt;"
+
+Resources:
+1. Internet access for searches and information gathering.
+2. Long Term memory management.
+3. GPT-3.5 powered Agents for delegation of simple tasks.
+4. File output.
+
+Performance Evaluation:
+1. Continuously review and analyze your actions to ensure you are performing to the best of your abilities.
+2. Constructively self-criticize your big-picture behavior constantly.
+3. Reflect on past decisions and strategies to refine your approach.
+4. Every command has a cost, so be smart and efficient. Aim to complete tasks in the least number of steps.
+
+You should only respond in JSON format as described below
+Response Format:
+{
+    "thoughts": {
+        "text": "thought",
+        "reasoning": "reasoning",
+        "plan": "- short bulleted\n- list that conveys\n- long-term plan",
+        "criticism": "constructive self-criticism",
+        "speak": "thoughts summary to say to user"
+    },
+    "command": {
+        "name": "command name",
+        "args": {
+            "arg name": "value"
+        }
+    }
+}
+Ensure the response can be parsed by Python json.loads</code></pre>
+
+        <h4>GPT-Engineer</h4>
+        <p>
+            <a href="https://github.com/AntonOsika/gpt-engineer" target="_blank">GPT-Engineer</a> 是另一个项目，它根据自然语言描述的任务生成一整个代码仓库。GPT-Engineer 被指示先想清楚要构建哪些较小的组件，并在需要时请用户输入来澄清问题。
+        </p>
+        <p>
+            下面是 GPT-Engineer 发往 OpenAI ChatCompletion 接口的一段任务澄清对话示例。用户输入包在 <code>{{user input text}}</code> 里。
+        </p>
+<pre><code>[
+  {
+    "role": "system",
+    "content": "You will read instructions and not carry them out, only seek to clarify them.\nSpecifically you will first summarise a list of super short bullets of areas that need clarification.\nThen you will pick one clarifying question, and wait for an answer from the user.\n"
+  },
+  {
+    "role": "user",
+    "content": "We are writing {{a Super Mario game in python. MVC components split in separate files. Keyboard control.}}\n"
+  },
+  {
+    "role": "assistant",
+    "content": "Summary of areas that need clarification:\n1. Specifics of the Super Mario game (e.g. level design, characters, gameplay mechanics)\n2. Details about the MVC components (e.g. which components are in each file)\n3. Keyboard control implementation (e.g. which keys to use, how to handle input)\n\nClarifying question:\nCan you provide more details about the Super Mario game, such as level design, characters, and gameplay mechanics?"
+  },
+  {
+    "role": "user",
+    "content": "{{There are 10 levels in total. The main character is a plumber named Mario, who can walk and jump. It is a classical platform game just like Super Mario. The main character moves from left to right, trying to get to the destination, where there are many obstacles and attacks from enemies in the process.}}\n\nIs anything else unclear? If yes, only answer in the form:\n{remaining unclear areas} remaining questions.\n{Next question}\nIf everything is sufficiently clear, only answer \"Nothing more to clarify.\"."
+  },
+  {
+    "role": "assistant",
+    "content": "Remaining unclear areas: 2 remaining questions.\nCan you provide more information about how the MVC components are split into separate files?"
+  },
+  {
+    "role": "user",
+    "content": "{{Make your own assumptions and state them explicitly before starting}}"
+  }
+]</code></pre>
+        <p>澄清之后，agent 换了一条系统消息，进入写代码模式。系统消息如下：</p>
+<pre><code>You will get instructions for code to write.
+You will write a very long answer. Make sure that every detail of the architecture is, in the end, implemented as code.
+Make sure that every detail of the architecture is, in the end, implemented as code.
+
+Think step by step and reason yourself to the right decisions to make sure we get it right.
+You will first lay out the names of the core classes, functions, methods that will be necessary, as well as a quick comment on their purpose.
+
+Then you will output the content of each file including ALL code.
+Each file must strictly follow a markdown code block format, where the following tokens must be replaced such that
+FILENAME is the lowercase file name including the file extension,
+LANG is the markup code block language for the code's language, and CODE is the code:
+
+FILENAME
+```LANG
+CODE
+```
+
+You will start with the "entrypoint" file, then go to the ones that are imported by that file, and so on.
+Please note that the code should be fully functional. No placeholders.
+
+Follow a language and framework appropriate best practice file naming convention.
+Make sure that files contain all imports, types etc. Make sure that code in different files are compatible with each other.
+Ensure to implement all code, if you are unsure, write a plausible implementation.
+Include module dependency or package manager dependency definition file.
+Before you finish, double check that all parts of the architecture is present in the files.
+
+Useful to know:
+You almost always put different classes in different files.
+For Python, you always create an appropriate requirements.txt file.
+For NodeJS, you always create an appropriate package.json file.
+You always add a comment briefly describing the purpose of the function definition.
+You try to add comments explaining very complex bits of logic.
+You always follow the best practices for the requested languages in terms of describing the code written as a defined
+package/project.
+
+
+Python toolbelt preferences:
+- pytest
+- dataclasses</code></pre>
+        <p>对话示例：</p>
+<pre><code>[
+  {
+    "role": "system",
+    "content": "You will get instructions for code to write.\nYou will write a very long answer. Make sure that every detail of the architecture is, in the end, implemented as code.\nMake sure that every detail of the architecture is, in the end, implemented as code.\n\nThink step by step and reason yourself to the right decisions to make sure we get it right.\nYou will first lay out the names of the core classes, functions, methods that will be necessary, as well as a quick comment on their purpose.\n\nThen you will output the content of each file including ALL code.\nEach file must strictly follow a markdown code block format, where the following tokens must be replaced such that\nFILENAME is the lowercase file name including the file extension,\nLANG is the markup code block language for the code's language, and CODE is the code:\n\nFILENAME\n```LANG\nCODE\n```\n\nYou will start with the \"entrypoint\" file, then go to the ones that are imported by that file, and so on.\nPlease note that the code should be fully functional. No placeholders.\n\nFollow a language and framework appropriate best practice file naming convention.\nMake sure that files contain all imports, types etc. Make sure that code in different files are compatible with each other.\nEnsure to implement all code, if you are unsure, write a plausible implementation.\nInclude module dependency or package manager dependency definition file.\nBefore you finish, double check that all parts of the architecture is present in the files.\n\nUseful to know:\nYou almost always put different classes in different files.\nFor Python, you always create an appropriate requirements.txt file.\nFor NodeJS, you always create an appropriate package.json file.\nYou always add a comment briefly describing the purpose of the function definition.\nYou try to add comments explaining very complex bits of logic.\nYou always follow the best practices for the requested languages in terms of describing the code written as a defined\npackage/project.\n\n\nPython toolbelt preferences:\n- pytest\n- dataclasses\n"
+  },
+ #  … same conversation as earlier, ended with "Make your own assumptions and state them explicitly before starting".
+  {
+    "role": "assistant",
+    "content": "Assumptions:\n1. Model: The model will contain the game's data, such as level information, character states, and enemy positions.\n2. View: The view will handle the game's visuals, including rendering the game objects, backgrounds, and updating the display.\n3. Controller: The controller will manage user input, such as keyboard controls, and update the model accordingly.\n\nWith these assumptions in mind, is there any specific aspect of the keyboard control implementation you would like me to clarify?"
+  },
+  {
+    "role": "user",
+    "content": "Please now remember the steps:\n\nThink step by step and reason yourself to the right decisions to make sure we get it right.\nFirst lay out the names of the core classes, functions, methods that will be necessary, As well as a quick comment on their purpose.\n\nThen you will output the content of each file including ALL code.\nEach file must strictly follow a markdown code block format, where the following tokens must be replaced such that\nFILENAME is the lowercase file name including the file extension,\nLANG is the markup code block language for the code's language, and CODE is the code:\n\nFILENAME\n```LANG\nCODE\n```\n\nPlease note that the code should be fully functional. No placeholders.\n\nYou will start with the \"entrypoint\" file, then go to the ones that are imported by that file, and so on.\nFollow a language and framework appropriate best practice file naming convention.\nMake sure that files contain all imports, types etc. The code should be fully functional. Make sure that code in different files are compatible with each other.\nBefore you finish, double check that all parts of the architecture is present in the files.\n"
+  }
+]</code></pre>
+    </section>
+
+    <section id="t07">
+        <h2>07. 挑战</h2>
+        <p><em>原文小节：Challenges</em></p>
+        <p>
+            看完搭建以 LLM 为中心的 agent 的关键思路和演示之后，作者总结出几个共同的限制。
+        </p>
+        <ul>
+            <li>
+                <em>有限的上下文长度</em>：上下文容量有限，限制了能放进去的历史信息、详细指令、API 调用上下文和返回结果。系统设计只能在这条有限的通信带宽内工作，而像“从过去的错误中学习”这类自我反思机制，会从很长甚至无限的上下文窗口里获益很多。向量数据库和检索虽然能接入更大的知识库，但它们的表示能力不如完整的注意力（full attention）。
+            </li>
+            <li>
+                <em>长期规划和任务分解的困难</em>：在很长的历史上做规划、有效地探索解空间，仍然很难。LLM 遇到意外错误时很难调整计划，所以和能从试错中学习的人相比，它们不够稳健。
+            </li>
+            <li>
+                <em>自然语言接口的可靠性</em>：现在的 agent 系统用自然语言作为 LLM 和记忆、工具等外部组件之间的接口。但模型输出的可靠性存疑，LLM 可能犯格式错误，偶尔还会表现出“叛逆”行为（比如拒绝执行某条指令）。所以 agent 演示代码里有很大一部分都在解析模型输出。
+            </li>
+        </ul>
+    </section>
+
+    <section id="tref">
+        <h2>主要参考文献</h2>
+        <ol>
+            <li>Wei et al. 2022. <a href="https://arxiv.org/abs/2201.11903" target="_blank">“Chain of thought prompting elicits reasoning in large language models”</a></li>
+            <li>Yao et al. 2023. <a href="https://arxiv.org/abs/2305.10601" target="_blank">“Tree of Thoughts: Deliberate Problem Solving with Large Language Models”</a></li>
+            <li>Liu et al. 2023. <a href="https://arxiv.org/abs/2302.02676" target="_blank">“Chain of Hindsight Aligns Language Models with Feedback”</a></li>
+            <li>Liu et al. 2023. <a href="https://arxiv.org/abs/2304.11477" target="_blank">“LLM+P: Empowering Large Language Models with Optimal Planning Proficiency”</a></li>
+            <li>Yao et al. 2023. <a href="https://arxiv.org/abs/2210.03629" target="_blank">“ReAct: Synergizing reasoning and acting in language models”</a></li>
+            <li>Google Blog 2020. <a href="https://ai.googleblog.com/2020/07/announcing-scann-efficient-vector.html" target="_blank">“Announcing ScaNN: Efficient Vector Similarity Search”</a></li>
+            <li>作者与 ChatGPT 的对话记录. <a href="https://chat.openai.com/share/46ff149e-a4c7-4dd7-a800-fc4a642ea389" target="_blank">chat.openai.com/share/46ff149e…</a></li>
+            <li>Shinn &amp; Labash 2023. <a href="https://arxiv.org/abs/2303.11366" target="_blank">“Reflexion: an autonomous agent with dynamic memory and self-reflection”</a></li>
+            <li>Laskin et al. 2023. <a href="https://arxiv.org/abs/2210.14215" target="_blank">“In-context Reinforcement Learning with Algorithm Distillation”</a></li>
+            <li>Karpas et al. 2022. <a href="https://arxiv.org/abs/2205.00445" target="_blank">“MRKL Systems: A modular, neuro-symbolic architecture that combines large language models, external knowledge sources and discrete reasoning”</a></li>
+            <li>Nakano et al. 2021. <a href="https://arxiv.org/abs/2112.09332" target="_blank">“WebGPT: Browser-assisted question-answering with human feedback”</a></li>
+            <li>Parisi et al. 2022. <a href="https://arxiv.org/abs/2205.12255" target="_blank">“TALM: Tool Augmented Language Models”</a></li>
+            <li>Schick et al. 2023. <a href="https://arxiv.org/abs/2302.04761" target="_blank">“Toolformer: Language Models Can Teach Themselves to Use Tools”</a></li>
+            <li>Weaviate Blog 2022. <a href="https://weaviate.io/blog/why-is-vector-search-so-fast" target="_blank">“Why is Vector Search so fast?”</a></li>
+            <li>Li et al. 2023. <a href="https://arxiv.org/abs/2304.08244" target="_blank">“API-Bank: A Benchmark for Tool-Augmented LLMs”</a></li>
+            <li>Shen et al. 2023. <a href="https://arxiv.org/abs/2303.17580" target="_blank">“HuggingGPT: Solving AI Tasks with ChatGPT and its Friends in HuggingFace”</a></li>
+            <li>Bran et al. 2023. <a href="https://arxiv.org/abs/2304.05376" target="_blank">“ChemCrow: Augmenting large-language models with chemistry tools”</a></li>
+            <li>Boiko et al. 2023. <a href="https://arxiv.org/abs/2304.05332" target="_blank">“Emergent autonomous scientific research capabilities of large language models”</a></li>
+            <li>Park et al. 2023. <a href="https://arxiv.org/abs/2304.03442" target="_blank">“Generative Agents: Interactive Simulacra of Human Behavior”</a></li>
+            <li>AutoGPT. <a href="https://github.com/Significant-Gravitas/Auto-GPT" target="_blank">github.com/Significant-Gravitas/Auto-GPT</a></li>
+            <li>GPT-Engineer. <a href="https://github.com/AntonOsika/gpt-engineer" target="_blank">github.com/AntonOsika/gpt-engineer</a></li>
+        </ol>
+    </section>
+
+    <footer class="document-footer">
+        <p>Lil'Log · LLM Powered Autonomous Agents · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

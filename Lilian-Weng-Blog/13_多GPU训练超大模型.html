@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>怎样用多块 GPU 训练超大模型 | Lil'Log 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="12_大模型推理优化.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Lil'Log 笔记目录</a> · 13</span>
+    <span><a href="14_什么是扩散模型.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>怎样用多块 GPU 训练超大模型</h1>
+        <p class="subtitle">单块 GPU 装不下大模型时的几类办法：数据、模型、流水线、张量四种并行，混合专家（MoE）稀疏结构，以及卸载、重计算、混合精度、压缩和省显存优化器等节省显存的设计</p>
+        <div class="author-meta">
+            作者：Lilian Weng · 发表于 2021 年 9 月 24 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://lilianweng.github.io/posts/2021-09-25-train-large/" target="_blank">How to Train Really Large Models on Many GPUs?</a>（Lil'Log；本文依据原文英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原文，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这篇文章讲什么</h2>
+        <p>
+            预训练语言模型越大，在很多 NLP 基准上的结果越好。可训练大而深的网络很难：它要大量 GPU 显存，训练时间也很长。单块 GPU 的显存有限，很多大模型的体积已经超出一块 GPU 能装下的范围。这篇文章整理了让训练跨多块 GPU 进行的几种并行范式，以及帮助训练<em>超大</em>网络的模型结构设计和省显存设计。
+        </p>
+        <p>
+            内容分三块。第一块是训练并行：数据并行（DP）、模型并行（MP）、流水线并行（PP，GPipe、PipeDream 及其变体）、张量并行（TP，Megatron-LM、PTD-P）。第二块是混合专家（MoE）：从 sparsely gated MoE 层讲到 GShard、Switch Transformer 和 2022 年补充的 Expert Choice 路由。第三块是其他省显存设计：CPU 卸载、激活重计算、混合精度训练、中间结果压缩、省显存的优化器（Adafactor、SM3、ZeRO）。读完你应该能说清一次大模型训练里显存都花在哪儿，以及每种方法省的是哪一部分、代价是什么。
+        </p>
+        <ol>
+            <li><a href="#t01">引言</a></li>
+            <li><a href="#t02">训练并行</a></li>
+            <li><a href="#t03">混合专家（MoE）</a></li>
+            <li><a href="#t04">其他省显存设计</a></li>
+            <li><a href="#tref">主要参考文献</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 引言</h2>
+        <p><em>原文小节：（开篇，无小标题）</em></p>
+        <p>
+            原文有两条更新记录：2022-03-13 补充了 expert choice routing（见第 03 节末尾）；2022-06-10，作者和 <a href="https://gregbrockman.com/" target="_blank">Greg</a> 把这篇文章写成了一个更短、更新的版本，发表在 OpenAI 博客上，题为<a href="https://openai.com/blog/techniques-for-training-large-neural-networks/" target="_blank">“Techniques for Training Large Neural Networks”</a>。
+        </p>
+        <p>
+            近几年，更大的预训练<a href="https://lilianweng.github.io/posts/2019-01-31-lm/" target="_blank">语言模型</a>在许多 NLP 基准任务上取得了更好的结果。训练大而深的神经网络有难度，因为它需要大量 GPU 显存和很长的训练时间。
+        </p>
+        <p>
+            单个 GPU worker（承担计算的一个进程或一块卡）的显存有限，许多大模型的规模已经超过单块 GPU。为此有几种并行范式能让训练跨多块 GPU 进行，也有各种模型结构和省显存的设计，让训练<em>超大</em>网络成为可能。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 训练并行</h2>
+        <p><em>原文小节：Training Parallelism</em></p>
+        <p>
+            训练超大模型的主要瓶颈是显存需求，远超单台 GPU 机器能承载的量。除了模型权重（例如几百亿个浮点数），存储中间计算结果往往更贵，比如梯度和优化器状态（例如 Adam 里的动量和方差）。此外，大模型通常配一个很大的训练语料，单个进程可能要跑到天荒地老。
+        </p>
+        <p>
+            Adam 是最常用的优化器之一，它为每个参数额外维护两个量：梯度的滑动平均（一阶矩，动量）和梯度平方的滑动平均（二阶矩，方差），因此显存开销是参数量的好几倍。
+        </p>
+        <p>所以必须并行。并行可以发生在不同维度上：数据、模型结构和张量运算。</p>
+
+        <h3>数据并行</h3>
+        <p><em>原文小节：Data Parallelism</em></p>
+        <p>
+            <strong>数据并行（Data parallelism，DP）</strong>最朴素的做法是：把同一份模型权重复制到多个 worker 上，每个 worker 分到一部分数据，同时处理。
+        </p>
+        <p>
+            如果模型比单个 GPU 节点的显存还大，朴素 DP 就行不通。像 <em>GeePS</em>（<a href="https://www.pdl.cmu.edu/PDL-FTP/CloudComputing/GeePS-cui-eurosys16.pdf" target="_blank">Cui et al. 2016</a>）这样的方法会在模型大到一台机器装不下时，把暂时不用的参数卸载回 CPU，以便在有限显存下工作。这类数据交换应该在后台进行，不干扰训练计算。
+        </p>
+        <p>
+            每个 minibatch 结束时，各 worker 需要同步梯度或权重，避免使用过时（stale）的参数。主要有两种同步方式，各有明显的优缺点：
+        </p>
+        <ul>
+            <li><em>批量同步并行（Bulk synchronous parallels，BSP）</em>：每个 minibatch 结束时所有 worker 同步数据。它避免了权重过时，学习效率好，但每台机器都得停下来等其他机器发来梯度。</li>
+            <li><em>异步并行（Asynchronous parallel，ASP）</em>：每个 GPU worker 异步处理数据，不用等待或停顿。但它很容易用到过时的权重，从而降低统计学习效率。即使它提高了计算时间的利用，也未必能缩短收敛所需的训练时间。</li>
+        </ul>
+        <p>
+            折中做法是每 $x$ 次迭代（$x \gt 1$）全局同步一次梯度。从 PyTorch v1.5 起，Distributed Data Parallel（<a href="https://pytorch.org/tutorials/intermediate/ddp_tutorial.html" target="_blank">DDP</a>）里把这个功能叫做“gradient accumulation”（梯度累积）（<a href="https://arxiv.org/abs/2006.15704" target="_blank">Li et al. 2021</a>）。梯度分桶（bucketing）不对每个梯度立刻做 <code>AllReduce</code>，而是把多个梯度装进一个桶、一次 <code>AllReduce</code>，以提高吞吐。<code>AllReduce</code> 是一种集合通信操作：每个 worker 都拿出自己的一份数据，最后每个 worker 都得到所有数据的汇总（例如求和）。还可以根据计算图来优化计算和通信的调度。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/pytorch-ddp.png" alt="Pseudo code for PyTorch DDP">
+            <figcaption>图：PyTorch DDP 的伪代码。原图出自 Li et al. 2021（引自原文）</figcaption>
+        </figure>
+
+        <h3>模型并行</h3>
+        <p><em>原文小节：Model Parallelism</em></p>
+        <p>
+            模型并行（Model parallelism，MP）针对的是模型权重放不进单个节点的情况。计算和模型参数被切分到多台机器上。数据并行里每个 worker 都有整个模型的完整副本；MP 只在一个 worker 上放一部分参数，所以显存占用和计算量都减少了。
+        </p>
+        <p>
+            深度神经网络通常是一层层纵向堆起来的，按层切分大模型看起来很直接：把一小段连续的层归为一个分区，放在一个 worker 上。可是如果朴素地让每批数据依次流过这些有先后依赖的 worker，就会产生大段等待时间，也就是“气泡”（bubble），计算资源严重闲置。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/naive-data-parallelism.png" alt="naive model parallelism">
+            <figcaption>图：朴素的模型并行，模型被纵向切成 4 个分区。因为有先后依赖，同一时刻只有一个 worker 在处理数据，于是出现大块空闲的“气泡”。原图出自 Huang et al. 2019（引自原文）</figcaption>
+        </figure>
+
+        <h3>流水线并行</h3>
+        <p><em>原文小节：Pipeline Parallelism</em></p>
+        <p>
+            流水线并行（Pipeline parallelism，PP）把模型并行和数据并行结合起来，减少低效的气泡时间。主要思路是把一个 minibatch 切成多个 microbatch，让每个阶段（stage）的 worker 同时各处理一个 microbatch。每个 microbatch 要走两遍：一次前向，一次反向。worker 之间只传递激活值（前向）和梯度（反向）。不同方法的区别在于怎样调度这些前向和反向、怎样聚合梯度。分区（worker）的数量也叫<em>流水线深度（pipeline depth）</em>。
+        </p>
+
+        <h4>GPipe</h4>
+        <p>
+            在 <em>GPipe</em>（<a href="https://arxiv.org/abs/1811.06965" target="_blank">Huang et al. 2019</a>）里，多个 microbatch 的梯度先聚合，最后同步地一起应用。同步梯度下降保证了学习的一致性和效率，与 worker 数量无关。如下图所示，气泡仍然存在，但比朴素模型并行小得多。设有 $m$ 个均匀切分的 microbatch、$d$ 个分区，并假设每个 microbatch 的前向和反向各花一个单位时间，气泡所占比例为：
+        </p>
+        $$ 1 - \frac{2md}{(2m + 2(d-1))d} = \frac{d-1}{m+d-1} $$
+        <p>
+            分子 $2md$ 是有效工作量，分母是总时长乘以设备数。GPipe 论文观察到，当 microbatch 数量超过分区数量的 4 倍，即 $m \gt 4d$ 时（并且用了<a href="#t04">激活重计算</a>），气泡开销几乎可以忽略。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/gpipe.png" alt="GPipe pipeline parallelism">
+            <figcaption>图：GPipe 中的流水线并行，4 个 microbatch、4 个分区。GPipe 在每个 batch 结束时跨设备同步地聚合并更新梯度。原图出自 Huang et al. 2019（引自原文）</figcaption>
+        </figure>
+        <p>
+            GPipe 的吞吐随设备数几乎线性加速，不过如果模型参数在各 worker 间分布不均，就不一定能做到。
+        </p>
+
+        <h4>PipeDream</h4>
+        <p>
+            <em>PipeDream</em>（<a href="https://cs.stanford.edu/~matei/papers/2019/sosp_pipedream.pdf" target="_blank">Narayanan et al. 2019</a>）让每个 worker 交替处理前向和反向（<code>1F1B</code>，one forward one backward）。PipeDream 把每个模型分区叫做“stage”，每个 stage 的 worker 可以有多个副本做数据并行。在此过程中，PipeDream 用确定性的轮询（round-robin）负载均衡把工作分配给 stage 的多个副本，保证同一个 minibatch 的前向和反向发生在同一个副本上。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/pipedream.png" alt="1F1B scheduling in PipeDream">
+            <figcaption>图：PipeDream 中 <code>1F1B</code> 的 microbatch 调度。原图出自 Harlap et al. 2018（引自原文）</figcaption>
+        </figure>
+        <p>
+            PipeDream 没有在 batch 结束时跨所有 worker 做全局梯度同步，所以朴素实现 1F1B 很容易让一个 microbatch 的前向和反向用到不同版本的模型权重，降低学习效率。PipeDream 提出了几个设计来解决这个问题：
+        </p>
+        <ul>
+            <li><em>权重暂存（Weight stashing）</em>：每个 worker 记录若干个模型版本，确保同一批数据的前向和反向使用同一版本的权重。</li>
+            <li><em>纵向同步（Vertical sync）</em>（可选）：模型权重的版本号随激活值和梯度一起在 stage worker 之间流动，计算时采用上游 worker 传来的对应暂存版本。这样能在各 worker 之间保持版本一致。注意它是异步的，这一点和 GPipe 不同。</li>
+        </ul>
+        <p>
+            训练开始时，PipeDream 先分析（profile）模型每一层的显存开销和计算时间，然后求解怎样把层划分到各个 stage，这是一个动态规划问题。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/pipedream-results.png" alt="PipeDream results for VGG16 on ILSVRC12">
+            <figcaption>图：VGG16 在 ILSVRC12 上的结果。上：准确率随时间的变化，整数表示 stage worker 的数量；ASP 为异步并行，BSP 为批量同步并行。下：不同并行配置下的训练加速比；straight pipeline 指不带数据并行的流水线并行。原图出自 Harlap et al. 2018（引自原文）</figcaption>
+        </figure>
+
+        <h4>PipeDream-flush 与 PipeDream-2BW</h4>
+        <p>
+            后来又提出了 PipeDream 的两个变体，用来减少暂存模型版本占用的显存（<a href="https://arxiv.org/abs/2006.09503" target="_blank">Narayanan et al. 2021</a>）。
+        </p>
+        <p>
+            <em>PipeDream-flush</em> 像 GPipe 一样，周期性地加入一次全局同步的流水线清空（flush）。这样以少量吞吐为代价，大大减少了显存占用（只维护一个版本的模型权重）。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/pipedream-flush.png" alt="PipeDream-flush scheduling">
+            <figcaption>图：PipeDream-flush 的流水线调度。原图出自 Narayanan et al. 2021（引自原文）</figcaption>
+        </figure>
+        <p>
+            <em>PipeDream-2BW</em> 只维护两个版本的模型权重，“2BW”是“double-buffered weights”（双缓冲权重）的缩写。它每 $k$ 个 microbatch 生成一个新模型版本，且 $k$ 要大于流水线深度 $d$，即 $k \gt d$。新版本不能马上完全替换旧版本，因为还有一些尚未完成的反向依赖旧版本。总共只需保存两个版本，显存开销因此小了很多。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/pipedream-2bw.png" alt="PipeDream-2BW scheduling">
+            <figcaption>图：PipeDream-2BW 的流水线调度。原图出自 Narayanan et al. 2021（引自原文）</figcaption>
+        </figure>
+
+        <h3>张量并行</h3>
+        <p><em>原文小节：Tensor Parallelism</em></p>
+        <p>
+            模型并行和流水线并行都是把模型纵向切开（按层）。另一种做法是把一次张量运算的计算横向切分到多个设备上，叫做张量并行（Tensor parallelism，TP）。
+        </p>
+        <p>
+            以流行的 Transformer 为例。Transformer 主要由一层层 MLP 和自注意力块组成。<em>Megatron-LM</em>（<a href="https://arxiv.org/abs/1909.08053" target="_blank">Shoeybi et al. 2020</a>）用一种简单的方式对 MLP 和自注意力做层内并行。
+        </p>
+        <p>
+            Transformer 里的 MLP 层包含一次 GEMM（General matrix multiply，通用矩阵乘法），后接非线性的 GeLU 激活。把权重矩阵 $A$ 按列切开：
+        </p>
+        $$ \begin{aligned} \text{Split }A &= [A_1, A_2] \\ Y &=\text{GeLU}(XA) \\ [Y_1, Y_2] &= [\text{GeLU}(XA_1), \text{GeLU}(XA_2)] \end{aligned} $$
+        <p>
+            按列切的好处是 GeLU 是逐元素运算，两块可以各自在自己的设备上算完，中间不需要通信。
+        </p>
+        <p>
+            注意力块按上面的切分方式，用 query（$Q$）、key（$K$）、value（$V$）权重并行地做 GEMM，再用另一个 GEMM 把它们合起来，得到注意力头的结果：
+        </p>
+        $$ \text{Attention}(X, Q, K, V) = \text{softmax}(\frac{(XQ) (XK)^\top}{\sqrt{d_k}}) XV $$
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/Megatron-LM.png" alt="Megatron-LM tensor parallelism">
+            <figcaption>图：Megatron-LM 对 Transformer 关键组件做张量并行的示意。原图出自 Shoeybi et al. 2020（引自原文）</figcaption>
+        </figure>
+
+        <h4>PTD-P</h4>
+        <p>
+            <a href="https://arxiv.org/abs/2104.04473" target="_blank">Narayanan et al. (2021)</a> 把流水线、张量和数据并行结合起来，配上一种新的流水线调度策略，称为 <em>PTD-P</em>。它不再只在一个设备上放一段连续的层（“model chunk”），而是给每个 worker 分配多个更小的连续层块。例如设备 1 放第 1、2、9、10 层，设备 2 放第 3、4、11、12 层，每个设备有两个 model chunk。一个 batch 里的 microbatch 数要能被 worker 数整除（$m \bmod d = 0$）。如果每个 worker 有 $v$ 个 model chunk，流水线气泡时间相比 GPipe 调度可以缩小到原来的 $1/v$。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/PTD-P-interleaved.png" alt="interleaved 1F1B schedule in PTD-P">
+            <figcaption>图：上：PipeDream-flush 里默认的 <code>1F1B</code> 流水线调度。下：交错（interleaved）1F1B 调度，深色是第一个 model chunk，浅色是第二个。原图出自 Narayanan et al. 2021（引自原文）</figcaption>
+        </figure>
+    </section>
+
+    <section id="t03">
+        <h2>03. 混合专家（MoE）</h2>
+        <p><em>原文小节：Mixture-of-Experts (MoE)</em></p>
+        <p>
+            <strong>混合专家（Mixture-of-Experts，MoE）</strong>最近很受关注，研究者（主要来自 Google）想用它推高模型规模的上限。它的核心思想来自<a href="https://en.wikipedia.org/wiki/Ensemble_learning" target="_blank">集成学习（ensemble learning）</a>，原文的说法是：“Combination of multiple weak learners gives you a strong learner!”
+        </p>
+
+        <h3>Sparsely gated MoE 层</h3>
+        <p>
+            在一个深度神经网络内部，集成可以通过一个连接多个专家的门控机制来实现（<a href="https://arxiv.org/abs/1701.06538" target="_blank">Shazeer et al., 2017</a>）。门控机制决定网络的哪一部分（例如哪些专家）被激活来产生输出。论文把它叫做 “sparsely gated mixture-of-experts”（MoE）层。
+        </p>
+        <p>具体来说，一个 MoE 层包含：</p>
+        <ul>
+            <li>$n$ 个作为专家的前馈网络 $\{E_i\}^n_{i=1}$；</li>
+            <li>一个可训练的门控网络 $G$，学习 $n$ 个专家上的概率分布，把流量路由给少数几个选中的专家。</li>
+        </ul>
+        <p>根据门控输出，并不是每个专家都要计算。专家数量很多时，可以考虑两级的分层 MoE。</p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/moe.png" alt="MoE layer">
+            <figcaption>图：混合专家（MoE）层示意。门控网络只选中并激活 $n$ 个专家中的 2 个。原图出自 Shazeer et al., 2017（引自原文）</figcaption>
+        </figure>
+        <p>
+            $G$ 最简单的选择是把输入乘一个可训练权重矩阵再做 softmax：$G_\sigma (x) = \text{softmax}(x W_g)$。但这样得到的是稠密的门控向量，省不了计算，因为只有当 $G^{(i)}(x)=0$ 时才能跳过第 $i$ 个专家。所以 MoE 层只保留最大的 $k$ 个值，并往 $G$ 里加入可调的高斯噪声来改善负载均衡。这个机制叫 <em>noisy top-k gating</em>：
+        </p>
+        $$ \begin{aligned} G(x) &= \text{softmax}( \text{topk}(H(x), k)) \\ H^{(i)}(x) &= (xW_g)^{(i)} + \epsilon \cdot \text{softplus}((xW_\text{noise})^{(i)} ); \quad \epsilon \sim \mathcal{N}(0, \mathbf{1}) \\ \text{topk}^{(i)}(v, k) &= \begin{cases} v^{(i)} & \text{if }v^{(i)}\text{ is in the top }k\text{ elements of }v \\ -\infty & \text{otherwise} \end{cases} \end{aligned} $$
+        <p>
+            上标 $v^{(i)}$ 表示向量 $v$ 的第 i 维。$\text{topk}(., k)$ 把其余维设为 $-\infty$，只留下值最大的 $k$ 维；softmax 之后这些 $-\infty$ 就变成 0。
+        </p>
+        <p>
+            门控网络可能有自我强化的倾向：总偏爱少数几个强专家，它们得到更多训练，又更强。为了避免这种情况，<a href="https://arxiv.org/abs/1701.06538" target="_blank">Shazeer et al. (2017)</a> 加了一个额外的 importance loss 作为软约束，鼓励所有专家获得相同的权重。它等于每个专家在一个 batch 上平均门控值的<a href="https://en.wikipedia.org/wiki/Coefficient_of_variation" target="_blank">变异系数（coefficient of variation）</a>的平方：
+        </p>
+        $$ L_\text{aux} = w_\text{aux} \cdot \text{CV}(\sum_{x \in X} G(x))^2 $$
+        <p>
+            其中 $\text{CV}$ 是变异系数（标准差除以均值），损失权重 $w_\text{aux}$ 是要调的超参数。
+        </p>
+        <p>
+            因为每个专家网络只分到一部分训练样本（“The shrinking batch problem”，batch 缩小问题），MoE 里应该尽量用大的 batch size。但这又受显存限制。可以用数据并行和模型并行来提高吞吐。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/moe-experiments.png" alt="MoE experiments on 1-Billion-Word benchmark">
+            <figcaption>图：1-Billion-Word 语言建模基准上的测试困惑度。左：模型容量从左到右增加，分别含 4、32、256、256、1024 和 4096 个专家。右：左图中最大的那个 40 亿参数 MoE 模型在不同计算预算下的表现。原图出自 Shazeer et al., 2017（引自原文）</figcaption>
+        </figure>
+
+        <h3>GShard</h3>
+        <p>
+            GShard（<a href="https://arxiv.org/abs/2006.16668" target="_blank">Lepikhin et al., 2020</a>）借助分片（sharding）把 MoE Transformer 扩展到 6000 亿参数。这个 MoE Transformer 把每隔一层的前馈层换成 MoE 层。在<em>分片 MoE Transformer</em> 中，只有 MoE 层被切分到多台机器上，其他层直接复制。
+        </p>
+        <p>GShard 对门控函数 $G$ 做了几项改进：</p>
+        <ul>
+            <li><em>专家容量（Expert capacity）</em>：流经一个专家的 token 数不能超过一个阈值，叫“expert capacity”。如果一个 token 被路由到已满的专家，它会被标为“overflowed”（溢出），门控输出改为零向量。</li>
+            <li><em>本地分组派发（Local group dispatching）</em>：token 被均匀分成多个本地组，专家容量在组的层面执行。</li>
+            <li><em>辅助损失（Auxiliary loss）</em>：动机和原始 MoE 的辅助损失类似，加一个辅助损失，最小化路由到每个专家的数据比例的均方。</li>
+            <li><em>随机路由（Random routing）</em>：第二好的专家按与其权重成正比的概率被选中；否则 GShard 采用随机路由，以增加一些随机性。</li>
+        </ul>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/gshard-algo.png" alt="GShard top-2 gating pseudo code">
+            <figcaption>图：GShard 中带辅助损失的组级 top-2 门控机制伪代码。原图出自 Lepikhin et al., 2020（引自原文）</figcaption>
+        </figure>
+
+        <h3>Switch Transformer</h3>
+        <p>
+            Switch Transformer（<a href="https://arxiv.org/abs/2101.03961" target="_blank">Fedus et al. 2021</a>）把稠密前馈层换成<em>稀疏的 switch FFN 层</em>，每个输入只被路由到<em>一个</em>专家网络，借此把模型规模扩到万亿参数级。给定 $n$ 个专家，负载均衡的辅助损失为 $\text{loss}_\text{aux} = w_\text{aux} \sum_{i=1}^n f_i p_i$，其中 $f_i$ 是路由到第 $i$ 个专家的 token 比例，$p_i$ 是门控网络预测的专家 $i$ 的路由概率。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/switch-transformer.png" alt="Switch Transformer">
+            <figcaption>图：Switch Transformer，蓝框里是稀疏的 switch FFN 层。原图出自 Fedus et al. 2021（引自原文）</figcaption>
+        </figure>
+        <p>为了提高训练稳定性，Switch Transformer 采用了以下设计：</p>
+        <ul>
+            <li><em>选择性精度（Selective precision）</em>：他们发现只把模型的局部转成 FP32 精度就能提高稳定性，同时避免 FP32 张量带来的高通信开销。FP32 只在路由函数内部使用，结果再转回 FP16。</li>
+            <li><em>更小的初始化（Smaller initialization）</em>：权重矩阵从截断正态分布中采样初始化，均值 $\mu=0$，标准差 $\sigma = \sqrt{s/n}$。他们还建议把 Transformer 的初始化尺度参数从 $s=1$ 降到 $s=0.1$。</li>
+            <li><em>更高的专家 dropout（Use higher expert dropout）</em>：微调常用小数据集。为避免过拟合，专家内部的 dropout 率大幅提高。有意思的是，他们发现所有层都提高 dropout 反而效果差。论文里非专家层用 0.1 的 dropout，专家 FF 层内部用 0.4。</li>
+        </ul>
+        <p>Switch Transformer 论文用一张图总结了训练大模型时不同的数据并行和模型并行策略：</p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/switch-transformer-parallelism.png" alt="parallelism strategies in Switch Transformer paper">
+            <figcaption>图：各种并行策略下，（上）模型权重和（下）数据怎样分布到多个 GPU 核上。上排每种颜色代表一个不同的权重矩阵；下排不同颜色代表不同的 token 集合。原图出自 Fedus et al. 2021（引自原文）</figcaption>
+        </figure>
+
+        <h3>Expert Choice 路由</h3>
+        <p>
+            GShard 的 top-2 和 Switch Transformer 的 top-1 都属于 <em>token choice</em>：由每个 token 挑选最合适的一两个专家。两者都用辅助损失来鼓励负载更均衡，但这不能保证最好的效果。另外，专家容量上限可能浪费 token：专家满了以后，再来的 token 就被丢掉。
+        </p>
+        <p>
+            Expert Choice（EC）路由（<a href="https://arxiv.org/abs/2202.09368" target="_blank">Zhou et al. 2022</a>；原文标题误写成 “Export Choice”）反过来，让每个专家挑选 top-$k$ 个 token。这样每个专家天然有固定容量，一个 token 也可能被路由到多个专家。EC 能做到完美的负载均衡，并被证明能把训练收敛速度提高 2 倍。
+        </p>
+        <p>给定 $e$ 个专家和输入矩阵 $X \in \mathbb{R}^{n \times d}$，token 与专家的亲和度分数为：</p>
+        $$ S = \text{softmax}(X \cdot W_g), \text{where } W_g \in \mathbb{R}^{d \times e}, S \in \mathbb{R}^{n \times e} $$
+        <p>
+            token 到专家的分配用三个矩阵表示：$I, G \in \mathbb{R}^{e\times k}$ 和 $P \in \mathbb{R}^{e \times k \times n}$。$I[i,j]$ 记录第 $i$ 个专家选中的第 $j$ 个 token 是哪个。门控矩阵 $G$ 存放选中 token 的路由权重。$P$ 是 $I$ 的 one-hot 形式，用来为门控 FFN 层构造输入矩阵 $P \cdot X \in \mathbb{R}^{e \times k \times d}$：
+        </p>
+        $$ G, I = \text{top-k}(S^\top, k)\quad P = \text{one-hot}(I) $$
+        <p>EC 路由探索过的一种正则化是限制每个 token 最多被几个专家选中：</p>
+        $$ \begin{aligned} & \max_A \langle S^\top, A\rangle + \lambda H(A) \\ \text{s.t.} & \forall i: \sum_{j'} A[i, j'] = k,\quad \forall j: \sum_{i'} A[i', j] \leq b,\quad \forall i,j: 0 \leq A[i,j] \leq 1 \end{aligned} $$
+        <p>
+            其中 $A \in \mathbb{R}^{e \times n}$ 的每个元素 $A[i,j]$ 表示第 $i$ 个专家是否选中第 $j$ 个 token。第一个约束是每个专家正好选 $k$ 个 token，第二个约束是每个 token 最多被 $b$ 个专家选中，$H(A)$ 是熵正则项。这个问题不好解，论文用了 <a href="https://projecteuclid.org/journals/annals-of-probability/volume-13/issue-3/An-Iterative-Procedure-for-Obtaining-I-Projections-onto-the-Intersection/10.1214/aop/1176992918.full" target="_blank">Dykstra 算法</a>，执行一连串迭代计算。实验中，加了上限的 expert choice 在微调表现上略有下降。
+        </p>
+        <p>
+            参数 $k$ 由 $k=nc/e$ 决定，$n$ 是一个 batch 里的 token 总数，$c$ 是容量因子，表示平均每个 token 用到几个专家。论文大多数实验用 $c=2$，但 $c=1$ 的 EC 仍然胜过 top-1 token choice 门控。有意思的是，$c=0.5$ 只让训练表现略微变差。
+        </p>
+        <p>
+            EC 的一大缺点是 batch size 太小时不能用，自回归文本生成也不能用，因为做 top-$k$ 选择需要知道未来的 token。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 其他省显存设计</h2>
+        <p><em>原文小节：Other Memory Saving Designs</em></p>
+
+        <h3>CPU 卸载</h3>
+        <p><em>原文小节：CPU Offloading</em></p>
+        <p>
+            显存满了时，一个办法是把暂时不用的数据卸载到 CPU 内存，等以后需要时再读回来（<a href="https://arxiv.org/abs/1602.08124" target="_blank">Rhu et al. 2016</a>）。<strong>CPU 卸载（CPU offloading）</strong>的想法很直接，但因为会拖慢训练，近几年用得少了。
+        </p>
+
+        <h3>激活重计算</h3>
+        <p><em>原文小节：Activation Recomputation</em></p>
+        <p>
+            激活重计算（Activation recomputation），也叫“activation checkpointing”或“gradient checkpointing”（<a href="https://arxiv.org/abs/1604.06174" target="_blank">Chen et al. 2016</a>），是一个简单又巧妙的想法：用计算时间换显存。反向传播计算梯度时要用到前向时每层的激活值，通常这些都得存着；重计算只存一部分，其余的在反向时重新算一遍。它把训练 $\ell$ 层深度网络的显存开销降到 $O(\sqrt{\ell})$，代价是每个 batch 只多一次前向计算。
+        </p>
+        <p>
+            假设把 $\ell$ 层网络均匀分成 $d$ 个分区。只有分区边界处的激活被保存并在 worker 间传递。分区内部各层的中间激活计算梯度时仍然需要，所以在反向时重新计算。用了激活重计算后，训练的显存开销 $M(\ell)$ 为：
+        </p>
+        $$ M(\ell) =\max_{i=1,\dots,k} \underbrace{\text{cost-of-one-partition}(i)}_\text{cost of back-propagation on the i-th partition} + \underbrace{O(d)}_\text{store intermediate outputs} = O(\frac{\ell}{d}) + O(d) $$
+        <p>
+            当 $d=\sqrt{\ell}$ 时取得最小开销 $O(\sqrt{\ell})$。激活重计算让显存开销相对于模型规模呈次线性增长。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/activation-checkpointing.png" alt="memory cost of memory saving algorithms">
+            <figcaption>图：不同省显存算法的显存开销。Sharing：中间结果不再需要时回收其显存；Inplace：把输出直接写进输入值的内存。原图出自 Chen et al. 2016（引自原文）</figcaption>
+        </figure>
+
+        <h3>混合精度训练</h3>
+        <p><em>原文小节：Mixed Precision Training</em></p>
+        <p>
+            <a href="https://arxiv.org/abs/1710.03740" target="_blank">Narang &amp; Micikevicius et al. (2018)</a> 提出了用半精度浮点数（FP16）训练模型而不损失精度的方法。FP16 每个数占 2 字节，FP32 占 4 字节，换成 FP16 能省一半显存，算得也更快，但能表示的数值范围小很多。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/mixed-precision-training.png" alt="mixed precision training procedure">
+            <figcaption>图：一层里混合精度训练的流程。原图出自 Narang &amp; Micikevicius, et al. 2018（引自原文）</figcaption>
+        </figure>
+        <p>为了避免在半精度下丢掉关键信息，有三个技巧：</p>
+        <ul>
+            <li><em>全精度权重主副本（Full-precision master copy of weights）</em>：维护一份全精度（FP32）的模型权重来累积梯度，前向和反向时再取整成半精度。原因是每次梯度更新量（梯度乘学习率）可能太小，FP16 的范围装不下（例如 $2^{-24}$ 在 FP16 里会变成零）。</li>
+            <li><em>损失缩放（Loss scaling）</em>：把损失放大，以便处理数值很小的梯度（见下面的梯度直方图）。放大梯度能把它们往可表示范围的右侧（数值较大的部分）挪，保住那些否则会丢失的值。</li>
+            <li><em>算术精度（Arithmetic precision）</em>：对常见的网络运算（例如向量点积、把向量元素求和的归约），可以先用 FP32 累加部分结果，最后输出存进内存前再转成 FP16。逐元素运算用 FP16 或 FP32 都行。</li>
+        </ul>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2021-09-25-train-large/gradient-histogram.png" alt="histogram of gradients in full precision">
+            <figcaption>图：全精度下的梯度直方图。模型切换到 FP16 后，左侧小于 $2^{-24}$ 的部分都会变成零。原图出自 Narang &amp; Micikevicius, et al. 2018（引自原文）</figcaption>
+        </figure>
+        <p>
+            他们的实验中，有些网络不需要损失缩放（例如图像分类、Faster R-CNN），另一些则必须用（例如 Multibox SSD、大型 LSTM 语言模型）。
+        </p>
+
+        <h3>压缩</h3>
+        <p><em>原文小节：Compression</em></p>
+        <p>
+            中间结果常常占很多显存，虽然它们只在一次前向和一次反向里用到，两次使用之间却隔着明显的一段时间。因此 <a href="https://www.microsoft.com/en-us/research/uploads/prod/2018/04/fiddle-gist-isca18.pdf" target="_blank">Jain et al. (2018)</a> 提出一种数据编码策略：在前向里第一次用完中间结果后就把它压缩，等反向传播时再解码回来。
+        </p>
+        <p>
+            他们的系统 <em>Gist</em> 包含两种编码方案。一是<em>层特定的无损编码（Layer-specific lossless encoding）</em>，针对 ReLU-Pool（“Binarize”，二值化）和 ReLU-Conv（“Sparse storage and dense computation”，稀疏存储、稠密计算）这两种模式。二是<em>激进的有损编码（Aggressive lossy encoding）</em>，使用延迟降精度（delayed precision reduction，DPR）。他们观察到，特征图的第一次使用要保持高精度，第二次使用则能容忍较低精度。
+        </p>
+        <p>
+            实验表明，在 5 个 SOTA 图像分类 DNN 上，Gist 最多能把显存开销降低 2 倍，平均 1.8 倍，性能开销只有 4%。
+        </p>
+
+        <h3>省显存的优化器</h3>
+        <p><em>原文小节：Memory Efficient Optimizer</em></p>
+        <p>
+            优化器很吃显存。以流行的 Adam 为例，它内部要维护动量和方差，两者都和梯度、模型参数同等规模。一下子就要存相当于模型权重 4 倍的显存。
+        </p>
+        <p>
+            已经有几种优化器被提出来减少显存占用。例如 <em>Adafactor</em>（<a href="https://arxiv.org/abs/1804.04235" target="_blank">Shazeer et al. 2018</a>）不像 Adam 那样存完整的动量和方差，只记录滑动平均的每行之和与每列之和，再用这些和估计二阶矩。对一个 $r \times c$ 的权重矩阵，这样只需存 $r + c$ 个数，不用存 $r \times c$ 个。<em>SM3</em>（<a href="https://arxiv.org/abs/1901.11150" target="_blank">Anil et al. 2019</a>）是另一种自适应优化方法，同样大幅减少了显存。
+        </p>
+        <p>
+            <em>ZeRO</em>（<em>Zero Redundancy Optimizer</em>；<a href="https://arxiv.org/abs/1910.02054" target="_blank">Rajbhandari et al. 2019</a>）基于对大模型训练两大显存消耗来源的观察来优化显存：
+        </p>
+        <ul>
+            <li>大头是<em>模型状态（model states）</em>，包括优化器状态（例如 Adam 的动量和方差）、梯度和参数。混合精度训练很耗显存，因为除了 FP16 版本，优化器还要保留一份 FP32 参数和其他优化器状态。</li>
+            <li>其余被激活值、临时缓冲区和无法使用的碎片化内存占用，论文称之为<em>残余状态（residual states）</em>。</li>
+        </ul>
+        <p>
+            ZeRO 结合了两种方法：<em>ZeRO-DP</em> 和 <em>ZeRO-R</em>。ZeRO-DP 是增强版的数据并行，避免模型状态的简单冗余：普通 DP 里每个进程都存一整份模型状态，ZeRO-DP 通过动态通信调度，把优化器状态、梯度和参数切分到多个数据并行进程上，并尽量减少通信量。ZeRO-R 优化残余状态的显存，手段是分区的激活重计算、固定大小的缓冲区和即时的内存碎片整理。
+        </p>
+    </section>
+
+    <section id="tref">
+        <h2>主要参考文献</h2>
+        <ol>
+            <li>Li et al. 2020. <a href="https://arxiv.org/abs/2006.15704" target="_blank">“PyTorch Distributed: Experiences on Accelerating Data Parallel Training”</a> VLDB 2020（正文写作 Li et al. 2021）</li>
+            <li>Cui et al. 2016. <a href="https://www.pdl.cmu.edu/PDL-FTP/CloudComputing/GeePS-cui-eurosys16.pdf" target="_blank">“GeePS: Scalable deep learning on distributed GPUs with a GPU-specialized parameter server”</a> EuroSys 2016</li>
+            <li>Shoeybi et al. 2019. <a href="https://arxiv.org/abs/1909.08053" target="_blank">“Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism”</a></li>
+            <li>Narayanan et al. 2021. <a href="https://arxiv.org/abs/2104.04473" target="_blank">“Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM”</a>（PTD-P）</li>
+            <li>Huang et al. 2018. <a href="https://arxiv.org/abs/1811.06965" target="_blank">“GPipe: Efficient Training of Giant Neural Networks using Pipeline Parallelism”</a></li>
+            <li>Narayanan et al. 2019. <a href="https://cs.stanford.edu/~matei/papers/2019/sosp_pipedream.pdf" target="_blank">“PipeDream: Generalized Pipeline Parallelism for DNN Training”</a> SOSP 2019</li>
+            <li>Harlap et al. 2018. <a href="https://arxiv.org/abs/1806.03377" target="_blank">“PipeDream: Fast and Efficient Pipeline Parallel DNN Training”</a>（正文图片出处，不在原文参考文献列表里）</li>
+            <li>Narayanan et al. 2021. <a href="https://arxiv.org/abs/2006.09503" target="_blank">“Memory-Efficient Pipeline-Parallel DNN Training”</a> ICML 2021（PipeDream-flush / 2BW）</li>
+            <li>Shazeer et al. 2017. <a href="https://arxiv.org/abs/1701.06538" target="_blank">“Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer”</a></li>
+            <li>Lepikhin et al. 2020. <a href="https://arxiv.org/abs/2006.16668" target="_blank">“GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding”</a></li>
+            <li>Fedus et al. 2021. <a href="https://arxiv.org/abs/2101.03961" target="_blank">“Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity”</a></li>
+            <li>Zhou et al. 2022. <a href="https://arxiv.org/abs/2202.09368" target="_blank">“Mixture-of-Experts with Expert Choice Routing”</a></li>
+            <li>Rhu et al. 2016. <a href="https://arxiv.org/abs/1602.08124" target="_blank">“vDNN: Virtualized Deep Neural Networks for Scalable, Memory-Efficient Neural Network Design”</a>（正文引用，不在原文参考文献列表里）</li>
+            <li>Chen et al. 2016. <a href="https://arxiv.org/abs/1604.06174" target="_blank">“Training Deep Nets with Sublinear Memory Cost”</a></li>
+            <li>Narang &amp; Micikevicius, et al. 2018. <a href="https://arxiv.org/abs/1710.03740" target="_blank">“Mixed precision training”</a> ICLR 2018</li>
+            <li>Jain et al. 2018. <a href="https://www.microsoft.com/en-us/research/uploads/prod/2018/04/fiddle-gist-isca18.pdf" target="_blank">“Gist: Efficient data encoding for deep neural network training”</a> ISCA 2018</li>
+            <li>Shazeer &amp; Stern 2018. <a href="https://arxiv.org/abs/1804.04235" target="_blank">“Adafactor: Adaptive learning rates with sublinear memory cost”</a></li>
+            <li>Anil et al. 2019. <a href="https://arxiv.org/abs/1901.11150" target="_blank">“Memory-Efficient Adaptive Optimization”</a>（SM3）</li>
+            <li>Rajbhandari et al. 2019. <a href="https://arxiv.org/abs/1910.02054" target="_blank">“ZeRO: Memory Optimizations Toward Training Trillion Parameter Models”</a></li>
+        </ol>
+        <p>原文参考文献里 MoE 和 ZeRO 两条的标题混进了作者名（“…Layer Noam”“…Samyam”），这里按论文原名写出；Chen et al. 2016 在正文中的链接拼成了 arvix.org，参考文献列表里是正确的 arxiv.org，这里用后者。</p>
+    </section>
+
+    <footer class="document-footer">
+        <p>Lil'Log · How to Train Really Large Models on Many GPUs? · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

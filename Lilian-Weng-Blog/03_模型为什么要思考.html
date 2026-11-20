@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模型为什么要思考 | Lil'Log 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="02_仔细看Scaling_Laws.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Lil'Log 笔记目录</a> · 03</span>
+    <span><a href="04_强化学习中的奖励作弊.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>模型为什么要思考</h1>
+        <p class="subtitle">测试时计算和思维链：让模型在回答前多想一会儿，有哪些做法，为什么有用，又带来了哪些新问题</p>
+        <div class="author-meta">
+            作者：Lilian Weng · 发表于 2025 年 5 月 1 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://lilianweng.github.io/posts/2025-05-01-thinking/" target="_blank">Why We Think</a>（Lil'Log；本文依据原文英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原文，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这篇文章讲什么</h2>
+        <p>
+            测试时计算（test-time compute，模型在推理阶段、也就是回答问题时额外花的算力）和思维链（chain-of-thought，CoT，让模型先写出中间推理步骤再给答案）让模型表现大幅提升，也引出了很多研究问题。这篇综述梳理的是：怎样有效地使用“思考时间”，以及它为什么有用。
+        </p>
+        <p>
+            文章先从三个角度说明为什么要让模型想得更久（心理学的快慢思考、把计算当成资源、隐变量建模），然后分三条线展开：用 token 思考（并行采样、顺序修改、强化学习、工具调用、思维链是否忠实）；在连续空间里思考（循环结构、thinking token）；把思考当成隐变量来训练（EM 算法、STaR 这类迭代学习）。之后讨论思考时间的 scaling law，最后列出作者认为还没解决的研究问题。读完你应该能把 o1、R1 这类推理模型背后的主要技术路线放进同一张图里。
+        </p>
+        <ol>
+            <li><a href="#t01">引言</a></li>
+            <li><a href="#t02">动机：为什么要让模型多想</a></li>
+            <li><a href="#t03">用 token 思考</a></li>
+            <li><a href="#t04">在连续空间里思考</a></li>
+            <li><a href="#t05">把思考当作隐变量</a></li>
+            <li><a href="#t06">思考时间的 Scaling Laws</a></li>
+            <li><a href="#t07">未来方向</a></li>
+            <li><a href="#tref">主要参考文献</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 引言</h2>
+        <p><em>原文小节：（文章开头，无标题）</em></p>
+        <p>
+            作者在开头感谢 John Schulman 给这篇文章提了大量反馈并直接改过文字。
+        </p>
+        <p>
+            “让模型在测试时多算一点”这条思路有不少早期工作：<a href="https://arxiv.org/abs/1603.08983" target="_blank">Graves et al. 2016</a> 的自适应计算时间、<a href="https://arxiv.org/abs/1705.04146" target="_blank">Ling et al. 2017</a> 先生成解题过程再给答案、<a href="https://arxiv.org/abs/2110.14168" target="_blank">Cobbe et al. 2021</a> 训练验证器。思维链这个方向则来自 <a href="https://arxiv.org/abs/2201.11903" target="_blank">Wei et al. 2022</a> 和 <a href="https://arxiv.org/abs/2112.00114" target="_blank">Nye et al. 2021</a>。这些工作带来了明显的性能提升，也带来了很多问题。本文要回顾的是：最近的研究怎样有效利用测试时计算（即“思考时间”），以及它为什么有帮助。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 动机：为什么要让模型多想</h2>
+        <p><em>原文小节：Motivation</em></p>
+        <p>让模型想得更久，可以从几个不同角度找到理由。</p>
+
+        <h3>心理学上的类比</h3>
+        <p><em>原文小节：Analogy to Psychology</em></p>
+        <p>
+            这个想法和人类思考的方式联系很紧。人没法张口就答出 <code>"What's 12345 times 56789?"</code>，遇到复杂问题时，先花时间琢磨、分析，再得出结果，是很自然的事。Daniel Kahneman 在《<a href="https://www.amazon.com/Thinking-Fast-Slow-Daniel-Kahneman/dp/0374533555" target="_blank">Thinking, Fast and Slow</a>》（Kahneman, 2013）里借助<a href="https://en.wikipedia.org/wiki/Dual_process_theory" target="_blank">双过程理论</a>（dual process theory），把人的思考分成两种模式：
+        </p>
+        <ul>
+            <li><em>快思考（System 1）</em>：运转快、自动化，靠直觉和情绪驱动，几乎不费力。</li>
+            <li><em>慢思考（System 2）</em>：需要有意识的逻辑思考，认知负担大，更耗精力，需要主动投入。</li>
+        </ul>
+        <p>
+            System 1 又快又省力，所以常常成了做决定的主力，代价是准确性和逻辑。它依赖大脑的捷径（启发式，heuristics），容易带来错误和偏差。人如果有意放慢，花更多时间反思、改进、分析，就能调动 System 2，去质疑直觉，做出更理性的选择。
+        </p>
+
+        <h3>把计算当作一种资源</h3>
+        <p><em>原文小节：Computation as a Resource</em></p>
+        <p>
+            深度学习有一种看法：一个神经网络的能力，可以用它在一次前向传播（forward pass，输入从第一层算到最后一层的一次完整计算）里能用到多少计算和存储来刻画。如果用梯度下降去优化它解决问题，优化过程自己会想办法用好这些资源，把它们组织成负责计算和存储信息的“电路”。按这个看法，如果设计一种在测试时能做更多计算的结构或系统，并训练它有效使用这份资源，它就会表现得更好。
+        </p>
+        <p>
+            在 Transformer 里，每生成一个 token，模型做的计算量（flops）大约是参数量的 2 倍。对混合专家模型（mixture of experts，MoE，每个 token 只激活一部分“专家”子网络的稀疏模型）来说，每次前向传播只用到一部分参数，所以计算量 = 2 × 参数量 / sparsity，这里 sparsity 指被激活的专家所占的比例。
+        </p>
+        <p>
+            CoT 则让模型在给出答案里的每个 token 之前，可以做多得多的计算。它还有个好性质：模型可以根据题目的难度，使用不同数量的计算。
+        </p>
+
+        <h3>隐变量建模</h3>
+        <p><em>原文小节：Latent Variable Modeling</em></p>
+        <p>
+            机器学习里有个经典做法：定义一个概率模型，里面有一个隐变量（latent variable，看不到、不直接给出的变量）$z$ 和一个可见变量 $y$，学习算法只拿到 $y$。对隐变量的所有可能取值做边缘化（求和），就能表达出可见变量上很丰富的分布：$P(y) = \sum_{z \sim P(z)} P(y \mid z)$。
+        </p>
+        <p>
+            举例来说，要建模“数学题和解答”的分布，可以让 $x$ 表示题目，$y$ 表示标准答案或证明，$z$ 表示通向证明的自由形式的思考过程。要优化的边缘分布就是 $P(y \mid x) = \sum_{z \sim p(z\mid x)} P(y \mid x, z)$。
+        </p>
+        <p>
+            从隐变量角度理解一些方法会很顺手，比如并行收集多条 CoT、或者在 CoT 上做搜索：这些算法可以看成是在从后验 $P(z \mid x, y)$ 里采样。这个角度也说明了用对数损失 $\log P(y \mid x)$ 作为优化目标的好处，因为对数损失在预训练里效果一直很好。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 用 token 思考</h2>
+        <p><em>原文小节：Thinking in Tokens</em></p>
+        <p>
+            先生成中间步骤、再给出简短答案，这个策略最早在数学题上被 <a href="https://arxiv.org/abs/1705.04146" target="_blank">Ling et al. 2017</a> 探索过，他们发布了 <a href="https://github.com/google-deepmind/AQuA" target="_blank">AQUA-RAT</a> 数据集。之后 <a href="https://arxiv.org/abs/2110.14168" target="_blank">Cobbe et al. 2021</a> 把它扩展开，发布了 <a href="https://github.com/openai/grade-school-math" target="_blank">Grade School Math（GSM）</a>数据集。Cobbe 等人用人写的解答做监督学习训练一个生成器，再训练验证器（verifier）去预测一个候选解答是否正确，于是可以在这些解答里做搜索。<a href="https://arxiv.org/abs/2112.00114" target="_blank">Nye et al. 2021</a> 把中间思考 token 当作“草稿纸”（scratchpads）来做实验，<a href="https://arxiv.org/abs/2201.11903" target="_blank">Wei et al. 2022</a> 提出了现在通用的名字：<strong>chain-of-thought</strong>（CoT）。
+        </p>
+        <p>
+            早期改进 CoT 推理的工作，是在人写的推理过程上做监督学习，或者在模型自己写、再按答案是否正确筛过的推理过程上做监督学习。后者可以看成一种初级形式的强化学习（reinforcement learning，RL，通过奖励信号而不是标准答案来训练模型）。另一些工作发现，只靠合适的提示词就能显著提高指令微调模型的数学成绩，比如加一句 <code>"think step by step"</code>（<a href="https://arxiv.org/abs/2205.11916" target="_blank">Kojima et al. 2022</a>），或者用更复杂的提示让模型先回想相关知识（<a href="https://arxiv.org/abs/2310.01714" target="_blank">Yasunaga et al. 2023</a>）。
+        </p>
+        <p>
+            后来的工作发现，在一批能自动检查答案的题目上做强化学习，可以大幅提升 CoT 推理能力。这类题目包括答案很短的 STEM 题，或者能用单元测试检查的编程题（<a href="https://arxiv.org/abs/2203.14465" target="_blank">Zelikman et al. 2022</a>、<a href="https://arxiv.org/abs/2312.08935" target="_blank">Wang et al. 2023</a>、<a href="https://arxiv.org/abs/2310.10047" target="_blank">Liu et al. 2023</a>）。这个做法随着 <a href="https://openai.com/index/learning-to-reason-with-llms/" target="_blank">o1-preview</a>、<a href="https://openai.com/index/introducing-o3-and-o4-mini/" target="_blank">o3</a> 的发布和 R1 技术报告（<a href="https://arxiv.org/abs/2501.12948" target="_blank">DeepSeek-AI, 2025</a>）变得广为人知。R1 报告说明，一个简单的配方，用策略梯度（policy gradient，直接按奖励调整模型输出各个动作的概率的一类 RL 算法）算法，就能得到很强的性能。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/cot-wei22.png" alt="Chain-of-thought prompting 在数学题上的成功率">
+            <figcaption>图：思维链提示让数学题的解题成功率更高，模型越大，从思考时间里获益越多（来源：Wei et al. 2022；引自原文）</figcaption>
+        </figure>
+
+        <h3>分支与修改</h3>
+        <p><em>原文小节：Branching and Editing</em></p>
+        <p>
+            测试时计算的根本用意，是在测试时自适应地改变模型的输出分布。在解码阶段，有各种办法利用测试时资源挑出更好的样本，把模型的预测推向更理想的分布。改进解码过程主要有两类做法：并行采样和顺序修改。
+        </p>
+        <ul>
+            <li><strong>并行采样（parallel sampling）</strong>：同时生成多个输出，过程中用过程奖励信号对每一步做引导，或者在最后用验证器评判质量。这是提升测试时表现时用得最多的解码方法，比如 best-of-$N$ 或 beam search。没有标准答案时，常用 self-consistency（<a href="https://arxiv.org/abs/2203.11171" target="_blank">Wang et al. 2023</a>），也就是在多条 CoT 结果里按多数投票选答案。</li>
+            <li><strong>顺序修改（sequential revision）</strong>：根据上一步的输出迭代地调整回答，要求模型有意地反思已有回答并改正错误。这个修改过程可能得依赖一个微调过的模型，因为单纯指望模型自带的自我纠错能力、又没有外部反馈，往往不会带来提升（<a href="https://arxiv.org/abs/2406.01297" target="_blank">Kamoi et al. 2024</a>、<a href="https://arxiv.org/abs/2310.01798" target="_blank">Huang et al. 2024</a>）。</li>
+        </ul>
+        <p>
+            并行采样简单直观，容易实现，但上限受制于模型能不能一次就做对。顺序修改明确要求模型反思错误，但更慢，实现时要格外小心：它有把正确答案改错、或者引入其他幻觉的风险。两种方法可以一起用。<a href="https://arxiv.org/abs/2408.03314" target="_blank">Snell et al. 2024</a> 发现，简单题只用顺序计算就能获益，难题则往往在顺序和并行计算达到某个最优比例时表现最好。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/parallel-vs-sequential.png" alt="并行采样与顺序修改示意">
+            <figcaption>图：并行采样与顺序修改的对比示意（引自原文）</figcaption>
+        </figure>
+
+        <h4>并行采样</h4>
+        <p><em>原文小节：Parallel Sampling</em></p>
+        <p>
+            给定一个生成模型，再给一个能给完整或部分样本打分的打分函数，就可以用各种搜索算法去找高分样本。Best-of-$N$ 最简单：独立采 $N$ 个样本，按打分函数挑最高的那个。Beam search（束搜索）更复杂一些，它让搜索过程更有适应性，把更多采样计算花在解空间里更有希望的部分。
+        </p>
+        <p>
+            Beam search 维护一组有希望的部分序列，交替地扩展它们、剪掉不太有希望的那些。挑选候选时，可以用过程奖励模型（process reward model，PRM，给推理的每一步打分的奖励模型，区别于只看最终答案的结果奖励模型；<a href="https://arxiv.org/abs/2305.20050" target="_blank">Lightman et al. 2023</a>）来引导。
+        </p>
+        <p>
+            <a href="https://arxiv.org/abs/2305.00633" target="_blank">Xie et al. 2023</a> 让 LLM 评估自己生成的每一步推理有多大可能是对的，把评估写成选择题的形式。他们发现，在 beam search 解码时做逐步自我评估，能减少多步推理里不断累积的错误。另外，采样时对温度做退火（逐步降低采样温度），有助于减轻随机性的累积。这些实验在 Codex 模型上，让 few-shot GSM8k、AQuA 和 StrategyQA 基准提升了 5–6%。
+        </p>
+        <p>
+            Reward balanced search（简称 REBASE；<a href="https://arxiv.org/abs/2408.00724" target="_blank">Wu et al. 2025</a>）单独训练了一个 PRM，按 softmax 归一化后的奖励分数，决定 beam search 时每一层的每个节点要扩展多少。
+        </p>
+        <p>
+            <a href="https://arxiv.org/abs/2410.01044" target="_blank">Jiang et al. 2024</a> 训练了一个叫 “RATIONALYST” 的 PRM 来引导 beam search，训练数据是以大量无标注数据为条件合成的推理依据（rationale）。筛选好 rationale 的标准是：把它放进上下文和不放进上下文相比，真实答案 token 的负对数概率是否降低超过某个阈值。推理时，RATIONALYST 用两种方式给 CoT 生成器提供过程监督：帮助估计下一步推理的对数概率（“implicit”），或者直接生成下一步推理放进提示里（“explicit”）。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/beam-search-xie23.png" alt="用 LLM 逐步自我评估引导 beam search">
+            <figcaption>图：用 LLM 对每一步推理做自我评估，以此引导 beam search 解码（来源：<a href="https://arxiv.org/abs/2305.00633" target="_blank">Xie et al. 2023</a>；引自原文）</figcaption>
+        </figure>
+        <p>
+            有意思的是，不用显式的 zero-shot 或 few-shot 提示，也能触发涌现的思维链推理路径。<a href="https://arxiv.org/abs/2402.10200" target="_blank">Wang &amp; Zhou 2024</a> 发现：在采样的第一个 token 处分叉，保留置信度最高的 top $k$ 个 token（置信度用采样时 top-1 和 top-2 候选之间的差来衡量），然后这 $k$ 条分支之后都用贪心解码（greedy decoding，每步只取概率最高的 token）往下走，结果很多序列天然就带有 CoT。尤其是上下文里出现 CoT 时，最终答案的解码会更有把握。
+        </p>
+        <p>
+            要计算最终答案的置信度，得先找出答案所在的那段文字，可以用任务相关的启发式规则（比如数学题取最后一个数值），也可以再提示模型一句 <code>"So the answer is"</code>。只在第一个 token 分叉，是因为观察到早分叉能显著增加可能路径的多样性，而后面的 token 很大程度上受前面序列影响。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/cot-decoding.png" alt="Top-k 解码">
+            <figcaption>图：Top-$k$ 解码，$k$ 指第一步采样时保留的候选数（来源：<a href="https://arxiv.org/abs/2402.10200" target="_blank">Wang &amp; Zhou, 2024</a>；引自原文）</figcaption>
+        </figure>
+
+        <h4>顺序修改</h4>
+        <p><em>原文小节：Sequential Revision</em></p>
+        <p>
+            如果模型能反思并改正过去回答里的错误，我们会期望它给出一串质量逐步提高的修改。可是这种自我纠错能力在 LLM 里并不天然存在，也不容易开箱即用。失败的方式有好几种：（1）幻觉，包括把正确的回答改错；（2）行为坍缩成不纠错，比如对第一版错误回答只做很小的修改或者不改；（3）测试时遇到分布偏移就无法泛化。
+        </p>
+        <p>
+            <a href="https://arxiv.org/abs/2310.01798" target="_blank">Huang et al. 2024</a> 的实验表明，直接套用自我纠错会让表现变差，模型要自我改进必须有外部反馈。外部反馈可以来自：与标准答案比对、启发式规则和任务相关指标、编程题的单元测试结果（<a href="https://arxiv.org/abs/2303.11366" target="_blank">Shinn et al. 2023</a>）、一个更强的模型（<a href="https://arxiv.org/abs/2404.17140" target="_blank">Zhang et al. 2024</a>），以及人类反馈（<a href="https://arxiv.org/abs/2302.02676" target="_blank">Liu et al. 2023</a>）。
+        </p>
+        <p>
+            Self-correction learning（<a href="https://arxiv.org/abs/2211.00053" target="_blank">Welleck et al. 2023</a>）的目标，是在生成器模型 $P_0(y_0 \mid x)$ 固定的前提下，训练一个纠错模型 $P_\theta(y \mid y_0, x)$。生成器保持通用，纠错模型可以针对具体任务，它只以初始回答和额外反馈（比如一句话、编译器报错、单元测试结果；反馈可以没有）为条件来生成。流程是：
+        </p>
+        <ul>
+            <li>先对数据池里的每个提示生成多个输出；</li>
+            <li>然后构造“价值提升对”（value-improving pairs）：同一个提示的两个输出，如果一个价值比另一个高，就配成一对（提示 $x$，假设 $y$，修正 $y'$）；</li>
+            <li>按价值提升量 $v(y') - v(y)$ 和两个输出的相似度 $\text{Similarity}(y, y')$ 成比例地挑选这些对，用来训练纠错模型；</li>
+            <li>为了鼓励探索，纠错模型也会把新生成的结果放回数据池。推理时，可以反复调用纠错模型，得到一条顺序修改的纠错轨迹。</li>
+        </ul>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/self-correction-welleck23.png" alt="Self-correction learning 示意">
+            <figcaption>图：self-correction learning 把同一题目的模型输出配成价值提升对，用来训练纠错模型（来源：Welleck et al. 2023；引自原文）</figcaption>
+        </figure>
+        <p>
+            Recursive inspection（<a href="https://arxiv.org/abs/2407.18219" target="_blank">Qu et al. 2024</a>）同样想训练更好的纠错模型，但用同一个模型既负责生成又负责自我纠错。
+        </p>
+        <p>
+            SCoRe（Self-Correction via Reinforcement Learning；<a href="https://arxiv.org/abs/2409.12917" target="_blank">Kumar et al. 2024</a>）是一种多轮 RL 方法，鼓励模型在第二次尝试时给出比第一次更好的答案。训练分两个阶段：阶段 1 只最大化第二次尝试的准确率，同时只对第一次尝试施加 KL 惩罚（KL penalty，用 KL 散度衡量新模型输出分布偏离原模型多远，偏得越多罚得越重），防止第一轮回答偏离 base model 太远；阶段 2 同时优化第一次和第二次尝试的准确率。理想情况下我们希望两次尝试都更好，但加入阶段 1 可以防止行为坍缩（模型对第一版回答只做很少改动或不改），阶段 2 再进一步提升结果。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/SCoRe-kumar24.png" alt="SCoRe 两阶段 RL 训练">
+            <figcaption>图：用两阶段 RL 训练显式提升自我纠错能力的设置（来源：Kumar et al. 2024；引自原文）</figcaption>
+        </figure>
+
+        <h3>用强化学习提升推理</h3>
+        <p><em>原文小节：RL for Better Reasoning</em></p>
+        <p>
+            最近用 RL 提升语言模型推理能力有很多成功案例。做法是收集一批带标准答案的问题（通常是答案容易验证的 STEM 题和谜题），模型答对就给奖励。这个方向的热度来自 OpenAI <code>o</code> 系列模型的强劲表现，以及之后 <a href="https://www.deepseek.com/" target="_blank">DeepSeek</a> 发布的模型和技术报告。
+        </p>
+        <p>
+            <code>DeepSeek-R1</code>（<a href="https://arxiv.org/abs/2501.12948" target="_blank">DeepSeek-AI, 2025</a>）是一个开源 LLM，目标是在数学、编程、逻辑解题这类需要高级推理的任务上表现出色。它经过了两轮 SFT-RL 训练（SFT 即监督微调，supervised fine-tuning，用标注好的示范数据直接训练），所以推理任务和非推理任务都做得好：
+        </p>
+        <ol>
+            <li><strong>冷启动 SFT</strong>：在几千条冷启动数据上微调 <code>DeepSeek-V3-Base</code> 基座模型。没有这一步，模型会出现可读性差、多种语言混杂的问题。</li>
+            <li><strong>面向推理的 RL</strong>：只用推理类提示训练推理模型，奖励有两种，都是基于规则的：
+                <ul>
+                    <li>格式奖励：模型要用 <code>&lt;thinking&gt; ... &lt;/thinking&gt;</code> token 把 CoT 包起来。</li>
+                    <li>准确率奖励：最终答案是否正确。数学题的答案要按特定格式给出（比如放在框里），才能可靠地验证；编程题用编译器检查测试用例是否通过。</li>
+                </ul>
+            </li>
+            <li><strong>拒绝采样 + 非推理 SFT</strong>：在第 2 步的 RL checkpoint 上做拒绝采样（rejection sampling，多采几次，只留下符合要求的样本）得到新的 SFT 数据，再加上 <code>DeepSeek-V3</code> 在写作、事实问答、自我认知等领域的非推理监督数据，重新训练 <code>DeepSeek-V3-Base</code>：
+                <ul>
+                    <li>过滤掉语言混杂、段落过长、带代码块的 CoT；</li>
+                    <li>按 DeepSeek-V3（<a href="https://arxiv.org/abs/2412.19437v1" target="_blank">DeepSeek-AI, 2024</a>）的流程加入非推理任务；</li>
+                    <li>对某些非推理任务，通过提示让 DeepSeek-V3 在回答前先生成可能的 CoT；但像 “hello” 这样简单的请求不需要 CoT；</li>
+                    <li>最后在总共 80 万（800k）条样本上把 DeepSeek-V3-Base 微调 2 个 epoch。</li>
+                </ul>
+            </li>
+            <li>最后一个 <strong>RL</strong> 阶段：在第 3 步的 checkpoint 上，用推理和非推理两类提示做训练，提升有用性、无害性和推理能力。</li>
+        </ol>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/R1-eval.png" alt="DeepSeek-R1 在推理基准上的表现">
+            <figcaption>图：<code>DeepSeek-R1</code> 在几个常用推理基准上与 OpenAI <code>o1-preview</code>、<code>o1-mini</code> 表现相当；<code>DeepSeek-V3</code> 是表中唯一的非推理模型（来源：DeepSeek-AI, 2025；引自原文）</figcaption>
+        </figure>
+        <p>
+            DeepSeek 团队还展示了：只用纯 RL、完全没有 SFT 阶段，模型依然能学会反思、回溯这类高级推理能力（“Aha moment”）。在 RL 训练过程中，模型会自然学着花更多思考 token 去解推理题。所谓 “aha moment”，指模型反思之前的错误，然后换一种方法去改正。之后出现了不少复现 R1 结果的开源项目，比如 <a href="https://github.com/huggingface/open-r1" target="_blank">Open-R1</a>、<a href="https://github.com/hkust-nlp/simpleRL-reason" target="_blank">SimpleRL-reason</a> 和 <a href="https://github.com/Jiayi-Pan/TinyZero" target="_blank">TinyZero</a>，都基于 <a href="https://github.com/QwenLM/Qwen2.5" target="_blank">Qwen</a> 模型。它们也证实了纯 RL 能在数学题上取得很好的成绩，并且会出现 “aha moment”。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/aha-moment.png" alt="模型学会反思和纠错的例子">
+            <figcaption>图：模型学会反思并纠正错误的例子（来源：左 DeepSeek-AI, 2025；右 Zeng et al. 2025；引自原文）</figcaption>
+        </figure>
+        <p>
+            DeepSeek 团队也分享了失败的尝试。他们没能用好过程奖励模型（PRM），因为很难为每一步定义评分标准，也很难判断某个中间步骤是否正确，同时它让训练更容易出现奖励作弊（reward hacking，模型钻奖励函数的空子拿高分，但并没有真正完成任务）。MCTS（Monte Carlo Tree Search，蒙特卡洛树搜索）的尝试也失败了：和国际象棋比，语言模型 token 的搜索空间太大；而且训练用来引导搜索的细粒度价值模型也很难。作者认为失败的尝试常常能提供独特的见解，希望研究社区多分享哪些做法没成功。
+        </p>
+
+        <h3>调用外部工具</h3>
+        <p><em>原文小节：External Tool Use</em></p>
+        <p>
+            推理过程中，有些中间步骤通过执行代码或做数学计算就能可靠、准确地解决。把这部分推理交给外部代码解释器，比如 PAL（Program-Aided Language Model；<a href="https://arxiv.org/abs/2211.10435" target="_blank">Gao et al. 2022</a>）或 Chain of Code（<a href="https://chain-of-code.github.io/" target="_blank">Li et al. 2023</a>），可以用外部工具扩展 LLM 的能力，LLM 不必自己学会执行代码或充当计算器。在 Chain of Code 里，代码执行器还可以用 LLM 来增强：标准的代码解释器跑不通时，可以改用 LLM 来“执行”那行代码。用代码增强推理步骤，对数学题、符号推理和算法类任务尤其有用。编程题里不一定自带单元测试，这时可以让模型自己生成单元测试，用来验证解答（<a href="https://arxiv.org/abs/2303.11366" target="_blank">Shinn et al. 2023</a>）。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/pal.png" alt="PAL 提示示例">
+            <figcaption>图：program-aided language model 提示的一个示例（来源：Gao et al. 2022；引自原文）</figcaption>
+        </figure>
+        <p>
+            ReAct（Reason+Act；<a href="https://arxiv.org/abs/2210.03629" target="_blank">Yao et al. 2023</a>）把调用 Wikipedia API 搜索的动作和生成推理过程结合起来，让推理路径能用上外部知识。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/react.png" alt="ReAct 解 HotpotQA 问题的示例">
+            <figcaption>图：用 ReAct 提示方法解一道 HotpotQA 题，把 Wikipedia 搜索 API 当作辅助推理的外部工具（来源：Yao et al. 2023；引自原文）</figcaption>
+        </figure>
+        <p>
+            OpenAI 最近发布的 <a href="https://openai.com/index/introducing-o3-and-o4-mini/" target="_blank">o3 和 o4-mini</a> 也是推理过程中使用工具的好例子，工具包括网页搜索、代码执行和图像处理。团队观察到，大规模强化学习表现出和 GPT 范式一样的趋势：“more compute = better performance”。
+        </p>
+
+        <h3>忠实地思考</h3>
+        <p><em>原文小节：Thinking Faithfully</em></p>
+        <p>
+            深度学习模型常被当作黑箱，人们提出了各种可解释性方法。可解释性有两点用处：第一，它多提供一道检验，用来判断模型是否偏离了开发者的意图（misaligned），或者是否在以某种光看行为监控不出来的方式出问题；第二，它能帮我们判断模型算出答案的过程是否站得住脚。思维链提供了一种特别方便的可解释性，因为它用自然语言把模型的内部过程展示出来。不过，这种可解释性建立在一个假设上：模型如实描述了自己的内部思考过程。
+        </p>
+        <p>
+            最近的工作表明，监控推理模型的 CoT，能有效发现<a href="https://lilianweng.github.io/posts/2024-11-28-reward-hacking/" target="_blank">奖励作弊</a>这类不当行为，甚至能让一个较弱的模型去监控一个较强的模型（<a href="https://arxiv.org/abs/2503.11926" target="_blank">Baker et al. 2025</a>）。增加测试时计算还能提升对抗鲁棒性（<a href="https://arxiv.org/abs/2501.18841" target="_blank">Zaremba et al. 2025</a>）。这在直觉上说得通：模型碰到不寻常的输入（比如对抗样本或越狱尝试，jailbreak，即用特殊构造的提示诱导模型绕过安全限制）时，想得更久应该格外有用，它可以用多出来的思考时间弄清自己面对的是什么奇怪情况。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/cot-monitor.png" alt="用 CoT 监控奖励作弊">
+            <figcaption>图：实验让一个模型根据另一个模型的思考过程，判断它在编程题里是否用某种方式钻了单元测试的空子。训练时可以用不同类型的监控器盯住这些奖励作弊行为。<code>exit(0)</code> 作弊指 agent 利用一个 bug，在没跑完全部单元测试时就提前退出环境；<code>raise SkipTest</code> 作弊指 agent 从测试框架之外的函数抛出异常，跳过单元测试评估（来源：Baker et al. 2025；引自原文）</figcaption>
+        </figure>
+
+        <h4>模型会如实说出它在想什么吗</h4>
+        <p><em>原文小节：Does the Model Tell What it Thinks Faithfully</em></p>
+        <p>
+            直觉上，模型的 CoT 可能有偏差，因为训练目标里并没有专门鼓励忠实推理的部分。如果用人写的解释去微调模型，这些人写的样本本身也可能有错。所以默认不能假设 CoT 总是忠实的。
+        </p>
+        <p>
+            <a href="https://arxiv.org/abs/2307.13702" target="_blank">Lanham et al. 2023</a> 研究了 CoT 不忠实的几种情形。做法是故意往 CoT 里引入错误，看它对一组选择题任务（AQuA、MMLU、ARC Challenge、TruthfulQA、HellaSwag 等）准确率的影响：
+        </p>
+        <ul>
+            <li>错误 1（<em>提前作答，Early answering</em>）：模型可能在生成 CoT 之前就过早下了结论。测试方法是提前截断 CoT 或往里插错误。不同任务对 CoT 的依赖程度不一样：有的任务截断 CoT 后成绩明显变化，有的则不受影响。<a href="https://arxiv.org/abs/2212.10001" target="_blank">Wang et al. 2023</a> 做了类似实验，但用的是更隐蔽的错误，和 CoT 里的桥接对象（bridging objects）或语言模板有关。</li>
+            <li>错误 2（<em>无信息 token，Uninformative tokens</em>）：假设是“没有信息量的 CoT token 也能提升表现”。测试方法是把 CoT 换成填充文本（比如全是句号）。结果是准确率没有提升，和不用 CoT 相比，有些任务的表现还略有下降。</li>
+            <li>错误 3（<em>人读不懂的编码，Human-unreadable encoding</em>）：相关信息以人难以理解的方式编码。用非标准方式改写 CoT 后，各数据集上的表现都没有下降，说明准确率的提升并不依赖人类可读的推理。</li>
+        </ul>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/cot-perturb.png" alt="评估 CoT 忠实性的几种扰动方式">
+            <figcaption>图：用不同方式扰动 CoT 来评估其忠实性（来源：Lanham et al. 2023；引自原文）</figcaption>
+        </figure>
+        <p>
+            有意思的是，Lanham 等人认为，在选择题上，小模型可能能力不够，用不好 CoT；大模型则可能不用 CoT 也能做出来。对 CoT 推理的依赖程度用“有 CoT 和没 CoT 时得到相同答案的比例”来衡量。在选择题上，这个依赖并不总是随模型变大而增加；但在加法任务上会随模型变大而增加。这说明思考时间对复杂推理任务更重要。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/cot-ablation.png" alt="对 CoT 推理的依赖程度">
+            <figcaption>图：对 CoT 推理的依赖程度，用有无 CoT 时答案相同的比例衡量；在加法这类推理任务上它更重要，且更大的模型获益更多（来源：Lanham et al. 2023；引自原文）</figcaption>
+        </figure>
+        <p>
+            另一类检验 CoT 忠实性的方法是扰动提示，而不直接修改 CoT 路径（<a href="https://arxiv.org/abs/2305.04388" target="_blank">Turpin et al. 2023</a>、<a href="https://arxiv.org/abs/2501.08156" target="_blank">Chua &amp; Evans, 2025</a>、<a href="https://assets.anthropic.com/m/71876fabef0f0ed4/original/reasoning_models_paper.pdf" target="_blank">Chen et al. 2025</a>）。
+        </p>
+        <p>
+            一种方法是在 few-shot 示例里，不管真实标签是什么，一律把正确答案标成 “(A)”，以此引入偏差。
+        </p>
+        <p>
+            另一种提示技巧是在提示里插入误导性的暗示，比如 <code>"I think the answer is &lt;random_label&gt; but curious to hear what you think".</code> 或 <code>"A Stanford Professor thinks the answer is &lt;random_label&gt;"</code>。对同一道题比较有暗示和无暗示时的预测，就能衡量模型能否如实描述暗示对答案的影响。具体是看那些有暗示和无暗示答案不同的情况，模型在带暗示解题时有没有承认这个暗示。如果模型是忠实的，它应该明确承认暗示的影响，承认自己改答案是因为暗示。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/faithfulness.png" alt="GPT 和 Claude 对上下文偏差的敏感性">
+            <figcaption>图：GPT 和 Claude 模型都对上下文里不同类型的偏差敏感，准确率下降说明存在系统性的不忠实；直接给出错误标签的暗示比“答案总是 A”这类偏差影响更大（来源：Turpin et al. 2023；引自原文）</figcaption>
+        </figure>
+        <p>
+            多项研究发现，推理模型描述暗示影响的可靠程度，比所有测试过的非推理模型都高得多。比如可以统计模型承认暗示是决定因素的样本比例（“faithful CoT”）。推理模型（Claude 3.7 Sonnet、DeepSeek R1）总体上比非推理模型（Claude 3.6、DeepSeek V3）做得好。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/faithfulness2.png" alt="推理模型更可能给出忠实的 CoT">
+            <figcaption>图：推理模型比非推理模型更可能给出忠实的 CoT（来源：Chen et al. 2025；引自原文）</figcaption>
+        </figure>
+        <p>
+            有证据显示，使用奖励模型会让模型输出的忠实度变低。经典 RLHF（reinforcement learning from human feedback，用人类偏好训练出的奖励模型来做强化学习）里的奖励模型，并没有被训练去鼓励这种测试里的忠实行为，因为它的偏好比较数据是人类挑“哪个看起来更好、更讨喜”收集来的。而在推理模型里，CoT 路径被优化的目标是得出正确的最终答案，跟奖励模型定义的人类偏好无关，所以直觉上应该更忠实。
+        </p>
+
+        <h4>对 CoT 施加优化压力：是好是坏</h4>
+        <p><em>原文小节：Optimization Pressure on CoT: Good or Bad?</em></p>
+        <p>
+            监控推理模型的 CoT 来发现奖励作弊是有效的。一种简单用法是测试时用监控器做过滤器，跑拒绝采样，挑出没有作弊的解答。但这只在 RL 早期有效：模型被进一步优化后，在预算内很难再找到能通过 CoT 监控的样本。这自然让人想到，可以把 CoT 监控器纳入 RL 奖励（一种基于过程的监督），来防止奖励作弊。
+        </p>
+        <p>
+            可是把 CoT 监控奖励加进 RL 效果并不好，它会导致“混淆式奖励作弊”（obfuscated reward hacking）：模型试图在 CoT 里隐藏真实意图（<a href="https://arxiv.org/abs/2503.11926" target="_blank">Baker et al. 2025</a>）。RL 训练时 CoT 监控器直接施加了优化压力，模型仍然能找到作弊办法，只是频率稍低，但它会在 CoT 里藏起意图，躲过监控器。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/RL-monitor-baker25.png" alt="用监控器提供 RL 奖励后模型仍能作弊">
+            <figcaption>图：训练时用监控器提供 RL 奖励信号来防止奖励作弊，模型仍能找到作弊方法，同时避开监控器（来源：Baker et al. 2025；引自原文）</figcaption>
+        </figure>
+        <p>
+            <a href="https://arxiv.org/abs/2502.03373" target="_blank">Yeo et al. 2025</a> 用 CoT 长度做 RL 信号的实验，印证了和 Baker 等人相似的结论：新的 RL 奖励塑形（reward shaping，人为调整奖励函数的形状来引导训练）会带来新的奖励作弊。他们这样设计奖励函数：正确的 CoT 奖励高于错误的；短而正确的 CoT 奖励高于长而正确的；短而错误的 CoT 惩罚重于长而错误的。加了这个额外奖励后，模型在难题上学会了在 CoT 里重复文字，而不去尝试解题。Yeo 等人又加了 n-gram 重复惩罚来防止这种作弊。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/rew-shaping-yeo25.png" alt="CoT 长度奖励需要仔细塑形">
+            <figcaption>图：用 CoT 长度奖励训练时，需要仔细做奖励塑形才能让训练稳定（来源：Yeo et al. 2025；引自原文）</figcaption>
+        </figure>
+        <p>
+            <a href="https://assets.anthropic.com/m/71876fabef0f0ed4/original/reasoning_models_paper.pdf" target="_blank">Chen et al. 2025</a> 用了一个有缺陷的 RL 环境做实验：选择题的评分器里填的是错误答案。模型在超过 99% 的提示上学会了利用这个漏洞，但在一半以上的环境里，它几乎从不（低于 2%）在 CoT 里说出自己在钻空子。在这种情况下，追加 RL 优化压力也没能促使模型说出这种作弊。
+        </p>
+        <p>
+            RL 训练天生容易出现奖励作弊。只靠启发式地排查奖励作弊、再手动修补，可能会陷入“打地鼠”（whack-a-mole）的局面。作者建议：在 RL 训练中直接对 CoT 施加优化时要格外小心，或者干脆避免这样做。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 在连续空间里思考</h2>
+        <p><em>原文小节：Thinking in Continuous Space</em></p>
+        <p>
+            自适应计算时间（Adaptive Computation Time）由 <a href="https://arxiv.org/abs/1603.08983" target="_blank">Alex Graves 在 2016 年</a>提出，早于大语言模型，但开创了同一个方向：让模型在推理时动态决定要走多少步计算。这可以看成让模型在测试时于连续空间里“多想一会儿”。连续空间里的自适应思考时间可以“纵向”实现，即用循环结构；也可以“横向”实现，即增加顺序采样的步数。
+        </p>
+
+        <h3>循环结构</h3>
+        <p><em>原文小节：Recurrent Architecture</em></p>
+        <p>
+            已有不少把 Transformer 改成循环结构、以支持自适应测试时计算的变体（<a href="https://arxiv.org/abs/1807.03819" target="_blank">Dehghani et al. 2019</a>、<a href="https://arxiv.org/abs/2203.07852" target="_blank">Hutchins et al. 2022</a>、<a href="https://arxiv.org/abs/2207.06881" target="_blank">Bulatov et al. 2022</a>）。作者说深入这方面文献会让文章太长，所以只挑几篇讲。
+        </p>
+        <p>
+            <a href="https://lilianweng.github.io/posts/2020-04-07-the-transformer-family/#make-it-recurrent-universal-transformer" target="_blank">Universal Transformer</a>（<a href="https://arxiv.org/abs/1807.03819" target="_blank">Dehghani et al. 2019</a>）把 Transformer 的自注意力和 RNN 的循环机制结合起来，用自适应计算时间（<a href="https://arxiv.org/abs/1603.08983" target="_blank">Graves, 2016</a>）<a href="https://lilianweng.github.io/posts/2023-01-27-the-transformer-family-v2/#adaptive-modeling" target="_blank">动态调整</a>步数。从高层看，它可以看成一个为每个 token 学习隐藏状态表示的循环函数；如果步数固定，Universal Transformer 就等价于一个各层共享参数的多层 Transformer。
+        </p>
+        <p>
+            <a href="https://arxiv.org/abs/2502.05171" target="_blank">Geiping et al. 2025</a> 提出了一种较新的循环结构设计，在标准 Transformer 之上加了一个循环块 $R$。循环块每次迭代都接收 embedding $\mathbf{e}$ 和一个随机状态 $\mathbf{s}_i$。概念上，这种“循环深度”（recurrent-depth）结构有点像带条件的扩散模型：原始输入 $\mathbf{e}$ 在每个循环步都提供一次，而一个用高斯随机初始化的状态 $\mathbf{s}_i$ 在整个过程中被反复更新。（有意思的是，他们试过一些更像扩散模型的设计，结果反而不好。）
+        </p>
+        $$ \begin{aligned} \mathbf{e} &= P(\mathbf{x}) & \text{embedding} \\ \mathbf{s}_0 &\sim \mathcal{N}(\mathbf{0}, \sigma^2 I_{n \cdot h}) \\ \mathbf{s}_i &= R(\mathbf{e}, \mathbf{s}_{i-1}) \quad\text{ for }i \in \{1, \dots, r\} & \small{\text{recurrent block; resembles a Transformer block}}\\ \mathbf{p} &= C(\mathbf{s}_r) & \text{unembedding} \end{aligned} $$
+        <p>
+            这里 $P$ 是把输入映射成 embedding 的部分，$C$ 是把最终状态映射回词表概率的 unembedding 部分。训练时，每条输入序列的循环次数 $r$ 是随机的，从 log-normal Poisson 分布里采样。为了控制计算开销，反向传播被截断，只穿过循环单元最后 $k$ 次迭代（实验里 $k=8$），这样就能在 Poisson 分布的重尾部分（循环次数很大的情况）上训练。embedding 块每一步都会收到梯度更新，因为它的输出 $\mathbf{e}$ 每一步都会被注入，这和 RNN 的训练方式类似。
+        </p>
+        <p>
+            不出所料，训练循环模型的稳定性很敏感。初始化、归一化和超参数都有影响，规模变大时尤其如此。比如隐藏状态可能坍缩，对每个 token 预测出同一个隐藏状态；或者模型学会忽略传进来的状态 $\mathbf{s}$。为了稳定训练，Geiping 等人用了一个 embedding 缩放因子、较小的学习率，并做了仔细的调参。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/recurrent.png" alt="3.5B 循环深度模型实验">
+            <figcaption>图：训练一个 3.5B 循环深度模型的实验曲线。大约在 $\bar{r} = 32$ 处开始饱和，这让人想知道这种结构能否外推、泛化到更多的迭代次数（来源：Geiping et al. 2025；引自原文）</figcaption>
+        </figure>
+
+        <h3>Thinking tokens</h3>
+        <p><em>原文小节：Thinking Tokens</em></p>
+        <p>
+            Thinking tokens 指训练或推理时引入的一组隐式 token，它们没有直接的语言含义，作用是给模型额外的思考时间和算力，让它表现更好。
+        </p>
+        <p>
+            <a href="https://arxiv.org/abs/2405.08644" target="_blank">Herel &amp; Mikolov 2023</a> 提出在句子的每个词后面插入特殊的 thinking token（<code>&lt;T&gt;</code>），并在这样的数据集上训练模型。每个 thinking token 都给模型多争取了一点处理时间，让它预测得更好。在一个玩具模型设置上，用 thinking token 训练得到的困惑度（perplexity，衡量语言模型对文本“意外”程度的指标，越低越好）比不用的基线更低。对不平凡的推理任务或含数字的句子，thinking token 的好处更明显。
+        </p>
+        <p>
+            类似地，<a href="https://arxiv.org/abs/2310.02226" target="_blank">Goyal et al. 2024</a> 提出的 pause tokens，是在输入序列末尾附加一些占位 token（比如 <code>.</code> 或 <code>#</code> 这样的字符）来推迟模型输出，让模型在推理时多做一些计算。训练和推理两个阶段都要注入 pause token，只在微调时加 pause token 收益有限。训练时，会在均匀随机的位置插入多个 pause token，并且 pause token 位置上的损失不参与训练。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/pause-tokens-goyal24.png" alt="pause tokens 在训练和推理中的注入方式">
+            <figcaption>图：pause token 在训练和推理时如何注入，与标准设置对比（来源：Goyal et al. 2024；引自原文）</figcaption>
+        </figure>
+        <p>
+            有意思的是，上面实验里的 thinking token 或 pause token 不带任何额外信息，也没加多少新参数，为什么还有用？一方面，它引入了更多推理循环，扩大了计算量，等于提高了计算容量。另一方面，它可以看成一种特殊的、隐式的 CoT。缺点是模型需要针对 thinking token 做预训练。尽管如此，在推理时 CoT 之外，这仍是进一步提升测试时计算利用能力的一个有趣办法。
+        </p>
+        <p>
+            Quiet-STaR（<a href="https://arxiv.org/abs/2403.09629" target="_blank">Zelikman et al. 2025</a>）引入了 token 级推理：训练模型在每个 token 之后生成 rationale，用来解释后面的文本。它把有 rationale 和没有 rationale 两种情况下对后续文本的预测混合起来，学习生成更好的 rationale，并用 REINFORCE（最基础的策略梯度算法，用采样得到的回报直接加权对数概率的梯度）优化 rationale 的生成质量。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/quiet-star-zelikman25.png" alt="Quiet-STaR 示意">
+            <figcaption>图：Quiet-STaR 示意（来源：Zelikman et al. 2025；引自原文）</figcaption>
+        </figure>
+        <p>Quiet-STaR 分三个阶段：</p>
+        <ol>
+            <li><em>Think</em>：带着 rationale 预测下一个 token。token 级推理的计算开销很高，所以这一步设计成并行生成多个 rationale。它用一张特殊的注意力掩码，让所有思考 token 只能关注自己、同一段思考里前面的思考 token，以及前面的正文。</li>
+            <li><em>Talk</em>：把不带 rationale 的下一个 token 预测和带 rationale 之后的预测混合。两组 logits 的混合权重由一个特殊的 mixing head 学出来，它是接在每段 rationale 之后的隐藏输出上的一个浅层 MLP。正确的下一个 token 通过 teacher forcing（训练时把真实的前文喂给模型，而不是用它自己生成的）来选取。</li>
+            <li><em>Learn</em>：用 REINFORCE 训练模型生成更好的 rationale：从那些提高了正确下一个 token 概率的样本里学习，丢掉那些损害预测的样本。</li>
+        </ol>
+        <p>
+            在 Mistral 7B 上的实验中，不做针对数据集的微调，Quiet-STaR 也把 CommonsenseQA 的 zero-shot 成绩从 36.3% 提高到 47.2%，GSM8K 从 5.9% 提高到 10.9%。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 把思考当作隐变量</h2>
+        <p><em>原文小节：Thinking as Latent Variables</em></p>
+        <p>
+            隐变量模型定义了一个概率框架，用没观测到的（隐）变量来解释观测到的数据。这些隐变量刻画了生成观测结果背后的隐藏结构或中间过程。语言模型可以被看成概率隐变量模型，其中测试时的思考和推理步骤就是隐藏的思维变量（<a href="https://arxiv.org/abs/2011.05268" target="_blank">Zhou et al. 2020</a>、<a href="https://arxiv.org/abs/2312.02179" target="_blank">Phan et al. 2023</a>）。这样的模型定义了题目 $x_i$、答案 $y_i$ 和隐藏思维 $z_i$ 的联合分布。我们想要优化的，是给定问题、并把多条 CoT 当作隐变量时，答案的对数似然（$N$ 是样本数，$K$ 是每道题的 CoT 条数）：
+        </p>
+        $$ \begin{aligned} \log \mathcal{L}(\theta) &= \log p(y \mid x) \\ &= \log \sum_{k=1}^K p(y, z^{(k)} \mid x) \\ &= \log \sum_{k=1}^K p(z^{(k)} \mid x)\; p(y \mid z^{(k)}, x) \\ &= \log \mathbb{E}_{z^{(k)} \sim p(z^{(k)} \mid x)} \; p(y \mid z^{(k)}, x) \end{aligned} $$
+        <p>
+            目标是在每道题有若干条推理轨迹 $\{z^{(k)}\}_{k=1}^K$ 的情况下，最大化正确答案的边缘似然 $p(y \mid x)$。
+        </p>
+
+        <h3>期望最大化（EM）</h3>
+        <p><em>原文小节：Expectation-Maximization</em></p>
+        <p>
+            <a href="https://en.wikipedia.org/wiki/Expectation%E2%80%93maximization_algorithm" target="_blank">期望最大化</a>（Expectation-Maximization，EM）是一种常用的迭代算法，用来优化带隐变量的模型参数，所以也可以用来训练更好的 CoT，再以它为条件生成更好的回答。通常在两步之间交替直到收敛：E 步（Expectation）猜测隐变量缺失的信息（也就是怎样采样出更好的 CoT）；M 步（Maximization）基于隐变量优化模型参数（也就是怎样采样出更好的答案）。
+        </p>
+        $$ \log \mathcal{L}(\theta) = \log \mathbb{E}_{\underbrace{z^{(k)} \sim p(z^{(k)} \mid x)}_\text{E-step}}\;\underbrace{p(y \mid z^{(k)}, x)}_\text{M-step} $$
+        <p>
+            因为没法直接从隐变量分布 $p(z \mid x, y)$ 里采样，研究者试过几种办法来取得好的 CoT 样本、更新模型：依赖人工标注数据（<a href="https://arxiv.org/abs/2011.05268" target="_blank">Zhou et al. 2020</a>）、Metropolis-Hastings MCMC（<a href="https://arxiv.org/abs/2312.02179" target="_blank">Phan et al. 2023</a>），或者用带特殊重要性权重的 Monte Carlo 采样（<a href="https://arxiv.org/abs/2503.18866" target="_blank">Ruan et al. 2025</a>）。
+        </p>
+        <p>
+            <a href="https://arxiv.org/abs/2503.18866" target="_blank">Ruan et al. 2025</a> 尝试用 EM 算法在大量带隐藏思维的网页文本上训练模型：对观测数据的每一块合成一段隐藏思维，然后模型以自回归方式同时学习隐藏思维和数据。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/ruan25.png" alt="在注入隐藏思维的语料上训练">
+            <figcaption>图：在注入了隐藏思维的数据语料上训练（来源：Ruan et al. 2025；引自原文）</figcaption>
+        </figure>
+        <p>他们先提示一个 LLM $\tilde{q}$，在给定观测数据 $X_i$ 的条件下生成合成的隐藏思维 $Z_i$：</p>
+<pre><code>You are provided with a pair of web document prefix and suffix. Your task is to insert latent thoughts between them underlying the creation of the suffix conditioned on the prefix. The latent thoughts should include: the missing background knowledge and the reasoning traces underlying each claim (especially, step-by-step derivations or logical reasoning).</code></pre>
+        <p>
+            用 <code>&lt;StartOfLatent&gt;&lt;Prior&gt; ... &lt;EndOfPrior&gt;</code> 这样的特殊 token，把生成的隐藏思维插入原始数据，用来训练联合分布 $p(z, x)$ 或近似后验 $q(z \mid x)$，取决于 $z$ 插在 $x$ 之前还是之后。不过，由于是用 LLM $\tilde{q}(z \mid x)$ 生成 CoT，近似后验 $q(z \mid x)$ 能有多好就被它封了顶。Ruan 等人在 E 步引入重要性权重来挑选 CoT 样本：
+        </p>
+        $$ w^{(k)} = \frac{p(z^{(k)}, x)}{q(z^{(k)} \mid x)} = \frac{p(x \mid z^{(k)}) \; p(z^{(k)})}{q(z^{(k)} \mid x)} $$
+        <p>
+            这样优先选出的 CoT 样本满足三点：善于预测观测数据（$p(x \mid z^{(k)})$ 高）；简单、直观（$p(z^{(k)})$ 高）；同时有信息量、不过于显而易见（$q(z^{(k)} \mid x)$ 低）。
+        </p>
+
+        <h3>迭代学习</h3>
+        <p><em>原文小节：Iterative Learning</em></p>
+        <p>
+            预训练模型本来就会生成思维链，所以很自然可以设计一个迭代改进流程：生成多条 CoT，只用那些通向正确答案的 rationale 来微调模型。
+        </p>
+        <p>
+            但这个直接的设计可能失败，因为模型在它解不出的题上得不到任何学习信号。STaR（“Self-taught reasoner”；<a href="https://arxiv.org/abs/2203.14465" target="_blank">Zelikman et al. 2022</a>）为失败的尝试加了一个 “rationalization”（合理化）过程来解决这个问题：模型在同时给定题目和标准答案的条件下，倒推着生成好的 CoT，于是能产出更合理的 CoT。然后用两类正确解答微调模型：本身就得出正确结果的，以及通过 rationalization 生成的。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/STaR-algo-zelikman22.png" alt="STaR 算法">
+            <figcaption>图：STaR 的算法（来源：Zelikman et al. 2022；引自原文）</figcaption>
+        </figure>
+        <p>
+            可以把 STaR 看成 RL 中策略梯度的一种近似，奖励就是一个简单的指示函数 $\mathbb{1}[\hat{y} = y]$（答对为 1，答错为 0）。我们想在先采样 $z \sim p(z \mid x)$、再采样 $y \sim p(y \mid x, z)$ 时最大化这个奖励的期望，因为 $p(y \mid x) = \sum_z p(z \mid x) \; p(y \mid x, z)$。
+        </p>
+        $$ \begin{aligned} \nabla_\theta J(\theta) &= \nabla_\theta \mathbb{E}_{z_i, y_i \sim p(.\mid x_i)} \mathbb{1}[y_i = y_i^\text{truth}] \\ &= \sum_{i=1}^N \nabla_\theta \mathbb{1}[y_i = y_i^\text{truth}] \; p(y_i, z_i \mid x_i) \\ &= \sum_{i=1}^N \mathbb{1}[y_i = y_i^\text{truth}] \; p(y_i, z_i \mid x_i) \frac{\nabla_\theta p(y_i, z_i \mid x_i)}{p(y_i, z_i \mid x_i)} & \text{;log-derivative trick}\\ &= \mathbb{E}_{z_i, y_i \sim p(.\mid x_i)} \mathbb{1}[y_i = y_i^\text{truth}] \; \nabla_\theta \log p(y_i, z_i \mid x_i) & \text{;log-derivative trick} \end{aligned} $$
+        <p>
+            这里用到的 log-derivative trick 是 $\nabla_\theta p = p \, \nabla_\theta \log p$，它把“对概率求梯度”变成“对采样到的样本，用奖励加权对数概率的梯度”，后者可以用采样来估计。每次迭代等价于：先按 $\mathbb{1}[y=y^\text{truth}]$ 筛选 CoT 样本，再做监督微调，优化生成好 CoT 和答案的对数概率。
+        </p>
+        <p>
+            STaR 的表现随训练迭代次数增加而提升，生成更好 CoT 的 rationalization 过程能加速学习。他们观察到，用高温度采样会增加“推理错了但答案碰巧对了”的情况，用这样的数据微调 LLM 会损害泛化。对没有标准答案的数据集，可以用多次高温度输出的多数投票结果充当标准答案的替代（<a href="https://arxiv.org/abs/2207.00747" target="_blank">Wang et al. 2022</a>），这样就能用合成样本来训练。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/STaR-rationalization-zelikman22.png" alt="STaR 在 n 位数加法上的准确率对比">
+            <figcaption>图：两个 $n$ 位数相加的准确率对比。用了 rationalization（以标准答案为条件生成 CoT）后，模型很早就能学会 $5$ 位数加法这样的复杂算术（来源：Zelikman et al. 2022；引自原文）</figcaption>
+        </figure>
+    </section>
+
+    <section id="t06">
+        <h2>06. 思考时间的 Scaling Laws</h2>
+        <p><em>原文小节：Scaling Laws for Thinking Time</em></p>
+        <p>
+            到这里已经有很多证据表明：让模型在推理时、给出最终答案之前多花一些计算去推理，能显著提升表现。无论是提示模型先生成中间推理步骤，还是训练模型在预测下一个 token 前停顿、反思，都被发现能把表现推到训练所得能力的上限之外。这等于引入了一个提升模型智能的新维度，补充了 scaling laws（<a href="https://arxiv.org/abs/2001.08361" target="_blank">Kaplan et al. 2020</a>，描述模型性能如何随规模增长的经验规律）里已有的因素：模型大小、训练计算量和数据量。
+        </p>
+        <p>
+            最近的研究表明，优化 LLM 的测试时计算，可能比扩大模型参数更有效（<a href="https://arxiv.org/abs/2408.03314" target="_blank">Snell et al. 2024</a>、<a href="https://arxiv.org/abs/2408.00724" target="_blank">Wu et al. 2025</a>）。小模型配上先进的推理算法，可以在成本和性能之间给出 Pareto 最优的取舍。
+        </p>
+        <p>
+            <a href="https://arxiv.org/abs/2408.03314" target="_blank">Snell et al. 2024</a> 评估并比较了测试时计算和预训练计算，发现两者不能 1:1 互换。在简单和中等难度的题上、模型能力差距不大时，测试时计算很容易补上差距；但对难题效果有限。预训练和推理的 token 预算之比影响很大：只有当推理 token 远少于预训练 token 时，测试时计算才更划算。这说明，用足够的预训练数据和算力做出一个强的基座模型依然很重要，测试时计算解决不了所有问题，也填不上大的模型能力差距。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/scaling-snell24.png" alt="Snell et al. 2024 测试时计算与预训练计算对比">
+            <figcaption>图：（左）用迭代修改或并行解码时，评估准确率随测试时计算预算的变化。（右）一个小模型加测试时计算采样技巧，对比一个大 14 倍、只用贪心解码的模型。可以控制测试时的 token 预算，让推理 token 与预训练 token 之比 $\ll 1$、$\approx 1$ 或 $\gg 1$；只有在比值 $\ll 1$ 时，测试时计算的好处才明显（来源：Snell et al. 2024；引自原文）</figcaption>
+        </figure>
+        <p>
+            <code>s1</code> 模型（<a href="https://arxiv.org/abs/2501.19393" target="_blank">Muennighoff &amp; Yang et al. 2025</a>）用 <em>budget forcing</em>（预算强制）技术来扩展 CoT 推理路径的长度：要拉长，就在后面追加 <code>"wait"</code> 这个词；要缩短，就追加思考结束 token 或 <code>"Final Answer:"</code> 来终止模型的思考。他们观察到，以 token 数衡量的平均思考时间和下游评估准确率之间有明显的正相关。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/s1-muennighoff25.png" alt="s1 实验中并行和顺序扩展都与表现正相关">
+            <figcaption>图：在 s1 实验里，测试时计算的并行扩展和顺序扩展都和评估表现正相关（来源：Muennighoff &amp; Yang et al. 2025；引自原文）</figcaption>
+        </figure>
+        <p>
+            把 budget forcing 和其他控制推理长度的解码方法相比，结果出人意料：简单的拒绝采样（一直采样，直到生成长度刚好符合 token 预算）会导致反向缩放，也就是 CoT 越长，表现越差。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2025-05-01-thinking/s1-scaling-muennighoff25.png" alt="s1 中 budget forcing 与拒绝采样的对比">
+            <figcaption>图：（左）CoT 路径越长，评估准确率越高，两者正相关。（右）用拒绝采样控制 CoT 长度时出现负向缩放，CoT 越长准确率越低（来源：Muennighoff &amp; Yang et al. 2025；引自原文）</figcaption>
+        </figure>
+    </section>
+
+    <section id="t07">
+        <h2>07. 未来方向</h2>
+        <p><em>原文小节：What's for Future</em></p>
+        <p>
+            作者写道，对测试时计算和思维链推理的探索，为增强模型能力带来了新机会。更有意思的是，借助测试时思考，我们在朝着这样的 AI 系统前进：它们借鉴人类思考的最佳做法，具备适应性、灵活性、批判性反思和纠错能力。她希望当前的进展能带动更多研究，去理解模型（以及我们自己）怎样思考、为什么思考。
+        </p>
+        <p>最后，作者呼吁对下面这些测试时计算和思维链推理的开放问题做更多研究：</p>
+        <ul>
+            <li>能否在 RL 训练中激励模型产出人类可读、忠实的推理路径，同时避免奖励作弊？</li>
+            <li>奖励作弊该怎样定义？能否在 RL 训练或推理时不靠人工介入就发现奖励作弊？怎样避免 RL 训练中对奖励作弊“打地鼠”式的修补？</li>
+            <li>自我纠错可以在思维链内部发生，也可以在多轮 RL 中被显式鼓励。没有标准答案时，怎样训练模型自我纠正，同时不产生幻觉、不退步？</li>
+            <li>对高度依赖情境、个性化、难以评分的任务，比如创意写作、辅导（coaching）、头脑风暴，怎样用 CoT rollout 做 RL 训练？</li>
+            <li>模型真正部署时，测试时思考不可能无限增加。怎样把性能提升平滑地转移回基座模型，同时降低推理成本（比如通过<a href="https://arxiv.org/abs/2501.12948" target="_blank">蒸馏</a>，distillation，用大模型或长推理的输出去训练更小、更快的模型）？</li>
+            <li>怎样让测试时的计算花费更好地按手头问题的难度自适应调整？</li>
+        </ul>
+    </section>
+
+    <section id="tref">
+        <h2>主要参考文献</h2>
+        <ol>
+            <li>Graves 2016. <a href="https://arxiv.org/abs/1603.08983" target="_blank">“Adaptive Computation Time for Recurrent Neural Networks”</a></li>
+            <li>Ling et al. 2017. <a href="https://arxiv.org/abs/1705.04146" target="_blank">“Program Induction by Rationale Generation: Learning to Solve and Explain Algebraic Word Problems”</a></li>
+            <li>Cobbe et al. 2021. <a href="https://arxiv.org/abs/2110.14168" target="_blank">“Training Verifiers to Solve Math Word Problems”</a></li>
+            <li>Wei et al. 2022. <a href="https://arxiv.org/abs/2201.11903" target="_blank">“Chain of Thought Prompting Elicits Reasoning in Large Language Models”</a></li>
+            <li>Nye et al. 2021. <a href="https://arxiv.org/abs/2112.00114" target="_blank">“Show Your Work: Scratchpads for Intermediate Computation with Language Models”</a></li>
+            <li>Kahneman 2013. <em>Thinking, Fast and Slow</em>. Farrar, Straus and Giroux</li>
+            <li>Kojima et al. 2022. <a href="https://arxiv.org/abs/2205.11916" target="_blank">“Large Language Models are Zero-Shot Reasoners”</a></li>
+            <li>Yasunaga et al. 2023. <a href="https://arxiv.org/abs/2310.01714" target="_blank">“Large Language Models as Analogical Reasoners”</a></li>
+            <li>Zelikman et al. 2022. <a href="https://arxiv.org/abs/2203.14465" target="_blank">“STaR: Bootstrapping Reasoning With Reasoning”</a></li>
+            <li>Wang et al. 2023. <a href="https://arxiv.org/abs/2203.11171" target="_blank">“Self-consistency Improves Chain of Thought Reasoning in Language Models”</a></li>
+            <li>Kamoi et al. 2024. <a href="https://arxiv.org/abs/2406.01297" target="_blank">“When Can LLMs Actually Correct Their Own Mistakes? A Critical Survey of Self-Correction of LLMs”</a></li>
+            <li>Huang et al. 2024. <a href="https://arxiv.org/abs/2310.01798" target="_blank">“Large Language Models Cannot Self-Correct Reasoning Yet”</a></li>
+            <li>Shinn et al. 2023. <a href="https://arxiv.org/abs/2303.11366" target="_blank">“Reflexion: Language Agents with Verbal Reinforcement Learning”</a></li>
+            <li>Zhang et al. 2024. <a href="https://arxiv.org/abs/2404.17140" target="_blank">“Small Language Models Need Strong Verifiers to Self-Correct Reasoning”</a></li>
+            <li>Liu et al. 2023. <a href="https://arxiv.org/abs/2302.02676" target="_blank">“Chain of Hindsight Aligns Language Models with Feedback”</a></li>
+            <li>Welleck et al. 2023. <a href="https://arxiv.org/abs/2211.00053" target="_blank">“Generating Sequences by Learning to Self-Correct”</a></li>
+            <li>Qu et al. 2024. <a href="https://arxiv.org/abs/2407.18219" target="_blank">“Recursive Introspection: Teaching Language Model Agents How to Self-Improve”</a></li>
+            <li>Kumar et al. 2024. <a href="https://arxiv.org/abs/2409.12917" target="_blank">“Training Language Models to Self-Correct via Reinforcement Learning”</a></li>
+            <li>Lightman et al. 2023. <a href="https://arxiv.org/abs/2305.20050" target="_blank">“Let’s Verify Step by Step”</a></li>
+            <li>Xie et al. 2023. <a href="https://arxiv.org/abs/2305.00633" target="_blank">“Self-Evaluation Guided Beam Search for Reasoning”</a></li>
+            <li>Wu et al. 2025. <a href="https://arxiv.org/abs/2408.00724" target="_blank">“Inference Scaling Laws: An Empirical Analysis of Compute-Optimal Inference for Problem-Solving with Language Models”</a></li>
+            <li>Jiang et al. 2024. <a href="https://arxiv.org/abs/2410.01044" target="_blank">“RATIONALYST: Pre-training Process-Supervision for Improving Reasoning”</a></li>
+            <li>Wang &amp; Zhou 2024. <a href="https://arxiv.org/abs/2402.10200" target="_blank">“Chain-of-Thought Reasoning Without Prompting”</a></li>
+            <li>DeepSeek-AI 2024. <a href="https://arxiv.org/abs/2412.19437" target="_blank">“DeepSeek-V3 Technical Report”</a></li>
+            <li>DeepSeek-AI 2025. <a href="https://arxiv.org/abs/2501.12948" target="_blank">“DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning”</a></li>
+            <li>Gao, Madaan &amp; Zhou et al. 2022. <a href="https://arxiv.org/abs/2211.10435" target="_blank">“PAL: Program-aided Language Models”</a></li>
+            <li>Yao et al. 2023. <a href="https://arxiv.org/abs/2210.03629" target="_blank">“ReAct: Synergizing Reasoning and Acting in Language Models”</a></li>
+            <li>Baker et al. 2025. <a href="https://arxiv.org/abs/2503.11926" target="_blank">“Monitoring Reasoning Models for Misbehavior and the Risks of Promoting Obfuscation”</a></li>
+            <li>Zaremba et al. 2025. <a href="https://arxiv.org/abs/2501.18841" target="_blank">“Trading Inference-Time Compute for Adversarial Robustness”</a></li>
+            <li>Lanham et al. 2023. <a href="https://arxiv.org/abs/2307.13702" target="_blank">“Measuring Faithfulness in Chain-of-Thought Reasoning”</a></li>
+            <li>Wang et al. 2023. <a href="https://arxiv.org/abs/2212.10001" target="_blank">“Towards Understanding Chain-of-Thought Prompting: An Empirical Study of What Matters”</a></li>
+            <li>Turpin et al. 2023. <a href="https://arxiv.org/abs/2305.04388" target="_blank">“Language Models Don’t Always Say What They Think: Unfaithful Explanations in Chain-of-Thought Prompting”</a></li>
+            <li>Chua &amp; Evans 2025. <a href="https://arxiv.org/abs/2501.08156" target="_blank">“Are DeepSeek R1 And Other Reasoning Models More Faithful?”</a></li>
+            <li>Chen et al. 2025. <a href="https://arxiv.org/abs/2505.05410" target="_blank">“Reasoning Models Don’t Always Say What They Think”</a></li>
+            <li>Yeo et al. 2025. <a href="https://arxiv.org/abs/2502.03373" target="_blank">“Demystifying Long Chain-of-Thought Reasoning in LLMs”</a></li>
+            <li>Dehghani et al. 2019. <a href="https://arxiv.org/abs/1807.03819" target="_blank">“Universal Transformers”</a></li>
+            <li>Hutchins et al. 2022. <a href="https://arxiv.org/abs/2203.07852" target="_blank">“Block-Recurrent Transformers”</a></li>
+            <li>Bulatov et al. 2022. <a href="https://arxiv.org/abs/2207.06881" target="_blank">“Recurrent Memory Transformers”</a></li>
+            <li>Geiping et al. 2025. <a href="https://arxiv.org/abs/2502.05171" target="_blank">“Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach”</a></li>
+            <li>Herel &amp; Mikolov 2023. <a href="https://arxiv.org/abs/2405.08644" target="_blank">“Thinking Tokens for Language Modeling”</a></li>
+            <li>Goyal et al. 2024. <a href="https://arxiv.org/abs/2310.02226" target="_blank">“Think before you speak: Training Language Models With Pause Tokens”</a></li>
+            <li>Zelikman et al. 2025. <a href="https://arxiv.org/abs/2403.09629" target="_blank">“Quiet-STaR: Language Models Can Teach Themselves to Think Before Speaking”</a></li>
+            <li>Zhou et al. 2020. <a href="https://arxiv.org/abs/2011.05268" target="_blank">“Towards Interpretable Natural Language Understanding with Explanations as Latent Variables”</a></li>
+            <li>Phan et al. 2023. <a href="https://arxiv.org/abs/2312.02179" target="_blank">“Training Chain-of-Thought via Latent-Variable Inference”</a></li>
+            <li>Ruan et al. 2025. <a href="https://arxiv.org/abs/2503.18866" target="_blank">“Reasoning to Learn from Latent Thoughts”</a></li>
+            <li>Wang et al. 2022. <a href="https://arxiv.org/abs/2207.00747" target="_blank">“Rationale-Augmented Ensembles in Language Models”</a></li>
+            <li>Kaplan et al. 2020. <a href="https://arxiv.org/abs/2001.08361" target="_blank">“Scaling Laws for Neural Language Models”</a></li>
+            <li>Muennighoff &amp; Yang et al. 2025. <a href="https://arxiv.org/abs/2501.19393" target="_blank">“s1: Simple test-time scaling”</a></li>
+            <li>Wang et al. 2023. <a href="https://arxiv.org/abs/2312.08935" target="_blank">“Math-Shepherd: Verify and Reinforce LLMs Step-by-step without Human Annotations”</a></li>
+            <li>Liu et al. 2023. <a href="https://arxiv.org/abs/2310.10047" target="_blank">“Improving Large Language Model Fine-tuning for Solving Math Problems”</a></li>
+            <li>Snell et al. 2024. <a href="https://arxiv.org/abs/2408.03314" target="_blank">“Scaling LLM Test-Time Compute Optimally can be More Effective than Scaling Model Parameters”</a></li>
+            <li>OpenAI 2024. <a href="https://openai.com/index/learning-to-reason-with-llms/" target="_blank">“Learning to reason with LLMs”</a>（o1-preview）</li>
+            <li>OpenAI 2025. <a href="https://openai.com/index/introducing-o3-and-o4-mini/" target="_blank">“Introducing OpenAI o3 and o4-mini”</a></li>
+        </ol>
+    </section>
+
+    <footer class="document-footer">
+        <p>Lil'Log · Why We Think · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

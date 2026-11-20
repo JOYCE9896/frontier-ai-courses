@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prompt Engineering | Lil'Log 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="09_LLM驱动的自主Agent.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Lil'Log 笔记目录</a> · 10</span>
+    <span><a href="11_Transformer家族2.0.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Prompt Engineering</h1>
+        <p class="subtitle">不改模型权重、只靠提示来引导自回归语言模型：zero-shot 与 few-shot、指令提示、self-consistency、思维链、自动设计提示，以及接入检索、代码和外部 API 的增强语言模型</p>
+        <div class="author-meta">
+            作者：Lilian Weng · 发表于 2023 年 3 月 15 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/" target="_blank">Prompt Engineering</a>（Lil'Log；本文依据原文英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原文，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这篇文章讲什么</h2>
+        <p>
+            Prompt engineering（提示工程），也叫 in-context prompting（上下文内提示），指在<em>不更新模型权重</em>的前提下，通过怎样和 LLM 沟通来引导它的行为、得到想要的结果。作者强调它是一门经验科学：同一种方法在不同模型上效果差别很大，所以要大量实验和启发式经验。
+        </p>
+        <p>
+            文章只讨论自回归语言模型（autoregressive LM，从左到右一个 token 一个 token 往下生成的模型，GPT 系列就是这种）的提示工程，不涉及完形填空式任务、图像生成或多模态模型。顺序是：先讲最基础的 zero-shot 和 few-shot，以及怎样挑选、排列示例；再讲直接写指令的指令提示；然后是 self-consistency 采样和思维链（CoT）及其各种扩展；接着是把提示当作可优化对象的自动提示设计；最后是让模型调用检索、代码解释器和外部 API 的增强语言模型（Toolformer 等）。读完你应该能说清这些常见提示技巧各自的做法、出处和已知的实验结论。
+        </p>
+        <ol>
+            <li><a href="#t01">引言</a></li>
+            <li><a href="#t02">基础提示</a></li>
+            <li><a href="#t03">指令提示</a></li>
+            <li><a href="#t04">Self-Consistency 采样</a></li>
+            <li><a href="#t05">思维链（CoT）</a></li>
+            <li><a href="#t06">自动设计提示</a></li>
+            <li><a href="#t07">增强语言模型</a></li>
+            <li><a href="#t08">实用资源</a></li>
+            <li><a href="#tref">主要参考文献</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 引言</h2>
+        <p><em>原文小节：（开篇，无小标题）</em></p>
+        <p>
+            作者的定义是：提示工程研究怎样和 LLM 沟通、引导它的行为得到期望结果，并且<em>不</em>改动模型权重。它的效果随模型变化很大，靠大量实验和经验法则推进。
+        </p>
+        <p>
+            这篇只关注自回归语言模型。作者认为，提示工程的核心目标是对齐（alignment，让模型的行为符合人的意图）和模型的可引导性（steerability）。相关背景可以看她之前写的<a href="https://lilianweng.github.io/posts/2021-01-02-controllable-text-generation/" target="_blank">可控文本生成</a>一文。
+        </p>
+        <p>
+            她还写了一段标为 “[My personal spicy take]” 的个人看法：有些提示工程论文其实不值得写 8 页，因为那些技巧一两句话就能讲清，剩下的全是跑基准。一个易用、共享的基准测试基础设施对社区会更有益。迭代式提示或调用外部工具搭起来并不简单，让整个研究社区都采用同一套设施也不简单。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 基础提示</h2>
+        <p><em>原文小节：Basic Prompting</em></p>
+        <p>
+            Zero-shot 和 few-shot 是提示模型最基础的两种方式。很多 LLM 论文率先使用了它们，它们也常被用来做 LLM 性能的基准测试。
+        </p>
+
+        <h3>Zero-Shot</h3>
+        <p>
+            Zero-shot learning（零样本）就是把任务文本直接喂给模型，让它给出结果，不给任何示例。（本节所有情感分析例子都来自 SST-2，一个电影评论情感二分类数据集。）
+        </p>
+<pre><code>Text: i'll bet the video game is a lot more fun than the film.
+Sentiment:</code></pre>
+
+        <h3>Few-shot</h3>
+        <p>
+            Few-shot learning（少样本）在提示里放一组针对目标任务的高质量示例（demonstration），每个示例都包含输入和期望的输出。模型先看到好的例子，就能更好地理解人的意图，以及想要什么样的回答。所以 few-shot 通常比 zero-shot 表现更好。代价是消耗更多 token，输入和输出文本较长时可能撞到上下文长度上限。
+        </p>
+<pre><code>Text: (lawrence bounces) all over the stage, dancing, running, sweating, mopping his face and generally displaying the wacky talent that brought him fame in the first place.
+Sentiment: positive
+
+Text: despite all evidence to the contrary, this clunker has somehow managed to pose as an actual feature movie, the kind that charges full admission and gets hyped on tv and purports to amuse small children and ostensible adults.
+Sentiment: negative
+
+Text: for the first time in years, de niro digs deep emotionally, perhaps because he's been stirred by the powerful work of his co-stars.
+Sentiment: positive
+
+Text: i'll bet the video game is a lot more fun than the film.
+Sentiment:</code></pre>
+        <p>
+            很多研究探讨了怎样构造上下文示例才能把表现做到最好，发现提示格式、选哪些训练示例、示例的顺序，都可能让表现天差地别，从接近随机猜测到接近 SoTA（state of the art，当前最好水平）。
+        </p>
+        <p>
+            <a href="https://arxiv.org/abs/2102.09690" target="_blank">Zhao et al. 2021</a> 研究了 few-shot 分类，认为 LLM（实验用的是 GPT-3）有几种偏差导致方差这么大：
+        </p>
+        <ol>
+            <li><em>多数标签偏差（majority label bias）</em>：示例中的标签分布不均衡时出现，模型倾向于输出示例里多的那个标签。</li>
+            <li><em>近因偏差（recency bias）</em>：模型倾向于重复排在最后的那个示例的标签。</li>
+            <li><em>常见 token 偏差（common token bias）</em>：LLM 更常输出常见 token，少输出罕见 token。</li>
+        </ol>
+        <p>
+            为了克服这些偏差，他们提出校准模型输出的标签概率：当输入字符串是 <code>N/A</code>（一个不含信息的输入）时，让各标签的概率变成均匀分布。这样就把模型对标签本身的偏好抵消掉了。
+        </p>
+
+        <h4>挑选示例的技巧</h4>
+        <p><em>原文：Tips for Example Selection</em></p>
+        <ul>
+            <li>
+                在嵌入空间里用 $k$-NN 聚类，挑与测试样例语义相似的示例（<a href="https://arxiv.org/abs/2101.06804" target="_blank">Liu et al. 2021</a>）。嵌入（embedding）是把一段文本映射成一个向量，语义相近的文本向量也相近。
+            </li>
+            <li>
+                为了挑出一组多样且有代表性的示例，<a href="https://arxiv.org/abs/2209.01975" target="_blank">Su et al. 2022</a> 提出一种基于图的方法。(1) 先根据样本之间的嵌入余弦相似度（嵌入可以来自 <a href="https://arxiv.org/abs/1908.10084" target="_blank">SBERT</a> 或<a href="https://arxiv.org/abs/2201.10005" target="_blank">其他</a><a href="https://platform.openai.com/docs/guides/embeddings" target="_blank">嵌入</a><a href="https://openai.com/blog/new-and-improved-embedding-model" target="_blank">模型</a>）构造一个有向图 $G=(V, E)$，每个节点指向它的 $k$ 个最近邻。(2) 从已选样本集合 $\mathcal{L}=\emptyset$ 和剩余样本集合 $\mathcal{U}$ 开始，给每个样本 $u \in \mathcal{U}$ 打分：
+                $$\text{score}(u) = \sum_{v \in \{v \mid (u, v) \in E, v\in \mathcal{U}\}} s(v)\quad\text{where }s(v)=\rho^{- \vert \{\ell \in \mathcal{L} \vert (v, \ell)\in E \}\vert},\quad\rho > 1$$
+                如果 $v$ 的邻居里已经有很多被选中，$s(v)$ 就低，所以这个打分鼓励挑多样的样本。换句话说，一个候选点周围已经被选过的点越多，它的得分越低，下一轮更可能选到还没被覆盖的区域。
+            </li>
+            <li>
+                <a href="https://arxiv.org/abs/2112.08633" target="_blank">Rubin et al. 2022</a> 提出针对某个训练集，用<a href="https://lilianweng.github.io/posts/2021-05-31-contrastive/" target="_blank">对比学习</a>（contrastive learning，让“应该相近”的样本向量靠近、“应该远离”的样本向量拉开）训练专门用于挑选上下文示例的嵌入。对每个训练对 $(x, y)$，一个示例 $e_i$（格式化好的输入-输出对）的质量可以用 LM 给出的条件概率衡量：$\text{score}(e_i) = P_\text{LM}(y \mid e_i, x)$。对每个训练对，把得分最高的 top-$k$ 和最低的 bottom-$k$ 示例分别作为正、负候选集，用于对比学习。
+            </li>
+            <li>
+                也有研究者试过用 <a href="https://lilianweng.github.io/posts/2018-02-19-rl-overview/#q-learning-off-policy-td-control" target="_blank">Q-Learning</a>（一种强化学习算法，学习每个状态下每个动作的价值）来挑示例（<a href="https://arxiv.org/abs/2211.04486" target="_blank">Zhang et al. 2022</a>）。
+            </li>
+            <li>
+                受基于不确定性的<a href="https://lilianweng.github.io/posts/2022-02-20-active-learning/" target="_blank">主动学习</a>（active learning，优先标注模型最拿不准的样本）启发，<a href="https://arxiv.org/abs/2302.12246" target="_blank">Diao et al. 2023</a> 建议找出多次采样中分歧大或熵高的样例，标注它们，再用作 few-shot 提示里的示例。
+            </li>
+        </ul>
+
+        <h4>示例排序的技巧</h4>
+        <p><em>原文：Tips for Example Ordering</em></p>
+        <ul>
+            <li>一般建议：示例要多样、和测试样本相关，并且按随机顺序排列，以避免多数标签偏差和近因偏差。</li>
+            <li>增大模型规模或加入更多训练示例，并不能降低上下文示例不同排列之间的方差。同一个顺序可能对一个模型效果好，对另一个模型效果差。验证集有限时，可以挑这样的顺序：让模型不产生极度不平衡的预测，也不对自己的预测过度自信（<a href="https://arxiv.org/abs/2104.08786" target="_blank">Lu et al. 2022</a>）。</li>
+        </ul>
+    </section>
+
+    <section id="t03">
+        <h2>03. 指令提示</h2>
+        <p><em>原文小节：Instruction Prompting</em></p>
+        <p>
+            在提示里放 few-shot 示例，目的是向模型解释我们的意图，也就是用演示的形式向模型描述任务指令。但 few-shot 很费 token，而且因为上下文长度有限，会挤占输入长度。那为什么不直接把指令告诉它？
+        </p>
+        <p>
+            <em>指令微调过的 LM（Instructed LM）</em>（例如 <a href="https://openai.com/research/instruction-following" target="_blank">InstructGPT</a>、<a href="https://github.com/allenai/natural-instructions" target="_blank">natural instruction</a>）用高质量的（任务指令，输入，标准输出）元组对预训练模型做微调，让 LM 更好地理解用户意图、遵循指令。<a href="https://lilianweng.github.io/posts/2021-01-02-controllable-text-generation/#rl-fine-tuning-with-human-preferences" target="_blank">RLHF</a>（Reinforcement Learning from Human Feedback，基于人类反馈的强化学习：用人类偏好训练奖励模型，再用 RL 优化语言模型）是常用的做法。这种指令遵循式微调的好处是，模型更符合人的意图，沟通成本大大降低。
+        </p>
+        <p>
+            和指令模型交互时，应该把任务要求描述得详细，尽量<em>具体</em>、<em>精确</em>；避免说“不要做什么”，而是说明要做什么。
+        </p>
+<pre><code>Please label the sentiment towards the movie of the given movie review. The sentiment label should be "positive" or "negative".
+Text: i'll bet the video game is a lot more fun than the film.
+Sentiment:</code></pre>
+        <p>说明目标受众也是一种好用的给指令方式。</p>
+        <ul>
+            <li>比如要生成给孩子的教育材料：
+<pre><code>Describe what is quantum physics to a 6-year-old.</code></pre>
+            </li>
+            <li>以及要求内容安全：
+<pre><code>... in language that is safe for work.</code></pre>
+            </li>
+        </ul>
+        <p>
+            <em>上下文指令学习（In-context instruction learning）</em>（<a href="https://arxiv.org/abs/2302.14691" target="_blank">Ye et al. 2023</a>）把 few-shot 学习和指令提示结合起来。它在提示里放多个来自不同任务的演示示例，每个示例都包含指令、任务输入和输出。注意他们的实验只做了分类任务，而且指令提示里列出了所有标签选项。
+        </p>
+<pre><code>Definition: Determine the speaker of the dialogue, "agent" or "customer".
+Input: I have successfully booked your tickets.
+Ouput: agent
+
+Definition: Determine which category the question asks for, "Quantity" or "Location".
+Input: What's the oldest building in US?
+Ouput: Location
+
+Definition: Classify the sentiment of the given movie review, "positive" or "negative".
+Input: i'll bet the video game is a lot more fun than the film.
+Output:</code></pre>
+    </section>
+
+    <section id="t04">
+        <h2>04. Self-Consistency 采样</h2>
+        <p><em>原文小节：Self-Consistency Sampling</em></p>
+        <p>
+            Self-consistency sampling（<a href="https://arxiv.org/abs/2203.11171" target="_blank">Wang et al. 2022a</a>）是在温度 &gt; 0 下采样多个输出，再从候选里选出最好的一个。温度（temperature）控制采样的随机程度，大于 0 时每次采样结果会不同。选最佳候选的标准因任务而异，通用做法是多数投票（majority vote）。对容易验证的任务，比如带单元测试的编程题，可以直接拿解释器跑一遍，用单元测试验证对错。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 思维链（CoT）</h2>
+        <p><em>原文小节：Chain-of-Thought (CoT)</em></p>
+        <p>
+            Chain-of-thought（CoT）提示（<a href="https://arxiv.org/abs/2201.11903" target="_blank">Wei et al. 2022</a>）让模型生成一串短句，一步一步描述推理逻辑，这串短句叫<em>推理链（reasoning chains）</em>或<em>理由（rationales）</em>，最后导出答案。CoT 的收益在复杂推理任务上更明显，并且要用大模型（例如参数超过 50B 的模型）。简单任务从 CoT 提示中获益很少。
+        </p>
+
+        <h3>CoT 提示的类型</h3>
+        <p><em>原文：Types of CoT prompts</em></p>
+        <p>CoT 提示主要有两种。</p>
+        <p>
+            Few-shot CoT：给模型几个演示，每个演示都包含人工写的（或模型生成的）高质量推理链。（本节所有数学推理例子都来自 <a href="https://github.com/openai/grade-school-math" target="_blank">GSM8k</a>，一个小学数学应用题数据集。）
+        </p>
+<pre><code>Question: Tom and Elizabeth have a competition to climb a hill. Elizabeth takes 30 minutes to climb the hill. Tom takes four times as long as Elizabeth does to climb the hill. How many hours does it take Tom to climb up the hill?
+Answer: It takes Tom 30*4 = &lt;&lt;30*4=120&gt;&gt;120 minutes to climb the hill.
+It takes Tom 120/60 = &lt;&lt;120/60=2&gt;&gt;2 hours to climb the hill.
+So the answer is 2.
+===
+Question: Jack is a soccer player. He needs to buy two pairs of socks and a pair of soccer shoes. Each pair of socks cost $9.50, and the shoes cost $92. Jack has $40. How much more money does Jack need?
+Answer: The total cost of two pairs of socks is $9.50 x 2 = $&lt;&lt;9.5*2=19&gt;&gt;19.
+The total cost of the socks and the shoes is $19 + $92 = $&lt;&lt;19+92=111&gt;&gt;111.
+Jack need $111 - $40 = $&lt;&lt;111-40=71&gt;&gt;71 more.
+So the answer is 71.
+===
+Question: Marty has 100 centimeters of ribbon that he must cut into 4 equal parts. Each of the cut parts must be divided into 5 equal parts. How long will each final cut be?
+Answer:</code></pre>
+        <p>
+            Zero-shot CoT：用 <code>Let's think step by step</code> 这样的自然语言句子，明确鼓励模型先生成推理链，再用 <code>Therefore, the answer is</code> 提示它给出答案（<a href="https://arxiv.org/abs/2205.11916" target="_blank">Kojima et al. 2022</a>）。也可以用类似的 <code>Let's work this out it a step by step to be sure we have the right answer</code>（<a href="https://arxiv.org/abs/2211.01910" target="_blank">Zhou et al. 2022</a>）。
+        </p>
+<pre><code>Question: Marty has 100 centimeters of ribbon that he must cut into 4 equal parts. Each of the cut parts must be divided into 5 equal parts. How long will each final cut be?
+Answer: Let's think step by step.</code></pre>
+
+        <h3>技巧与扩展</h3>
+        <p><em>原文：Tips and Extensions</em></p>
+        <ul>
+            <li>
+                <a href="#t04">Self-consistency 采样</a>通过采样多个不同答案再多数投票，可以提升推理准确率（<a href="https://arxiv.org/abs/2203.11171" target="_blank">Wang et al. 2022a</a>）。
+            </li>
+            <li>
+                另一种集成学习的做法是在多次采样时引入随机性：改变示例顺序，或者用模型生成的理由替换人工写的理由。然后对模型输出做多数投票得到最终答案（<a href="https://arxiv.org/abs/2207.00747" target="_blank">Wang et al. 2022b</a>）。
+            </li>
+            <li>
+                如果训练样例只有正确答案（容易验证）、没有理由，可以用 <em>STaR</em>（Self-Taught Reasoner；<a href="https://arxiv.org/abs/2203.14465" target="_blank">Zelikman et al. 2022</a>）方法：(1) 让 LLM 生成推理链，只保留那些导出正确答案的；(2) 用这些生成的理由微调模型，重复这个过程直到收敛。注意温度越高，越容易生成“答案对但理由错”的推理链。如果训练样例连标准答案都没有，可以考虑把多数投票的结果当作“正确”答案。
+            </li>
+            <li>
+                推理复杂度更高的演示能带来更好的表现，复杂度用推理链里的推理步数衡量。分隔推理步骤时，换行符 <code>\n</code> 比 <code>step i</code>、句号 <code>.</code> 或分号 <code>;</code> 效果更好（<a href="https://arxiv.org/abs/2210.00720" target="_blank">Fu et al. 2023</a>）。
+            </li>
+            <li>
+                <em>基于复杂度的一致性（Complexity-based consistency）</em>：在所有生成结果里显式偏向复杂的推理链，只在最复杂的 top $k$ 条链之间做多数投票（<a href="https://arxiv.org/abs/2210.00720" target="_blank">Fu et al. 2023</a>）。
+            </li>
+            <li>
+                后来 <a href="https://arxiv.org/abs/2302.12822" target="_blank">Shum et al. 2023</a> 在实验中发现，只含复杂示例的 CoT 提示能提高复杂问题的准确率，但在简单问题上表现差；证据来自 GSM8k。
+            </li>
+            <li>
+                把 <code>Q:</code> 改成 <code>Question:</code> 被发现有帮助（<a href="https://arxiv.org/abs/2210.00720" target="_blank">Fu et al. 2023</a>）。
+            </li>
+            <li>
+                <a href="https://arxiv.org/abs/2205.03401" target="_blank">Ye &amp; Durrett 2022</a> 发现，对需要在文本上推理的 NLP 任务（即问答和 NLI，自然语言推断），在提示里加入解释的收益从小到中等，效果因模型而异。他们观察到，解释更可能是不符合事实的（nonfactual），而不是前后不一致的（inconsistent，即解释是否能推出预测）。不符合事实的解释最可能导致错误预测。
+            </li>
+            <li>
+                <em>Self-Ask</em>（<a href="https://arxiv.org/abs/2210.03350" target="_blank">Press et al. 2022</a>）反复提示模型<em>提出追问</em>，以迭代方式构建思考过程。追问可以用搜索引擎的结果来回答。类似地，<em>IRCoT</em>（Interleaving Retrieval CoT；<a href="https://arxiv.org/abs/2212.10509" target="_blank">Trivedi et al. 2022</a>）和 <em>ReAct</em>（Reason + Act；<a href="https://arxiv.org/abs/2210.03629" target="_blank">Yao et al. 2023</a>）把迭代式 CoT 提示和对 Wikipedia API 的查询结合起来，搜索相关实体和内容，再把结果加回上下文。
+                <figure>
+                    <img src="https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/SelfAsk-search.png" alt="Self-Ask 配合外部搜索">
+                    <figcaption>图：Self-Ask 如何配合外部搜索查询工作（原图出处 Press et al. 2022，引自原文）</figcaption>
+                </figure>
+            </li>
+            <li>
+                <em>Tree of Thoughts</em>（<a href="https://arxiv.org/abs/2305.10601" target="_blank">Yao et al. 2023</a>）扩展了 CoT，在每一步探索多种推理可能。它先把问题分解成多个思考步骤，每一步生成多个想法，形成一个树结构。搜索过程可以用 BFS（广度优先）或 DFS（深度优先），每个状态由一个分类器（通过提示实现）或多数投票来评估。
+                <figure>
+                    <img src="https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/tree-of-thoughts.png" alt="Tree of Thoughts">
+                    <figcaption>图：Tree of Thoughts 示意（原图出处 Yao et al. 2023，引自原文；原文这张图的图注误写成了上一张 Self-Ask 图的 “How Self-Ask works with external search queries.”）</figcaption>
+                </figure>
+            </li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. 自动设计提示</h2>
+        <p><em>原文小节：Automatic Prompt Design</em></p>
+        <p>
+            提示是一串前缀 token，作用是在给定输入时提高得到期望输出的概率。所以可以把它们当作可训练参数，在嵌入空间里用梯度下降<a href="https://lilianweng.github.io/posts/2021-01-02-controllable-text-generation/#smart-prompt-design" target="_blank">直接优化</a>，例如 AutoPrompt（<a href="https://arxiv.org/abs/2010.15980" target="_blank">Shin et al. 2020</a>）、Prefix-Tuning（<a href="https://arxiv.org/abs/2101.00190" target="_blank">Li &amp; Liang 2021</a>）、P-tuning（<a href="https://arxiv.org/abs/2103.10385" target="_blank">Liu et al. 2021</a>）和 Prompt-Tuning（<a href="https://arxiv.org/abs/2104.08691" target="_blank">Lester et al. 2021</a>）。作者的<a href="https://lilianweng.github.io/posts/2021-01-02-controllable-text-generation/#smart-prompt-design" target="_blank">《Controllable Neural Text Generation》里的这一节</a>对它们有详细介绍。从 AutoPrompt 到 Prompt-Tuning，趋势是设置逐步简化。
+        </p>
+
+        <h3>APE</h3>
+        <p>
+            APE（Automatic Prompt Engineer；<a href="https://arxiv.org/abs/2211.01910" target="_blank">Zhou et al. 2022</a>）在一池模型生成的指令候选里搜索，按选定的打分函数过滤候选集，最后选出得分最高的那条。
+        </p>
+        <ol>
+            <li>
+                提示 LLM 根据一小组输入-输出形式的演示，生成指令候选。例如 <code>{{Given desired input-output pairs}}\n\nThe instruction is</code>。
+            </li>
+            <li>
+                给定数据集 $\mathcal{D}_\text{train} = \{(x, y)\}$，想找一条指令 $\rho$，使得
+                $$\rho^* = \arg\max_\rho \mathbb{E}_{(x, y) \in \mathcal{D}_\text{train}} [f(\rho, x, y)]$$
+                其中 $f(.)$ 是逐样本的打分函数，比如执行准确率 $\mathbb{1}[\text{LM}(.\vert \rho, x)=y]$，或对数概率 $p_\text{LM}(y \mid \rho, x)$。意思是：在训练数据上平均得分最高的指令就是最好的指令。
+            </li>
+            <li>
+                用迭代的蒙特卡洛搜索改进最好的候选：通过类似这样的提示生成语义相近的变体：<code>Generate a variation of the following instruction while keeping the semantic meaning.\n\nInput: ...\n\nOutput:...</code>
+            </li>
+        </ol>
+
+        <h3>自动构造 CoT 提示</h3>
+        <p>
+            为了自动构造思维链提示，<a href="https://arxiv.org/abs/2302.12822" target="_blank">Shum et al. 2023</a> 提出 augment-prune-select 三步流程：
+        </p>
+        <ul>
+            <li><em>Augment（扩充）</em>：用 few-shot 或 zero-shot CoT 提示，对给定问题生成多条伪思维链；</li>
+            <li><em>Prune（剪枝）</em>：根据生成的答案是否与标准答案一致，剪掉不合格的伪思维链；</li>
+            <li><em>Select（选择）</em>：用一种降低方差的策略梯度（policy gradient，强化学习里直接沿“提高期望奖励”的方向更新策略参数的方法）来学习所选示例上的概率分布。这里把示例上的概率分布当作策略，把验证集准确率当作奖励。</li>
+        </ul>
+        <p>
+            <a href="https://arxiv.org/abs/2210.03493" target="_blank">Zhang et al. 2023</a> 则用<em>聚类</em>技术来采样问题，再生成推理链。他们观察到 LLM 往往会犯某几类错误。同一类错误在嵌入空间里可能彼此相近，因而被分到一组。只从高频错误簇里采样一个或少数几个，就能避免同一类错误的错误演示太多，收集到一组多样的示例。
+        </p>
+        <ul>
+            <li><em>问题聚类</em>：把问题嵌入成向量，跑 $k$-means 聚类。</li>
+            <li><em>演示选择</em>：从每个簇里选一组有代表性的问题，即每个簇出一个演示。每个簇内的样本按到簇中心的距离排序，离中心近的优先选。</li>
+            <li><em>理由生成</em>：用 zero-shot CoT 为选出的问题生成推理链，构造 few-shot 提示来做推理。</li>
+        </ul>
+    </section>
+
+    <section id="t07">
+        <h2>07. 增强语言模型</h2>
+        <p><em>原文小节：Augmented Language Models</em></p>
+        <p>
+            <a href="https://arxiv.org/abs/2302.07842" target="_blank">Mialon et al. 2023</a> 写的增强语言模型综述，对多类具备推理能力和外部工具使用能力的语言模型覆盖得很好，作者推荐阅读。
+        </p>
+
+        <h3>检索</h3>
+        <p><em>原文：Retrieval</em></p>
+        <p>
+            我们常常要完成需要最新知识（模型预训练截止时间之后的信息）或内部/私有知识库的任务。这种情况下，如果不在提示里明确提供上下文，模型是不知道的。很多<a href="https://lilianweng.github.io/posts/2020-10-29-odqa/" target="_blank">开放域问答</a>方法都是先在知识库上检索，再把检索到的内容作为提示的一部分。整个过程的准确率取决于检索和生成两步的质量。
+        </p>
+        <p>
+            <a href="https://arxiv.org/abs/2203.05115" target="_blank">Lazaridou et al. 2022</a> 研究了怎样用 Google Search 检索文档来增强 LLM。给定问题 $q$，从 Google 返回的 20 个 URL 中抽取干净文本，得到一组文档。这些文档很长，所以每篇切成 6 句一段的段落 $\{p\}$。段落按与查询的 TF-IDF 余弦相似度排序，只把最相关的一段放进提示，用来生成答案 $a$。
+        </p>
+        <p>
+            在闭卷问答里，每个演示按下面的格式组织，用来构造 few-shot 提示。把问题和证据的位置对调（即问题和答案之间的距离变长），在所有数据集上都稳定地得到更低的结果。
+        </p>
+<pre><code>Evidence: ...
+Question: ...
+Answer: ...</code></pre>
+        <p>答案概率有三种算法：</p>
+        <ul>
+            <li>
+                <a href="https://lilianweng.github.io/posts/2020-10-29-odqa/#RAG" target="_blank">RAG</a> 式：
+                $$p(a_i \mid q) = \sum_{i=1}^n p_\text{tf-idf} (p_i \mid q) \cdot p_\text{LM}(a_i \mid q, p_i)$$
+                其中 $p_\text{tf-idf} (p_i \mid q)$ 是段落和问题的 TF-IDF 表示之间归一化后的余弦相似度。也就是按每段的相关度给各段条件下的答案概率加权求和。
+            </li>
+            <li>
+                噪声信道推断（noisy channel inference）：
+                $$p(a_i\mid q) = \frac{p_\text{LM}(q \mid a_i, p_i) \cdot p_\text{LM}(a_i \mid p_i)}{p_\text{LM}(q \mid p_i)}$$
+                它借用贝叶斯公式，反过来看“给定答案和证据，模型能不能生成这个问题”。
+            </li>
+            <li>专家乘积（Product-of-Experts，PoE）：把上面用到的所有概率，再加上 $p_\text{LM}(p_i \mid q)$，组合在一起。</li>
+        </ul>
+        <p>
+            在生成和分类任务上的实验显示，三种答案重排分数的排序是 PoE &gt; Noisy channel &gt; RAG。在单个概率里，$p_\text{LM}(a \mid q, p_i)$ 和 $p_\text{LM}(q \mid p_i, a)$ 信息量最大。$p_\text{LM}(q \mid p_i, a)$ 反映的是给定证据段落和答案时，LM 能多好地“解释”这个问题，可以可靠地用来给候选答案重排。
+        </p>
+        <p>
+            在 <a href="https://situatedqa.github.io/" target="_blank">SituatedQA</a> 数据集（问题以不同日期为背景）上有一个观察：即使 LM（预训练截止于 2020 年）能通过 Google Search 拿到最新信息，它在 2020 年之后的问题上的表现仍然比 2020 年之前的问题<em>差</em>很多。这说明上下文信息和模型内部的参数化知识之间存在某种差异或冲突。
+        </p>
+        <p>
+            有意思的是，即使只做“内部检索”也有好处，也就是先让模型针对某个话题生成知识，再回答问题（<a href="https://arxiv.org/abs/2110.08387" target="_blank">Liu et al. 2022</a>）。先用下面的模板抽取知识：
+        </p>
+<pre><code>Generate some knowledge about the input. Examples:
+
+Input: What type of water formation is formed by clouds?
+Knowledge: Clouds are made of water vapor.
+
+Input: {question}
+Knowledge:</code></pre>
+        <p>然后以模型生成的知识为上下文，再提示 LM 给出答案。</p>
+
+        <h3>编程语言</h3>
+        <p><em>原文：Programming Language</em></p>
+        <p>
+            PAL（Program-aided language models；<a href="https://arxiv.org/abs/2211.10435" target="_blank">Gao et al. 2022</a>）和 PoT（Program of Thoughts prompting；<a href="https://arxiv.org/abs/2211.12588" target="_blank">Chen et al. 2022</a>）都让 LLM 生成编程语言语句来解自然语言推理题，把求解这一步交给 Python 解释器这样的运行时。这种设置把复杂计算和推理分开了。它要求 LM 有足够好的编程能力。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/PoT.png" alt="CoT 与 PoT 对比">
+            <figcaption>图：CoT 与 PoT 的对比（原图出处 Chen et al. 2022，引自原文）</figcaption>
+        </figure>
+
+        <h3>外部 API</h3>
+        <p><em>原文：External APIs</em></p>
+
+        <h4>TALM</h4>
+        <p>
+            TALM（Tool Augmented Language Models；<a href="https://arxiv.org/abs/2205.12255" target="_blank">Parisi et al. 2022</a>）是用文本到文本的 API 调用增强过的语言模型。LM 在任务输入文本的条件下，被引导生成 <code>|tool-call</code> 和 <code>tool input text</code> 来构造 API 调用请求。出现 <code>|result</code> 时，调用指定的工具 API，返回结果追加到文本序列后面。最终输出跟在 <code>|output</code> token 之后生成。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/TALM.png" alt="TALM 的 API 调用格式">
+            <figcaption>图：TALM 中 API 调用的格式（原图出处 Parisi et al. 2022，引自原文）</figcaption>
+        </figure>
+        <p>
+            TALM 用自我博弈（self-play）的方式迭代地自举（bootstrap）工具使用示例数据集，并用它微调 LM。这里的 self-play 指模型与工具 API 交互：根据新加入的工具 API 能否改善模型输出，迭代地扩充数据集。Toolformer 也采用了同样的想法，下面详细讲。这条流水线大致模仿了一个 RL 过程：LM 是策略网络，用二元奖励信号通过策略梯度训练。
+        </p>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/TALM-iteration.png" alt="TALM self-play 迭代">
+            <figcaption>图：self-play 迭代帮助提升模型表现（原图出处 Parisi et al. 2022，引自原文）</figcaption>
+        </figure>
+
+        <h4>Toolformer</h4>
+        <p>
+            Toolformer（<a href="https://arxiv.org/abs/2302.04761" target="_blank">Schick et al. 2023</a>）是一个能通过简单 API 使用外部工具的 LM。它以自监督方式构建，每个 API 只需要少量演示。Toolformer 的工具箱包括：
+        </p>
+        <ul>
+            <li><em>计算器</em>：弥补 LM 缺乏精确数学能力；</li>
+            <li><em>问答系统</em>：帮助应对不忠实内容和幻觉；</li>
+            <li><em>搜索引擎</em>：提供预训练截止时间之后的最新信息；</li>
+            <li><em>翻译系统</em>：提升低资源语言上的表现；</li>
+            <li><em>日历</em>：让 LM 知道时间的推移。</li>
+        </ul>
+        <figure>
+            <img src="https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/toolformer.png" alt="构建 Toolformer 的流程">
+            <figcaption>图：如何构建 Toolformer（原图出处 Schick et al. 2023，引自原文）</figcaption>
+        </figure>
+        <p>Toolformer 的训练步骤：</p>
+        <ol>
+            <li>
+                <p><em>用提示标注潜在的 API 调用。</em>让一个预训练 LM 通过 few-shot 学习、配合 API 调用示例，去标注一个数据集。格式示例：</p>
+                <figure>
+                    <img src="https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/toolformer-annotation.png" alt="Toolformer 数据标注">
+                    <figcaption>图：数据集如何被标注上 API 调用（原图出处 Schick et al. 2023，引自原文）</figcaption>
+                </figure>
+                <ul>
+                    <li>
+                        每个 API 调用表示成一个（API 名，对应输入）元组 $c=(a_c, i_c)$，对应的结果记为 $r$。带结果和不带结果的 API 调用序列分别标记为：
+                        $$\begin{aligned} e(c) &= \langle\texttt{API}\rangle a_c(i_c) \langle\texttt{/API}\rangle \\ e(c, r) &= \langle\texttt{API}\rangle a_c(i_c) \to r \langle\texttt{/API}\rangle \end{aligned}$$
+                    </li>
+                    <li>根据概率 $p_\text{LM}(\langle\texttt{API}\rangle \mid \text{prompt}(\mathbf{x}), \mathbf{x}_{1:i})$ 采样 API 调用：如果在位置 $i$ 这个概率大于阈值，就把它选为做 API 调用的 top $k$ 候选位置之一。</li>
+                    <li>然后以序列 $[\text{prompt}(\mathbf{x}), x_1, \dots, x_{i-1}, \langle\texttt{API}\rangle]$ 为前缀、$\langle\texttt{/API}\rangle$ 为后缀，从 LM 采样潜在的 API 调用。</li>
+                </ul>
+            </li>
+            <li>
+                <p><em>按 API 调用能否帮助模型预测后续 token 来过滤标注。</em>用一个自监督损失判断哪些 API 调用真正有用。</p>
+                <ul>
+                    <li>执行每个 API 调用 $c_i$，得到对应结果 $r_i$。</li>
+                    <li>
+                        在模型以提示为前缀时，计算 LM 在 token $x_i, \dots, x_n$ 上的加权交叉熵损失。算两个版本，一个带 API 结果，另一个用空序列 $\varepsilon$：
+                        $$\begin{aligned} L^+_i &= L_i(e(c_i, r_i)) \\ L^-_i &= \min(L_i(\varepsilon), L_i(e(c_i, \varepsilon))) \end{aligned}$$
+                        只保留 $L^-_i - L^+_i$ 大于阈值的 API 调用，意思是加上这个 API 调用和它的结果，能帮助模型预测后面的 token。$L^-_i$ 取“完全不调用”和“调用但不给结果”两者中更小的损失，所以只有真正拿到结果后损失明显下降的调用才会留下。
+                    </li>
+                </ul>
+            </li>
+            <li>
+                <p><em>在标注好的数据集上微调 LM。</em>新的训练序列构造为 $\mathbf{x}^* = x_{1:i-1}, e(c_i, r_i), x_{i:n}$。训练数据由原始数据集（论文里是 CCNet 的一个子集）和它的增强版本组成。</p>
+            </li>
+        </ol>
+        <p>
+            推理时，解码一直进行到模型生成 “$\to$” token，表示它接下来在等 API 调用的响应。
+        </p>
+        <p>
+            Toolformer 目前不支持链式使用工具（把一个工具的输出作为另一个工具的输入），也不支持交互式使用（经人工选择后再采用 API 响应）。作者认为两者都是值得扩展的方向。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 实用资源</h2>
+        <p><em>原文小节：Useful Resources</em></p>
+        <ul>
+            <li><a href="https://github.com/openai/openai-cookbook" target="_blank">OpenAI Cookbook</a>：有很多深入示例，讲怎样高效使用 LLM。</li>
+            <li><a href="https://langchain.readthedocs.io/en/latest/" target="_blank">LangChain</a>：一个把语言模型和其他组件组合起来构建应用的库。</li>
+            <li><a href="https://github.com/dair-ai/Prompt-Engineering-Guide" target="_blank">Prompt Engineering Guide</a>：这个仓库收集了相当全面的提示工程学习材料。</li>
+            <li><a href="https://learnprompting.org/docs/intro" target="_blank">learnprompting.org</a></li>
+            <li><a href="https://promptperfect.jina.ai" target="_blank">PromptPerfect</a></li>
+            <li><a href="https://github.com/microsoft/semantic-kernel" target="_blank">Semantic Kernel</a></li>
+        </ul>
+    </section>
+
+    <section id="tref">
+        <h2>主要参考文献</h2>
+        <ol>
+            <li>Zhao et al. 2021. <a href="https://arxiv.org/abs/2102.09690" target="_blank">“Calibrate Before Use: Improving Few-shot Performance of Language Models”</a></li>
+            <li>Liu et al. 2021. <a href="https://arxiv.org/abs/2101.06804" target="_blank">“What Makes Good In-Context Examples for GPT-3?”</a></li>
+            <li>Lu et al. 2022. <a href="https://arxiv.org/abs/2104.08786" target="_blank">“Fantastically Ordered Prompts and Where to Find Them: Overcoming Few-Shot Prompt Order Sensitivity”</a></li>
+            <li>Ye et al. 2023. <a href="https://arxiv.org/abs/2302.14691" target="_blank">“In-Context Instruction Learning”</a></li>
+            <li>Su et al. 2022. <a href="https://arxiv.org/abs/2209.01975" target="_blank">“Selective annotation makes language models better few-shot learners”</a></li>
+            <li>Rubin et al. 2022. <a href="https://arxiv.org/abs/2112.08633" target="_blank">“Learning to retrieve prompts for in-context learning”</a></li>
+            <li>Wei et al. 2022. <a href="https://arxiv.org/abs/2201.11903" target="_blank">“Chain of thought prompting elicits reasoning in large language models”</a></li>
+            <li>Wang et al. 2022a. <a href="https://arxiv.org/abs/2203.11171" target="_blank">“Self-Consistency Improves Chain of Thought Reasoning in Language Models”</a></li>
+            <li>Diao et al. 2023. <a href="https://arxiv.org/abs/2302.12246" target="_blank">“Active Prompting with Chain-of-Thought for Large Language Models”</a></li>
+            <li>Zelikman et al. 2022. <a href="https://arxiv.org/abs/2203.14465" target="_blank">“STaR: Bootstrapping Reasoning With Reasoning”</a></li>
+            <li>Ye &amp; Durrett 2022. <a href="https://arxiv.org/abs/2205.03401" target="_blank">“The unreliability of explanations in few-shot in-context learning”</a></li>
+            <li>Trivedi et al. 2022. <a href="https://arxiv.org/abs/2212.10509" target="_blank">“Interleaving retrieval with chain-of-thought reasoning for knowledge-intensive multi-step questions”</a></li>
+            <li>Press et al. 2022. <a href="https://arxiv.org/abs/2210.03350" target="_blank">“Measuring and narrowing the compositionality gap in language models”</a></li>
+            <li>Yao et al. 2023. <a href="https://arxiv.org/abs/2210.03629" target="_blank">“ReAct: Synergizing reasoning and acting in language models”</a></li>
+            <li>Fu et al. 2022. <a href="https://arxiv.org/abs/2210.00720" target="_blank">“Complexity-based prompting for multi-step reasoning”</a></li>
+            <li>Wang et al. 2022b. <a href="https://arxiv.org/abs/2207.00747" target="_blank">“Rationale-augmented ensembles in language models”</a></li>
+            <li>Zhang et al. 2022. <a href="https://arxiv.org/abs/2210.03493" target="_blank">“Automatic chain of thought prompting in large language models”</a></li>
+            <li>Shum et al. 2023. <a href="https://arxiv.org/abs/2302.12822" target="_blank">“Automatic Prompt Augmentation and Selection with Chain-of-Thought from Labeled Data”</a></li>
+            <li>Zhou et al. 2022. <a href="https://arxiv.org/abs/2211.01910" target="_blank">“Large Language Models Are Human-Level Prompt Engineers”</a></li>
+            <li>Lazaridou et al. 2022. <a href="https://arxiv.org/abs/2203.05115" target="_blank">“Internet augmented language models through few-shot prompting for open-domain question answering”</a></li>
+            <li>Chen et al. 2022. <a href="https://arxiv.org/abs/2211.12588" target="_blank">“Program of Thoughts Prompting: Disentangling Computation from Reasoning for Numerical Reasoning Tasks”</a></li>
+            <li>Gao et al. 2022. <a href="https://arxiv.org/abs/2211.10435" target="_blank">“PAL: Program-aided language models”</a></li>
+            <li>Parisi et al. 2022. <a href="https://arxiv.org/abs/2205.12255" target="_blank">“TALM: Tool Augmented Language Models”</a></li>
+            <li>Schick et al. 2023. <a href="https://arxiv.org/abs/2302.04761" target="_blank">“Toolformer: Language Models Can Teach Themselves to Use Tools”</a></li>
+            <li>Mialon et al. 2023. <a href="https://arxiv.org/abs/2302.07842" target="_blank">“Augmented Language Models: a Survey”</a></li>
+            <li>Yao et al. 2023. <a href="https://arxiv.org/abs/2305.10601" target="_blank">“Tree of Thoughts: Deliberate Problem Solving with Large Language Models”</a></li>
+        </ol>
+    </section>
+
+    <footer class="document-footer">
+        <p>Lil'Log · Prompt Engineering · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>
