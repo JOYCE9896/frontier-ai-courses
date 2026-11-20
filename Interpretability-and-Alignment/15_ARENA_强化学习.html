@@ -1,0 +1,877 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ARENA 第 2 章：强化学习 | 可解释性与对齐研究 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="14_ARENA_电路与玩具模型.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">可解释性与对齐研究 目录</a> · 15</span>
+    <span><a href="16_ARENA_评测与对齐科学.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>ARENA 第 2 章：强化学习</h1>
+        <p class="subtitle">从贝尔曼方程和表格 Q-learning 出发，依次实现 DQN、策略梯度、PPO，在网格世界里观察奖励投机和目标错误泛化，再把 GRPO、LoRA、RLVR 用到语言模型上，最后用 MCTS 和自我对弈训练 AlphaZero 下四子棋</p>
+        <div class="author-meta">
+            作者：Callum McDougall 等（ARENA）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://learn.arena.education/chapter2_rl/" target="_blank">ARENA Chapter 2: Reinforcement Learning</a> 与 <a href="https://github.com/callummcdougall/ARENA_3.0" target="_blank">GitHub 仓库</a>（依据 2026 年 11 月仓库中的练习页面整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这篇讲什么</h2>
+        <p>
+            强化学习（reinforcement learning，RL）研究智能体（agent）怎样在环境里行动，拿到尽可能多的累积奖励。ARENA 第 2 章的仓库说明把这一章概括为：先学 RL 的基础，用 <code>gymnasium</code>（OpenAI <code>gym</code> 的维护分支）环境做实验；亮点包括按 Sutton &amp; Barto 教材实现多臂老虎机智能体，实现 DQN、VPG 和 PPO 玩 CartPole，在网格世界里看到奖励投机和目标错误泛化，把 RLHF 用到自回归 Transformer 上，用 Dr. GRPO 做可验证奖励的 RL（RLVR），以及实现 MCTS 和 AlphaZero，靠自我对弈学会下四子棋。
+        </p>
+        <p>
+            这一章和本合集的可解释性论文没有一一对应的关系，它提供的是读懂后面材料需要的 RL 背景。现在的大模型在预训练之后都要经过 RL 后训练（RLHF、RLVR），<a href="16_ARENA_评测与对齐科学.html">16</a> 里的涌现性失调、对齐伪装、推理模型思维链等案例都发生在这类模型上；2.3.2 讲的奖励投机和目标错误泛化，是 16 里很多失调现象的简化版本。仓库 README 没有给第 2 章标出必做组；从各页导言看，2.1 是后面 DQN、VPG、PPO、RLHF 的理论基础，2.1 的多臂老虎机部分已改为可选，2.4.1 RLHF 写明不需要先做 PPO，2.4.2 RLVR 在 2.4.1 的基础上继续，2.4.3 RLAIF 目前只有占位页。
+        </p>
+        <ol>
+            <li><a href="#t01">2.1 强化学习入门：规划与表格学习</a></li>
+            <li><a href="#t02">2.2.1 DQN：深度 Q 网络</a></li>
+            <li><a href="#t03">2.2.2 VPG：朴素策略梯度</a></li>
+            <li><a href="#t04">2.3 PPO：近端策略优化</a></li>
+            <li><a href="#t05">2.3.2 目标错误泛化：陶器店网格世界</a></li>
+            <li><a href="#t06">2.4.1 RLHF：GRPO 与 LoRA</a></li>
+            <li><a href="#t07">2.4.2 RLVR：可验证奖励的强化学习</a></li>
+            <li><a href="#t08">2.4.3 RLAIF（占位）</a></li>
+            <li><a href="#t09">2.5 MCTS 与 AlphaZero</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 2.1 强化学习入门：规划与表格学习</h2>
+        <p><em>原练习页：[2.1] Intro to RL</em></p>
+        <p>
+            这一组的导言说，在讲 DQN、VPG、PPO、RLHF 这些大题目之前，要先打好理论基础。这里先假设环境的状态和动作都是有限的，分两种情况：一是智能体能直接拿到环境的动态（dynamics），可以解析地求出最优策略；二是环境是黑箱，只能从中采样，智能体要靠玩来学会环境怎样运作。到 DQN 一节再放掉“状态少到能全部访问”的假设，用深度学习去泛化到没见过的状态。这一天偏理论。
+        </p>
+
+        <h3>1️⃣ 规划（Planning）</h3>
+        <p>学习目标：理解已知环境下的马尔可夫决策过程（Markov Decision Process，MDP）和智能体的目标；理解贝尔曼方程；理解策略改进定理，以及怎样用它迭代求出最优策略。</p>
+        <p>
+            这一部分假设是白箱环境：转移分布 $T$ 和奖励函数 $R$ 都可以访问，目标是把“找最好的策略 $\pi^*$”变成一个可以迭代求解的优化问题。环境足够小，可以遍历所有状态动作对。这类方法叫表格方法（tabular RL）：不学习状态之间的相似性，只在一张大查找表里记每个状态值多少。可选阅读是 Sutton and Barto 第 3 章 3.1–3.6 和第 4 章 4.1–4.4。
+        </p>
+        <p>
+            RL 的交互循环：智能体在状态 $s$ 用当前策略 $\pi$ 采样动作 $a \sim \pi(\cdot | s)$，环境回给它新状态和奖励 $(s', r)$，其中 $s' \sim T(\cdot | s, a)$，$r = R(s, a, s')$。轨迹（trajectory，也叫 rollout）是完整的交互历史：
+        </p>
+        $$\tau = s_0, a_0, r_1, s_1, a_1, r_2, s_2, a_2, r_3, \ldots$$
+        <p>
+            这里沿用 Sutton &amp; Barto 的记号，时间步在环境那一边递增：在第 $t$ 步给定 $s_t$，智能体给出 $a_t$，环境给出 $(s_{t+1}, r_{t+1})$。练习页提醒，有的作者写成 $r_0, r_1, \ldots$，读别的资料时要留意。策略默认是马尔可夫的（动作只依赖当前状态）。练习页的讨论举了两个例子：井字棋里当前棋盘就足够决定最优走法；扑克里对手过去的下注模式会影响最优策略，这时可以把相关历史并进状态，代价是状态空间变大。
+        </p>
+        <p>
+            智能体的目标是最大化期望折扣回报（expected discounted return）$G_t = r_{t+1} + \gamma r_{t+2} + \gamma^2 r_{t+3} + \ldots$。从状态 $s$ 出发、遵循策略 $\pi$ 的期望折扣回报叫价值函数（value function）：
+        </p>
+        $$V_{\pi}(s) = \mathbb{E}_{\pi} \left[ \sum_{i=0}^\infty \gamma^{i} r_{i + t+1} \Bigg| s_t = s \right]$$
+        <p>
+            练习页用三个折叠框解释折扣：不折扣的话无穷和可能发散（$1,1,1,\ldots$ 和 $2,2,2,\ldots$ 都发散到正无穷，无法比较），也可能既不收敛也不发散（$-1,1,-1,1,\ldots$）。为什么用几何折扣：几何折扣是“时间一致”的，相邻两步的折扣比恒为 $\gamma$，而双曲折扣 $\Gamma(i) = \frac{1}{1+iD}$ 的相邻比会趋向 1（练习页提到人类常被认为按双曲折扣行事）。价值函数左边不带 $t$，因为在策略 $\pi$ 下过程是平稳的，$T$、$R$、$\pi$ 都只依赖状态而不依赖时间。
+        </p>
+        <p>价值函数满足递归形式的贝尔曼方程（Bellman equation）：</p>
+        $$V_\pi(s) = \sum_a \pi(a | s) \sum_{s'} T(s' | s, a) \bigg( R(s, a, s') + \gamma V_\pi(s') \bigg)$$
+        <p>
+            读法是：当前按 $\pi$ 走的价值 = 下一步奖励 + 下一状态继续按 $\pi$ 走的折扣价值。动作价值函数（action-value function，Q 值）$Q_\pi(s,a)$ 是先选动作 $a$ 再按 $\pi$ 走的期望回报，两者的关系是 $V_\pi(s) = \sum_a \pi(a \mid s) Q_\pi(s, a)$，以及
+        </p>
+        $$Q_\pi(s,a) = \sum_{s'} T(s' \mid s, a) \big[ R(s, a, s') + \gamma V_\pi(s') \big]$$
+        <p>
+            最优策略：若对所有状态 $V_{\pi_1}(s) \geq V_{\pi_2}(s)$，称 $\pi_1$ 优于（帕累托支配）$\pi_2$，这只是一个偏序。最优价值函数 $V^*(s) := \sup_\pi V_{\pi}(s)$ 唯一，并且至少有一个策略达到它。练习页给出定理：$\gamma &lt; 1$ 时任何 MDP 都存在确定性最优策略。可选的证明把贝尔曼最优算子
+        </p>
+        $$(\mathcal{B} V)(s) = \max_{a \in \mathcal{A}} \sum_{s' \in \mathcal{S}} T(s' \mid s,a) \Big[ R(s,a,s') + \gamma V(s') \Big]$$
+        <p>
+            看成有界函数空间上的压缩映射（contraction mapping），$\|\mathcal{B}V_1 - \mathcal{B}V_2\|_\infty \le \gamma \|V_1 - V_2\|_\infty$，所以有唯一不动点 $V^*$；再用单调性说明 $V^* \geq V_\pi$，对 $V^*$ 贪心取动作就得到最优策略。
+        </p>
+        <p>
+            练习“推理一个玩具环境”（15–25 分钟）：三个状态 $s_0, s_L, s_R$，两个动作。在 $s_0$ 选 $a_L$ 得奖励 1 到 $s_L$，选 $a_R$ 得奖励 0 到 $s_R$；从 $s_L$ 回 $s_0$ 得 0，从 $s_R$ 回 $s_0$ 得 2。答案：$V_{\pi_L}(s_0) = \frac{1}{1-\gamma^2}$，$V_{\pi_R}(s_0) = \frac{2\gamma}{1-\gamma^2}$，所以 $\gamma &lt; 1/2$ 时选左，$\gamma &gt; 1/2$ 时选右，$\gamma = 1/2$ 时两者都最优。折扣重的智能体短视，宁可现在拿 1 也不要以后拿 2。
+        </p>
+        <p>
+            接下来的练习用 Russell &amp; Norvig 的 3×4 网格世界：四个动作（上右下左），撞墙或出界就原地不动，+1（天堂）和 −1（地狱）是吸收的终止状态，每步有 $r = -0.04$ 的小惩罚。环境是滑的：只有 70% 概率按选定方向走，另外三个方向各 10%。练习页问：从右下角到天堂有经过地狱旁边的短路和绕墙的长路，智能体会选哪条？惩罚更重时值得冒险走短路，惩罚轻时走长路，中间存在一个阈值 $r^*$。环境类提供 <code>T[s, a, s_new]</code> 和 <code>R[s, a, s_new]</code> 两个三维数组；仓库还提供从 ASCII 地图构建网格的 <code>GridWorld</code> 类，Norvig 网格就是它加上 <code>slipperiness=0.3</code>。
+        </p>
+        <p>
+            练习 <code>policy_eval_numerical</code>（15–30 分钟）：把贝尔曼方程当作更新规则，从 $\hat{V}_\pi = 0$ 开始反复扫过所有状态，直到 $\max_s |\hat{V}^{new}(s) - \hat{V}^{old}(s)| &lt; \epsilon$。练习页说明它收敛的原因和上面一样：这个更新也是因子为 $\gamma$ 的压缩。
+        </p>
+<pre><code>def policy_eval_numerical(env, pi, gamma=0.99, eps=1e-8, max_iterations=10_000):
+    num_states = env.num_states
+    value = np.zeros((num_states,))
+    transition_matrix = env.T[range(num_states), pi, :]  # shape [s, s_next]
+    reward_matrix = env.R[range(num_states), pi, :]      # shape [s, s_next]
+    for i in range(max_iterations):
+        new_value = einops.reduce(transition_matrix * (reward_matrix + gamma * value), "s s_next -&gt; s", "sum")
+        if np.abs(new_value - value).max() &lt; eps:
+            break
+        value = np.copy(new_value)
+    return value</code></pre>
+        <p>
+            练习 <code>policy_eval_exact</code>（10–20 分钟）：已知 $T$ 和 $R$ 时，贝尔曼方程就是线性方程组。定义 $\mathbf{P}^\pi_{i,j} = T(j \,|\, i, \pi(i))$、$\mathbf{r}^\pi_s = \sum_{s'} T(s' \mid s, \pi(s)) R(s, \pi(s), s')$，就有 $\mathbf{v}^\pi = \mathbf{r}^\pi + \gamma \mathbf{P}^\pi \mathbf{v}^\pi$，于是
+        </p>
+        $$\mathbf{v}^\pi = (I - \gamma \mathbf{P}^\pi)^{-1} \mathbf{r}^\pi$$
+        <p>
+            $\gamma &lt; 1$ 时逆矩阵一定存在。直观上用展开式 $(\mathbf{I} - \mathbf{X})^{-1} = \mathbf{I} + \mathbf{X} + \mathbf{X}^2 + \ldots$，得到 $\mathbf{v}^\pi = (\mathbf{I}+\gamma \mathbf{P}^\pi+\gamma^2 (\mathbf{P}^\pi)^2+\ldots) \mathbf{r}^\pi$，也就是每多走一步再乘一次转移矩阵、再折扣一次。代码里用 <code>np.linalg.solve(np.eye(num_states) - gamma * transition_matrix, r)</code>。
+        </p>
+        <p>
+            练习 <code>policy_improvement</code>（10–25 分钟）和 <code>find_optimal_policy</code>：策略改进取让贝尔曼方程右边最大的动作，
+            $\pi^\text{better}(s) = \text{argmax}_a \sum_{s'} T(s' \mid s, a) (R(s,a,s') + \gamma V_{\pi}(s'))$。交替做策略评估（E）和策略改进（I），每次改进都是严格单调提升，直到策略不再变化，这时满足最优贝尔曼方程。这就是策略迭代（policy iteration）。
+        </p>
+<pre><code>def policy_improvement(env, V, gamma=0.99):
+    q = einops.einsum(env.T, env.R + gamma * V, "s a s_next, s a s_next -&gt; s a")
+    return q.argmax(axis=1)
+
+def find_optimal_policy(env, gamma=0.99, max_iterations=10_000):
+    pi = np.zeros(shape=env.num_states, dtype=int)
+    for i in range(max_iterations):
+        V = policy_eval_exact(env, pi, gamma)
+        pi_new = policy_improvement(env, V, gamma)
+        if np.array_equal(pi_new, pi):
+            return pi_new
+        pi = pi_new</code></pre>
+
+        <h3>2️⃣ 学习（Learning）</h3>
+        <p>学习目标：理解 <code>gym.Env</code> 的结构，能自己用和写环境；理解时序差分（temporal difference，TD）方法如 SARSA 和 Q-learning 的思路；实现两者并在不同环境上比较；理解 TD($\lambda$) 怎样在短时间尺度和长时间尺度的更新之间混合。</p>
+        <p>
+            现在环境是黑箱，智能体看不到 $T$ 和 $R$。能直接访问转移分布和奖励函数的算法叫规划算法（planning algorithm）；Q-learning 是无模型（model-free）算法，它不去学环境动态，只学在哪个状态做哪个动作好。练习页引用了 Q-learning 原论文的话：Q-learning 让智能体通过体验动作的后果，学会在马尔可夫领域里最优地行动，不需要构建领域地图。表格方法只是在记忆，练习页说，如果奖励函数是从所有函数中随机抽的，没有结构可以利用，这已经是最好的做法；自然的奖励函数往往有结构（扑克里下注 £100 和 £99 的回报相近），这留给后面的深度方法。
+        </p>
+        <p>
+            Gymnasium 部分讲 <code>env.step</code> 返回 5 个值：<code>obs, reward, terminated, truncated, info</code>。旧版 gym 返回 4 个，<code>done</code> 隐含等于 <code>terminated or truncated</code>。<code>terminated</code> 表示进入终止状态（提前终止等价于此后永远困在原地、奖励为零），<code>truncated</code> 表示因时间限制等原因被截断。<code>info</code> 可以放调试信息，例如智能体“本不该看到”的环境动态，偷看 <code>info</code> 的作弊智能体（cheater）可以给出最优性能的参照。练习 <code>Cheater</code>：在 <code>ToyGym-v0</code> 上（$\gamma = 0.99$，两步后终止），作弊智能体应总拿到 $2\gamma = 1.98$，随机智能体平均 $\frac{2\gamma + 1}{2} = 1.49$。
+        </p>
+        <p>
+            SARSA 是同策略（on-policy）TD 控制。最优 Q 函数满足 $Q^*(s,a) = \mathbb{E}_{\pi^*} [r + \gamma \max_{a'} Q^*(s', a') \mid s_t = s, a_t = a]$。TD 误差 $\delta_t := r_{t+1} + \gamma \widehat{Q}^*(s_{t+1}, a_{t+1}) - \widehat{Q}^*(s_t,a_t)$ 指出该往哪个方向调整估计，像随机梯度下降一样小步更新：
+        </p>
+        $$\widehat{Q}^*(s_t,a_t) \leftarrow \widehat{Q}^*(s_t,a_t) + \alpha \left( r_{t+1} + \gamma \widehat{Q}^*(s_{t+1}, a_{t+1}) - \widehat{Q}^*(s_t,a_t) \right)$$
+        <p>
+            更新用到 $(s_t, a_t, r_{t+1}, s_{t+1}, a_{t+1})$ 五个量，名字由此而来。它只从当前策略产生的数据学，单独使用只会收敛到 $Q^\pi$，所以要配合 ε-贪心之类的策略改进。Q-learning 是异策略（off-policy）：把 TD 误差里的 $a_{t+1}$ 换成下一状态的最优动作，
+        </p>
+        $$\widehat{Q}^*(s_t,a_t) \leftarrow \widehat{Q}^*(s_t,a_t) + \alpha \left( r_{t+1} + \gamma \max_a \widehat{Q}^*(s_{t+1}, a) - \widehat{Q}^*(s_t,a_t) \right)$$
+        <p>
+            它只需要 $(s_t, a_t, r_{t+1}, s_{t+1})$，直接估计 $Q^*$，与产生数据的策略无关。练习页说，只要每个状态动作对被访问无穷多次（加上学习率的一些条件），Q-learning 对任何策略都能学到 $Q^*$，策略完全随机也行，只是很慢。贪心策略容易探索不足，所以用 ε-贪心：以概率 $\epsilon$ 随机选动作，否则选 Q 最大的动作。
+        </p>
+        <p>
+            练习“实现 Q-learning 和 SARSA”：填 <code>EpsilonGreedy</code>、<code>QLearning</code>、<code>SARSA</code> 三个类。初始化里已加入乐观初始值（optimism），终止状态的 Q 值设为 0。练习页解释了 SARSA 的 <code>run_episode</code> 为什么不同：SARSA 要先决定下一动作 $a_{t+1}$ 才能更新，Q-learning 则是先更新再决定下一动作。在 Norvig 网格上两者表现接近：练习页报告，200 个种子平均下 Q-learning 在前约 200 局领先约 0.05，之后持平，这个差距比种子之间的噪声小。
+        </p>
+<pre><code>class QLearning(EpsilonGreedy):
+    def observe(self, exp: Experience) -&gt; None:
+        s, a, r, s_next = exp.obs, exp.act, exp.reward, exp.new_obs
+        self.Q[s, a] += self.config.lr * (r + self.gamma * np.max(self.Q[s_next]) - self.Q[s, a])
+
+class SARSA(EpsilonGreedy):
+    def observe(self, exp: Experience):
+        s, a, r, s_next, a_next = exp.obs, exp.act, exp.reward, exp.new_obs, exp.new_act
+        self.Q[s, a] += self.config.lr * (r + self.gamma * self.Q[s_next, a_next] - self.Q[s, a])</code></pre>
+        <p>
+            “探索什么时候真正重要”：Norvig 网格太嘈杂，随机滑动白送了探索，体现不出 ε 的作用。练习页换成一张确定性地图：起点左下，+1 目标在右上附近，−1 陷阱在右上角，其他步奖励为 0。Q 初始化为 0 时 <code>np.argmax</code> 平局取第一个动作“上”，纯贪心智能体（$\epsilon = 0$）一直往顶墙撞、原地不动，回报恒为 0；对 $\epsilon \in \{0, 0.1, 0.2, 0.5\}$ 扫描（5 个种子平均、±1 标准误阴影），任何 $\epsilon &gt; 0$ 都能到达目标，探索多的更早找到目标。
+        </p>
+        <p>
+            资格迹（eligibility traces）：1 步更新偏差大，用整局真实回报的更新无偏但方差大。$\lambda$-回报对所有部分回报做几何加权，$G^\lambda_t = (1-\lambda) \sum_{k=1}^{\infty} \lambda^{k-1} G_{t:t+k}$（有终止时把尾项并到 $\lambda^{T-t} G_t$），用它更新 $Q(s_t, a_t) \leftarrow Q(s_t, a_t) + \alpha ( G^\lambda_t - Q(s_t, a_t) )$，这叫 TD($\lambda$)。$\lambda=0$ 退化为 1 步 TD，$\lambda=1$ 退化为蒙特卡洛。直接计算 $G^\lambda_t$ 要 $O(T^2)$，资格迹给出在线的等价做法：每个状态动作对有一个“该担多少责任”的迹，
+        </p>
+        $$e_0(s,a) := 0, \qquad e_t(s,a) := \gamma \lambda e_{t-1}(s,a) + \mathbf{1}(s = s_t, a = a_t)$$
+        <p>
+            SARSA($\lambda$) 每步计算 $\delta_t = r_{t+1} + \gamma Q(s_{t+1}, a_{t+1}) - Q(s_t, a_t)$，给当前对的迹加 1，对所有 $(s,a)$ 做 $Q \leftarrow Q + \alpha \delta_t e$，再把所有迹乘 $\gamma\lambda$。练习页附了一份完整推导，并注明这份证明尚未经人工审阅。
+        </p>
+<pre><code>def observe(self, exp: Experience):
+    s, a, r, s_next, a_next = exp.obs, exp.act, exp.reward, exp.new_obs, exp.new_act
+    delta = r + self.gamma * self.Q[s_next, a_next] - self.Q[s, a]
+    self.e[s, a] += 1
+    self.Q += self.config.lr * delta * self.e  # broadcast update over all (s, a)
+    self.e *= self.gamma * self.lambda_</code></pre>
+        <p>
+            资格迹什么时候有用：它加速信用分配（credit assignment）。1 步方法每局只能把奖励信号往起点方向推一步，SARSA($\lambda$) 一次更新就把功劳分给最近整段轨迹。练习页用 8×8 稀疏奖励网格（只有右上角目标给 +1，最优路径 14 步）对比，SARSA($\lambda$) 学得明显更快，差距随信用分配链变长而变大，这也是 PPO 里要用它的“近亲”GAE 的原因。注意事项：这里是累加迹，$\lambda$ 大（如 0.95）且学习率高时，长而曲折的探索局里反复更新可能不稳定，反而变差。
+        </p>
+        <p>
+            Q-learning 与 SARSA 对比用 <code>CliffWalking-v1</code>（Sutton &amp; Barto 例 6.6，$\gamma = 1$，$\epsilon = 0.1$）。学习过程中的在线回报 SARSA 更好：它学的是自己实际执行的 ε-贪心策略的价值，知道沿悬崖边走会被探索推下去（每次 −100），于是学会绕远路。Q-learning 学的是贪心最优策略的价值，学会贴着悬崖走，然后被自己的探索一次次推下悬崖。关掉探索后排名反过来：Q-learning 的贪心策略走最短路，回报约 −13；SARSA 的贪心策略走安全绕路，回报约 −15。练习页的结论：在意学习期间的回报、或部署时还会继续 ε-贪心（例如安全要紧），选 SARSA；只在意最后贪心部署的策略，选 Q-learning。附加内容有 Watkins 的 Q($\lambda$)（每次采取非贪心的探索动作，就把之前所有迹清零）、自己写 CliffWalking 环境、探索率调度和 Double-Q learning。
+        </p>
+
+        <h3>3️⃣ （可选）多臂老虎机（Multi-Armed Bandit）</h3>
+        <p>学习目标：理解最优探索的难处；比较上置信界（Upper Confidence Bound，UCB）方法和其他探索方法。</p>
+        <p>
+            多臂老虎机没有状态，但环境分布本身可能随时间漂移，重点是权衡探索和利用。UCB 这类方法也用在别处，比如蒙特卡洛树搜索和超参数搜索的 Hyperband 算法。练习页说这部分以前是核心内容，因为后面的材料都不依赖它，所以挪到了可选部分。环境里 <code>stationary=True</code> 时各臂均值在 reset 时从 $N(0,1)$ 抽取并固定；<code>stationary=False</code> 时都从 0 开始，每次 <code>step</code> 做一小步随机游走。读物是 Sutton and Barto 2.1–2.7 节（跳过梯度老虎机）。这部分还顺带讲了注册环境、<code>TimeLimit</code> 包装器和伪随机数生成器。
+        </p>
+        <p>
+            练习依次是 <code>RandomAgent</code>（验证选中最优臂的频率约为 <code>1/num_arms</code>）、奖励平均（ε-贪心，乐观值通过把初始 $Q_0$ 设为 optimism 实现）、作弊智能体和 UCB 选择（Sutton and Barto 式 2.10，注意除零）。练习页观察到：乐观的智能体一开始更差，因为它探索多、利用少，估计过于乐观，即使找到好臂 Q 值也会下降；但最终它胜过现实的智能体，因为更多探索让它更可能收敛到最优臂。UCB 预期比奖励平均有小幅提升。
+        </p>
+        <p>
+            小节“真实的 RL 体验”是作者的经验之谈：RL 代码常常静默失败，作者第一次写的 13 行代码有个 bug，让两个版本看起来一样好；超参数数量增长快且相互影响（这里已经有 <code>epsilon</code> 和 <code>optimism</code> 两种鼓励探索的方式，<code>epsilon</code> 还应该退火）；每个版本训练 200 个智能体算多还是少也不清楚。建议是处处交叉检查，对结论保持谦虚。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 2.2.1 DQN：深度 Q 网络</h2>
+        <p><em>原练习页：[2.2.1] DQN</em></p>
+        <p>
+            这一组实现深度 Q 学习（Deep Q-Network，DQN），来自 <a href="https://www.cs.toronto.edu/~vmnih/docs/dqn.pdf" target="_blank">Playing Atari with Deep Reinforcement Learning</a>，是最早把深度学习成功用于 RL 的工作之一。练习页说，2013 年这篇论文出来时，智能体只看和人类玩家一样的屏幕像素来玩游戏，不需要“敌人在哪”的描述，这一点令人兴奋。练习用它掌握 CartPole，有时间再挑战 MountainCar。学习目标：理解 DQN 算法；学习 RL 调试，搭建探针环境（probe environment）调试智能体；实现存储转移的回放缓冲区（replay buffer）；用 PyTorch 在 CartPole 上实现 DQN。可选读物是 LessWrong 上的 Deep Q Networks Explained（第 1–4 节）和 Andy Jones 的 Debugging RL, Without the Agonizing Pain；起始代码基于 CleanRL。
+        </p>
+
+        <h3>1️⃣ Q 网络与回放缓冲区</h3>
+        <p>
+            DQN 把 Q-learning 扩展到深度学习：用神经网络代替查找表，输入状态，输出每个动作的最优 Q 值估计 $s \to (Q^*(s, a_1), ..., Q^*(s, a_n))$。流程是循环：用 ε-贪心采样一批经验存进回放缓冲区；用这些经验计算 TD 误差并更新网络；为了稳定，“下一步”那一项用目标网络（target network）计算，它是 Q 网络的滞后副本，每隔一段时间把 Q 网络权重复制过去。
+        </p>
+        <p>
+            为了反馈快，用 CartPole-v1 而不是 Atari 像素（Breakout 一次训练可能要 15 分钟）。CartPole 的观测是连续的四维向量（小车位置、速度、杆角度、角速度），动作是左推或右推。练习页说这套物理用模型方法很容易拟合（控制理论常用 PID 控制器），但这里是无模型的：智能体不知道这些数是位置和速度，也不知道物理定律。环境动态整个移植到了 PyTorch（<code>gpu_env.py</code>），所有环境按锁步并行运行，不用在 numpy 和 torch 之间来回转换，能跑几千个并行环境；代价是所有环境必须同步走相同步数，某个环境终止时自动重置。
+        </p>
+        <p>
+            练习 <code>QNetwork</code>（10–15 分钟）：Linear(obs_dim, 120) → ReLU → Linear(120, 84) → ReLU → Linear(84, num_actions)。最后一层不能接 ReLU，否则只能预测非负 Q 值，遇到负奖励或奖励缩放就出问题。网络学的是 Q 值（未来折扣奖励之和），学好以后，“杆稍偏左时把车往左推”这类状态动作对的 Q 值应该很大。
+        </p>
+        <p>
+            回放缓冲区：DQN 想把 RL 化成监督学习，而监督学习要求样本独立同分布。经验的分布依赖策略，策略又依赖 Q 网络，所以 DQN 一直在追一个移动目标，训练损失曲线不会像监督学习那样平稳下降。经验扩展为 $e_t = (s_t, a_t, r_{t+1}, s_{t+1}, d_{t+1})$，其中 $d_{t+1}$ 用 <code>terminated</code> 而不是 <code>terminated | truncated</code>：时间限制是为了训练方便加的，如果智能体把超时当作失败，它就没有理由区分“一直保持平衡”和“前 499 步平衡、然后马上倒下”。另一个细节是，向量化环境在某个环境终止时返回的 <code>next_obs</code> 已经是下一局的初始观测，真正的最后观测要从 <code>infos["final_observation"]</code> 取。仓库给出的 <code>ReplayBuffer</code> 是固定大小的环形缓冲区，<code>add</code> 写入下一批空位、满了就覆盖最旧的；<code>sample</code> 有放回抽样，批均值损失仍是整个缓冲区均值损失的无偏估计。
+        </p>
+
+        <h3>2️⃣ 探索与探针环境</h3>
+        <p>
+            DQN 不做聪明的探索：和 Q-learning 一样用 ε-贪心，只是 ε 逐步减小，Q 网络随机初始化，一开始的判断也近乎随机。练习页举了几个反面例子：Montezuma's Revenge 奖励稀疏，要拿特定钥匙开特定门，随机乱走成功的概率太低，DQN 只拿到人类平均水平的 0%；CoastRunners 里智能体发现绕圈吃刚刷新的道具比跑完比赛分更高，船撞得起火也不管；Montezuma's Revenge 加了“拿钥匙”的辅助奖励，但奖励给得稍早，智能体学会靠近钥匙但不拿、拿到辅助奖励后退回去再来。更好的方向是好奇心式探索，如 OpenAI 2018 年的 Random Network Distillation（难以预测的状态是探索不足的，给高奖励）和 2020 年的 First return, then explore；这类方法也能被钻空子，即“噪声电视问题”：追求新奇的智能体会被环境里的随机源（像失谐电视的雪花）迷住。
+        </p>
+        <p>
+            练习 <code>linear_schedule</code>（5–10 分钟）：ε 在前 <code>exploration_fraction</code> 比例的总步数内从 <code>start_e</code> 线性降到 <code>end_e</code>，之后保持。练习 <code>epsilon_greedy_policy</code>（10–20 分钟）：每个环境独立掷硬币决定是否探索，总是先做一次前向，再用 <code>t.where</code> 逐环境挑选。练习页解释，也可以让所有环境一起探索或一起贪心，能省一次前向，但会让各局相关，探索步数期望一样、方差大得多。这里还提到最大化偏差（maximisation bias）：贪心动作和 TD 目标 $\max_{a'} Q(s', a')$ 都偏乐观，Double Q-Learning 用两个估计器互相更新来纠正。
+        </p>
+<pre><code>def linear_schedule(current_step, start_e, end_e, exploration_fraction, total_timesteps):
+    return start_e + (end_e - start_e) * min(current_step / (exploration_fraction * total_timesteps), 1)
+
+# inside epsilon_greedy_policy
+with t.no_grad():
+    greedy_actions = q_network(obs).argmax(dim=-1)
+is_explore = t.rand(num_envs, generator=rng, device=obs.device) &lt; epsilon
+random_actions = t.randint(0, num_actions, (num_envs,), generator=rng, device=obs.device)
+actions = t.where(is_explore, random_actions, greedy_actions)</code></pre>
+        <p>
+            探针环境是极简的调试环境，放在 <code>gpu_probe.py</code>。第一个探针的观测恒为 <code>[0.0]</code>、奖励恒为 +1、一步就终止，智能体应该很快学到这个观测的价值是 +1。练习要求读懂所有探针，练习页给出各自失败时该查哪里：探针 1 测基本学习能力（查损失函数和优化器）；探针 2 测区分两个观测；探针 3 测时间和奖励延迟（查折扣和 step 逻辑）；探针 4 测不同动作导致不同奖励（查策略更新和损失）；探针 5 测观测到动作的映射。
+        </p>
+
+        <h3>3️⃣ DQN 主算法</h3>
+        <p>
+            Q 函数现在是网络 $Q(s,a ; \theta)$，要让它满足最优贝尔曼方程，也就是期望 TD 误差为零。终止状态的 Q 值为 0，所以乘上 $(1 - d_{t+1})$。从缓冲区抽一批 $B$，最小化平方 TD 误差：
+        </p>
+        $$L(\theta) = \frac{1}{|B|} \sum_{i=1}^{|B|} \left( r_{t_i+1} + (1 - d_{t_i+1}) \gamma \max_a Q(s_{t_i+1}, a ; \theta_\text{target}) - Q(s_{t_i}, a_{t_i} ; \theta) \right)^2$$
+        <p>
+            $\theta_\text{target}$ 是 $\theta$ 的旧副本，隔一段时间更新一次。<code>DQNArgs</code> 的默认值：16 个并行环境，总共 300,000 环境步（包括填充缓冲区），缓冲区 10,000，每次 <code>play_step</code> 后做一次优化（<code>steps_per_update=1</code>），每 50 次优化同步一次目标网络，批大小 512，学习率 5e-3，$\gamma = 0.99$，ε 从 1.0 降到 0.02，探索比例 0.1。练习页强调区分两种“步”：默认设置下是 30 万环境步，但只有约 1.8 万优化步。
+        </p>
+        <p>
+            练习 <code>DQNAgent</code>（25–45 分钟）：<code>play_step</code> 取动作、走一步环境、把新经验加进缓冲区（终止的环境要用 <code>final_observation</code>）；<code>get_actions</code> 按线性调度设 ε 再做 ε-贪心。练习页提到设计上遵循关注点分离：智能体类只负责和环境交互。练习 <code>DQNTrainer</code>（30–60 分钟）写 <code>add_to_replay_buffer</code> 和 <code>training_step</code>：
+        </p>
+<pre><code>def training_step(self, step: int) -&gt; None:
+    data = self.buffer.sample(self.args.batch_size)  # o_t, a_t, r_{t+1}, d_{t+1}, o_{t+1}
+    with t.inference_mode():
+        target_max = self.target_network(data.next_obs).max(-1).values
+    predicted_q_vals = self.q_network(data.obs).gather(-1, data.actions.unsqueeze(-1)).squeeze(-1)
+    td_error = data.rewards + self.args.gamma * target_max * (1 - data.terminated.float()) - predicted_q_vals
+    loss = td_error.pow(2).mean()
+    loss.backward()
+    self.optimizer.step()
+    self.optimizer.zero_grad()
+    if step % self.args.trains_per_target_update == 0:
+        self.target_network.load_state_dict(self.q_network.state_dict())</code></pre>
+        <p>
+            记录什么：TD 损失（一开始快速下降，之后不必继续降，智能体变好、到达新状态时还可能上升，短暂尖峰不一定是坏事）、SPS（每秒步数，用来判断环境是不是瓶颈）、Q 值。Q 值一开始接近 0，接近解决环境（局长接近 500）时应趋向几何级数 $1 + \gamma + \gamma^2 + \cdots$；每次复制目标网络后 Q 值会跳一下，因为 Q 网络要快速“追上”新目标。
+        </p>
+        <p>
+            灾难性遗忘（catastrophic forgetting）：DQN 在 CartPole 上的表现常常循环，局长到 500，然后掉下来（有时掉很多），再恢复。练习页提醒不要只看训练结束时的智能体，因为训练在固定步数停下，停在循环的哪一段是偶然的。原因是缓冲区里几乎全是成功经验，模型忘了怎样从坏状态恢复。练习页用一个实验量化这个机制，每 500 个梯度步记录五样东西，逐面板解释：
+        </p>
+        <ol>
+            <li>缓冲区里的失败用完了：16 个环境、10,000 条转移只覆盖最近约 625 步，所有环境都撑满 500 步后缓冲区里就没有终止转移。</li>
+            <li>Q 不再区分动作：数据里没有失败，TD 目标说每个动作都没问题，左右两个动作的 Q 值趋同，动作间隙（action gap）$\max_a Q(s,a) - \min_a Q(s,a)$ 衰减。</li>
+            <li>Q 忘了“必死状态”长什么样：必死状态（下一步不管做什么都会终止）的真值是 0，但没有数据锚定，它们的值向 $1/(1-\gamma) = 100$ 漂移。这在失败只是变少时就开始了。</li>
+            <li>损失看不出来：整个漂移过程中 TD 损失接近零，因为 Q 和它训练的数据完全一致，遗忘对训练信号不可见。</li>
+            <li>崩溃和恢复：动作间隙接近零时，argmax 策略变成抛硬币，表现崩溃；失败重新进入缓冲区，损失飙升，几百步内面板 3、4 恢复。</li>
+        </ol>
+        <p>
+            面板 2–4 能提前预测崩溃，损失（面板 5）不能。这说明要保留旧经验，即使当前策略不会再产生它们。练习页建议的修法是让缓冲区保留 10% 以前阶段的经验、90% 当前阶段的经验；PPO 一节会再介绍奖励塑形。
+        </p>
+
+        <h3>4️⃣ CartPole 之外与附加内容</h3>
+        <p>
+            下一个挑战是 MountainCar-v0（<code>gpu_env.py</code> 里有 GPU 版 <code>"MountainCar-gpu"</code>，3 个离散动作、2 维观测，<code>QNetwork</code> 不用改），它每步奖励 −1 直到小车到达旗子，是比 CartPole 难得多的探索问题。推荐的其他环境有 Minigrid、microRTS、Megastep、Procgen 和 Atari。仓库附了一个 Atari 版 DQN（4 帧 84×84 灰度堆叠，换成 Nature-DQN 卷积网络），作者说训练 40 分钟效果不错，但不如 PPO 一节的 Atari 结果，可能还没调好。附加练习：去掉目标网络看看会怎样；把 Q 网络缩小到四分之三或一半参数；实现 Dueling DQN。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 2.2.2 VPG：朴素策略梯度</h2>
+        <p><em>原练习页：[2.2.2] VPG</em></p>
+        <p>
+            这一组实现朴素策略梯度（Vanilla Policy Gradient，VPG），它是 PPO 等更高级算法的基础。四个部分的学习目标：1️⃣ 理解策略梯度定理和 VPG 算法，怎样做同策略的策略梯度；2️⃣ 从多个并行环境收集同策略经验；3️⃣ 把策略梯度定理变成能反向传播的损失，理解基线为什么能降方差而不引入偏差；4️⃣ 用探针环境调试，训练出能把杆平衡满 500 步的智能体。可选读物是 Lilian Weng 的 Policy Gradient Algorithms。
+        </p>
+
+        <h3>1️⃣ 策略梯度定理</h3>
+        <p>
+            策略梯度方法直接学策略，不经过动作价值。策略参数化为 $\pi_\theta(a|s)$，目标是最大化期望回报 $J(\theta) = \mathbb{E}_{\tau \sim \pi_\theta}[G(\tau)]$（练习页戏称 joy），做梯度上升 $\theta \leftarrow \theta + \alpha \nabla_\theta J(\theta)$。难点在于回报是轨迹上奖励之和，轨迹本身来自对策略的反复采样，还依赖拿不到的环境分布，无法直接对参数求导。策略梯度定理给出无偏估计：
+        </p>
+        $$\nabla_\theta J(\theta) = \mathbb{E}_{\tau \sim \pi_\theta} \left[ \sum_t G_t \nabla_\theta \log \pi_\theta(a_t|s_t) \right]$$
+        <p>
+            推导：轨迹概率 $\Pr(\tau|\theta) = \rho_0(s_0) \prod_{t} \pi_\theta(a_t|s_t)\,\mu(s_{t+1}|s_t, a_t)$。用对数导数技巧 $\nabla_\theta p(x) = p(x) \nabla_\theta \log p(x)$ 得到 $\nabla_\theta J = \mathbb{E}[\nabla_\theta \log \Pr(\tau|\theta) \, G(\tau)]$；初始分布 $\rho_0$ 和动态 $\mu$ 不依赖 $\theta$，求导后消失，所以 $\nabla_\theta \log \Pr(\tau|\theta) = \sum_t \nabla_\theta \log \pi_\theta(a_t|s_t)$。这就是 REINFORCE 估计量，每个对数概率乘整条轨迹的回报 $G(\tau)$。动作 $a_t$ 影响不了之前的奖励，那些奖励只是噪声，所以换成从 $t$ 开始的回报（reward-to-go）$G_t = \sum_{i=t}^{T} \gamma^{i-t} r_{i}$，得到方差更低的无偏估计。
+        </p>
+        <p>
+            实现沿用 DQN 的 GPU 向量化 CartPole。DQN 只跑少量环境，因为它的样本效率来自回放缓冲区；朴素策略梯度不能那样复用旧数据，所以更依赖向量化，每次更新从很多环境收集新的 rollout（主训练用 32 个）。练习 <code>PolicyNetwork</code>：结构和 Q 网络一样（120、84 两个隐藏层），输出动作 logits；最后一层同样不能接 ReLU，否则 logits 被限制在 0 以上，网络就不能任意压低一个动作。
+        </p>
+
+        <h3>2️⃣ Rollouts</h3>
+        <p>
+            VPG 的流程很简单：在 <code>num_envs</code> 个环境里并行做一次 rollout，存下轨迹，从中学习，然后丢掉。一次 rollout 对应一步学习，所以总是同策略。练习 <code>Rollout Buffer</code>（20 分钟）：最小数据单位是一整条轨迹，不打乱、不拆成单条经验；<code>add_step</code> 追加一步，<code>get_batches</code> 用 <code>t.split</code> 切成若干批。练习 <code>VPGAgent</code>（10–15 分钟）：<code>gen_rollout</code> 跑 <code>num_steps_per_rollout</code> 步，环境终止时自动重置，一个 rollout 里每个环境通常有好几局；<code>get_actions</code> 对 logits 的 softmax 用 <code>t.multinomial</code> 采样，再 gather 出所采动作的对数概率。
+        </p>
+
+        <h3>3️⃣ 损失</h3>
+        <p>
+            练习 <code>compute_returns</code>：倒序遍历轨迹，遇到 <code>done</code>（这里是 <code>terminated | truncated</code>，标记局的边界）就把累计回报清零。练习页指出，真正被截断的尾巴来自 rollout 窗口：窗口结束时还活着的环境，反向计算从 $G=0$ 开始，拿不到它本会继续得到的奖励。PPO 里的 actor-critic 方法用评论家自举来解决这个问题。
+        </p>
+<pre><code>def compute_returns(rewards, done, gamma=0.9):
+    returns = t.zeros_like(rewards)
+    G = t.zeros_like(rewards[:, 0])  # (num_envs,)
+    for i in reversed(range(rewards.shape[1])):
+        G = rewards[:, i] + gamma * G * (~done[:, i])
+        returns[:, i] = G
+    return returns</code></pre>
+        <p>
+            练习 <code>compute_logprobs</code> 用当前策略重新计算每步所采动作的对数概率。练习 <code>compute_importance_weights</code>：重要性权重 $\text{iw}_t = \pi(a_t | s_t) / \pi_{old}(a_t | s_t)$ 修正策略在收集 rollout 之后发生的变化，这样一个 rollout 可以复用几次更新（<code>rollout_use_count &gt; 1</code>，略微异策略）。用对数概率之差再取指数保证数值稳定，权重要 <code>.detach()</code>，可选地截到 $[1-c, 1+c]$。练习页说明这个截断不是 PPO 式的裁剪，默认配置每个 rollout 只用一次。练习 <code>normalize_returns</code>：在所有轨迹和时间步上标准化为零均值、单位方差。
+        </p>
+        <p>练习 <code>compute_reinforce_loss</code>：第 $t$ 步的损失为</p>
+        $$\text{iw}_t \log \pi(a_t | s_t) \big( G_t - b_t \big)$$
+        <p>
+            基线 $b_t$ 取同一时间步上 $N$ 个环境回报的均值 $b_t = \frac{1}{N} \sum_{i=1}^N G^{(i)}_t$。它依赖 rollout 位置 $t$，不依赖动作，所以梯度无偏。一个细节：$b_t$ 包含环境 $i$ 自己的回报，代数上 $G^{(i)}_t - b_t = \frac{N-1}{N} ( G^{(i)}_t - \frac{1}{N-1} \sum_{j \neq i} G^{(j)}_t )$，正好是“留一法”基线的 $\frac{N-1}{N}$ 倍，而留一法基线严格无偏，所以期望梯度方向不变，只是缩小了 $\frac{N-1}{N}$，相当于略小的学习率。这个“损失”实际是要最大化的目标，优化器用 <code>maximize=True</code>，不取负号。对时间步也取均值只是常数缩放，不改变算法。
+        </p>
+<pre><code>def compute_importance_weights(logprobs_taken, tau, clip_coef):
+    iw = t.exp(logprobs_taken - tau.logprobs).detach()  # no gradient through the weights
+    if clip_coef is not None:
+        iw = t.clamp(iw, 1 - clip_coef, 1 + clip_coef)
+    return iw
+
+def compute_reinforce_loss(returns, logprobs_taken, iw):
+    adv = returns - returns.mean(dim=0, keepdim=True)  # per-timestep baseline across envs
+    return (iw * logprobs_taken * adv.detach()).mean()</code></pre>
+
+        <h3>4️⃣ 训练</h3>
+        <p>
+            练习 <code>VPGTrainer</code>（45 分钟）主要写 <code>compute_loss</code>，训练循环是标准的：做一次 rollout，切批，算损失，逐批更新。探针环境已经写好。练习页提到在 CPU 上训练这么小的网络时，PyTorch 默认每核一个线程反而拖慢速度，设置里把线程数限制在 4，作者在多核机器上遇到过 10 倍的减速。VPG 训练通常不稳定（实践中用 PPO 的原因），作者调了一组超参数，在 CPU 或 GPU 上约 10 秒训练到最优策略。训练时会渲染 4×4 网格视频，某个环境的智能体倒下重置时格子背景闪粉色。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 2.3 PPO：近端策略优化</h2>
+        <p><em>原练习页：[2.3] PPO</em></p>
+        <p>
+            这一组在 CartPole 上实现近端策略优化（Proximal Policy Optimization，PPO），练习页说做完后约 15 秒能训练到接近完美；还可以用奖励塑形让智能体学得更快或做花样，附加练习扩展到 Atari 和 MuJoCo。很多设置和 DQN 一节类似。“今天的工作方式”一段说：RL 的反馈噪声极大，代码正确时智能体也可能失败，代码有 bug 时也可能成功，建立系统的方法应对困惑本身就是这一天的目的：提出假设并设计测试或断点验证，在更简单的环境上测，理解各个日志指标的含义，注意没想通的地方而不是含糊带过。
+        </p>
+        <p>
+            读物：0️⃣ 是专门为这些练习写的 PPO 速览，不要求全读，但强烈建议至少读每小节末尾的总结框；推荐视频 An introduction to Policy Gradient methods（20 分钟）；<a href="https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/" target="_blank">The 37 Implementation Details of PPO</a> 是做练习时的参考，这里只处理其中 13 个“核心”细节，各小节标题注明对应第几条；PPO 原论文前 5 页可作公式参考。可选：Spinning Up 的 VPG 和 PPO、Lilian Weng 的文章、Yu Geng 的 PPO &amp; GRPO。
+        </p>
+
+        <h3>0️⃣ PPO 速览</h3>
+        <p>学习目标：理解 PPO 的数学直觉，学会 PPO 目标函数这类表达式是怎样推出来的。这里为简化记号，假设有限时域、不折扣（$\gamma = 1$）。</p>
+        <p>
+            策略梯度方法与 DQN 的对比：DQN 学 Q 函数，用贝尔曼方程的 TD 残差做更新，对 Q 取 argmax 得到策略；策略梯度方法把期望未来奖励 $J(\pi_\theta)$ 写成策略的函数，直接做梯度上升。策略梯度定理的一般形式是
+        </p>
+        $$\nabla_\theta J\left(\pi_\theta\right)=\underset{\tau \sim \pi_\theta}{\mathbb{E}}\left[\sum_{t=0}^T \nabla_\theta \log \pi_\theta\left(a_t \mid s_t\right) A_\theta(s_t, a_t)\right]$$
+        <p>
+            其中优势函数（advantage function）$A_\theta(s_t, a_t) = Q_\theta(s_t, a_t) - V_\theta(s_t)$，表示在 $s_t$ 选 $a_t$ 比按 $\pi_\theta$ 走平均好多少。优势为正就提高这个动作的概率，为负就降低，也就是让有利的动作更可能、不利的动作更不可能。用总回报 $R(\tau)$ 代替优势就是 REINFORCE，能用但方差高。推导先得到带 $R(\tau)$ 的形式，再用“期望梯度对数概率引理” $\mathbb{E}_{x \sim P_\theta}[\nabla_\theta \log P_\theta(x)] = 0$ 说明可以减去任何只依赖早期轨迹的基线，最后括号里正好是 $Q - V = A$。
+        </p>
+        <p>
+            实际的目标函数用冻结参数 $\theta_\text{target}$ 估计优势（类似 DQN 用冻结的目标网络），用未冻结参数算对数概率：
+        </p>
+        $$L(\theta) = \frac{1}{|B|} \sum_{t \in B} \log \pi_\theta(a_t \mid s_t) \hat{A}_{\theta_\text{target}}(s_t, a_t)$$
+        <p>
+            它的梯度近似 $\nabla_\theta J(\pi_\theta)$。PPO 需要两个网络：演员（actor）学策略 $\pi_\theta(a_t \mid s_t)$，输入状态、输出动作 logits；评论家（critic）学价值函数 $V_\phi(s_t)$，输出一个标量，用来估计优势。评论家通过最小化 TD 残差学习，练习页说这在概念上更像 SARSA 而不像 Q-learning/DQN，因为策略改进来自演员网络。和 DQN 不同，策略梯度方法能处理连续动作空间：演员可以输出一组均值和方差来参数化动作分布。
+        </p>
+        <p>
+            怎样从价值估计得到优势估计：只用 1 步残差 $\delta_t = r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t)$ 太短视；把所有未来残差加起来又和直接用 $R(\tau)$ 差不多，不稳定。广义优势估计（Generalized Advantage Estimation，GAE）取中间：$\hat{A}^{\text{GAE}(\lambda)}_t = \delta_t + \lambda \gamma \delta_{t+1} + \lambda^2 \gamma^2 \delta_{t+2} + \ldots$。
+        </p>
+        <p>最后还有三处改动让它成为 PPO：</p>
+        <ol>
+            <li>熵奖励（entropy bonus）鼓励探索、防止过早收敛到次优策略。熵衡量不确定性，在同一状态总做同一动作的策略熵低。把策略熵乘一个系数加到要最大化的目标上，系数通常随时间衰减。</li>
+            <li>把目标函数裁剪成 $L^\text{CLIP}(\theta)$，让比值 $\pi_\theta / \pi_{\theta_\text{target}}$ 在一次学习阶段内保持接近 1。练习页的理由是：策略离旧策略越远，用旧策略生成的经验就越不现实。TRPO 显式约束新旧策略的 KL 散度，PPO 做法更简单粗糙：优势为正时比值超过 $1+\epsilon$ 就裁掉，不再传梯度；优势为负时对 $1-\epsilon$ 做同样处理。</li>
+            <li>计算 $L^\text{CLIP}$ 时用概率比值代替对数概率。因为裁剪保证比值接近 1，可用 $\log(x) \approx x - 1$，两者只差一个与 $\theta$ 无关的常数。</li>
+        </ol>
+        <p>
+            练习页说，三处改动里第 2 处把 PPO 和其他策略梯度方法区分开，“近端”（proximal）一词就来自这个让新策略靠近旧策略的裁剪。实现上分两个阶段：rollout 阶段用冻结网络生成一批经验，学习阶段在这批经验上更新策略；和 DQN 不同，rollout 阶段清空缓冲区重新生成，学习阶段在同一缓冲区上迭代多轮。三个主要类是 <code>ReplayMemory</code>、<code>PPOAgent</code>、<code>PPOTrainer</code>。目标函数三项分工：熵奖励只训练演员；裁剪替代目标训练演员（用旧评论家的估计），是三项中最重要的；价值函数损失只训练评论家。
+        </p>
+
+        <h3>1️⃣ 搭建智能体</h3>
+        <p>学习目标：理解演员和评论家网络的区别与作用；学习并实现 GAE；构建存储和采样经验的回放内存；设计在环境里走步并记录经验的智能体类。</p>
+        <p>
+            练习 <code>get_actor_and_critic</code>：经典控制环境下演员和评论家都是 64-64 的 Tanh MLP，权重正交初始化、偏置初始化为常数（细节 #2），演员最后一层 std=0.01，评论家最后一层 std=1.0。Atari 和 MuJoCo 用不同架构，后面再写。
+        </p>
+        <p>
+            GAE 一节（细节 #5）从偏差方差权衡讲起。1 步估计 $\hat{A}_t^{(1)} = \delta_t := r_t + (1 - d_{t+1})\,\gamma V_\phi(s_{t+1}) - V_\phi(s_t)$ 方差低（只有一个随机奖励）但有偏（完全依赖评论家）。n 步估计用 $n$ 个真实奖励再自举，$n$ 越大偏差越小、方差越大，$n \to \infty$ 是无偏高方差的蒙特卡洛估计；n 步估计正好是 TD 残差的折扣和。GAE 对所有 n 步估计做权重 $\propto \lambda^{n-1}$ 的指数平均，化简为
+        </p>
+        $$\hat{A}^{\text{GAE}(\lambda)}_t = \sum_{l=0}^{\infty} (\gamma \lambda)^l\, \delta_{t+l}$$
+        <p>
+            $\lambda = 0$ 是 1 步估计，$\lambda = 1$ 是蒙特卡洛估计，实践中用 0.95 左右。GAE 也帮评论家：评论家回归到 $\hat{A}_t + V_\phi(s_t)$ 这个多步前瞻目标。实际计算时 rollout 长度有限，且不能跨局自举，于是从末尾倒推：
+        </p>
+        $$\hat{A}_t = \delta_t + (1 - d_{t+1})\,(\gamma \lambda)\, \hat{A}_{t+1}, \qquad \hat{A}_{T-1} = \delta_{T-1}$$
+<pre><code>@t.inference_mode()
+def compute_advantages(next_value, next_terminated, rewards, values, terminated, gamma, gae_lambda):
+    T = values.shape[0]
+    terminated = terminated.float()
+    next_terminated = next_terminated.float()
+    next_values = t.concat([values[1:], next_value[None, :]])
+    next_terminated = t.concat([terminated[1:], next_terminated[None, :]])
+    deltas = rewards + gamma * next_values * (1.0 - next_terminated) - values
+    advantages = t.zeros_like(deltas)
+    advantages[-1] = deltas[-1]
+    for s in reversed(range(T - 1)):
+        advantages[s] = deltas[s] + gamma * gae_lambda * (1.0 - terminated[s + 1]) * advantages[s + 1]
+    return advantages</code></pre>
+        <p>
+            练习 <code>get_minibatch_indices</code> 和给出的 <code>ReplayMemory</code> 类：学习阶段把缓冲区随机切成小批，按细节 #6 做小批量更新，每个 rollout 迭代若干轮；回报定义为 <code>returns = advantages + values</code>。练习 <code>PPOAgent</code>：<code>play_step</code> 用演员采样动作、走一步、用评论家算价值，把观测、动作、对数概率、价值、奖励、终止标志存进内存。
+        </p>
+
+        <h3>2️⃣ 学习阶段</h3>
+        <p>学习目标：实现由三项组成的总目标函数（论文式 (9)）；理解每一项对算法的作用；写出返回优化器和学习率调度器的函数。符号约定：函数输出就是式 (9) 里的 $L_t^{CLIP}$、$c_1 L_t^{VF}$、$c_2 S[\pi_\theta](s_t)$，优化器用 <code>maximize=True</code> 做梯度上升。</p>
+        <p>裁剪替代目标（细节 #8，论文式 (7)），其中 $r_t(\theta) = \pi_\theta(a_t|s_t) / \pi_{\theta_{\text{target}}}(a_t|s_t)$ 是概率比值（不要和奖励 $r_t$ 混淆）：</p>
+        $$L^{CLIP}(\theta) = \frac{1}{|B|} \sum_t \left[\min \left(r_{t}(\theta) \hat{A}_t, \operatorname{clip}\left(r_{t}(\theta), 1-\epsilon, 1+\epsilon\right) \hat{A}_t\right)\right]$$
+        <p>
+            练习页的推导说明：$\hat{A}_t &gt; 0$ 时下裁剪界不起作用（$r_t &lt; 1-\epsilon$ 时裁剪项更大，被 min 丢掉），表达式化为 $\min(r_t, 1+\epsilon) \hat{A}_t$；优势为负时同理只有下界起作用。PPO 论文图 1 画了这两种情况。实现时先对小批内的优势做标准化。
+        </p>
+<pre><code>def calc_clipped_surrogate_objective(dist, mb_action, mb_advantages, mb_logprobs, clip_coef, eps=1e-8):
+    prob_ratio = t.exp(dist.log_prob(mb_action) - mb_logprobs)
+    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + eps)
+    non_clipped = prob_ratio * mb_advantages
+    clipped = t.clip(prob_ratio, 1 - clip_coef, 1 + clip_coef) * mb_advantages
+    return t.minimum(non_clipped, clipped).mean()
+
+def calc_value_function_loss(values, mb_returns, vf_coef):
+    return vf_coef * (values - mb_returns).pow(2).mean()
+
+def calc_entropy_bonus(dist, ent_coef):
+    return ent_coef * dist.entropy().mean()</code></pre>
+        <p>
+            价值函数损失（细节 #9）是评论家新预测 $V_\phi(s_t)$ 和观测回报 <code>advantages + values</code> 的均方差，作用类似 SARSA 的 TD 误差。论文对它也做了裁剪，练习页按细节 #9 给出的证据（裁剪没有好处）不裁剪。熵奖励（细节 #10）用离散分布熵 $H(p) = \sum_x p(x) \ln \frac{1}{p(x)}$，<code>dist.entropy</code> 已经数值稳定地实现了它。CartPole 上熵最小为 0（总往一边推），最大为 $\ln 2 \approx 0.693$（均匀随机）。熵也是有用的诊断量：接近最大说明智能体在乱走，训练早期就接近最小说明探索可能不够。练习 <code>PPOScheduler</code>（细节 #3、#4）：练习页说 Adam 虽然已经自适应学习率，经验上衰减学习率仍有好处，所以在 <code>total_phases</code> 次调用内把学习率从 <code>initial_lr</code> 线性降到 <code>end_lr</code>，每个学习阶段结束时调用一次。
+        </p>
+
+        <h3>3️⃣ 训练循环</h3>
+        <p>学习目标：搭出完整的 PPO 训练循环；训练智能体并用 Weights &amp; Biases 的媒体记录可视化；用奖励塑形改进训练（还能让它做花样）。</p>
+        <p>
+            练习“补全 <code>PPOTrainer</code>”：交替 rollout 阶段和学习阶段。奖励塑形（reward shaping）一节先讲灾难性遗忘在 PPO 上可能比 DQN 更严重，因为 PPO 是同策略的，每个学习阶段都生成全新的经验。练习页说常把 PPO 称作同策略、DQN 称作异策略，但界线是模糊的：PPO 只要做了一步学习，严格说就已经在用旧策略生成的数据。除了保留部分坏经验，另一个办法是奖励塑形。GPU 版 CartPole 把 <code>reward_function</code> 单独作为方法，塑形只要子类覆盖它。建议把奖励限制在 0 到 1 之间，越稳定越接近 1，例如 $r = 1 - (\theta / \theta_{\text{max}})^2$（让杆接近竖直）或 $r = 1 - (x / x_{\text{max}})^2$（把车推回中间），也可以用绝对值或线性组合。公平比较时要看局长（<code>episode_length</code>），因为塑形后回报本来就比原环境低。
+        </p>
+
+        <h3>4️⃣ Atari</h3>
+        <p>学习目标：理解怎样在视觉领域用合适的架构（CNN）做 PPO；理解策略头和价值头；训练智能体解决 Breakout。</p>
+        <p>
+            原始观测是 (210, 160, 3) 的图像，需要大得多的网络，奖励塑形也难得多，因为观测是低层像素，不直接包含高层抽象。Breakout 有 4 个动作：不动、发球、右移、左移，奖励来自打碎砖块（越高的砖分越多）。按 37 细节文章的 Atari 部分，除一条外都是环境包装器，例如跳帧（同一动作重复 4 帧、奖励求和）和把图像缩放成 84×84 灰度；另一条是演员和评论家共享 Nature-CNN 主干（细节 #8），主干提取高层表示，再接策略头和价值头。练习 <code>get_actor_and_critic_atari</code> 实现这个结构。
+        </p>
+
+        <h3>5️⃣ MuJoCo</h3>
+        <p>学习目标：理解 PPO 怎样用于连续动作空间；安装并使用 MuJoCo 物理引擎；训练智能体解决 Hopper 环境。</p>
+        <p>
+            练习页提到 MuJoCo 让人想起 OpenAI 那个会后空翻的“面条”，那项工作为 RLHF 打下了基础。这里用 Brax（JAX 写的 MuJoCo 物理，跑在 GPU 上），pip 直接安装，不再有老 <code>mujoco-py</code> 对库版本和 Python &lt;3.11 的苛刻要求。动作从正态分布采样，可能超出允许范围，所以由环境包装器裁到 −1 到 1（细节 #5–9）。演员和评论家不共享主干，因为观测空间很小，用不着共享的特征提取。演员分成 <code>actor_mu</code>（结构同 CartPole 演员，输出正态分布均值）和 <code>actor_log_sigma</code>（只是一个偏置，标准差与状态无关，细节 #2）。连续动作的对数概率要在动作维度上求和。
+        </p>
+<pre><code># continuous version of play_step (PPOAgentCts)
+_, _, dist = self.actor.forward(obs)          # actor returns (mu, sigma, dist)
+actions = dist.sample()
+next_obs, rewards, next_terminated, next_truncated, infos = self.envs.step(actions)
+logprobs = dist.log_prob(actions).sum(-1)     # sum over the action dimensions</code></pre>
+        <p>
+            “从零设计奖励”一节说，奖励函数是问题定义的一部分，糟糕的选择常常让智能体根本得不到反馈。好的奖励函数要能区分随机初始化策略产生的不同 rollout，至少有一些随机 rollout 比其他的奖励更高，训练才有东西可抓。仓库额外接入了离散动作的 <code>MountainCar</code> 和连续动作的 <code>Pendulum</code>，先给 MountainCar 的奖励塑形示例，再让学员给 Pendulum 设计奖励。最后是自定义的小车加双摆环境 <code>CartDoublePendulum</code>（<code>mode="swing-up"</code>）：两根无驱动的杆一开始垂直下垂，智能体只能左右推车，要把它们甩上去并倒立平衡，同时不跑出导轨，需要真正的闭环反馈策略，不能靠背下一串力矩。它整个跑在 GPU 上，运动方程是批量的 3×3 线性求解，用 RK4 积分。
+        </p>
+
+        <h3>☆ 附加内容</h3>
+        <p>信赖域方法（TRPO）、在 PPO 上做 RLHF、长期回放内存、向量化优势计算、其他离散环境、连续动作与奖励塑形、自己选一个环境（如 Wordle）、Minigrid/Procgen、多智能体 PPO。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 2.3.2 目标错误泛化：陶器店网格世界</h2>
+        <p><em>原练习页：[2.3.2] Goal Misgeneralisation</em></p>
+        <p>
+            用 RL 训练智能体时，我们通过奖励函数告诉它要做什么。这一天讲两种最主要的出错方式：
+        </p>
+        <ol>
+            <li>目标错误设定（goal misspecification，也叫奖励投机 reward hacking、规范博弈 specification gaming，较少叫外部失调 outer misalignment）：智能体用不符合设计者意图的方式拿到高奖励。奖励函数被优化了，奖励背后的意图没有，因为奖励函数没有完美刻画想要的行为。</li>
+            <li>目标错误泛化（goal misgeneralisation）：智能体学到的目标在训练分布上和奖励函数一致，在分布偏移下却和预期目标分道扬镳。它在新环境里依然能干，只是能干地追求错误的东西。</li>
+        </ol>
+        <p>
+            练习页说后者更隐蔽：即使你能写出一个完全概括你所有愿望的奖励函数，智能体仍可能内化错误的目标；在训练分布上，从黑箱角度看，学错目标的智能体和学对的可能无法区分。实验环境叫陶器店（pottery shop）：一个小机器人在店里，有易碎的瓮（urn）和一堆堆碎片（shard），我们希望它把碎片清理掉，同时不打碎任何东西。PPO 实现和网络结构已经给好（高度优化的版本），学员这一天在高一层工作，设计环境和奖励函数，研究它们训练出的智能体的行为。
+        </p>
+        <p>
+            来源：改编自 Matthew Farrugia-Roberts 为牛津大学 AI Safety and Alignment 课程（2025 年秋季学期）写的实验，原版用 JAX（<a href="https://github.com/matomatical/reward-lab" target="_blank">reward-lab</a>），ARENA 移植到 PyTorch；这一节最早是 Iliad Intensive 的目标错误泛化日（David Quarel 编写），以 CC BY 4.0 共享。读物分三类：外部对齐与规范博弈（LessWrong 的 outer alignment 词条；DeepMind 2020 年的 Specification gaming 博文和案例表；Ng、Harada、Russell 1999 年的势函数塑形论文，证明基于势的塑形不改变最优策略，并且只有这类塑形有这个保证）；内部对齐与目标错误泛化（LessWrong 的 inner alignment 词条；Robert Miles 的两个视频；Langosco 等 2022 年命名并首次在 RL 中演示这一现象的论文，其中 CoinRun 实验的硬币在训练时总在关卡末尾，智能体学到“往右走”而不是“拿硬币”；Shah 等 2022 年的论文，论证修好奖励函数不能阻止智能体学错目标）；延伸阅读有 Hubinger 等的 Risks from Learned Optimization、Richard Ngo 的三种框架、Alex Turner 的 Reward is not the optimization target。
+        </p>
+        <p>
+            这一组和 <a href="16_ARENA_评测与对齐科学.html">16</a> 的 4.1 涌现性失调、4.2 对齐伪装相关：练习页在第 5 部分直接提到 Anthropic 2024 年观察到的对齐伪装现象。
+        </p>
+
+        <h3>1️⃣ 环境</h3>
+        <p>学习目标：理解陶器店环境怎样用批量张量运算实现；建立对环境动态的直觉。</p>
+        <p>
+            网格里有瓮（走进去就会碎成一堆碎片）、碎片、垃圾桶和蓝色机器人。机器人可以上下左右移动、捡起碎片、把手里的碎片放下（放在地上或垃圾桶里）。示范策略依次捡起每堆碎片送到左上角的垃圾桶，不碰任何瓮。<code>Environment</code> 数据类表示 <code>envs</code> 个并行环境：<code>init_robot_pos</code>、<code>bin_pos</code> 是坐标，<code>init_items_map</code> 是 (envs, N, N) 的张量，值 0/1/2 表示空、碎片、瓮。<code>State</code> 多一个 <code>inventory</code>，表示机器人手里拿着什么。<code>reset</code> 初始化批量状态，<code>step</code> 按动作更新状态（移动、改库存、打碎瓮）。还可以自己上手玩。
+        </p>
+
+        <h3>2️⃣ 奖励函数</h3>
+        <p>学习目标：解读奖励函数，它激励什么行为、本来想激励什么行为；用给定的 PPO 训练智能体；解读训练出的行为，发现它何时偏离设计者意图。</p>
+        <p>
+            练习页引用 Sutton 的奖励假设（reward hypothesis）：我们所说的目标和意图，都可以很好地理解为最大化所收到的标量信号（奖励）累积和的期望值。它也提到领域里对这一假设在最强形式下是否成立有争议。练习“解读这个奖励函数”给出 <code>reward1</code>：
+        </p>
+<pre><code>pickup_reward = (
+    (item_below_robot == Item.SHARDS)
+    &amp; (state.inventory == Item.EMPTY)
+    &amp; (action == Action.PICKUP)
+).float()
+dispose_reward = (
+    (state.bin_pos[:, 0] == state.robot_pos[:, 0])
+    &amp; (state.bin_pos[:, 1] == state.robot_pos[:, 1])
+    &amp; (state.inventory == Item.SHARDS)
+    &amp; (action == Action.PUTDOWN)
+).float()
+total_reward = pickup_reward + dispose_reward</code></pre>
+        <p>
+            答案：捡起碎片得 1，在垃圾桶处放下碎片得 1（理论上同一转移两者同时发生会得 2）。设计者大概想激励“捡碎片、扔进垃圾桶”。用 PPO 训练后，练习“解读智能体的行为”让学员对比设计者意图、自己的预期和实际行为。
+        </p>
+
+        <h3>3️⃣ 规范博弈</h3>
+        <p>学习目标：看到规范博弈时能认出来；把奖励函数写成探测不当行为的行为探针；理解并实现势函数塑形（potential shaping），在奖励里加提示又不让智能体钻空子；把塑形项和惩罚组合成修好的规范并验证。</p>
+        <p>
+            训练出的智能体有两个问题：它更喜欢反复捡起、放下碎片，而不是捡一次送进垃圾桶；它愿意打碎瓮去找新碎片。每次捡起值 +1，扔在地上不扣分，打碎的瓮就是新的“刷分”来源。练习页补充，只要有一堆碎片可以反复刷，它其实不需要打碎瓮，但 <code>reward1</code> 里也没有任何东西阻止它这样做。
+        </p>
+        <p>
+            “逆奖励假设”（inverse reward hypothesis）：按奖励假设，现有智能体的行为也可以理解为对某个奖励函数的最大化。注意平凡情形：常数零奖励让任何策略都“最优”，所以要找的是让该策略最优、而学到不同行为的策略不最优的奖励函数。练习“把奖励函数写成行为探针”：写 <code>reward_drop</code>（在垃圾桶以外放下碎片时 +1）和 <code>reward_break</code>（打碎瓮时 +1），它们不用于训练，只用来测量行为，理想情况下我们希望它们的回报被最小化。在一批 rollout 上画这些探针的回报直方图，就能定量看到奖励投机。
+        </p>
+        <p>
+            势函数塑形：直接删掉捡起奖励能解决第一个问题，但奖励工具性子目标有时能帮学习。问题在于提示一旦能在不完成任务的情况下被满足，就会引发奖励投机。做法是选一个势函数 $\Phi : \mathcal{S} \to \mathbb{R}$（在明显有进展的状态取高值），转移时加上进入新状态的 $\gamma\Phi(s')$、减去离开旧状态的 $\Phi(s)$：
+        </p>
+        $$R^\Phi(s,a,s') = R(s,a,s') + \gamma\Phi(s') - \Phi(s)$$
+        <p>
+            这样奖励的是取得进展，不是待在某处。进入高势状态得到势值，离开时再还回去，所以不能靠在高势状态附近徘徊刷塑形奖励。拿着碎片时势高，捡起时立即得到奖励；如果之后把碎片扔进垃圾桶得到真实奖励，势随库存清空还回去；如果扔在地上，势同样还回去。在什么策略最优这一点上，势函数塑形不改变结果，但会改变训练动态。可选练习证明势函数在回报中相消（裂项求和）。练习“实现势函数塑形”（重要性 5/5）：测试和后续分析统一用持有碎片时势为 0.5、扔进垃圾桶奖励 +1。
+        </p>
+<pre><code>def reward_shaped(state, action, next_state):
+    pickup_shaping_term = DISCOUNT_RATE * inventory_potential(next_state) - inventory_potential(state)
+    bin_reward_term = reward_bin(state, action, next_state)
+    return bin_reward_term + pickup_shaping_term</code></pre>
+        <p>
+            抑制打碎瓮：直接惩罚打碎瓮的转移，难点是惩罚多大。太小的话，打碎瓮再把碎片扔进垃圾桶仍然划算；太大会让训练不稳定，策略还带随机性时，智能体可能学会害怕瓮，远远躲开，怕采到错误动作不小心撞碎。默认 −2：打碎后把碎片扔进垃圾桶最多拿回略少于 1 的奖励（有折扣），所以不打碎明显更好。可选练习“人人都有价”：找一个即使在修好的奖励下打碎瓮仍然划算的布局。练习“修好规范”：把塑形奖励和惩罚合成 <code>reward2</code>，用同样设置重训（建议 <code>num_train_steps=192</code>），确认智能体至少清理一堆碎片，<code>reward_drop</code> 和 <code>reward_break</code> 两个探针集中在零附近。
+        </p>
+
+        <h3>4️⃣ 泛化</h3>
+        <p>学习目标：理解 RL 中的泛化是机器学习泛化的特例；在程序化生成的环境上训练智能体；探测训练好的策略在没见过的布局上怎样表现。</p>
+        <p>
+            RL 的泛化和机器学习一般意义上的泛化没有本质差别：要学一个函数（策略，从状态映射到动作概率），用梯度下降从数据里学，而有些输入从没被查询和校准过。泛化指的是策略对未见状态给出的动作概率是否仍符合最大化期望回报的目标。
+        </p>
+        <p>
+            “策略怎样泛化”：<code>net2</code> 在训练用的店里清理得很完美，但它只见过一个布局。换一个同样大小、碎片和瓮互换位置、机器人起点也不同的店，跑 4 次 rollout：它走向训练店里碎片原来所在的 (3, 1) 和 (3, 2)，那里现在是瓮，于是每次都把两个瓮打碎（在训练店里同一个智能体从不打碎瓮），再把碎片送向垃圾桶，完全无视 9 堆真正的碎片。它只在固定布局上训练，背下一条路线就能拿满分，没有任何压力让它去看物品到底在哪。
+        </p>
+        <p>
+            程序化生成环境：常见做法是在一个程序化生成的环境分布上训练，各环境共享一些共性（如尺寸），但不允许依赖虚假假设（如物品位置）。练习页举了两个例子：CartPole 的初始状态在 (0,0,0,0) 上对每个变量加 $\mathcal{U}(-0.05, 0.05)$ 噪声，防止背下一串只对一个起点有效的动作；Atari（ALE）加“粘手柄”噪声，以小概率执行上一个动作，因为很多游戏是在模拟器上跑的原始 ROM，不容易改游戏机制。生成器为每个环境把垃圾桶放在左上角，再用随机排列给机器人和物品抽不同的格子。渲染出来的样本里机器人、碎片、瓮每次位置都不同，但垃圾桶始终固定在左上角，这个常量就是智能体后来学错的依据。<code>ppo.train_agent_multienv</code> 每个训练步重新采样 256 个环境，网络更大、并行环境更多。
+        </p>
+        <p>
+            练习“现在策略怎样泛化”（20–25 分钟）：为 6×6 店设计布局，先预测再观察，刻画哪些情况下泛化正确、哪些不正确，提示是想想所有训练环境里什么始终不变。要求在进入第 5 部分前至少找到一个智能体“能干但做错”的布局。可变的东西有碎片和瓮的数量（训练中始终是 4 堆碎片、2 个瓮）、机器人和物品的位置、垃圾桶本身的位置。参考答案：和训练布局相似的情况（新位置，甚至新数量）一般处理正确；把垃圾桶移走（比如放到右上角）时，智能体仍然熟练地捡起碎片送到左上角，放在地上，不理真正的垃圾桶。
+        </p>
+
+        <h3>5️⃣ 目标错误泛化</h3>
+        <p>学习目标：理解目标错误泛化的定义，区分预期目标和行为目标；写一个编码行为目标的奖励函数，定量演示目标错误泛化；理解扩大训练分布怎样修复它，以及为什么实践中这条路不总是可行。</p>
+        <p>练习“目标错误泛化的要素”引用 Langosco 等（2022）的定义：</p>
+        <blockquote>
+            A deep RL agent is trained to maximize reward $R : \mathcal{S} \times \mathcal{A} \times \mathcal{S} \to \mathbb{R}$ ... Goal misgeneralization occurs if the agent now achieves low reward in the new environment because it continues to act capably yet appears to optimize a different reward $R' \neq R$. We call $R$ the intended objective and $R'$ the behavioral objective of the agent.
+        </blockquote>
+        <p>
+            （译：深度 RL 智能体被训练来最大化奖励 $R$，部署时发生分布偏移。如果智能体在新环境里因为继续能干地行动、却看起来在优化另一个奖励 $R' \neq R$ 而得到低奖励，就发生了目标错误泛化。$R$ 叫预期目标，$R'$ 叫智能体的行为目标。）
+        </p>
+        <p>
+            对应到这里：分布偏移是训练时垃圾桶总在左上角 (0, 0)，测试时在别处（例如右上角）；行为目标是“把碎片拿到左上角放下”，训练时它和预期目标“把碎片拿到垃圾桶”完全相关，策略没法区分，更简单、更容易学的那个胜出。<code>proxy</code> 奖励函数在 (0, 0) 放下碎片时 +1，不管垃圾桶在不在那里。直方图显示，在偏移环境里策略在 <code>reward2</code> 下回报低得多（几乎从不真正扔进垃圾桶），在 <code>proxy</code> 下回报明显为正。若 <code>reward2</code> 显示一个约 $0.5\gamma^{64} \approx 0.36$ 的小常数正回报，那不是扔进了垃圾桶：<code>evaluate_behaviour</code> 跑到 64 步就停，智能体还拿着碎片，捡起时预支的势没有还回去，这就是可选证明里有限轨迹的注意事项。
+        </p>
+        <p>
+            练习页接着说：一个学到行为目标的智能体和一个学到预期目标的智能体，若没有能检查模型内部在优化什么的白箱方法，或者观察分布外环境的行为，是无法区分的。这里分布外行为容易猜，但一般情况下事先并不清楚分布外输入长什么样，这是开放问题。一个足够能干、知道自己在训练中的智能体可能在训练时故意按预期目标行事以免被训练改变，部署后再追求自己的目标，练习页注明 Anthropic 在 2024 年观察到了这一现象（对齐伪装，见 <a href="16_ARENA_评测与对齐科学.html">16</a> 的 4.2）。
+        </p>
+        <p>
+            练习“实现分布偏移”（10–15 分钟）：写 <code>generate_shift</code>，连垃圾桶位置一起随机，最简单的做法是对全部 <code>size**2</code> 个格子做排列，第一个给垃圾桶、第二个给机器人、其余给物品。“在分布外训练”：用 <code>generate_shift</code> 训练，目标错误泛化应该减少。这个任务更难（要找垃圾桶，而不是总往角落走），回报在前约 50 步接近零，之后约 150 步上升，约第 250 步趋平。“实践中怎样缓解”：现实中往往只有类似 <code>generate</code> 的训练分布，部署时面对未知的偏移，训练时拿不到 <code>generate_shift</code>，缓解这种情况下的目标错误泛化是活跃的研究方向。
+        </p>
+        <p>
+            结论一节把两种失败对应起来：目标错误设定（外部对齐失败）指在训练环境里，若有比设计者意图回报更高的行为，策略就会追求它们；目标错误泛化（内部对齐失败）指在分布外环境里，策略的行为不一定由奖励函数“本来会激励”的东西决定，而取决于智能体架构的归纳偏置，一个更简单、训练时与预期目标完全相关的目标，往往就是策略之后继续追求的目标。附加内容包括回到“人人都有价”、证明势函数塑形保持策略之间的排序等。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 2.4.1 RLHF：GRPO 与 LoRA</h2>
+        <p><em>原练习页：[2.4.1] RLHF</em></p>
+        <p>
+            练习页开头标注这部分是新材料，仍在打磨。它完整实现用强化学习微调语言模型，也就是 RLHF（Reinforcement Learning from Human Feedback，基于人类反馈的强化学习）中的“RL”部分。算法用 GRPO（Group Relative Policy Optimization，组相对策略优化），来自 <a href="https://arxiv.org/abs/2402.03300" target="_blank">DeepSeekMath</a> 论文，用于训练 DeepSeek-R1，是语言模型 RL 的几个标准选择之一。和 PPO 不同，GRPO 不需要评论家：对同一提示做多次 rollout、分别打分，用这一组的平均分作基线估计优势。练习页说这比 PPO 高效，PPO 需要改造 LLM，在残差流末端接一个昂贵的评论家，再训练它预测奖励模型会给多少分；ARENA 旧版材料就是这样做的。这一节直接用 Hugging Face <code>transformers</code> 模型，不用 TransformerLens。
+        </p>
+        <p>
+            前提：不需要先做 PPO，做过的话会认出一些部件（尤其是裁剪替代目标）。练习假设 GPU 显存至少 24GB（RTX 4090、A10、L4 或 A100）；显存低于 22 GiB 或没有 GPU 时自动设 <code>LOW_GPU_MEM = True</code>，换用小模型，RLHF 的内容不会少学，只是不太能在大模型和复杂奖励上做实验。用到两族模型，都是只做过预训练的基座模型（base model）：GPT-2 medium（355M 参数，低显存时用 124M 的 GPT-2 small），在第一部分全量微调；Qwen3-1.7B-Base（低显存时 0.6B），在第二部分用 LoRA 微调。
+        </p>
+        <p>
+            可选读物：Hugging Face 的 Illustrating RLHF（约 10 分钟）；RLHF+ChatGPT: What you must know（约 5 分钟，讲到模式坍缩和 shoggoth 梗）；The True Story of How GPT-2 Became Maximally Lewd（奖励函数的一个符号错误让模型生成“最坏”的输出）；DeepSeekMath 第 4 节；LoRA 论文 1–4 节；Dwarkesh 的 RL is even more information inefficient than you thought；Thinking Machines 的 LoRA Without Regret（RL 反馈的信息密度低，所以很低秩的 LoRA 就能达到全量微调的效果）。
+        </p>
+
+        <h3>1️⃣ 通过 GRPO 做 RLHF</h3>
+        <p>学习目标：理解怎样把从 LLM 采样表示成 RL 框架；理解 GRPO 的组相对优势、裁剪替代目标和对参考模型的 KL 惩罚；理解为什么从采样到的 token 估计 KL 惩罚；写出完整的 RLHF 训练循环，用玩具奖励函数训练；观察并理解奖励投机和模式坍缩；试验更复杂的奖励函数（情感分类器）。</p>
+        <p>
+            语言模型“环境”：策略 $\pi_\theta$ 是自回归语言模型，动作 $a_t$ 是生成的 token（动作空间是词表），初始状态 $s_0$ 是提示，状态 $s_t$ 是到此为止的整个序列，环境动态就是拼接 $s_{t+1} := s_t \; a_t$。结束前每步奖励为零，最后一步的奖励由奖励函数作用于整个序列给出 $r_T = R(s_0 a_0 \ldots a_{T-1})$。严格说它是马尔可夫的，但只因为每个可能的 token 序列都是一个状态，几乎不会重访同一状态，更好的理解是奖励依赖整段生成历史的非马尔可夫环境。每局长度固定，从同一个提示开始，期望回报 $\mathbb{E}[G_0] = \gamma^{T-1} \mathbb{E}[r_T]$，$\gamma^{T-1}$ 是常数，所以不折扣。若长度可变（模型可以提前输出结束符），折扣会促使回答简短。练习页提醒，RLHF 真正的一环是收集人类反馈、训练奖励函数，这里用固定奖励函数代替（附加部分可以自己训练），所以这一天实际上是“语言模型的 RL 微调”，这也是数学和代码这类可自动检验任务的训练方式（RLVR）。
+        </p>
+        <p>
+            策略梯度与基线：目标 $J(\theta) = \mathbb{E}_{o \sim \pi_\theta(\cdot \mid q)}[R(q,o)]$，$q$ 是提示（question），$o$ 是生成（output），沿用 GRPO 论文记号。最简单的优势是 $A_t = R(q, o)$，但所有奖励都为正时会把每个采样序列都往上推。减去不依赖动作的基线不改变期望梯度，好的基线大幅降方差。PPO 用评论家估计 $V(s_t)$，在 LLM 上要接一个价值头读残差流后层激活，再用 MLP 映射成标量。练习页列出这种做法的问题：增加参数量；价值头随机初始化，可能把模型带偏；估计半句话的价值很难，一个恶意续写就能毁掉半句话的情感，半成品代码也很难按自动测试给部分分。GRPO 对每个提示采样一组 $G$ 个生成，用组均值作基线、再除以标准差：
+        </p>
+        $$\hat{A}_{i} = \frac{r_i - \operatorname{mean}(r_1, \ldots, r_G)}{\operatorname{std}(r_1, \ldots, r_G)}$$
+        <p>
+            除以标准差是为了与奖励尺度无关。生成 $o_i$ 的每个 token 共享同一个优势（更复杂的方法会把功劳分给具体 token 或句子，见 DeepSeekMath 4.1.3 节）。缺点是组内 rollout 必须有差异：奖励是 0/1 时，若全错或全对，这一组对训练毫无作用。GRPO 目标（DeepSeekMath 4.1 节，要最大化）：
+        </p>
+        $$J_{\text{GRPO}}(\theta) = \mathbb{E}\left[ \frac{1}{G} \sum_{i=1}^{G} \frac{1}{|o_i|} \sum_{t=1}^{|o_i|} \left( \min\Big[ \rho_{i,t} \, \hat{A}_{i}, \; \text{clip}(\rho_{i,t}, 1-\epsilon, 1+\epsilon)\,\hat{A}_{i} \Big] - \beta \, D_{\mathrm{KL}}\!\left[\pi_\theta \,\|\, \pi_{\text{ref}}\right] \right) \right]$$
+        $$\rho_{i,t} = \frac{\pi_\theta(o_{i,t} \mid q, o_{i,\lt t})}{\pi_{\theta_{\text{old}}}(o_{i,t} \mid q, o_{i,\lt t})}$$
+        <p>
+            三个要素：组相对优势；裁剪替代目标（采样昂贵，想在每批样本上走几步梯度，但第一步之后 $\pi_\theta$ 已经不是生成样本的策略，比值修正这一点，裁剪防止离旧策略太远）；KL 惩罚 $\beta D_{KL}[\pi_\theta \| \pi_\text{ref}]$，防止策略离原始预训练模型太远、生成分布外的垃圾，奖励模型比策略简单、容易被不连贯输出骗到高分时尤其重要。训练交替 rollout 阶段（采样一组生成，算奖励和优势，记录所采 token 在当前策略和参考模型下的对数概率）和学习阶段（切小批做梯度上升）。为简单起见，所有 rollout 用同一个提示，整批就是一组；所有生成都恰好 <code>gen_len</code> 个 token。
+        </p>
+        <p>
+            为什么是反向 KL $D_{KL}(\pi_\theta \| \pi_\text{ref})$：要惩罚的是新模型生成了在旧模型下极不可能的输出（$\pi_\theta$ 高、$\pi_\text{ref}$ 低），我们希望输出是原分布更集中的版本，保持对完全不连贯行为的低概率；反过来，基座模型里有一定概率、新模型里接近零的行为（比如暴力或色情内容）是可以接受的，新模型就该这样。
+        </p>
+        <p>
+            练习依次是：<code>reward_fn_char_count</code>（数句号个数作为玩具奖励）、<code>compute_grpo_advantages</code>、<code>logits_to_logprobs</code>、<code>get_logprobs</code>、<code>calc_kl_penalty</code>、<code>calc_clipped_surrogate_objective</code>、补全 <code>GRPO_Trainer</code>，然后“构思你的奖励函数”和“用更复杂的奖励函数”。
+        </p>
+<pre><code>def reward_fn_char_count(samples: list[str], char: str = ".") -&gt; Float[Tensor, " batch"]:
+    return t.tensor([s.count(char) for s in samples], device=device, dtype=t.float)
+
+def compute_grpo_advantages(rewards, eps: float = 1e-6):
+    return (rewards - rewards.mean()) / (rewards.std() + eps)</code></pre>
+        <p>
+            KL 惩罚：精确计算要对整个词表求和，代价是 $O(\text{batch\_size} \times \text{gen\_len} \times \text{d\_vocab})$，而且分布有长尾：练习页的图里最可能的 50 个 token 占约一半概率，其余约 5 万个 token 分剩下的一半，精确求和几乎全部算力都花在贡献很小的项上。改用只依赖实际采样 token 的估计量。记 $\log \rho^\text{ref}_t = \log \pi_\theta(a_t \mid s_t) - \log \pi_\text{ref}(a_t \mid s_t)$，三个候选：k1 $= \log \rho^\text{ref}_t$，无偏但大约一半样本为负（尽管 KL ≥ 0）；k2 $= \tfrac{1}{2}(\log \rho^\text{ref}_t)^2$，总是非负、方差低得多，有偏但分布接近时偏差很小，它的期望是一个 $f''(1) = 1$ 的 f-散度，在两个分布接近时与 KL 二阶一致，prime-RL 用的就是这一项；k3 $= (\rho^\text{ref}_t)^{-1} - 1 + \log \rho^\text{ref}_t$，策略接近参考时最适合“测量” KL。练习选 k2 做惩罚：它的值是略有偏的 KL 估计，但它的梯度恰好是 $D_{KL}(\pi_\theta \| \pi_\text{ref})$ 的梯度。
+        </p>
+<pre><code>def calc_kl_penalty(logprobs, ref_logprobs, kl_coef: float):
+    log_ratio = logprobs - ref_logprobs
+    k2 = 0.5 * log_ratio**2
+    return kl_coef * k2.mean()</code></pre>
+        <p>
+            为什么不要熵奖励：KL 惩罚本身含有 $-H(\pi_\theta)$，$D_{KL}(\pi_\theta \| \pi_\text{ref}) = -H(\pi_\theta) + \text{CE}(\pi_\theta \| \pi_\text{ref})$；预训练基座模型把概率分散在许多合理续写上，把策略拉向它就会维持熵，通常足以防止坍缩。
+        </p>
+        <p>
+            训练观察：冒烟测试（不开 KL）时，模型模式坍缩到一直生成句号。正式运行开启 KL（<code>kl_coef=1.0</code>，从前 10 个 token 以温度 0.6 采样，优势裁到 ±2），提示是 <code>"My favourite author is"</code>，模型要想办法在 KL 惩罚察觉不到的情况下塞进尽可能多的句号。练习页用 DPO 论文第 4 节的结论解释：KL 正则化目标 $\mathbb{E}_{\pi}[R] - \beta\, D_{KL}(\pi \,\|\, \pi_\text{ref})$ 的最优解是 $\pi^*(o) \propto \pi_\text{ref}(o)\, e^{R(o)/\beta}$，所以最便宜的句号出现在基座模型本来就认为可能的文本里。在 <code>"This is"</code> 这类泛泛的提示后，GPT-2 记住了句号很多的固定文本（例如 Democracy Now! 文字稿开头 <code>This is a rush transcript. Copy may not be in its final form.</code>），训练大多坍缩到它；<code>"My favourite author is"</code> 没有这种模板，但作者名缩写是放句号的自然位置。练习页还指出 KL 惩罚的一个失效方式：基座模型会做上下文学习，一旦文本里已经有 <code>......</code>，基座模型也同意接下来最可能还是句号。冒烟测试（<code>kl_coef=0.0</code>）的日志里，平均奖励从第 2 阶段的 3.33 涨到第 3 阶段的 15.30、第 4 阶段的 172.81，样本逐渐变成夹满句号的文字。
+        </p>
+        <p>
+            更复杂的奖励：用预训练文本分类模型做情感奖励，例如 <code>lvwerra/distilbert-imdb</code>（IMDB 影评正负面）、<code>cardiffnlp/twitter-roberta-base-sentiment</code>、<code>distilbert-base-uncased-emotion</code>（悲伤、喜悦、爱、愤怒、恐惧、惊讶），提示要和奖励模型匹配（IMDB 用 <code>"This movie was really"</code>）。用 gpt2-medium、<code>gen_len=40</code> 时峰值约 11GB 显存。
+        </p>
+
+        <h3>2️⃣ LoRA</h3>
+        <p>学习目标：理解低秩适配（Low-Rank Adaptation）的机制，以及它为什么能大幅减少微调内存；从零为 Hugging Face 模型实现 LoRA；用 GRPO + LoRA 对更大的模型做 RL 微调。</p>
+        <p>
+            全量微调的内存账：float32 加 AdamW，每个参数 4 字节权重、4 字节梯度、Adam 一阶矩和二阶矩各 4 字节，共 16 字节（不含激活）；RL 还要一个冻结的原模型副本，再加 4 字节，共 20 字节。1.7B 模型就是约 34GB，超过 24GB 显卡。全用 bf16 存（每参数 8 字节）的问题是 bf16 只有 8 个有效位，$w$ 附近相邻两个 bf16 数相差约 $4e-3|w|$ 到 $8e-3|w|$，一次 Adam 更新太小就被舍入掉。练习页用 AdamW 训练一个小 MNIST 分类器做对比：学习率 1e-3 时 fp32、bf16、混合精度最终测试准确率都是 96.8%，但每步改变的参数比例分别是 95.8%、63.3%、95.8%；学习率 1e-5 时 fp32 为 85.6%（100% 参数变化），bf16 只有 29.2%（3.1% 参数变化），混合精度 85.6%。
+        </p>
+        <p>
+            LoRA（Hu 等 2021）基于微调更新有低“内在秩”的观察，冻结预训练权重，只学低秩更新。对线性层 $h = x W_0$，$W_0 \in \mathbb{R}^{d_\text{in} \times d_\text{out}}$，学习 $\Delta W = AB$，$A \in \mathbb{R}^{d_{\text{in}} \times r}$，$B \in \mathbb{R}^{r \times d_{\text{out}}}$，$r \ll \min(d_{\text{in}}, d_{\text{out}})$：
+        </p>
+        $$h = x W_0 + \frac{\alpha}{r} x A B$$
+        <p>
+            实现细节：只有适配器有梯度和优化器状态，相对整个模型可以忽略，适配器常常不到总参数的 0.1%；$A$ 高斯初始化、$B$ 初始化为零，所以一开始 $\Delta W = 0$；更新乘 $\frac{\alpha}{r}$ 缩放；训练完可以合并 $W = W_0 + \frac{\alpha}{r} AB$，推理没有额外延迟。练习 <code>LoRALinear</code> 和 <code>merge</code>/<code>unmerge</code>：
+        </p>
+<pre><code>class LoRALinear(nn.Module):
+    def __init__(self, base: nn.Linear, rank: int, alpha: float):
+        super().__init__()
+        self.base, self.rank, self.alpha = base, rank, alpha
+        self.scaling = alpha / rank
+        self.enabled, self.merged = True, False
+        self.base.requires_grad_(False)
+        device = base.weight.device
+        self.A = nn.Parameter(t.randn(base.in_features, rank, device=device) / base.in_features**0.5)
+        self.B = nn.Parameter(t.zeros(rank, base.out_features, device=device))
+
+    def forward(self, x):
+        out = self.base(x)
+        if (not self.enabled) or self.merged:
+            return out
+        x = einops.einsum(x.to(self.A.dtype), self.A, "... d_in, d_in rank -&gt; ... rank")
+        update = einops.einsum(x, self.B, "... rank, rank d_out -&gt; ... d_out")
+        return out + (self.scaling * update).to(out.dtype)
+
+    @t.no_grad()
+    def merge(self):
+        # nn.Linear stores weight as (d_out, d_in), the transpose of W_0
+        delta = self.scaling * einops.einsum(self.A, self.B, "d_in rank, rank d_out -&gt; d_out d_in")
+        self.base.weight += delta
+        self.merged = True</code></pre>
+        <p>
+            练习页提醒：如果基座权重是低精度（如 bfloat16），合并和取消合并都会舍入，<code>unmerge</code> 只能近似回到 $W_0$。可选小节讲 Qwen3 架构。练习 <code>apply_lora</code>（必做）把 LoRA 套到模型的线性层上。练习 <code>GRPO_LoRA_Trainer</code>：按 <code>args.dtype</code> 加载模型、整体冻结、套 LoRA、把 <code>self.ref_model</code> 设为 <code>None</code>，再建优化器（它只会拿到可训练的适配器参数）；仓库给了上下文管理器 <code>lora_disabled</code>，关掉所有适配器就得到参考模型，不必在内存里再放一份完整模型。
+        </p>
+
+        <h3>☆ 附加内容</h3>
+        <p>
+            和 <code>peft</code> 库的 LoRA 对比；该给哪些层加 LoRA、秩取多少；GRPO 的变体；超参数扫描；自适应 KL 惩罚；TRL 库；从人类偏好学奖励模型；对 RL 微调后的模型做可解释性；复现 Deep Reinforcement Learning from Human Preferences；用 <code>trl</code>、<code>peft</code> 和 vLLM 做真实规模的训练和更快的采样。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 2.4.2 RLVR：可验证奖励的强化学习</h2>
+        <p><em>原练习页：[2.4.2] RLVR</em></p>
+        <p>
+            同样标注为仍在打磨的新材料。前面主要用 RL 改变模型行为（多生成句号、生成正面情感），这一节介绍可验证奖励的强化学习（Reinforcement Learning from Verifiable Rewards，RLVR），用来教模型新能力：给模型出题，让它先生成长思维链再作答，用验证器批改，强化得出正确答案的 rollout。奖励函数需要某种基准真值（题目答案、计算器、带单元测试的 Python 解释器、形式化证明检查器等）。练习页说，RLHF 的奖励是人类偏好的代理，容易被投机；这里的奖励（应当）不会被投机，因为（希望）唯一拿到正奖励的方式是给出导向正确答案的 rollout。所以通常不在乎 rollout 是否保持在基座模型的分布内：如果模型在学一个原来没有的能力，成功的 rollout 几乎按定义就在基座模型的分布之外。
+        </p>
+        <p>
+            练习页同时提醒，完美的验证器也不是万无一失：如果模型能用工具（比如写代码并执行），作弊（偷看答案、篡改验证器）可能比完成任务更容易。可选读物：From REINFORCE to Dr. GRPO 博文；OpenAI 的 Monitoring Reasoning Models for Misbehavior（Baker 等 2025，前沿模型学会用 <code>exit(0)</code> 让单元测试通过）；Cognition 的 Kevin-32B（题目太难时，唯一有正优势的 rollout 是一个被投机的 kernel）；Spurious Rewards（Shao 等 2025，在 Qwen2.5-Math 上随机奖励带来了正确奖励大部分的提升）；Anthropic 的 Natural Emergent Misalignment from Reward Hacking（MacDiarmid 等 2025，学会奖励投机的模型整体上更失调）；Lilian Weng 的奖励投机综述。最后一篇和 <a href="16_ARENA_评测与对齐科学.html">16</a> 的 4.1 涌现性失调相关。
+        </p>
+        <p>
+            导言还讨论了 RLVR 是教会新能力还是激发已有能力：从零开始的 RL（无预训练、奖励不可投机）显然学到新能力，随机初始化的网络不会平衡杆，也没有可激发的能力；但预训练模型已有很多能力，而且必须对任务至少有点本事，否则没有好的 rollout 可强化。文献意见分裂：Yue 等（2025）发现在大 <code>pass@k</code> 下基座模型能追上，认为 RLVR 只是让基座已能到达的答案更可能；ProRL（Liu 等 2025）发现更长、更稳定的 RL 训练能解出基座模型无论采样多少次都解不出的题。练习页最后会检验这个问题，给出的诚实回答是不清楚：样本足够多时基座模型常常追上甚至超过 RL 后的模型，但 RL 仍改善单次表现，而实践中在乎的就是单次表现。
+        </p>
+        <p>
+            分工：同 2.4.1 一样用 LoRA 微调 Hugging Face 基座模型 <code>Qwen/Qwen3-0.6B-Base</code>，但这次用 <code>peft</code> 库的 LoRA。学员实现属于 RLVR 本身的部分：可验证奖励、Dr. GRPO 目标、让每道题保持约 50% 解题率的难度控制器、训练器的 rollout 和学习阶段；仓库提供任务生成器和难度阶梯、答案解析器、模型加载、<code>peft</code> LoRA、快速采样、Dr. GRPO 优势、微批处理和评估。
+        </p>
+
+        <h3>1️⃣ 多位数乘法</h3>
+        <p>学习目标：理解什么样的任务适合 RLVR（可验证、难度可调、输入空间大）；理解任务生成器、难度阶梯和答案解析器怎样配合，实现可验证奖励。</p>
+        <p>
+            任务是函数 <code>(difficulty, rng) -&gt; (prompt, answer)</code>，难度是每个乘数的位数。多位数乘法合适：模型知道乘法概念和做法，但大数上会出错；输入空间大，可以确信模型不是在背预训练见过的结果。基座模型的表现：通常 3×2 能做对，3×3 错多对少，4×4 几乎从不对。提示末尾的换行有影响：没有换行时补全会在同一行继续（<code>" To"</code>、<code>" The"</code>，约 10% 是 <code>" What"</code>，也就是又出一道题），3×2 的 pass@1 从 0.58 降到 0.50。练习“Qwen3 游乐场”（20 分钟）让学员自己确认即使用强提示或少样本示例，<code>Qwen3-0.6B-Base</code> 在足够难度下仍然很吃力，作者自己的尝试在 4×4 上也得不到可靠的解。
+        </p>
+        <p>
+            按惯例要求模型把答案写成 <code>\boxed{N}</code>，用正则取最后一个 boxed 整数。奖励只在最后一步给出：
+        </p>
+        $$r_T = \begin{cases} 1 &amp; \text{if the model's answer is correct} \\ 0.1 &amp; \text{if the model's answer is incorrect but formatted correctly} \\ 0 &amp; \text{otherwise} \end{cases}$$
+        <p>
+            这是 RLVR 常用的奖励（格式奖励加正确性奖励），模型很快学会正确格式。练习页说可以以后再给“接近正确答案”的部分分，但更复杂的奖励函数有被投机的风险。练习 <code>int_reward</code>（约 10 分钟）为一个 GRPO 组（同一题的 <code>num_rollouts</code> 个生成）返回形状 <code>(num_rollouts,)</code> 的奖励张量。
+        </p>
+
+        <h3>2️⃣ 用可验证奖励做 GRPO</h3>
+        <p>学习目标：看到为什么可验证奖励让我们可以去掉对参考模型的 KL 项，以及 Dr. GRPO 相对 GRPO 改了什么；理解为什么约 50% 的解题率让组相对优势下的奖励信息量最大。</p>
+        <p>
+            模型是 <code>Qwen3-0.6B-Base</code>，给所有七个线性层（<code>q_proj</code>、<code>k_proj</code>、<code>v_proj</code>、<code>o_proj</code> 和 MLP 的三个投影，不含嵌入和反嵌入）加 LoRA，基座约 596M 参数，适配器约 10M。不用 KL 惩罚，因为不在乎 rollout 离基座多远，只要得到正确答案。<code>peft</code> 的 <code>disable_adapter</code> 上下文管理器对应 2.4.1 的 <code>lora_disabled</code>；<code>peft</code> 的 $A$ 用 PyTorch 默认的 kaiming uniform（$a = \sqrt{5}$）初始化，$B$ 同样为零。
+        </p>
+        <p>
+            Dr. GRPO（GRPO Done Right）去掉 GRPO 的两个优化偏差。一是问题难度偏差：GRPO 用 <code>(r − mean) / std</code> 标准化，几乎全对或几乎全错的题方差小，回报被放大，梯度被放大；难度正好、对错各半的题梯度反而被削弱。Dr. GRPO 去掉 <code>/std</code>。二是回答长度偏差：GRPO 对每个生成的逐 token 目标按长度 $|o_i|$ 平均，每个 token 拿相同的优势，有效推动正比于 $\hat{A}_{i} / |o_i|$，优势为正时偏好更短的回答，错误回答则被鼓励更长；练习页说默认不想施加缩短回答的压力，那可能让模型更弱或思维链更难解读。Dr. GRPO 去掉 $|o_i|^{-1}$，改为除以固定的生成预算 $L_\text{max}$：
+        </p>
+        $$\mathcal{J}_{\text{Dr.GRPO}} = \frac{1}{L_\text{max}}\frac{1}{G}\sum_{i=1}^{G}\sum_{t=1}^{|\mathbf{o}_i|}\min\left[\rho_{i,t}(\theta)\,\hat{A}_{i},\ \mathrm{clip}\left(\rho_{i,t}(\theta),1-\epsilon,1+\epsilon\right)\hat{A}_{i}\right], \qquad \hat{A}_{i} = r_i - \mathrm{mean}(r_1,\ldots,r_G)$$
+        <p>
+            练习 <code>drgrpo_objective</code>（10–15 分钟）返回要最小化的损失（负目标），用 <code>mask</code> 只统计有效 token（这里生成长度不一），对批内求和而不是取平均，由训练器在整个 rollout 缓冲区上除以 <code>n_prompts * num_rollouts</code>：
+        </p>
+<pre><code>def drgrpo_objective(new_logprobs, old_logprobs, advantages, mask, max_gen_len: int, clip: float = 0.2):
+    adv = advantages.unsqueeze(-1)
+    ratio = (new_logprobs - old_logprobs).exp()
+    clipped_ratio = t.clamp(ratio, 1 - clip, 1 + clip)
+    surrogate = t.minimum(ratio * adv, clipped_ratio * adv)
+    return -(surrogate * mask).sum() / max_gen_len</code></pre>
+        <p>
+            动态课程（dynamic curriculum）：组内至少两个 rollout 奖励不同，组相对优势才有信息；全对或全错的题优势全为零，浪费算力。对错二值的题，解题概率为 $p$ 时每个答案的信息量是二元熵 $\mathcal{H}(p) = - p \log_2 p - (1-p) \log_2 (1-p)$，在 $p=0.5$ 时最大，为 1 比特。模型在进步，固定难度要么开头太难、要么结尾太简单，所以动态调整难度。难度是整数，用随机舍入变成连续的：$\tilde{d} = n + \epsilon$ 时采样 $\hat{d} = n + \delta$，$\delta \sim \text{Bernoulli}(\epsilon)$，例如 $\tilde{d}=5.2$ 表示 80% 概率出 5 级题、20% 概率出 6 级题。从 $D_0 = 1$ 开始，按类似 TD 误差的方式更新：
+        </p>
+        $$D_{t+1} = \text{clamp}\big(D_t + \alpha (\hat{s}_t - s^*), D_{\text{MIN}}, D_{\text{MAX}}\big)$$
+        <p>
+            $\hat{s}_t$ 是这批的精确匹配解题率，$s^*$ 默认 0.5，$\alpha = 0$ 就是固定难度。练习 <code>Curriculum.update</code>（难度 1/5）实现它。训练循环一节讲对数概率的计算优化，练习 <code>generation_logprobs</code>，以及“rollout 和学习阶段”这个大练习（最后一步用这批解题率更新课程）。
+        </p>
+        <p>
+            训练前后的解法对比：训练后的生成会有真正的分步计算，例如 <code>4127 × 386 = 4127×300 + 4127×80 + 4127×6 = 1,238,100 + 330,160 + 24,762 → \boxed{1593022}</code>。练习页报告，40 步的运行里 4×3 的 pass@1 从约 0.1 升到约 0.6–0.85，4×4 从约 0.05 升到约 0.35–0.7。
+        </p>
+        <p>
+            讨论“什么是好的 RLVR 任务”，作者在小模型上扫过很多任务后的经验：基座模型至少偶尔能做对（每组 rollout 里不止一个对）；太难就像这里一样动态调难度，或给部分分（小心奖励投机）。在提示上花时间，没有指令时训练可能完全不动；“Reason step by step”这句话起了很大作用，多样本示例效果更好，但作者认为那有点作弊，而且如果提示里把做法都告诉了模型，说明基座本来就会。可以让能干的编码智能体去尝试各种提示策略、报告效果，得到一个合理基线。避免复杂奖励函数，优化压力很聪明，一定会找到投机的办法。如果说不清到底想要什么，可以写评分细则让另一个 LLM 当评委，但同样有骗过评委的风险，这留给 2.4.3。
+        </p>
+
+        <h3>☆ 附加内容</h3>
+        <p>
+            对数概率的内存与时间权衡：激活检查点（activation checkpointing）把内存从 $O(n)$ 降到 $O(\sqrt{n})$，代价是多约 33% 的计算；可选练习实现带检查点的分块对数概率。练习页给出的例子：微批 10、分块 32 时慢 3%，省约 3.2GiB 显存；微批 8、分块 32 时慢 10%，省约 4.6GiB。还讨论了张量布局和形状为什么会影响速度。
+        </p>
+        <p>
+            RL 作为能力激发：<code>pass@k</code> 问 $k$ 次独立采样里是否至少一次正确。基座本来能做、只是不太可能采到正确答案的任务，<code>pass@k</code> 随 $k$ 增长；基座几乎不可能做对的任务，对所有 $k$ 都接近零。Yue 等（2025）称很多模型和任务上，RLVR 后的模型 <code>pass@1</code> 更高，但 $k$ 大时基座的 <code>pass@k</code> 能追上甚至超过，认为 RLVR 主要是让基座的分布变尖锐。练习用乘法任务检验这一点。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 2.4.3 RLAIF（占位）</h2>
+        <p><em>原练习页：[2.4.3] RLAIF</em></p>
+        <p>
+            RLAIF（Reinforcement Learning from AI Feedback，基于 AI 反馈的强化学习）这一页目前只有一句说明：Coming soon，这一节是材料审阅期间的占位页。唯一的小节标题是“1️⃣ Coming soon”，没有练习内容。2.4.2 的讨论部分说，LLM 当评委的奖励及其被骗的风险会在 2.4.3 里探讨。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 2.5 MCTS 与 AlphaZero</h2>
+        <p><em>原练习页：[2.5] MCTS &amp; AlphaZero</em></p>
+        <p>
+            前面大多是无模型方法，没有显式的世界模型，要从经验里学规则。练习页说，当环境已知且模拟成本低（比如棋类）时这样做很浪费。这一节介绍蒙特卡洛树搜索（Monte Carlo Tree Search，MCTS），一种基于模型（model-based）的方法：有环境模拟器可以用来规划，再结合深度学习，只靠自我对弈训练出下四子棋（Connect 4）很强的智能体。AlphaGo Zero 用同样的方法在围棋上达到超人水平。主要思路：用神经网络引导树搜索；按搜索中访问最多的节点选动作；训练策略网络模仿树搜索，把规划蒸馏进策略网络。练习页说这个反馈回路（通过搜索做策略迭代）让 AlphaZero 在几小时内从随机走子到超人水平。
+        </p>
+        <p>
+            步骤：搭网络（带两个头的小 ResNet）；用纯 Python 写单局 MCTS 理解算法；把 MCTS 向量化以便在 GPU 上同时跑几百局；写把搜索变成训练数据的自我对弈采样器；训练网络模仿树搜索。仓库提供了向量化的四子棋实现，以及基于 Pascal Pons 四子棋完美求解器的快速评估，按智能体选中可证明最优着法的频率打分；最终模型在 GPU 上 5 分钟内能训练到很强的水平。部分代码基于 Surag Nair（MIT 许可）和 DeepMind mctx（Apache 2.0）的实现。读物：Silver 等 2017（AlphaGo Zero）、Silver 等 2018（AlphaZero）、Surag Nair 的 A Simple Alpha(Go) Zero Tutorial、Browne 等 2012 的 MCTS 综述。
+        </p>
+
+        <h3>0️⃣ MCTS 与 AlphaZero 理论</h3>
+        <p>学习目标：理解 MCTS 的四个阶段（选择、扩展、模拟、回传）；看到 AlphaZero 怎样用价值网络代替随机 rollout，并通过 PUCT 把策略当作先验；理解自我对弈循环和网络的损失函数。</p>
+        <p>
+            四子棋是 6×7 棋盘上的两人完全信息零和博弈，已被强解（任何局面的最优着法都已知），但仍然难以下得最优，所以有真值可以衡量智能体。朴素 MCTS：每个节点是一个局面，存访问次数 $N$、价值和 $W$ 和子节点指针，边是动作。从当前局面为根，反复执行：选择（从根按树策略往下选子节点，平衡利用好着法和探索不确定的着法，直到叶子）；扩展（给叶子加一个子节点）；模拟（从新节点开始双方随机走到终局，看谁赢）；回传（把结果沿路径传回去，更新每个节点的 $N$ 和 $W$）。迭代结束后，根节点访问最多的着法就是实际走的那步。
+        </p>
+        <p>AlphaZero 保留树搜索骨架，做两处改动。先定义网络 $f_\theta : \mathcal{S} \to \Delta(\mathcal{A}) \times [-1, 1]$，把状态映射成策略 $\mathbf{p}(\cdot | s)$（7 列上的概率分布，是搜索前对哪些着法有希望的先验）和价值 $v(s)$（从轮到走棋一方的角度估计最终结果，−1 必输、+1 必赢）。改动一：不做随机 rollout，叶子直接查评论家头 $v(s)$，终局时用真实结果 $z \in \{-1, 0, +1\}$。改动二：选择时用 PUCT（Predictor + Upper Confidence Trees）：</p>
+        $$PUCT(s,a) = Q(s, a) + c \cdot p_\theta(a|s) \cdot \frac{\sqrt{1 + \sum_{a'} N(s,a')}}{1 + N(s, a)}$$
+        <p>
+            $N(s,a)$ 是访问次数；$W(s,a)$ 是回传结果之和，总是从 $s$ 处走棋方的角度，双方交替，所以回传时每上一层取一次负号；$Q(s, a) := W(s,a) / \max(1, N(s,a))$ 是平均价值，即利用项；$p_\theta(a|s)$ 是先验；$c$ 权衡利用和探索。探索项在先验高、访问相对少时大，随访问增多而缩小，所以搜索先跟着策略的建议，再越来越相信实际测到的价值。根号里加 1 只在节点第一次访问时有影响：那时所有 $N = 0$、$Q = 0$，没有 +1 的话所有合法动作得分都是 0，argmax 只会选第一个合法列；加 1 后得分正比于先验，搜索立刻跟随先验，模拟次数少时有帮助。用 $z$ 表示奖励是 AlphaGo Zero/AlphaZero 论文的记号，棋类只有终局结果这一个奖励。练习页附了一个交互式可视化工具，可以逐次模拟看树怎样生长。
+        </p>
+        <p>
+            自我对弈的每一步：为当前局面建根节点，跑网络得到 $v(s)$ 和先验（可选地只在根节点注入 Dirichlet 噪声鼓励探索）；跑若干次模拟（选择、扩展、评估、回传）；归一化访问次数 $\pi(a | s) := N(s, a) / \sum_{a'} N(s, a')$ 是目标策略，它经过树搜索改进，应比原始策略网络更好；训练时按 $\pi$ 采样实际走的着法以鼓励探索，评估时贪心走访问最多的着法。网络的损失：
+        </p>
+        $$\mathcal{L}(\theta) = \mathbb{E}_{s,z,\pi \sim \mathcal{D}} \left[ (z - v(s))^2 - \sum_{a} \pi(a|s) \log p_\theta(a|s) \right] + \lambda ||\theta||^2$$
+        <p>
+            $\mathcal{D}$ 是自我对弈产生的状态、结果和树策略的分布。第一项训练评论家预测真实结果；第二项是交叉熵，训练 $p_\theta$ 模仿树策略 $\pi$，也就是把规划过程蒸馏进网络，网络变强又让树策略更强；第三项是原论文里的正则项，作者说实践中不加也能训练。练习页称这在 RL 里是个奇怪的损失，和策略梯度完全不同，更像蒸馏损失：学生 $p_\theta$ 模仿老师 $\pi$，而老师本身是学生加上 MCTS 的提升；即使 $p_\theta$ 随机初始化，$\pi$ 也明显更强，给 $p_\theta$ 留出可以抓住的改进空间。
+        </p>
+
+        <h3>1️⃣ 环境与网络</h3>
+        <p>学习目标：使用给定的向量化四子棋环境，理解棋盘的编码；搭建 AlphaZero 的策略价值网络。</p>
+        <p>
+            <code>Board</code> 类捆绑棋子（<code>obs</code>）和轮到谁走（<code>red_to_move</code>），形状就是批形状，可以像张量一样索引、切片、掩码。<code>boards.mover_view()</code> 给出 (B, 3, 6, 7) 的输入，三个通道是空格、走棋方、对手。网络是共享主干加两个头的残差 CNN：初始 3×3 卷积从 3 通道到 128 通道（BatchNorm、ReLU），两个 <code>ResBlock(128)</code>（两层卷积加跳连），然后分出评论家（输出 (B,) 的价值）和演员（输出 (B, 7) 的 logits）。练习依次实现 <code>ResBlock</code>、<code>Critic</code>、<code>Actor</code>、<code>Connect4Model</code>。
+        </p>
+
+        <h3>2️⃣ 单局 AlphaZero MCTS（PUCT）</h3>
+        <p>学习目标：实现 <code>Node</code> 类、PUCT 选择、扩展和回传；组装完整搜索循环，验证它能找到战术制胜和必要的拦截。练习页说这一版用显式树、纯 Python，谈不上速度，但先写顺序版本有帮助。</p>
+        <p>
+            练习依次是 <code>select_child</code>（PUCT）、<code>select</code>、<code>expand</code>、<code>evaluate</code>、<code>backup</code>、<code>sample_tree_policy</code>，根节点噪声已给出，最后组装 <code>mcts</code>，并“看它找到一步制胜”。<code>select_child</code> 要返回 Python int，因为 0 维张量按身份哈希，会让 <code>action in node.children</code> 的字典查找失败：
+        </p>
+<pre><code>def select_child(node: Node, c_puct: float) -&gt; Action:
+    sumN = node.N.sum()
+    puct_score = node.Q + c_puct * node.P * t.sqrt(sumN + 1.0) / (1.0 + node.N)
+    legal_score = t.where(node.legal, puct_score, -t.inf)
+    return int(legal_score.argmax())</code></pre>
+
+        <h3>3️⃣ 模拟向量化的 AlphaZero MCTS</h3>
+        <p>学习目标：理解怎样重组顺序版本，把评估阶段批量化；理解根并行（Root Parallelization）和树并行（Tree Parallelization）的原理，以及根并行为什么适合在 PyTorch 里实现；用顺序版本作后端搭一个模拟的根并行。</p>
+        <p>
+            这里的做法是同时跑 <code>batch_size</code> 局独立的棋，每局有自己的搜索树，树之间不交互。练习页说明这是文献中根并行（Chaslot 等 2008）的变体：原版是多棵独立的树从同一局面搜索、把根访问次数相加选一步，这里每棵树对应不同的对局。批量化只是为了 GPU 吞吐：所有树都做完选择和扩展后，把叶子收集起来做一次网络前向，再各自回传；搜索结束后每棵树得到自己的树策略，各采样一个动作，所有环境走一步。共享同一个网络是树之间唯一的相互影响。速度来自全部在 GPU 上：所有树和树上的操作都写成锁步的向量化运算，不需要线程同步；复杂之处在于叶子深度不同、对局长度不同。树并行太复杂，这里不做。作为过渡，先“批量化网络、保留 Python 树”。
+        </p>
+
+        <h3>4️⃣ 自我对弈与训练</h3>
+        <p>学习目标：实现自我对弈采样器，包括树策略、网络策略，以及用评论家估计 rollout 的价值；理解损失函数，以及它怎样蒸馏树搜索提供的规划；训练智能体去匹配完美求解器的着法（最好也能赢你）。</p>
+        <p>
+            练习 <code>compute_z_targets</code>：从终局奖励往回走，每退一手翻一次符号（负极大，negamax：对走棋方好就是对上一手的走棋方坏）。练习 <code>compute_az_loss</code>：策略交叉熵加价值均方差。之后是 <code>self_play_step</code>、<code>visit_policy</code>、<code>training_step</code>；回放缓冲区和对完美求解器的评估已给出。
+        </p>
+<pre><code>def compute_z_targets(dones, rewards):
+    batch, timesteps = dones.shape
+    z = t.zeros((batch, timesteps), device=dones.device)
+    running = t.zeros((batch,), device=dones.device)
+    for step in range(timesteps - 1, -1, -1):
+        running = t.where(dones[:, step], rewards[:, step], -running)
+        z[:, step] = running
+    return z
+
+def compute_az_loss(value, logits, pi, z, value_coef=1.0):
+    logprobs = F.log_softmax(logits, dim=-1)
+    policy_loss = -(pi * logprobs).sum(-1).mean()
+    critic_loss = F.mse_loss(value, z)
+    return policy_loss + value_coef * critic_loss</code></pre>
+        <p>
+            训练超参数 <code>AZConfig</code> 的默认值是一套快速配方：每代 8192 局并行自我对弈、每步 16 次模拟、8 代、小批 2048，在 GPU 上约 3–4 分钟达到约 85% 的 Pons 求解器准确率（RTX 5090 上约 1 分钟）。想更强就把模拟次数提到 64、代数提到约 50（约 2.5 万次优化步）。注释里记录了调参结果：c_puct 从 1.5 调到 1.0、学习率从 1e-3 调到 5e-3、回放缓冲区从最近 8 代改为最近 4 代，是一次全流程扫描得出的（pons_CE 从约 0.466 降到 0.420，算力约为四分之一）；所有收益都来自更新鲜的自我对弈数据，容量、损失、正则化方面的改动都没效果；可用学习率约 3e-3 到 6e-3，≥7e-3 时随种子不稳定。其他默认值：每代 42 手（一整局）、Dirichlet $\alpha = 10/7 \approx 1.43$、噪声权重 0.25、学习率余弦衰减到 2e-5、权重衰减 1e-4、梯度裁剪 1.0、价值项系数 1.0，默认开启 bf16 autocast。
+        </p>
+        <p>
+            练习页提醒一个 autocast 陷阱：autocast 会缓存每个权重的 bf16 副本直到 <code>with</code> 块退出，所以把一个 <code>torch.autocast</code> 包住整个调用 <code>optimizer.step()</code> 的循环，前向会一直用旧权重，模型悄悄停止进步；要每个优化步开一个新的上下文，或者传 <code>cache_enabled=False</code>。训练完可以和智能体对弈。
+        </p>
+
+        <h3>☆ 附加：向量化 AlphaZero MCTS</h3>
+        <p>学习目标：理解怎样把树存成张量，让树搜索在 GPU 上以锁步并行运算执行；把选择、扩展、评估、回传都向量化。</p>
+        <p>
+            树存成张量分四步：每个属性一个张量、每个节点一行；槽位按创建顺序分配；指针变成槽位编号；每局一张表。再用三个技巧让 <code>B</code> 个搜索锁步进行。练习依次是 <code>masked_softmax_prior</code>、批量 <code>puct_select</code>、<code>vec_select</code>、<code>vec_expand</code>、<code>vec_evaluate</code>、<code>vec_backup</code>、<code>vec_mcts</code>，最后检查单局版本和批量版本的等价性。
+        </p>
+
+        <h3>☆ 附加：Gumbel AlphaZero</h3>
+        <p>学习目标：用 Gumbel-max 和 Gumbel-top-k 技巧做无放回采样；理解顺序减半（sequential halving）怎样把很少的模拟预算花在选出最好的着法上；用补全的 Q 值构建改进策略，比较 Gumbel 和 PUCT 搜索。</p>
+        <p>
+            练习页列出原版 AlphaZero 在模拟次数少时的三个弱点：训练目标粗糙（16 次模拟时访问比例都是 1/16 的倍数，没被访问的着法目标恰好为 0，不管多好）；搜索可能让策略变差（不能保证访问次数策略优于它出发时的先验，模拟少时 PUCT 可能只因为先验喜欢就把访问堆到某个着法上）；探索是外加的（Dirichlet 噪声的超参数是照搬的）。Gumbel AlphaZero（Danihelka、Guez、Schrittwieser、Silver，ICLR 2022）只改动根节点的处理，就修复了这三点。练习依次是 <code>gumbel_max_sample</code> 和 <code>gumbel_top_k</code>、<code>completed_q</code>、<code>gumbel_root_action</code> 和 <code>improved_policy</code>，最后做实验比较小模拟预算下 PUCT 和 Gumbel。
+        </p>
+
+        <h3>☆ 其他附加内容</h3>
+        <p>
+            利用棋盘的镜像对称做数据增强；AlphaZero 的缩放规律：同一个训练好的网络在不同模拟预算下自我对弈，按循环赛结果拟合 Elo（只有差值有意义，400 分差对应 10:1 的胜率），把不搜索的原始策略网络定为 1000 分。把 Elo 对 $\log_2(\text{sims})$ 作图，复现 AlphaZero 的已知结果：棋力大致与搜索预算的对数成线性关系，思考时间每翻一倍，Elo 大致增加一个常数，权重不变。
+        </p>
+    </section>
+
+    <section>
+        <h2>这篇的要点</h2>
+        <ul>
+            <li>2.1：贝尔曼方程 $V_\pi(s) = \sum_a \pi(a | s) \sum_{s'} T(s' | s, a) ( R + \gamma V_\pi(s') )$；已知环境时可用迭代或 $\mathbf{v}^\pi = (I - \gamma \mathbf{P}^\pi)^{-1} \mathbf{r}^\pi$ 精确求值，交替评估和改进得到最优策略。</li>
+            <li>2.1：SARSA 同策略、Q-learning 异策略；CliffWalking 上 SARSA 学习期回报更好、贪心策略走安全路（约 −15），Q-learning 贪心策略走最短路（约 −13）。资格迹在奖励延迟、路径长时加速信用分配。</li>
+            <li>2.1：多臂老虎机已改为可选；乐观初始值开始更差、最终更好，UCB 比奖励平均略有提升。</li>
+            <li>2.2.1：DQN 用平方 TD 误差、回放缓冲区和目标网络；$d_{t+1}$ 用 <code>terminated</code> 而非截断；默认 30 万环境步约对应 1.8 万优化步。</li>
+            <li>2.2.1：灾难性遗忘的机制是缓冲区失去失败样本、动作间隙衰减、必死状态的值漂向 100，而 TD 损失看不出来。</li>
+            <li>2.2.2：REINFORCE 用 reward-to-go 和逐时间步的跨环境均值基线，后者等于留一法基线的 $\frac{N-1}{N}$ 倍，因此梯度方向无偏。</li>
+            <li>2.3：PPO 目标由裁剪替代目标、价值函数损失和熵奖励组成；GAE 用 $\lambda$ 在 1 步估计和蒙特卡洛估计之间权衡，实践中约 0.95；连续动作用状态无关的对数标准差。</li>
+            <li>2.3.2：<code>reward1</code> 导致反复捡放碎片和打碎瓮；势函数塑形（持有碎片势 0.5）加 −2 的打碎惩罚修好规范；垃圾桶总在左上角的训练分布让智能体学到“把碎片送到左上角”，移动垃圾桶后出现目标错误泛化，扩大训练分布能修复，但现实中常拿不到那个分布。</li>
+            <li>2.4.1：GRPO 用组内均值和标准差得到优势，不需要评论家；KL 惩罚用 k2 估计量，其梯度等于反向 KL 的梯度；不开 KL 时模型坍缩到全是句号，开 KL 后模型把句号藏进基座模型认为合理的文本里。</li>
+            <li>2.4.1：全量微调每参数约 20 字节（1.7B 模型约 34GB）；LoRA 学 $\frac{\alpha}{r} AB$，$B$ 初始化为零，可合并回权重。</li>
+            <li>2.4.2：RLVR 用 1/0.1/0 的可验证奖励、去掉 KL；Dr. GRPO 去掉除以标准差和除以长度两个偏差；动态课程把解题率保持在约 50%（二元熵最大）；40 步后 4×3 的 pass@1 从约 0.1 到约 0.6–0.85，4×4 从约 0.05 到约 0.35–0.7；RLVR 是否教会新能力，练习页认为答案不清楚。</li>
+            <li>2.4.3 RLAIF 目前是占位页。</li>
+            <li>2.5：AlphaZero 用价值网络替代随机 rollout，用 PUCT 把策略当先验，损失是价值均方差加对访问次数策略的交叉熵；默认配方约 3–4 分钟达到约 85% 的完美求解器准确率；棋力大致随搜索预算的对数线性增长。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>ARENA · Chapter 2: Reinforcement Learning · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

@@ -1,0 +1,987 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transformer 电路的数学框架 | 可解释性与对齐研究 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="00_导读.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">可解释性与对齐研究 目录</a> · 01</span>
+    <span><a href="02_上下文学习与归纳头.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Transformer 电路的数学框架</h1>
+        <p class="subtitle">把只有注意力层的小 Transformer 改写成一组可以逐项阅读的“路径”之和：零层模型是 bigram 表，一层模型是 bigram 加 skip-trigram，两层模型靠注意力头的组合造出归纳头</p>
+        <div class="author-meta">
+            作者：Nelson Elhage、Neel Nanda、Catherine Olsson、Tom Henighan、Nicholas Joseph、Ben Mann、Amanda Askell 等，通讯作者 Chris Olah（Anthropic）· 发布日期：2021 年 12 月 22 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://transformer-circuits.pub/2021/framework/index.html" target="_blank">A Mathematical Framework for Transformer Circuits</a>（Transformer Circuits Thread；本文依据原文英文网页整理，是中文转述和讲解，不是逐字翻译；原文插图均为内嵌图片，本页用文字描述其内容，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这篇讲什么</h2>
+        <p>
+            这是 Anthropic 可解释性团队在 Transformer Circuits Thread 上发表的第一篇主要论文。它想回答的问题是：能不能像把一个编译好的二进制程序反编译成人能读的源代码那样，把 Transformer 的计算过程逆向出来？这类工作叫机制可解释性（mechanistic interpretability），意思是从权重和激活出发，弄清模型内部具体按什么步骤算出输出。此前 Distill 上的 Circuits 系列做过视觉模型 InceptionV1，语言模型这边还没有类似的系统工作。
+        </p>
+        <p>
+            作者选了最简单的起点：只有注意力层、没有 MLP 层的“玩具”Transformer，层数不超过两层。方法是把标准的 Transformer 写成一种数学上等价、但更方便阅读的形式。核心工具有三个：残差流（residual stream）看成各层共用的通信通道；每个注意力头拆成 QK 电路（决定看哪里）和 OV 电路（决定看到后写什么）；把整个模型的矩阵乘积展开成“端到端路径”之和。用这套写法，零层模型就是一张 bigram 表，一层模型是 bigram 表加若干 skip-trigram 表，两层模型则通过注意力头之间的组合（composition）实现了一种叫归纳头（induction head）的上下文学习算法。
+        </p>
+        <p>
+            这一篇的记号和概念（残差流、$W_{OV}$、$W_{QK}$、Q/K/V 组合、归纳头）是本合集后面所有论文的地基。归纳头在下一篇 <a href="02_上下文学习与归纳头.html">02 上下文学习与归纳头</a> 里被推广到大模型；本文反复提到 MLP 层难以理解、可能是因为“叠加”，这个问题由 <a href="03_叠加的玩具模型.html">03 叠加的玩具模型</a> 和 <a href="04_走向单义性.html">04 走向单义性</a> 接着处理。名词的入门解释见 <a href="00_导读.html">00 导读</a>；动手复现这篇里的电路可以看 <a href="13_ARENA_Transformer与可解释性入门.html">13 ARENA 入门</a> 的 TransformerLens 与归纳电路练习。
+        </p>
+        <ol>
+            <li><a href="#t01">引言与结果摘要</a></li>
+            <li><a href="#t02">Transformer 概览：模型简化与总体结构</a></li>
+            <li><a href="#t03">残差流是通信通道：虚拟权重与子空间</a></li>
+            <li><a href="#t04">注意力头相互独立、可以相加</a></li>
+            <li><a href="#t05">注意力头的作用是搬运信息</a></li>
+            <li><a href="#t06">零层 Transformer</a></li>
+            <li><a href="#t07">一层模型：路径展开与 QK/OV 电路</a></li>
+            <li><a href="#t08">一层模型：解读为 skip-trigram</a></li>
+            <li><a href="#t09">一层模型：概括 OV/QK 矩阵，检测复制</a></li>
+            <li><a href="#t10">两层模型：三种组合与路径展开</a></li>
+            <li><a href="#t11">两层模型：实际分析一个模型</a></li>
+            <li><a href="#t12">归纳头</a></li>
+            <li><a href="#t13">项重要性分析与虚拟注意力头</a></li>
+            <li><a href="#t14">这项工作把我们带到了哪里</a></li>
+            <li><a href="#t15">相关工作</a></li>
+            <li><a href="#t16">评论与更正</a></li>
+            <li><a href="#t17">附录：额外的直觉与观察</a></li>
+            <li><a href="#t18">附录：记号与张量积</a></li>
+            <li><a href="#t19">附录：技术细节</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 引言与结果摘要</h2>
+        <p><em>原文小节：开篇引言；Summary of Results</em></p>
+
+        <h3>为什么要逆向 Transformer</h3>
+        <p>
+            论文开头说，Transformer 语言模型已经被广泛使用，例如 GPT-3、LaMDA、Codex、Meena、Gopher 等系统。模型越大，开放程度和容量越高，出现意外行为甚至有害行为的空间也越大。即使大模型训练完好几年，开发者和用户还会不断发现之前不知道的能力，其中包括有问题的行为。
+        </p>
+        <p>
+            作者给出的一条应对路线是机制可解释性：尝试逆向 Transformer 执行的具体计算，类似程序员把复杂的二进制文件逆向成人能读的源代码。如果能做到，就可能更系统地解释当前的安全问题、发现新的问题，甚至预判尚未造出来的更强模型会有什么安全问题。
+        </p>
+        <p>
+            现代语言模型复杂且巨大，作者认为最有效的做法是从最简单的模型开始往上走，目标是找到简单的算法模式、反复出现的结构（motif）或分析框架，以后再套用到更大更复杂的模型上。本文研究的是两层以内、只含注意力块的 Transformer。作为对比，GPT-3 有 96 层，注意力块和 MLP 块交替出现。
+        </p>
+        <p>
+            作者发现，把 Transformer 的运算换一种数学上等价的新写法，就能读懂这些小模型的内部运作。其中一个发现是一类被命名为“归纳头”（induction head）的注意力头可以解释这些小模型里的上下文学习（in-context learning，指模型不更新参数、只利用当前输入里的前文来改进预测），而且这种头只在至少有两层注意力的模型里出现。这一篇不把结论推到大模型上；作者预告会在后续论文中说明，这套数学框架和归纳头的概念至少部分适用于大得多、更接近实际的模型，但离完整逆向这些模型还差得很远。
+        </p>
+
+        <h3>逆向工程的结果</h3>
+        <ul>
+            <li>零层 Transformer 建模的是 bigram 统计（前一个 token 决定下一个 token 的概率）。这张 bigram 表可以直接从权重里读出来。</li>
+            <li>一层只含注意力的 Transformer 是 bigram 模型和若干 “skip-trigram” 模型的集成（ensemble）。skip-trigram 指形如 “A… B C” 的序列：前面某处出现过 A，当前 token 是 B，下一个 token 预测为 C。bigram 表和 skip-trigram 表都可以不运行模型、直接从权重读出。skip-trigram 的表达能力比想象中强，包括一种很简单的上下文学习。</li>
+            <li>两层只含注意力的 Transformer 可以通过注意力头的组合实现复杂得多的算法，这些组合算法同样能直接从权重中检测出来。两层模型利用注意力头组合造出了“归纳头”，这是一种很通用的上下文学习算法。</li>
+            <li>一层和两层模型做上下文学习的算法很不一样。两层模型的注意力头用的是性质上更复杂的推理时算法（以归纳头为代表），这是一个重要的转折点，和更大的模型也有关。</li>
+        </ul>
+
+        <h3>概念上的收获</h3>
+        <p>
+            作者说 Transformer 架构的很多细节要求他们用一种和 InceptionV1 Circuits 工作相当不同的方式来逆向。他们也声明这些观点不一定是新的，很多在别的论文里已有显式或隐含的表述。下面是论文列出的要点，后面各节会逐条展开：
+        </p>
+        <ul>
+            <li>注意力头可以看成相互独立的操作，每个头输出一个结果并加进残差流。常见的“拼接再相乘”写法是为了计算效率，数学上与此等价。</li>
+            <li>只含注意力的模型可以写成一组可解释的端到端函数之和，每个函数把 token 映射到 logit 的变化。这些函数对应穿过模型的“路径”，如果冻结注意力模式，它们都是线性的。</li>
+            <li>Transformer 里有大量线性结构。只要把求和拆开、把矩阵链乘起来，就能学到很多东西。</li>
+            <li>注意力头包含两部分基本独立的计算：QK（query-key）电路计算注意力模式；OV（output-value）电路计算一个 token 如果被注意到，会对输出产生什么影响。</li>
+            <li>key、query、value 向量可以看成计算低秩矩阵 $W_Q^TW_K$ 和 $W_OW_V$ 时的中间结果。描述 Transformer 时完全可以不提它们。</li>
+            <li>注意力头的组合大大提高了表达能力。组合有三种，分别对应 key、query 和 value；key 组合、query 组合与 value 组合性质很不一样。</li>
+            <li>Transformer 的所有部件（token 嵌入、注意力头、MLP 层、反嵌入）都通过读写残差流的不同子空间互相通信。与其直接分析残差流向量，不如把残差流分解成这些不同的通信通道，它们对应穿过模型的各条路径。</li>
+        </ul>
+    </section>
+
+    <section id="t02">
+        <h2>02. Transformer 概览：模型简化与总体结构</h2>
+        <p><em>原文小节：Transformer Overview；Model Simplifications；High-Level Architecture</em></p>
+        <p>
+            作者先说明他们看待 Transformer 的方式。很多时候他们会把 Transformer 改写成等价但不常见的形式。机制可解释性要把模型拆成人能理解的小块，第一步是找到最方便推理的表示。现代深度学习很重视计算效率，我们对模型的数学描述也常常照搬高效代码的写法；但如果同一个计算有很多等价表示，最容易被人理解的表示和最省算力的表示多半不是同一个。全文用到的记号统一列在附录的记号表里（本页 <a href="#t18">18 节</a>）。
+        </p>
+
+        <h3>模型简化</h3>
+        <p>
+            最大的简化是只研究“只含注意力”（attention-only）的 Transformer，去掉 MLP 层。作者承认这是很激进的简化。理由有两个：一是注意力头带来的电路问题是 Distill Circuits 工作没遇到过的，单独研究它们可以给出很干净的处理；二是他们到目前为止在理解 MLP 层上成功得很少。在同时有注意力和 MLP 的普通 Transformer 里，有很多主要由注意力头承担的电路可以研究，其中有些很重要，但 MLP 部分很难入手。作者说这是本工作的一个主要弱点，计划以后重点解决；后面的附录仍会讨论带 MLP 的情况。
+        </p>
+        <p>
+            其他几处简化被认为是表面上的，主要为了清晰：
+        </p>
+        <ul>
+            <li>不考虑偏置（bias）。带偏置的模型总能用不带偏置的模型模拟：把偏置并进权重，再加一个恒为 1 的维度。在只含注意力的模型里，偏置乘出来后基本等于 logit 上的偏置。</li>
+            <li>忽略层归一化（layer normalization）。显式处理它会增加不少复杂度；除了一个可变的缩放系数，层归一化可以并进相邻的权重。作者还认为，除了一些实现上的麻烦，层归一化可以换成批归一化（batch normalization），后者能完全并进相邻参数。具体做法见 <a href="#t19">19 节</a>。</li>
+        </ul>
+
+        <h3>总体结构</h3>
+        <p>
+            论文关注的是自回归、仅解码器（decoder-only）的 Transformer 语言模型，例如 GPT-3。最初的 Transformer 论文为了翻译任务用的是编码器-解码器结构，很多现代语言模型不包含编码器部分。
+        </p>
+        <p>
+            一个 Transformer 先做 token 嵌入（embedding），然后是一串“残差块”（residual block），最后做 token 反嵌入（unembedding），得到下一个 token 的 logits。每个残差块由一个注意力层和其后的一个 MLP 层组成。注意力层和 MLP 层都通过一次线性投影从残差流“读”输入，算完后再通过一次线性投影把结果加回残差流，也就是“写”。每个注意力层包含多个并行运行的注意力头。原文这里有一张结构示意图（内嵌图片）。按正文的描述和记号表，可以把它整理成（笔者整理）：token 嵌入 $x_0 = W_E t$ 进入残差流；注意力层把各头输出加上去，$x_{i+1} = x_i + \sum_{h} h(x_i)$；MLP 层同理，$x_{i+2} = x_{i+1} + m(x_{i+1})$；最后用 $W_U$ 作用于最后一层的残差流得到 logits $T(t)$。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 残差流是通信通道：虚拟权重与子空间</h2>
+        <p><em>原文小节：Virtual Weights and the Residual Stream as a Communication Channel</em></p>
+        <p>
+            Transformer 结构的一大特点是每一层都把结果加进作者所说的“残差流”。带残差流的模型可以追溯到 Schmidhuber 组的早期工作，例如 highway networks 和 LSTM，后来在残差网络（ResNet）中大获成功。在 Transformer 里，残差流向量常被叫作“嵌入”（embedding）。作者更喜欢“残差流”这个叫法，一是它强调了残差这一性质，作者认为这很重要；二是他们认为残差流经常给当前 token 以外的其他 token 分配子空间，“嵌入”这个词带来的直觉会因此失效。
+        </p>
+        <p>
+            残差流就是之前所有层的输出与最初嵌入的总和。它自己不做任何处理，所有层都通过它通信，所以作者把它看成一条通信通道（communication channel）。
+        </p>
+        <p>
+            残差流有很强的线性结构。作者在旁注里说，完全线性的残差流在神经网络架构里很少见：即使是最相近的 ResNet，残差流上也有非线性激活函数，或者每次读取残差流时都要过非线性。Transformer 的每一层在开头用一个任意的线性变换把信息从残差流“读”进来（这里忽略了每层开头的层归一化；除了一个常数标量，层归一化是一个固定的仿射变换，可以并进这个线性变换），结束时再用另一个任意线性变换把输出“写”回去。这种线性、可加的结构有很多重要推论。最基本的一条是残差流没有“特权基”（privileged basis）：特权基指架构本身会让特征倾向于对齐到坐标轴方向，残差流没有这种倾向。我们可以把残差流整体旋转一下，同时旋转所有与它交互的矩阵，模型行为完全不变。
+        </p>
+
+        <h3>虚拟权重</h3>
+        <p>
+            残差流是线性的，因此任意两层之间（即使中间隔了很多层）都可以设想一组隐含的“虚拟权重”（virtual weights）把它们直接连起来，做法是把它们通过残差流的相互作用乘出来。虚拟权重是前一层的输出权重与后一层的输入权重的乘积，即 $W_{I}^2W_{O}^1$，它描述后一层在多大程度上读取前一层写入的信息。注意力层其实有三种输入权重 $W_Q$、$W_K$、$W_V$，这里为了简洁统一称为输入权重。原文配图把两层之间的虚拟权重画成一条跨越残差流的连线。
+        </p>
+
+        <h3>子空间与残差流带宽</h3>
+        <p>
+            残差流是高维向量空间，小模型几百维，大模型可以到几万维。不同的层可以把不同信息存到不同的子空间里，发给不同的后续层。这对注意力头尤其重要：单个头只在比较小的子空间上运作（常见 64 或 128 维），很容易写进完全不相交的子空间、互不干扰。
+        </p>
+        <p>
+            信息一旦写入某个子空间，除非有别的层主动删除，就会一直留在那里。从这个角度看，残差流的维度有点像“内存”或“带宽”。原始的 token 嵌入和反嵌入主要只用到一小部分维度。作者在旁注里说明了依据：他们对 token 嵌入和反嵌入做了 PCA，对 $d_\text{model}$ 较大的模型，谱衰减得很快，嵌入和反嵌入集中在少数维度上；为了看两者是否占用同一子空间，他们把归一化后的嵌入矩阵和反嵌入矩阵拼起来做联合 PCA，结果既有两者“混用”的维度，也有只被其中一方使用的维度。这样大多数维度都“空着”，留给其他层存信息。
+        </p>
+        <p>
+            作者认为残差流带宽应该是高度紧缺的资源。“计算维度”（神经元、注意力头结果向量的维度等）一般远多于残差流用来传递信息的维度。单个 MLP 层的神经元数通常是残差流维度的 4 倍。比如在一个 50 层 Transformer 的第 25 层，残差流前面有相当于其维度 100 倍的神经元，后面又要和 100 倍于其维度的神经元通信，只能以叠加（superposition）的方式传递信息。作者把这类张量叫作“瓶颈激活”（bottleneck activations），预计它们会特别难解释。这也是本文不直接研究残差流、改为用虚拟权重把通过残差流的各路通信拆开的一个主要原因。
+        </p>
+        <p>
+            可能因为带宽紧张，作者看到一些迹象：部分 MLP 神经元和注意力头在做某种“内存管理”，读入其他层设置的残差流维度，再写出它的相反数，把这些维度清掉。证据是：有些 MLP 神经元的输入权重和输出权重余弦相似度很负，这可能表示在从残差流删除信息；有些注意力头的 $W_OW_V$ 矩阵有很大的负特征值，并且主要注意当前 token，也可能是一种删除机制。作者补充说，这些机制可能是通用的删除手段，也可能只在某些情况下有条件地删除信息。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 注意力头相互独立、可以相加</h2>
+        <p><em>原文小节：Attention Heads are Independent and Additive</em></p>
+        <p>
+            作者把注意力层看成若干完全独立的注意力头 $h\in H$，它们完全并行地运行，各自把输出加回残差流。教科书里通常不这样介绍注意力层，所以需要说明两者等价。
+        </p>
+        <p>
+            在 Vaswani 等人最初的 Transformer 论文里，注意力层的输出是把各头的结果向量 $r^{h_1}, r^{h_2},\ldots$ 堆叠起来，再乘一个输出矩阵 $W_O^H$。把 $W_O^H$ 按头切成等宽的块 $[W_O^{h_1}, W_O^{h_2},\ldots]$，就有：
+        </p>
+        $$W_O^H \left[\begin{matrix}r^{h_1}\\r^{h_2}\\... \end{matrix}\right] ~~=~~ \left[W_O^{h_1},~ W_O^{h_2},~ ... \right]\cdot\left[\begin{matrix}r^{h_1}\\r^{h_2}\\...\end{matrix}\right] ~~=~~ \sum_i W_O^{h_i} r^{h_i}$$
+        <p>
+            这说明“拼接再乘输出矩阵”等价于让每个头独立运行、各乘自己的输出矩阵、再加进残差流。拼接写法之所以常用，是因为它得到一个更大、计算更高效的矩阵乘法。做理论理解时，作者更愿意把各头看成独立相加的。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 注意力头的作用是搬运信息</h2>
+        <p><em>原文小节：Attention Heads as Information Movement；Observations about Attention Heads</em></p>
+        <p>
+            既然各头独立，那每个头做什么？作者的回答是：注意力头的基本作用是搬运信息。它从一个 token 的残差流读取信息，写到另一个 token 的残差流里。这一节最主要的结论是：<strong>“从哪些 token 搬”与“读哪些信息、怎样写到目的地”是完全可以分开的。</strong>
+        </p>
+
+        <h3>用张量积重写注意力</h3>
+        <p>
+            给定注意力模式后，注意力头的输出通常分三步算：
+        </p>
+        <ul>
+            <li>对每个 token，从残差流算出 value 向量：$v_i = W_V x_i$。</li>
+            <li>按注意力模式线性组合 value 向量，得到“结果向量”（result vector）：$r_i = \sum_j A_{i,j} v_j$。</li>
+            <li>最后对每个 token 算出该头的输出：$h(x)_i = W_O r_i$。</li>
+        </ul>
+        <p>
+            这三步都是矩阵乘法，为什么不并成一步？如果把 $x$ 看成二维矩阵（每个 token 一个向量），这几次乘法乘在不同的“边”上：$W_V$ 和 $W_O$ 作用在“每个 token 的向量”那一边，$A$ 作用在“位置”那一边。我们要表达的是从矩阵到矩阵的线性映射 $[n_\text{context},~ d_\text{model}] \to [n_\text{context},~ d_\text{model}]$，数学上这类映射叫 “(2,2)-张量”（两个输入维度映射到两个输出维度），所以张量语言最自然。张量积（tensor product，也就是 Kronecker 积）记作 $\otimes$；$\text{Id} \otimes W$ 表示对每个位置的向量乘 $W$，$A \otimes \text{Id}$ 表示在位置之间混合（详细规则见 <a href="#t18">18 节</a>）。用张量积，注意力头可以写成：
+        </p>
+        $$h(x) = (\text{Id} \otimes W_O)\cdot(A \otimes \text{Id})\cdot(\text{Id} \otimes W_V)\cdot x$$
+        <p>
+            从右往左读：先对每个 token 算 value 向量（$v_i=W_V x_i$），再按 $A$ 在 token 之间混合得到结果向量（$r_i = \sum_j A_{i,j} v_j$），最后对每个 token 投影出去（$h(x)_i = W_O r_i$）。利用混合积性质 $(A \otimes B)(C \otimes D) = (AC) \otimes (BD)$ 并消掉单位矩阵，得到：
+        </p>
+        $$h(x) = (A \otimes W_O W_V)\cdot x$$
+        <p>
+            $A$ 负责在 token 之间混合，$W_OW_V$ 独立地作用在每个向量上。
+        </p>
+        <p>
+            注意力模式本身呢？通常的做法是先算 key $k_i = W_K x_i$ 和 query $q_i = W_Q x_i$，再由每对 key 和 query 的点积算注意力模式 $A = \text{softmax}(q^T k)$。也可以一步算完、完全不提 key 和 query：$A = \text{softmax}(x^T W_Q^T W_K x)$。作者提醒，这种写法虽然数学等价，真按它去实现（显式乘出 $W_O W_V$ 和 $W_Q^T W_K$）效率会极低。
+        </p>
+
+        <h3>关于注意力头的观察</h3>
+        <p>改写之后，很多以前不容易看出的结构浮现出来：</p>
+        <ul>
+            <li>注意力头把信息从一个 token 的残差流搬到另一个 token 的残差流。由此推出，常被理解为“上下文词嵌入”的残差流向量空间，一般会包含一些线性子空间，存的是从其他 token 复制来的信息，与当前 token 本身无关。</li>
+            <li>一个注意力头实际上施加了两个线性操作 $A$ 和 $W_OW_V$，它们作用在不同的维度上，彼此独立。$A$ 决定信息从哪个 token 搬到哪个 token；$W_O W_V$ 决定从源 token 读取哪些信息、怎样写到目标 token。
+                作者在旁注中用奇异值分解解释“$W_{OV}$ 决定读写哪个子空间”：设 $USV = W_{OV}$，由于 $d_\text{head} &lt; d_\text{model}$，$W_{OV}$ 是低秩的，$S$ 的对角线上只有一部分非零。右奇异向量 $V$ 描述被注意的那个位置的残差流中哪个子空间被“读入”（存进 value 向量），左奇异向量 $U$ 描述写到目标残差流的哪个子空间。</li>
+            <li>$A$ 是这个式子里唯一的非线性部分（来自 softmax）。所以如果固定注意力模式，注意力头就是线性操作；不固定 $A$ 时，注意力头在某种意义上是“半线性”的，因为逐 token 的线性操作是固定的。</li>
+            <li>$W_Q$ 和 $W_K$ 总是一起起作用，从不单独出现；$W_O$ 和 $W_V$ 也一样。它们虽然被参数化为不同的矩阵，但 $W_O W_V$ 和 $W_Q^T W_K$ 总可以看成单个低秩矩阵。</li>
+            <li>key、query、value 向量在某种意义上是表面的东西，只是计算这些低秩矩阵时的中间产物。完全可以对低秩矩阵的两个因子重新参数化，得到不同的向量，而功能完全相同。</li>
+            <li>因此作者定义组合矩阵 $W_{OV} = W_O W_V$ 和 $W_{QK} = W_Q^T W_K$，后文一直用它们。</li>
+            <li>注意力头的乘积行为上很像一个注意力头。由分配律，$(A^{h_2}\otimes W_{OV}^{h_2}) \cdot (A^{h_1}\otimes W_{OV}^{h_1}) = (A^{h_2}A^{h_1})\otimes(W_{OV}^{h_2}W_{OV}^{h_1})$。这个乘积在功能上等价于一个注意力模式为 $A^{h_2}A^{h_1}$、OV 矩阵为 $W_{OV}^{h_2}W_{OV}^{h_1}$ 的注意力头，作者称之为“虚拟注意力头”（virtual attention head），后面 <a href="#t13">13 节</a> 详细讨论。</li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. 零层 Transformer</h2>
+        <p><em>原文小节：Zero-Layer Transformers</em></p>
+        <p>
+            在看更复杂的模型之前，先看“零层”Transformer。它拿到一个 token，做嵌入，再直接反嵌入得到预测下一个 token 的 logits：
+        </p>
+        $$T = W_U W_E$$
+        <p>
+            模型无法从其他 token 搬运信息，只能根据当前 token 预测下一个 token，所以 $W_U W_E$ 的最优行为是逼近 bigram 对数似然。作者在旁注中提到，这和 Levy &amp; Goldberg（2014）的一个观察相呼应：很多早期词嵌入可以看成对数似然矩阵的矩阵分解。
+        </p>
+        <p>
+            这对一般的 Transformer 也有意义。任何 Transformer 的展开式里都有 $W_U W_E$ 形式的项，对应“直接路径”（direct path）：token 嵌入沿着残差流一路流到反嵌入，不经过任何层。它唯一能影响的就是 bigram 对数似然。在更大的模型里，模型的其他部分也会预测一部分 bigram 统计，所以直接路径不会精确等于 bigram 统计，它表示的是一种“残差”。具体说，$W_U W_E$ 项常常帮忙表示那些一般语法规则描述不了的 bigram 统计，例如 “Barack” 后面经常跟 “Obama”。由此还能推出，$W_U$ 虽然常被称为“反嵌入”矩阵，但我们不应期望它是 $W_E$ 的逆。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 一层模型：路径展开与 QK/OV 电路</h2>
+        <p><em>原文小节：One-Layer Attention-Only Transformers；The Path Expansion Trick；Splitting Attention Head terms into Query-Key and Output-Value Circuits；OV and QK Independence</em></p>
+        <p>
+            作者的论断是：一层只含注意力的 Transformer 可以理解为一个 bigram 模型加上若干 “skip-trigram” 模型的集成，后者影响 “A… BC” 这类序列的概率。“skip-trigram” 这个叫法借自 Mikolov 等人在经典词嵌入论文里用的 “skip-gram”。直观上，每个注意力头可以有选择地从当前 token（B）注意到前面的某个 token（A），把信息复制过来，调整下一个 token（C）的各个候选的概率。这一节要严格证明这种对应，并演示如何把原始权重换算成可读的 skip-trigram 概率调整表。
+        </p>
+
+        <h3>路径展开技巧</h3>
+        <p>
+            一层只含注意力的 Transformer 由 token 嵌入、一个注意力层（各头独立作用）和反嵌入组成。用张量记号和上一节推出的注意力头写法，整个模型是三项的乘积（$t$ 是 one-hot 编码的 token）：
+        </p>
+        $$T = (\text{Id} \otimes W_U)\cdot\Big(\text{Id} + \sum_{h\in H} A^h \otimes W_{OV}^h\Big)\cdot(\text{Id} \otimes W_E)$$
+        <p>
+            中间那一项里的 $\text{Id}$ 是残差连接，$\sum_h$ 是各注意力头。这里的关键技巧就是把乘积直接展开：原来每个因子对应一层，展开后每一项对应一条端到端的路径。
+        </p>
+        $$T = \text{Id} \otimes W_U W_E ~+~ \sum_{h\in H} A^h \otimes \left(W_U W_{OV}^h W_E\right)$$
+        <p>
+            作者认为每条端到端路径项都容易理解，可以单独推理，最后相加构成模型行为。直接路径项 $\text{Id} \otimes W_U W_E$ 在零层模型里已经出现过。它不在位置之间搬运信息（这就是 $\text{Id} \otimes \ldots$ 的含义），只能贡献 bigram 统计，并补上其他项没处理到的部分。更有意思的是注意力头项。
+        </p>
+
+        <h3>把注意力头项拆成 QK 电路和 OV 电路</h3>
+        <p>
+            每个头 $h$ 对应一项 $A^h \otimes (W_UW_{OV}^hW_E)$，其中
+        </p>
+        $$A^h = \text{softmax}\left( t^T \cdot W_E^T W_{QK}^h W_E \cdot t \right)$$
+        <p>
+            这一项由两个可分开的操作组成，它们的核心都是 $[n_\text{vocab},~ n_\text{vocab}]$ 大小的矩阵：
+        </p>
+        <ul>
+            <li>$W_E^T W_{QK}^h W_E$：作者称为“query-key（QK）电路”。它给出每个 query token 对每个 key token 的注意力分数，也就是某个 query token 有多“想”注意某个 key token。</li>
+            <li>$W_UW_{OV}^hW_E$：称为“output-value（OV）电路”。它描述某个 token 如果被注意到，会怎样影响输出 logits。</li>
+        </ul>
+        <p>
+            直观上可以把这两个乘积看成从 token 出发、到 token 结束的路径。QK 电路是把 query 向量和 key 向量的计算一路追到注意力头，两者点积形成一个双线性型（bilinear form）。OV 电路是把计算 value 向量的路径一路接到 logits。原文配图把这两条路径画在模型结构图上。
+        </p>
+        <p>
+            注意力模式是源 token 和目标 token 的函数。严格说，它是从开头到目标 token 之间所有可能源 token 的函数，因为 softmax 要对每个源 token 用 QK 电路算分数、取指数、再归一化。但一旦目标 token 决定了对某个源 token 注意多少，对输出的影响就只取决于那个源 token：如果多个目标 token 以同样的程度注意同一个源 token，这个源 token 对预测 logits 的影响是一样的。
+        </p>
+
+        <h3>OV 与 QK 的独立性：冻结注意力模式的技巧</h3>
+        <p>
+            把 OV 和 QK 电路分开思考很有用，因为它们各自都是能理解的函数（作用在已知矩阵上的线性或双线性函数）。但这样分开有道理吗？作者给了一个思想实验：把模型跑两遍。第一遍收集每个头的注意力模式，这只取决于 QK 电路（在多于一层的模型里，QK 电路会比 $W_E^T W_{QK}^h W_E$ 复杂）。第二遍把注意力模式替换成第一遍收集到的“冻结”模式。这样得到的函数里，logits 是 token 的线性函数。作者认为这是思考 Transformer 的一种很有力的方式。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 一层模型：解读为 skip-trigram</h2>
+        <p><em>原文小节：Interpretation as Skip-Trigrams；Copying / Primitive In-Context Learning；Other Interesting Skip-Trigrams；Primarily Positional Attention Heads；Skip-Trigram "Bugs"</em></p>
+        <p>
+            机制可解释性的一个核心难题是让神经网络参数“有语境”、变得有意义（作者引用了 Voss 等人在 Visualizing Weights 中的讨论）。把 OV 和 QK 电路乘出来就做到了这一点：参数变成了 token 上的简单线性或双线性函数。QK 电路决定当前的“目标”（destination）token 回头注意哪个“源”（source）token、从它那里复制信息；OV 电路描述这对下一个 token 的“输出”（out）预测有什么影响。三个 token 合起来构成形如 [source]… [destination][out] 的 skip-trigram，被调整的是 out 的概率。
+        </p>
+        <p>
+            作者强调这并不意味着解释就变简单了，原因有几条：
+        </p>
+        <ul>
+            <li>这些矩阵巨大。他们的词表约 50,000 个 token，一个展开后的 OV 矩阵约有 25 亿个元素。作者的说法是，一层只含注意力的模型被揭示为一个压缩过的“中文房间”，我们手里剩下一大堆卡片。</li>
+            <li>理解作用在相关变量上的广义线性模型的权重时会遇到的常见问题这里都有，变量之间还可以互相替代。例如某个注意力头的某个权重为零，可能只是因为另一个头会注意同一个 token、承担同样的角色。</li>
+            <li>一个技术问题：不同 query 向量的 QK 权重之间没法直接比较，怎样归一化也没有明确的正确答案。</li>
+        </ul>
+        <p>
+            尽管如此，现在 Transformer 的所有参数都有了语境、可以理解。在联合的 OV/QK 矩阵里找大元素，就能读出 skip-trigram，并看到很多有趣的行为。作者在后面各小节做了一个精选导览，同时提供了两个模型最大元素的完整、未挑选的列表链接：12 个头、$d_\text{head}=64$ 的模型，以及 32 个头、$d_\text{head}=128$ 的模型。
+        </p>
+
+        <h3>复制，也就是最原始的上下文学习</h3>
+        <p>
+            看这些矩阵时最醒目的一点是，一层模型里大多数注意力头把很大一部分容量用于复制（copying）。OV 电路的设置使得一个 token 如果被该头注意到，就会提高它自己的概率，以及较小程度上提高相似 token 的概率。QK 电路则只回头注意那些有可能成为下一个 token 的 token。结果是 token 被复制，但只复制到按 bigram 式统计看来说得通的位置。
+        </p>
+        <p>
+            原文第一张示例图的做法是：固定一个源 token，列出 QK 中对应的最大元素（目标 token）和 OV 中最大的元素（输出 token）。源 token 是挑过的，挑的是能展示有趣行为的；目标和输出 token 都是排名最前的元素（除非用省略号显式跳过），颜色深浅代表矩阵中数值的大小。大多数例子一看就懂，有两个需要解释：第四个例子（如 <code>lambda… &#36;\lambda</code> 这种 skip-trigram）似乎是模型在学 LaTeX；第五个例子（如 <code>nbsp… &gt;&amp;nbsp</code>）似乎是在学 HTML 转义序列。作者指出这些例子大多是复制，复制很常见。
+        </p>
+        <p>
+            还有更隐蔽的复制，和分词方式有关。分词器通常把空格并到单词开头。偶尔一个词前面没有空格，例如在新段落开头或对话的开引号之后。这些情况少见，分词没有为它们优化。所以较少见的词前面有空格时常常是单个 token（<code>" Ralph"</code> → <code>[" Ralph"]</code>），没有空格时会被切开（<code>"Ralph"</code> → <code>["R", "alph"]</code>）。
+        </p>
+        <p>
+            处理这种情况下复制的 skip-trigram 很常见。作者有时还观察到部分专门负责这件事的注意力头：看到一个碎片 token（如 <code>"R"</code>）时，回头注意可能是带空格完整单词的 token（<code>" Ralph"</code>），然后预测后续部分（<code>"alph"</code>）。作者指出，这可以看成一个很特殊的情形：一层模型借此在某种程度上模仿了两层模型才有的归纳头。
+        </p>
+        <p>
+            作者把观察到的复制行为归纳成几种抽象模式，原文用一张图列出（后文 12 节把一层复制头概括为 <code>[b] … [a] → [b]</code>，分词允许时为 <code>[ab] … [a] → [b]</code>）。它们都可以看成极原始的上下文学习。Transformer 能适应上下文是它最有意思的性质之一，这种简单复制是其中最基础的形式；两层模型里会出现更有力的上下文学习算法。
+        </p>
+
+        <h3>其他有意思的 skip-trigram</h3>
+        <p>
+            复制不是这些头编码的唯一行为。skip-trigram 看似简单，能产生的行为比想象复杂。下面是作者在展开的 OV/QK 矩阵最大元素中找到的例子（格式为 “源 … 目标 → 输出”）：
+        </p>
+        <ul>
+            <li>[Python] 缩进减少后，关键字 <code>else</code>、<code>elif</code>、<code>except</code> 更可能出现：<code>\n\t\t\t … \n\t\t → else/elif/except</code>，前一部分缩进 $N$ 次、后一部分缩进 $N-1$ 次，$N$ 取多种值，空白可以是 tab 或空格。</li>
+            <li>[Python] 预测 <code>open()</code> 会带文件模式字符串参数：<code>open … "," → [rb / wb / r / w]</code>（例如 <code>open("abc.txt","r")</code>）。</li>
+            <li>[Python] 函数第一个参数常是 <code>self</code>：<code>def … ( → self</code>（例如 <code>def method_name(self):</code>）。</li>
+            <li>[Python] 在 Python 2 里，<code>super</code> 作用于 <code>self</code> 后常接着调用 <code>.__init__()</code>：<code>super … self → ).__</code>（例如 <code>super(Parent, self).__init__()</code>）。</li>
+            <li>[Python] 提高与某个库相关的方法、变量、属性的概率：<code>upper … . → upper/lower/capitalize/isdigit</code>，<code>tf … . → dtype/shape/initializer</code>，<code>datetime… → date / time / strftime / isoformat</code>，<code>QtWidgets … . → QtCore / setGeometry / QtGui</code>，<code>pygame … . → display / rect / tick</code>。</li>
+            <li>[Python] 常见模式 <code>for... in [range/enumerate/sorted/zip/tqdm]</code>。</li>
+            <li>[HTML] <code>tbody</code> 后面常跟 <code>&lt;td&gt;</code> 标签：<code>tbody … &lt; → td</code>。</li>
+            <li>[多种语言] 括号、引号、标点的开闭配对：<code>(** … X → **)</code>，<code>(' … X → ')</code>，<code>"% … X → %"</code>，<code>'&lt;/ … X → &gt;'</code>（见 32 头模型的 0:27 号头）。</li>
+            <li>[LaTeX] 每个 <code>\left</code> 都必须有对应的 <code>\right</code>，反过来 <code>\right</code> 只能出现在 <code>\left</code> 之后。所以模型预测 <code>\left</code> 之后的 LaTeX 命令更可能是 <code>\right</code>：<code>left … \ → right</code>。</li>
+            <li>[英语] 常见短语和搭配，例如 <code>keep … [in → mind / at → bay / under → wraps]</code>，<code>difficult … not → impossible</code>。</li>
+            <li>单个头里与 query <code>" and"</code> 相关的一批三元组：<code>back and → forth</code>、<code>eat and → drink</code>、<code>trying and → failing</code>、<code>day and → night</code>、<code>far and → away</code>、<code>created and → maintained</code>、<code>forward and → backward</code>、<code>past and → present</code>、<code>happy and → satisfied</code>、<code>walking and → talking</code>、<code>sick and → tired</code> 等（见 12 头模型的 0:0 号头）。</li>
+            <li>[URL] 常见 URL 结构：<code>twitter … / → status</code>，<code>github … / → [issues / blob / pull / master]</code>，<code>gmail … . → com</code>，<code>http … / → [www / google / localhost / youtube / amazon]</code>，<code>http … : → [8080 / 8000]</code>，<code>www … . → [org / com / net]</code>。</li>
+        </ul>
+        <p>
+            学到的 skip-trigram 常和分词方式的特性有关。例如把连续空白合并成一个 token，使单个 token 就能体现缩进层级；反斜杠不和文本合并，使得预测 LaTeX 时反斜杠后面的 token 一定是转义序列。
+        </p>
+        <p>
+            很多 skip-trigram 没有专门知识就看不懂。例如 <code>Israel … K → nes</code>，只有知道以色列议会叫 “Knesset” 才说得通。作者建议的一个办法是把候选的 skip-trigram 敲进 Google 之类的搜索引擎，看自动补全。
+        </p>
+
+        <h3>以位置为主的注意力头</h3>
+        <p>
+            前面没有讨论注意力头如何处理位置，主要因为位置编码有好几种互相竞争的方法，会让公式变复杂。（对于标准的位置嵌入，一层模型的数学相当于把 $W_{QK}$ 乘上位置嵌入。）
+        </p>
+        <p>
+            实际上，一层模型往往有少数几个以位置为主的头，强烈偏好某些相对位置。原文展示了一个要么注意当前 token、要么注意前一个 token 的头。一层模型怎么学会按相对位置注意？对 rotary 这类显式编码相对位置的机制，答案很直接。作者用的机制是让每个位置的位置嵌入只影响 key 和 query。假设这些嵌入固定为正弦形式，或者模型学成了正弦形式，那么在这种嵌入中平移等价于乘一个旋转矩阵，$W_{QK}$ 只要对含正弦信息的维度做适当旋转，就能选出任意相对位置偏移。
+        </p>
+
+        <h3>skip-trigram 的 “bug”</h3>
+        <p>
+            观察一层模型展开后的 QK 和 OV 矩阵，最有意思的一点是它们能解释一些从外部看难以理解的模型行为。一层模型以“分解形式”表示 skip-trigram，分散在 OV 和 QK 矩阵里，有点像用 $f(a,b,c) = f_1(a,b) f_2(a,c)$ 来表示一个三元函数。这种形式不能灵活地捕捉三方交互。例如，一个头如果同时提高 <code>keep… in mind</code> 和 <code>keep… at bay</code> 的概率，它也必然会提高 <code>keep… in bay</code> 和 <code>keep… at mind</code> 的概率。对模型来说总体上这多半是划算的取舍，但在某种意义上也是 bug。作者经常在注意力头里看到这种情况。
+        </p>
+        <p>
+            原文配图里，高亮的文字是模型理想情况下不该提高概率的 skip-trigram 后续。图中提到的 QCanvas 是流行的 Qt 库里一个和 pixmap 有关的类；<code>Lloyd... Catherine</code> 可能指 Catherine Lloyd Burns。作者说这些例子稍有挑选、为了有趣，但如果去看上面链接的模型的展开权重，这类情况很常见。
+        </p>
+        <p>
+            这些 bug 本身看起来微不足道，但作者认为它是用可解释性理解模型失败的一个早期示范。他们没有进一步研究，提出了几个想追问的问题：这些 “bug” 让模型损失了多少性能（以 loss 计或其他方式）？这类问题在更大的模型里是否部分延续（大概会被其他效应部分掩盖，但不会完全消失）？
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 一层模型：概括 OV/QK 矩阵，检测复制</h2>
+        <p><em>原文小节：Summarizing OV/QK Matrices；Detecting Copying Behavior；Do We "Fully Understand" One-Layer Models?</em></p>
+
+        <h3>能否更好地概括这些矩阵</h3>
+        <p>
+            理解一层模型的问题已经变成了理解展开后的 OV 和 QK 矩阵，但它们动辄几十亿个元素。找最大元素有意思，有没有更好的办法？作者给出至少三个理由相信有：
+        </p>
+        <ul>
+            <li>OV 和 QK 矩阵秩极低。它们是 50,000 × 50,000 的矩阵，秩只有 $d_\text{head}$（64 或 128）。展开后看起来很大，在某种意义上其实很小。</li>
+            <li>看单个元素常能发现更简单结构的迹象。例如有一个头，人名的最强 query 是 <code>" by"</code> 这样的词（如 <code>Anne… by → Anne</code>），地名的最强 query 是 <code>" from"</code>（如 <code>Canada… from → Canada</code>），暗示矩阵里有类似聚类的结构。</li>
+            <li>复制行为在 OV 矩阵里很普遍，而且可以说是最有意思的行为之一（下一部分会看到，两层模型的 QK 矩阵里有类似结构，用于搜索与 query 相似的 token）。应该可以把它形式化。</li>
+        </ul>
+        <p>
+            作者说他们还没有明确的正确答案，但相信合适的矩阵分解或降维会很有帮助。高效处理这些大矩阵的方法见 <a href="#t19">19 节</a>。
+        </p>
+
+        <h3>检测复制行为</h3>
+        <p>
+            作者最想自动检测的行为是复制。复制的本质是把同一个向量映射到它自己（例如一个 token 提高自己的概率），所以似乎特别适合用某种汇总统计量来刻画。
+        </p>
+        <p>
+            但他们发现很难精确定义“复制”。判断一个矩阵算不算“复制矩阵”有很多略有差别的划界方式，还不确定哪种最有用。例如，本文的模型里没有，但在稍大一些的模型里，他们经常看到一些注意力头从附近的词“复制”性别、单复数、时态的某种混合，帮模型用对代词、变对动词形式。这些头的矩阵并不精确复制单个 token，但在很实际的意义上确实在复制。复制这个概念比初看起来复杂。
+        </p>
+        <p>
+            一种自然的办法是用特征向量和特征值。回忆：若 $Mv_i = \lambda_i v_i$，则 $v_i$ 是矩阵 $M$ 的特征向量，特征值为 $\lambda_i$。对 OV 电路 $M=W_UW^h_{OV}W_E$，如果 $\lambda_i$ 是正实数，意思是存在一个 token 的线性组合，它会提高同一组 token 的 logits 的线性组合。（在 token 嵌入之前，token 被看成极高维空间中的 one-hot 向量，logits 也是向量，所以两个空间里都可以谈 token 的线性组合。）粗略地说，这对应一组互相提高彼此概率的 token：范围宽的可能是所有复数名词，或所有以某个字母开头的 token；范围窄的可能是同一个词的不同大小写和带不带空格的版本。一般来说特征向量有正有负，所以更像是两组 token（例如阳性词和阴性词，单数词和复数词），各自提高同组 token 的概率、降低另一组的概率。
+        </p>
+        <p>
+            特征分解把矩阵表示为一组这样的特征向量和特征值。对随机矩阵，我们预期正负特征值数量大致相等，而且很多是复数。作者在旁注里说，特征值性质被研究得最清楚、又最接近这里情形的随机矩阵类大概是 Ginibre 矩阵，其元素服从高斯分布，类似初始化时的神经网络矩阵；实值 Ginibre 矩阵的特征值正负对称，在实轴上有额外的概率质量，实轴附近还有“排斥”现象。这里处理的是矩阵乘积，但经验上随机初始化权重的 OV 电路特征值分布看起来与 Ginibre 分布一致。复制需要正特征值，而实际观察到很多注意力头有正特征值，似乎反映了复制结构。
+        </p>
+        <p>
+            原文先画出各头 OV 电路的特征值分布，再进一步压缩成一个直方图，统计有多少头在复制（如果相信特征值这个汇总统计量的话）。一个可以使用的汇总量是正特征值所占的比例，例如
+        </p>
+        $$\frac{\sum_i \lambda_i}{\sum_i |\lambda_i|}$$
+        <p>
+            作者没有在正文写出这个式子，这里只是笔者为帮助理解“正特征值占优”给出的一种写法。原文结论是：<strong>12 个头里有 10 个显著在复制</strong>，这与对展开权重的定性观察一致。
+        </p>
+        <p>
+            不过，复制矩阵一定有正特征值，但有正特征值的矩阵不一定都该算复制。矩阵的特征向量不一定正交，这允许出现病态例子：可能有一个矩阵所有特征值都为正，却把某些 token 映射成降低该 token 自己的 logit。（作者旁注：用特征向量表示矩阵时要乘特征向量矩阵的逆，在非正交情形下这与直接投影到特征向量上可能差别很大。）正特征值仍然说明矩阵在某种意义上“平均而言在复制”，而且它在默认情况下不太可能出现、经验上又与复制吻合，所以是很强的证据，但不能当成矩阵在所有合理意义上都在复制的决定性证明。
+        </p>
+        <p>
+            还可以用别的方式形式化“复制矩阵”。一种是看矩阵对角线，它描述每个 token 怎样影响自己的概率；正如预期，对角线元素明显偏正。另一种是问：随机取一个 token，它提高自己概率的程度超过其他所有 token 的频率是多少（或者它是否在被提高最多的前 k 个里，以容纳大小写不同或带空格的同一个词）。这些都指向这些头是复制矩阵，但哪一个都不是“这个矩阵的主要行为是复制”的完全稳健的形式化。作者指出，这些复制概念都通过一个事实联系在一起：特征值之和等于迹，也就是对角线之和。
+        </p>
+        <p>
+            本文后面继续使用基于特征值的汇总统计量。作者不认为它完美，但认为它是很强的复制证据，且经验上与人工检查和其他定义一致。
+        </p>
+
+        <h3>我们“完全理解”一层模型了吗</h3>
+        <p>
+            常有人怀疑真正逆向神经网络是否可能、是否值得。这时很容易指着一层只含注意力的 Transformer 说：“看，最简化的玩具版 Transformer 至少可以完全理解。”
+        </p>
+        <p>
+            作者说这取决于“完全理解”指什么。他们现在对这个简化模型的理解，相当于看着一个巨大线性回归的权重而理解它，或看着一个大数据库而理解查询它意味着什么。这是一种理解：不再有算法上的谜团，神经网络参数的语境化问题已经被剥掉了。但如果不进一步做概括，内容多到没人能装进脑子里。普通的一层神经网络本来就是广义线性模型、能按广义线性模型来解释，所以单个注意力层也大体如此，作者认为这或许不令人意外。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 两层模型：三种组合与路径展开</h2>
+        <p><em>原文小节：Two-Layer Attention-Only Transformers；Three Kinds of Composition；Path Expansion of Logits；Path Expansion of Attention Scores QK Circuit</em></p>
+        <p>
+            深度学习研究的是深的模型，也就是层数多的模型。经验上这类模型很强大。力量从哪来？一种直觉是深度允许组合（composition），组合带来强大的表达能力。
+        </p>
+        <p>
+            注意力头的组合是一层和两层只含注意力的 Transformer 之间的关键区别。没有组合的话，两层模型只是多了一些注意力头来实现 skip-trigram。但实际上两层模型会找到利用注意力头组合的办法，表达一种强大得多的上下文学习机制。这样一来它更像一个运行算法的计算机程序，不再只是一层模型那种 skip-trigram 查找表。
+        </p>
+
+        <h3>三种组合</h3>
+        <p>
+            残差流是通信通道。每个注意力头读取由 $W_Q$、$W_K$、$W_V$ 决定的残差流子空间，写入由 $W_O$ 决定的子空间。注意力头的向量远小于残差流（$d_\text{head} / d_\text{model}$ 的典型值大约在 $1/10$ 到 $1/100$ 之间），所以各头在小子空间上运作，很容易避免明显的相互作用。如果确实发生组合，有三种可能：
+        </p>
+        <ul>
+            <li>Q 组合（Q-Composition）：$W_Q$ 读取的子空间受到前面某个头的影响。</li>
+            <li>K 组合（K-Composition）：$W_K$ 读取的子空间受到前面某个头的影响。</li>
+            <li>V 组合（V-Composition）：$W_V$ 读取的子空间受到前面某个头的影响。</li>
+        </ul>
+        <p>
+            Q 组合、K 组合和 V 组合差别很大。Q 组合和 K 组合都影响注意力模式，让注意力头能表达复杂得多的模式。V 组合影响的是注意力头注意某个位置时搬运什么信息，结果是 V 组合起来的头更像一个整体单元，可以看成额外造出了一个“虚拟注意力头”。信息搬运和信息搬运组合起来还是信息搬运；注意力头去影响另一个头的注意力模式，就不能这样化简。要真正理解这三种组合，需要再看 OV 和 QK 电路。
+        </p>
+
+        <h3>logits 的路径展开</h3>
+        <p>
+            对 Transformer 能问的最基本问题是 “logits 是怎么算出来的？”。和一层模型一样，先写出每个因子对应一层的乘积，再展开成每项对应一条端到端路径的和。两层模型写成乘积是：
+        </p>
+        $$T = (\text{Id} \otimes W_U)\cdot\Big(\text{Id} + \sum_{h\in H_2} A^h \otimes W_{OV}^h\Big)\cdot\Big(\text{Id} + \sum_{h\in H_1} A^h \otimes W_{OV}^h\Big)\cdot(\text{Id} \otimes W_E)$$
+        <p>展开得到三类项：</p>
+        $$T = \underbrace{\text{Id} \otimes W_U W_E}_{\text{direct path}} ~+~ \underbrace{\sum_{h \in H_1 \cup H_2} A^h \otimes \left(W_U W_{OV}^h W_E\right)}_{\text{individual head terms}} ~+~ \underbrace{\sum_{h_2 \in H_2}\sum_{h_1 \in H_1} (A^{h_2}A^{h_1}) \otimes \left(W_U W_{OV}^{h_2} W_{OV}^{h_1} W_E\right)}_{\text{virtual attention heads}}$$
+        <p>
+            直接路径项和单个头的项与一层模型相同。最后的“虚拟注意力头”项对应 V 组合。作者说虚拟注意力头在概念上很有意思，后面会再讨论；但实际中它们在小的两层模型里作用不大。
+        </p>
+
+        <h3>注意力分数（QK 电路）的路径展开</h3>
+        <p>
+            只看 logits 的展开，会漏掉两层只含注意力的模型最根本不同的性质：Q 组合和 K 组合让第二层的注意力模式表达力强得多。
+        </p>
+        <p>
+            为了看清这一点，要看计算注意力模式的 QK 电路。头 $h$ 的注意力模式是 $A^h = \text{softmax}^*\!\left( t^T \cdot C_{QK}^h t \right)$，其中 $C_{QK}^h$ 是把 token 映射到注意力分数的 “QK 电路”，$\text{softmax}^*$ 指带自回归掩码的 softmax。第一层的头的 QK 电路就是一层模型里那个矩阵：$C^{\,h\in H_1}_{\,QK} = W_E^T W_{QK}^h W_E$。
+        </p>
+        <p>
+            第二层的 QK 电路里，Q 组合和 K 组合都会起作用，前一层的头可能影响 key 和 query 的构造。$W_{QK}$ 归根到底作用在残差流上。第一层的情况简化为只作用在 token 嵌入上：$C^{\,h\in H_1}_{\,QK} = x_0^T W_{QK}^h x_0 = W_E^T W_{QK}^h W_E$。到第二层，$C^{\,h\in H_2}_{\,QK} = x_1^T W_{QK}^h x_1$ 作用在 $x_1$ 上，也就是经过第一层注意力头后的残差流。可以把它写成一个乘积，第一层同时出现在 “key 一侧” 和 “query 一侧”，然后同样套用路径展开。
+        </p>
+        <p>
+            一个麻烦是要写成 6 维张量，用到两次矩阵张量积。因为我们要表达的是形如 $[n_\text{context},~ d_\text{model}] \times [n_\text{context},~ d_\text{model}] \to [n_\text{context},~ n_\text{context}]$ 的多线性函数。一层的情况可以隐式地做外积绕过去，这里不行了。自然的表达是一个 (4,2)-张量（4 个输入维度、2 个输出维度）。每一项的形式为 $A_q \otimes A_k \otimes W$，定义为
+        </p>
+        $$x\,(A_q \otimes A_k \otimes W)\,y = A_q^T\, x\, W\, y\, A_k$$
+        <p>
+            $A_q$ 描述 query 一侧的信息在 token 之间怎样搬运，$A_k$ 描述 key 一侧的信息怎样搬运，$W$ 描述两者怎样相乘形成注意力分数。原文用一张图列出展开后的各项。按上面的规则把 $x_1 = (\text{Id} + \sum_{h\in H_1} A^h \otimes W_{OV}^h)\, x_0$ 代入两侧，可以得到四类项（下面是笔者按原文规则做的整理）：两侧都直接取 token 嵌入的项 $\text{Id} \otimes \text{Id} \otimes (W_E^T W_{QK}^{h} W_E)$，与一层模型相同；只有 key 一侧经过第一层某个头 $h_1$ 的项，形如 $\text{Id} \otimes A^{h_1} \otimes (W_E^T W_{QK}^{h} W_{OV}^{h_1} W_E)$，对应 K 组合；只有 query 一侧经过第一层头的项 $A^{h_1} \otimes \text{Id} \otimes (\ldots)$，对应 Q 组合；以及两侧都经过第一层头的项 $A^{h_1} \otimes A^{h_1'} \otimes (\ldots)$。
+        </p>
+        <p>
+            每一项都对应模型实现更复杂注意力模式的一种方式。抽象地推理它们很难，作者在讲归纳头时回到具体例子。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 两层模型：实际分析一个模型</h2>
+        <p><em>原文小节：Analyzing a Two-Layer Model；Correction</em></p>
+        <p>
+            到这里已经有了理解两层只含注意力模型的理论：一个描述 logits 的总方程（OV 电路），以及描述每个头的注意力模式如何计算的方程（QK 电路）。实际中怎么用？这一节逆向一个具体的两层模型。两层模型与一层模型的关键区别是 Q、K、V 组合；没有组合，它就只是多了些头的一层模型。
+        </p>
+        <p>
+            小的两层模型常常（并非总是）有很简单的组合结构：唯一的组合是第一层某一个头与第二层部分头之间的 K 组合。这个模型里看不到明显的 V 组合或 Q 组合。原文的图显示了第一层和第二层各头之间的 Q、K、V 组合强度，并按作者对其行为的理解给头上色。第一层那个头的注意力模式很简单：主要注意前一个 token，较少地注意当前 token 和往前第二个 token。第二层的那些头就是作者所说的归纳头。
+        </p>
+
+        <h3>原文的更正说明</h3>
+        <p>
+            原文在这张图前加了一条更正：由于作者为加速低秩矩阵线性代数而写的底层库里有一个 bug，这张图有误，详细说明和更正后的图附在文末（见本页 <a href="#t16">16 节</a>）。
+        </p>
+
+        <h3>怎样度量组合</h3>
+        <p>
+            这张图回答的问题是：第二层某个头的 query、key 或 value 向量，在多大程度上读取了第一层某个头写入的信息？度量方法是相关矩阵乘积的 Frobenius 范数，除以各自范数的乘积：
+        </p>
+        <ul>
+            <li>Q 组合：$\|W_{QK}^{h_2~T}W_{OV}^{h_1}\|_F \,/\, (\|W_{QK}^{h_2~T}\|_F\, \|W_{OV}^{h_1}\|_F)$</li>
+            <li>K 组合：$\|W_{QK}^{h_2}W_{OV}^{h_1}\|_F \,/\, (\|W_{QK}^{h_2}\|_F\, \|W_{OV}^{h_1}\|_F)$</li>
+            <li>V 组合：$\|W_{OV}^{h_2}W_{OV}^{h_1}\|_F \,/\, (\|W_{OV}^{h_2}\|_F\, \|W_{OV}^{h_1}\|_F)$</li>
+        </ul>
+        <p>
+            默认会减去同样形状的随机矩阵的经验期望值（大多数注意力头之间的组合比随机矩阵还小得多）。这个模型里实际只有显著的 K 组合，而且只和第 0 层的一个头有关。
+        </p>
+        <p>
+            一个直接的观察是大多数注意力头不参与实质性的组合，可以粗略地看成更大的一组 skip-trigram。这个两层模型有一个谜团要解，但范围相当窄。作者推测：在小模型里，有几个归纳头在某种意义上“胜过”了几个可能的 skip-trigram 头，而其他类型的组合都没有胜出；也就是说，多几个 skip-trigram 头对小模型的第二层来说是有竞争力的用法。
+        </p>
+
+        <h3>交互图：价值加权的注意力模式</h3>
+        <p>
+            在提出理论之前，原文给了一个交互图，展示各头在《哈利·波特与魔法石》第一段上的价值加权注意力模式，参与 K 组合的头用同样的配色标出（另有一个通用的探索界面）。作者建议单独查看各个头，看注意力模式并把鼠标悬停在 token 上；对归纳头，特别留意注意力模式中偏离对角线的斜线，以及它在组成 Dursley 和 Potters 的那些 token 上的行为。
+        </p>
+        <p>
+            价值加权注意力模式（value-weighted attention pattern）是把注意力权重乘以源位置 value 向量的范数 $\|v_{src}^h\|$，可以理解为“从每个位置搬运了多大的向量”。Kobayashi 等人最近也提出了同样的做法。它特别有用，因为注意力头在找不到要找的 token 时，有时会把某些 token 当成默认或“休息”位置；这些位置的 value 向量很小，所以加权后的模式更有信息量。
+        </p>
+        <p>
+            仔细看会发现，标成青色的“归纳头”经常回头注意接下来要出现的那个 token 的前一次出现。当然，只看一段文本（尤其是这么有名的一段）上的注意力模式，不能让我们很有把握地判断这些头的一般行为。作者在有了更明确的假设后会回到这个问题。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 归纳头</h2>
+        <p><em>原文小节：Induction Heads；Function of Induction Heads；How Induction Heads Work；Checking the Mechanistic Theory</em></p>
+        <p>
+            在小的两层只含注意力的 Transformer 里，组合似乎主要用于一个目的：造出归纳头。一层模型把大量容量用于复制头，作为实现上下文学习的粗糙方式；归纳头是实现上下文学习的强大得多的机制。作者预告下一篇论文会详细研究归纳头在上下文学习中的作用（见 <a href="02_上下文学习与归纳头.html">02 上下文学习与归纳头</a>）。
+        </p>
+
+        <h3>归纳头做什么</h3>
+        <p>
+            归纳头在上下文中搜索当前 token 之前出现过的位置。如果没找到，就注意第一个 token（这里是放在开头的一个特殊 token），什么也不做。如果找到了，就看它后面那个 token，并把它复制过来。这样就能精确或近似地重复前面出现过的 token 序列。
+        </p>
+        <p>和一层模型里的上下文学习对比：</p>
+        <ul>
+            <li>一层模型的复制头：<code>[b] … [a] → [b]</code></li>
+            <li>分词的罕见特性允许时：<code>[ab] … [a] → [b]</code></li>
+            <li>两层模型的归纳头：<code>[a][b] … [a] → [b]</code></li>
+        </ul>
+        <p>
+            两层的算法更强。它知道这个 token 之前怎么被使用，并留意类似的情形；一层的复制头只能泛泛地寻找可以重复某个 token 的地方。这让它在这些情况下的预测更有把握。它也更不怕分布偏移，因为它不依赖“某个 token 能否跟在另一个 token 后面”这类学到的统计。后面会看到，归纳头在完全随机 token 的重复序列上也能工作。
+        </p>
+        <p>
+            原文用一张图展示归纳头在《哈利·波特》第一段几个片段中帮助预测 token 的例子，画出 1:8 号归纳头（第 1 层第 8 个头）的原始注意力模式和 logit 效应。“logit 效应”指当前 token 的结果向量对下一个 token 的 logit 的影响，$(W_U W_O^h r^h_\text{pres\_tok})_\text{next\_tok}$，等价于跑完整的 OV 电路、查看这个头对下一个 token 的 logit 贡献了多少。
+        </p>
+
+        <h3>在随机重复序列上检验</h3>
+        <p>
+            既然认为归纳头是在注意 token 的先前副本并往后移一位，它们应该能在完全随机的重复模式上做到这一点。这大概是能给它们的最难测试，因为它们不能依赖“哪些 token 通常跟在哪些 token 后面”的正常统计。这些 token 从词表中均匀随机抽样，用 <code>&lt;n&gt;</code> 表示词表中第 $n$ 个 token，特殊 token 记为 <code>&lt;START&gt;</code>。这完全脱离了训练分布：只要“重复出现过的序列更可能再次出现”这一抽象性质成立，归纳头就能在差别极大的分布上工作。原文的交互图展示了各头在一段重复三次的随机 token 序列上的价值加权注意力模式。
+        </p>
+        <p>
+            作者认为这是归纳头假设正确的很强的证据。现在知道了这个两层模型里 K 组合用来干什么，接下来的问题是 K 组合怎样做到这件事。
+        </p>
+
+        <h3>归纳头怎样工作</h3>
+        <p>
+            归纳头的核心技巧是：<strong>key 是由往前移了一位的 token 算出来的。</strong>query 寻找“相似”的 key 向量，但由于 key 错开了一位，找到的就是下一个 token。（作者在旁注里说，如果模型的位置嵌入存在残差流里，和 rotary 不同，还有第二种实现归纳头的算法，见 <a href="#t17">17 节</a> 的指针运算。）
+        </p>
+        <p>
+            原文用一个来自更大模型、归纳头更复杂的例子做说明：QK 电路可以按 token 展开，图中 key 和 query 的颜色深浅表示每个 token 让注意力分数提高了多少，logit 效应就是 OV 电路。
+        </p>
+        <p>
+            造归纳头的最小方式，是让它与一个“前一个 token 头”（previous token head）做 K 组合，把 key 向量往前移一个 token。这会在 QK 电路里产生一项
+        </p>
+        $$\text{Id} \otimes A^{h_{-1}} \otimes W$$
+        <p>
+            其中 $A^{h_{-1}}$ 表示注意前一个 token 的注意力模式。如果 $W$ 在两个 token 相同时取大值（QK 版本的“复制矩阵”），这一项就会在“源位置的前一个 token 与目标 token 相同”时提高注意力分数。归纳头也可以比这更复杂：例如其他一些两层模型会发展出一个注意得比前一个 token 更远一点的头，大概是为了造出 $A^{h_{-1}} \otimes A^{h_{-2}} \otimes W$ 这样的项，使某些头能往回匹配更远。
+        </p>
+
+        <h3>检验机制理论</h3>
+        <p>这套机制理论意味着归纳头必须做到两件事：</p>
+        <ul>
+            <li>有一个“复制”型的 OV 电路矩阵。</li>
+            <li>与 $\text{Id} \otimes A^{h_{-1}} \otimes W$ 项相关的 QK 电路矩阵是“相同匹配”（same matching）型的。</li>
+        </ul>
+        <p>
+            作者不确定前面的特征值汇总统计量是否是检测“复制”或“匹配”矩阵的最佳统计量，但把它作为工作上的形式化。如果把每个注意力头看成二维平面上的点，横纵轴分别是 QK 和 OV 特征值的正性，所有归纳头都落在最右上的极端角落里。
+        </p>
+        <p>
+            有人可能会问这是否是循环论证：最初关注这些头，是因为它们的 K 组合大于随机水平，现在回来看的又部分是 K 组合项。但这里发现的是 K 组合造出的矩阵极度偏向正特征值。K 组合大并不意味着 K 组合是正的，也没有理由让所有 OV 电路都是正的。而如果实现的算法是上面描述的归纳算法，就会出现这样的结果。
+        </p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 项重要性分析与虚拟注意力头</h2>
+        <p><em>原文小节：Term Importance Analysis；Virtual Attention Heads</em></p>
+
+        <h3>用消融检查各阶项的贡献</h3>
+        <p>
+            前面因为没看到明显的 V 组合，就忽略了所有“虚拟注意力头”项。这多半是对的，但也可能出错：每个虚拟头单独都不重要，加起来却可能重要。这一节用消融（ablation，指把模型的某部分去掉或置零，看性能变化）来复核。
+        </p>
+        <p>
+            通常消融的对象在激活里是显式存在的，乘以零就行。这里要消融的是只在展开方程后才存在的隐含项。可以直接按方程实现一个 Transformer 来做，但那样会极慢，模型越深越是指数级变慢。
+        </p>
+        <p>
+            作者给出一个算法，能确定消融第 $n$ 阶项（也就是经过 $n$ 个注意力头的 V 组合的路径）的边际效应。技巧是把模型跑多遍，每次用上一遍保存的激活替换当前激活。这样可以限制路径深度，消融所有高于某阶的项；再对各次消融的 loss 求差，得到第 $n$ 阶项的边际效应。
+        </p>
+        <p><em>测量第 $n$ 阶项边际 loss 降低量的算法</em></p>
+        <ul>
+            <li>第 1 步：运行模型，保存所有注意力模式。</li>
+            <li>第 2 步：运行模型，强制所有注意力模式等于记录下来的版本；不把注意力头输出加进残差流，改为保存输出，然后用同形状的零张量替换。记录 loss。</li>
+            <li>第 $n$ 步：运行模型，强制所有注意力模式等于记录下来的版本；不把注意力头输出加进残差流，改为保存输出，然后用上一遍为这个头保存的值替换。记录 loss。</li>
+        </ul>
+        <p>
+            把注意力模式冻结为真实值，是这个消融只针对 V 组合的原因。这是最简单、聚焦于 OV 电路的版本，其变体也可用来分离 Q 组合或 K 组合。
+        </p>
+        <p>
+            结果与 V 组合的度量一致：二阶的“虚拟注意力头”项在这个模型里边际效应很小（在其他模型，尤其更大的模型里可能重要得多）。原文图中按阶数画出各项带来的 loss 降低。作者的结论是，理解两层只含注意力的模型，不该优先理解二阶虚拟注意力头，应集中在直接路径（只能贡献 bigram 统计）和单个注意力头项上。作者强调这对 Q 组合和 K 组合什么也没说明：OV 电路里高阶项不重要，只排除了 V 组合；Q 组合和 K 组合对应的是每个头的 QK 电路里的项。
+        </p>
+        <p>
+            再把单个头的项细分为第 1 层和第 2 层，原文的图表明应该把注意力集中在第二层头的项上。
+        </p>
+
+        <h3>虚拟注意力头</h3>
+        <p>
+            虚拟头对理解这个两层模型的性能不太重要，但作者推测它们在更大更复杂的 Transformer 里可能重要得多，而且在理论上很优雅。
+        </p>
+        <p>
+            回忆：虚拟注意力头是 logit 展开式中形如 $(A^{h_2}A^{h_1}) \otimes (\ldots W_{OV}^{h_2}W_{OV}^{h_1}\ldots)$ 的项，对应两个头的 V 组合。Q 组合和 K 组合影响注意力模式，V 组合则造出这种独立运作的单元：先做一个头的操作，再做另一个。最好把它看成两个头的复合 $h_2 \circ h_1$，它有自己的注意力模式 $A^{h_2 \circ h_1} = A^{h_2}A^{h_1}$ 和自己的 OV 矩阵 $W_{OV}^{h_2 \circ h_1} = W_{OV}^{h_2}W_{OV}^{h_1}$。更深的模型原则上还可以有更高阶的虚拟头，例如 $h_3 \circ h_2 \circ h_1$。
+        </p>
+        <p>作者指出两点：</p>
+        <ul>
+            <li>这种组合看来很强大。常能看到注意前一个 token 的头，却少见注意往前第二个 token 的头，可能因为往前第二个 token 的预测价值已经通过虚拟头拿到了。注意力模式还能实现更抽象的东西，比如注意当前从句的开头、句子的主语；组合使得“注意前一个从句的主语”这类功能成为可能。</li>
+            <li>虚拟注意力头数量很多。普通头的数量随层数线性增长，两个头复合的虚拟头按平方增长，三个头按立方增长，依此类推。所以模型理论上有大得多的空间通过虚拟头获得预测能力。这一点很重要，因为普通注意力头在某种意义上是“大”的：一个头只有一个注意力模式决定注意哪些源 token，并有 $d_\text{head}$ 个维度从源复制到目标。这让它不便用于直观上“小”的任务，即不需要传递多少信息的任务，例如注意前面的代词来判断文本是第一、第二还是第三人称，或注意时态标记来判断文本是过去、现在还是将来时。</li>
+        </ul>
+    </section>
+
+    <section id="t14">
+        <h2>14. 这项工作把我们带到了哪里</h2>
+        <p><em>原文小节：Where Does This Leave Us?</em></p>
+        <p>
+            前几节在理解一层和两层只含注意力的 Transformer 上有了进展，但最终目标是理解一般的 Transformer。这项工作有没有让我们更接近？这些特殊的受限情形能否照亮一般问题？作者说后续工作会探讨，他们总的感觉是能：这些方法可以用来理解一般 Transformer 的一部分，包括大语言模型。
+        </p>
+        <p>
+            一个理由是普通 Transformer 包含一些主要由注意力构成的电路。即使有 MLP 层，注意力头仍作用于残差流，仍可以彼此直接交互、与嵌入直接交互。实践中他们确实找到了只涉及注意力头和嵌入的可解释电路。也许无法理解整个模型，但很适合逆向这些部分。
+        </p>
+        <p>
+            他们在大模型里也看到了与玩具模型类似的注意力头和电路。特别是大模型会形成很多归纳头，其基本构造方式与这里一样，是与前一个 token 头的 K 组合。这似乎是各种规模语言模型中上下文学习的一个核心驱动力，下一篇论文会讨论。
+        </p>
+        <p>
+            另一方面，这种方式大概只能理解大语言模型的一小部分。MLP 层占标准 Transformer 参数的 2/3，不处理这些参数，模型的大部分行为显然无法理解。实际情况可能更糟：很多注意力头与 MLP 层交互，所以不考虑 MLP 层能理解的参数比例比 1/3 还小。更完整的理解需要在 MLP 层上取得进展。在机制层面，MLP 的电路其实有很好的数学结构（见 <a href="#t17">17 节</a>），但最清晰的前进路线需要单个可解释的神经元，而他们在找这样的神经元上成果有限。
+        </p>
+        <p>
+            作者说这篇初始论文的目标只是为后续工作建立一个立足点，还有大量工作要做。
+        </p>
+    </section>
+
+    <section id="t15">
+        <h2>15. 相关工作</h2>
+        <p><em>原文小节：Related Work</em></p>
+
+        <h3>Circuits</h3>
+        <p>
+            Distill Circuits 系列集中力量逆向了 InceptionV1 模型，本文想对大语言模型做类似的事。Circuits 方法在语言模型上需要大幅重新思考：注意力头和卷积网络里的任何东西都很不一样，需要新方法。残差流的线性结构既带来新挑战（没有特权基，少了一些研究它的手段），也带来机会（可以穿过它做展开）。电路是双线性型而不只是线性的，这也很少见（Goh 等人研究过图像模型与语言模型之间的双线性交互）。
+        </p>
+        <p>作者注意到 InceptionV1 的电路工作与研究只含注意力的语言模型电路之间几处高层差别：</p>
+        <ul>
+            <li>只含注意力模型的电路分析随模型规模的扩展方式可能很不一样。参数被组织成较大的、有意义的、基本线性运作的块（注意力头），这为“大致理解”大量参数提供了很多机会。即使很大的模型也只有几千个注意力头，逐个查看似乎可行。当然，一旦加入 MLP 层，大部分参数都在 MLP 里，这方面的优势就相对变小。</li>
+            <li>在极小的只含注意力 Transformer 上研究电路，比在小视觉模型上成功得多。小视觉模型的问题是神经元常常不可解释；这里没有类似问题，因为一切都能化成端到端的项。不过作者推测，等更仔细地研究带 MLP 的模型（MLP 不能化成端到端的项）时，也许也会发现神经元需要模型足够大才变得可解释。</li>
+        </ul>
+
+        <h3>Logit Lens</h3>
+        <p>
+            LessWrong 用户 Nostalgebraist 提出的 “Logit Lens” 方法利用的也是本文大量使用的残差流线性结构。Logit Lens 注意到残差流是逐步精炼的，可以把反嵌入矩阵作用在残差流较早的阶段上（基本上就是看 $W_U x_i$），观察模型预测怎样演变。本文可以看成做了类似的观察，但认为残差流不是该研究的根本对象：它是许多注意力头和神经元线性投影之和，自然的做法是把权重乘出来，看所有构成这个和的部分怎样连到 logits，再继续利用线性结构把线性尽量往模型前面推，大致就得到了本文的方法。
+        </p>
+
+        <h3>注意力头分析</h3>
+        <p>
+            本文追随了此前一些研究注意力头的论文。注意力模式的研究可能始于 Llion Jones 的可视化，随后很快有人扩展；近来有几篇论文开始认真研究注意力头与语法结构的对应关系。与这些工作最大的区别在于目标：本文要给出端到端的机制性解释，不只是经验地描述注意力模式。此外本文只研究了很小的玩具模型，而且只为说明和支持理论；本文关注自回归 Transformer，不是 BERT 这样的去噪模型。作者对这些结果与前人工作的关系有几点零散想法：
+        </p>
+        <ul>
+            <li>与大多数这类论文一样，他们在多数模型里看到“前一个 token 注意力头”。小模型里有时这个头会更分散地覆盖最后两三个 token。</li>
+            <li>与其他人的发现一致，很多注意力头把标点或特殊 token 当作默认位置。归纳头就是一个具体例子。与 Kobayashi 等人类似，他们发现用 value 向量的大小缩放注意力模式很有助于看清这一点。</li>
+            <li>本文的玩具模型没有出现前人描述的那些复杂语法注意力头，但在更大的模型里能找到更相似的头。</li>
+            <li>Voita 等人描述了偏好注意罕见 token 的注意力头，作者猜想它们也许与本文的 skip-trigram 头类似。</li>
+            <li>几篇论文提到有注意当前 token 先前出现位置的头。作者想到，在用掩码数据训练的双向模型里，归纳头可能就表现成这样；其机制特征会是 QK 展开里一个特征值很大且为正的 $A^{h_{prev}} \otimes A^{h_{prev}} \otimes W$ 项。</li>
+        </ul>
+
+        <h3>对“注意力即解释”的批评</h3>
+        <p>
+            有一系列重要工作批评把注意力权重直接理解为某个 token 对模型输出有多重要。对只含注意力的模型这一有限情形，本文的框架可以看成给出了一份分类：天真地解读注意力模式会在哪些情况下误导人，在哪种情况下是对的。注意力头单独起作用时（对应方程中的一阶项），确实可以直接解读，而且还能直接描述这些一阶项怎样影响 logits。但注意力头有三种交互方式（Q、K、V 组合），产生的复杂行为无法用天真的注意力模式解读来对应（对应路径展开中高阶项的激增）。问题在于这些高阶项有多重要，而作者观察到它们有时很重要。
+        </p>
+        <p>
+            归纳头是一个范例，说明天真解读注意力模式既能很有信息量、也会误导。一方面，归纳头的注意力模式本身信息量很大：对相当一部分 token，模型行为可以解释为“一个归纳头注意了前面这个 token，并预测它会再次出现”。另一方面，这些归纳头完全依赖前一层的前一个 token 头，通过 K 组合决定注意哪里。不理解 K 组合，就会完全误解前一个 token 头的作用，也看不到归纳头如何决定注意哪里。作者还指出这对基于梯度的归因方法也许是个好的测试案例：归纳头如果很确定地注意某处，它的 softmax 会饱和，key 上的梯度很小，相应 token 的归因就低，掩盖了被注意 token 之前那个 token 的关键作用。
+        </p>
+
+        <h3>Bertology</h3>
+        <p>
+            上面这些注意力头研究常被归入更大的一类工作 “Bertology”，研究 Transformer 语言模型（尤其 BERT）的内部表示。除注意力头分析外，最大的一支大概是用探针（probing）方法考察 BERT 残差流各阶段（该文献里叫 embeddings）的语言学性质。作者推荐 Rogers 等人的综述。本文主要和 Bertology 里注意力头分析的部分有交集，原因包括：只研究注意力模型，有意不直接研究残差流，偏重机制分析而非自上而下的探针方法。
+        </p>
+
+        <h3>数学框架</h3>
+        <p>
+            本文用到的数学观察本身大多不新，前人工作里已经有显式或隐含的表述。最突出的大概是 Dong 等人，他们在分析自注意力网络表达能力时考虑了穿过网络的路径，推出了与本文 logits 路径展开相同的结构。Shazeer 等人最近的论文用“多路 einsum”描述多头注意力，也可以看成本文强调的张量结构的另一种表达。作者认为自己的贡献在于把这类思路用于模型的机制可解释性。
+        </p>
+
+        <h3>其他可解释性方向</h3>
+        <p>
+            论文列出了其他方向：解释单个神经元（Transformer、其他语言模型、视觉模型都有相关工作，也有批评）、影响函数（influence functions）、显著图（saliency maps）、特征可视化（feature visualization，语言模型和视觉模型都有），每项都附了支持和质疑的文献。
+        </p>
+
+        <h3>可解释性界面</h3>
+        <p>
+            作者认为可解释性研究与可视化和交互界面紧密相连。没有可视化，就只能依赖汇总统计量，用这么低维的方式去理解神经网络很受限。合适的界面能让研究者快速探索各种高维结构：注意力模式、激活、模型权重等。只要用来问对的问题，界面既支持探索也支持严谨。机器学习有用可视化和交互界面探索模型的悠久传统，在 Transformer 上也延续下来，尤其是注意力的可视化。
+        </p>
+
+        <h3>近期的架构改动</h3>
+        <ul>
+            <li>Primer 是通过自动架构搜索找到的更高效 Transformer 变体。So 等人分离出两处关键改动，其中之一是在计算 key、query、value 时，对最后三个位置做深度卷积（depthwise convolution）。作者指出，这个改动使得不用 K 组合也能表达归纳头。</li>
+            <li>Talking Heads Attention 不太好理解。换个角度：普通注意力头有 $W^h_{OV} = W_O^hW_V^h$，talking heads attention 相当于 $W^h_{OV} = \alpha_1^h W_O^1W_V^1 + \alpha_2^h W_O^2W_V^2 + \ldots$，$W_{QK}$ 也一样。这意味着不同头的 OV 和 QK 矩阵可以共享成分；如果你认为多个复制头可以共享一部分 OV 矩阵，这样做就很自然。</li>
+        </ul>
+    </section>
+
+    <section id="t16">
+        <h2>16. 评论与更正</h2>
+        <p><em>原文小节：Comments &amp; Replications；Summary of Follow-Up Research；Correction: Attention Head Composition Diagram；Additional Resources</em></p>
+        <p>
+            效仿最初的 Circuits Thread 和 Distill 的讨论文章实验，Transformer Circuits 的文章有时会附上其他研究者的评论和复现，或原作者的更新。这篇有两条，都由原作者之一 Chris Olah 撰写。
+        </p>
+
+        <h3>后续研究综述（截至 2023 年 2 月）</h3>
+        <p>
+            论文发表后，大量后续工作澄清并扩展了文中初步的想法。
+        </p>
+        <p>
+            <em>理解 MLP 层与叠加。</em>这篇论文最大的弱点是对 MLP 层几乎无从下手，作者当时推测原因是叠加（superposition）现象。此后对 MLP 神经元有了更多了解，叠加理论被大幅充实，也出现了与之竞争的理论：
+        </p>
+        <ul>
+            <li>MLP 神经元通常不可解释。Black 等人提供了大量证据，表明 Transformer 语言模型的典型神经元是多义的（polysemantic，一个神经元对多种无关的输入都有反应）。作者说看到不只是自己遇到这个问题，他们松了口气。</li>
+            <li>叠加。<a href="03_叠加的玩具模型.html">Toy Models of Superposition</a> 大幅阐述了叠加假说，并在玩具模型里演示了它。Sharkey 等人发表了关于如何把特征从叠加中分离出来的中期报告。Lindner 等人做了一个利用叠加把程序编译进 Transformer 的工具。本文的一位作者提出了一批与多义性和叠加有关的开放问题。还有一些论文研究了如何避免叠加、叠加为何出现的模型，以及叠加与记忆的关系。</li>
+            <li>其他方向。Black 等人提出 Polytope Lens，作为叠加之外的另一种假说（或至少另一种视角）。Millidge 等人研究了能否用权重的 SVD 找到可解释的特征方向。</li>
+            <li>模型想在 MLP 层里表示什么特征？作者有一个视频介绍在 MLP 层里找到的少数可解释神经元。Miller &amp; Neo 找到了一个可解释的 “an” 神经元。作者的一篇后续论文在一个为减少叠加而设计的模型里描述了一批看起来可解释的神经元。</li>
+        </ul>
+        <p>
+            <em>注意力头组合与电路。</em>Turner 的初步研究更细致地探讨了注意力头组合。Wang 等人描述了一个由注意力头构成的复杂电路（但只在一个窄的子分布上分析）。
+        </p>
+        <p>
+            <em>归纳头。</em>作者发表了后续论文研究归纳头对上下文学习贡献多少（<a href="02_上下文学习与归纳头.html">02 上下文学习与归纳头</a>）。很多研究者复现了归纳头的一般结论。Chan 等人用他们的 “causal scrubbing” 方法更严格地刻画了归纳头。von Oswald 等人证明，重复使用一种类似归纳头的机制，可以通过模拟梯度下降在上下文中学会一个线性模型。与此同时，归纳头越来越多地出现在“神经网络是否理解”的讨论中，似乎因为它是神经网络“实现了一个算法”的一个有意思的具体中间案例（例如 Raphaël Millière 在某个研讨会上的报告）。
+        </p>
+
+        <h3>更正：注意力头组合图</h3>
+        <p>
+            论文发表后，作者发现自己写的一个底层库里有 bug。它只影响了一张图，但在某些方面影响了对“两层只含注意力 Transformer”一节的解读：那个模型里的注意力头组合比看上去更多。
+        </p>
+        <p>
+            <em>技术细节。</em>分析需要高效处理低秩矩阵，所以作者写了一个库来处理会得到低秩矩阵的矩阵乘法“链”（strands）。有几种计算可以利用转置矩阵乘积的恒等式提高效率，例如迹 $Tr(AB) = Tr(BA)$ 和特征值 $\lambda_i(AB) = \lambda_i(BA)$。他们在计算 Frobenius 范数时误用了类似的恒等式，可能是实现者把特征值恒等式套到了决定 Frobenius 范数的奇异值上。
+        </p>
+        <p>
+            结果是，本应计算 $\|W^{h_2T}_Q W^{h_2}_K W^{h_1}_OW^{h_1}_V\|_F$，实际算成了 $\|W^{h_2}_K W^{h_1}_OW^{h_1}_VW^{h_2T}_Q\|_F$ 或 $\|W^{h_1}_VW^{h_2T}_Q W^{h_2}_K W^{h_1}_O\|_F$（这里写的是 K 组合，Q 组合和 V 组合有类似错误）。本想计算一般的注意力头组合，算出来的是另一种东西。
+        </p>
+        <p>
+            用归纳头和前一个 token 头的组合来理解最容易。误算的量衡量的是：归纳头的 query 在多大程度上由前一个 token 头搬入数据的那个子空间构成。这就是归纳头对前一个 token 的 K 组合项应做的事，所以这个量对它反应很强，同时滤掉了其他类型的组合。它突出了归纳头的组合（而且隐含地算出了一个挺有意思的量），但不是作者原本想算的注意力头组合。
+        </p>
+        <p>
+            <em>bug 的影响。</em>只有一张图受影响，原文并列展示了原图和更正后的图。与前一个 token 头的 K 组合的重要性没有变化，但能看到一些额外的组合。主要新增的是：两个归纳头还依赖一个注意最后若干个 token（不只是前一个 token）的头。这与前面“归纳头怎样工作”中的讨论一致：其他模型里的归纳头常用比“与前一个 token 头做 K 组合”这种最小版本更复杂的电路。
+        </p>
+
+        <h3>其他资源与致谢</h3>
+        <p>
+            文章配有一套习题，作者认为它们对建立注意力头的直觉很有帮助。作者还开源了研究中用的一个库 PySvelte（方便在 Python 里使用交互可视化），并写文章介绍了另一个库 Garcon（他们探查模型内部的工具，尤其用于大模型）。致谢部分感谢了 Martin Wattenberg、Vladimir Mikulik、Jeff Wu、Evan Hubinger、Peter Hase 等人的反馈，以及报告勘误的读者。
+        </p>
+        <p>
+            作者贡献部分说明：理论框架来自 Nelson Elhage、Catherine Olsson、Neel Nanda 和 Chris Olah 过去一年的讨论与实证研究。Nelson Elhage 发现了神经元在残差流里做内存管理的证据，促成了“残差流是通信通道”的表述；Catherine Olsson 仔细刻画了几十个神经元和注意力头；Neel Nanda 大幅改进了对注意力头组合的理解；Chris Olah 提出了框架的基础思想、发现了归纳头并主导了理论进展。玩具模型的分析由 Chris Olah 和 Neel Nanda 完成，所用的特殊只含注意力玩具模型由 Nelson Elhage 构建。文章由 Chris Olah 起草，Neel Nanda 做了重要的教学性改进，Dario Amodei 对高层框架贡献很大。分析基础设施 Garcon 由 Nelson Elhage 构建。项目由 Chris Olah 主导。
+        </p>
+    </section>
+
+    <section id="t17">
+        <h2>17. 附录：额外的直觉与观察</h2>
+        <p><em>原文小节：Additional Intuition and Observations</em></p>
+
+        <h3>MLP 层</h3>
+        <p>
+            正文只讨论了只含注意力的 Transformer，怎样把方法推广到带 MLP 层的模型？MLP 层 $m$ 从残差流 $x_i$ 算出激活 $a^m$：做一次矩阵乘法，过激活函数；再把激活向量投影回去，加进残差流。原文用图表示为 $a^m = \text{GeLU}(W_I^m x_i)$，$x_{i+1} = x_i + W_O^m a^m$（按记号表的定义整理）。
+        </p>
+        <p>
+            GeLU 激活使得不能像注意力层那样把 MLP 层线性化。可能需要采用 Circuits 项目逆向视觉模型的路子：弄清神经元表示什么、怎样被计算、怎样被使用。
+        </p>
+        <p>
+            理论上有不少理由对理解这些神经元保持乐观：激活函数应该会鼓励特征对齐到基方向；神经元数是残差流的 4 倍，信息也不必非得流经它们，这两点都可能减少多义性。可惜实践中难得多。作者发现很难对神经元提出假设，例外是位于模型约 5% 深度处的神经元，它们常对一簇意思相近的短语有反应。正文聚焦注意力头，是因为在注意力头上更早取得了进展。
+        </p>
+        <p>
+            即便如此，一旦找到可解释的神经元，有一套相当干净的方式对它做机制推理。
+        </p>
+        <p>
+            <em>一层模型中 MLP 层的路径展开。</em>考虑一个标准的一层 Transformer（忽略层归一化和偏置）。MLP 的激活前值（pre-activation）是残差流的线性函数，套用注意力头的方程，得到与一层模型 logits 基本相同的式子：
+        </p>
+        $$a^m_\text{pre} ~=~ W^m_I \cdot \bigg(\text{Id}+\sum_{h\in H_1} A^h \otimes W_{OV}^h\bigg)\cdot~W_E$$
+        $$a^m_\text{pre} ~=~ W^m_I W_E ~+~ \sum_{h\in H_1} A^h \otimes \left(W^m_I W_{OV}^h W_E\right)$$
+        <p>
+            于是可以用同样的方法研究它。$W^m_I W_E$ 说明不同 token 通过残差流怎样激励或抑制这个神经元；$W^m_I W_{OV}^h W_E$ 说明 token 在被某个注意力头注意时起什么作用。这有点像卷积网络里的神经元，区别是卷积网络的神经元权重按相对位置索引，这里按注意力头索引。下一小节会细说这层联系。
+        </p>
+        <p>
+            这些神经元的下游效应呢？$W_U W^m_O$ 说明每个神经元的激活怎样影响 logits，是个简单的线性函数。这对网络最后一个 MLP 层总是成立，所以理解最后一层会容易很多。网络越深，这种做法越难，需要推理一个 MLP 层怎样影响下游的另一个 MLP 层。作者认为一般的电路方法看来是可行的，困难在于神经元特别难理解，而且数量巨大。
+        </p>
+
+        <h3>虚拟权重与类卷积结构</h3>
+        <p>对 Transformer 的各种项做路径展开，一般会得到这种形式的虚拟权重：</p>
+        $$y = \Big(\text{Id} \otimes W_\text{Id} + \sum_h A^h \otimes W_h\Big) x + \ldots$$
+        <p>
+            （一般情况下 $h$ 也可以包括虚拟注意力头。）本文主要例子是 $y$ 为输出 token 的 logits、$x$ 为 one-hot 输入 token，但很多别的情形也会出现，例如 $y$ 是 MLP 激活前值、$x$ 是前一个 MLP 层的激活。乘以 $(\text{Id} \otimes W_\text{Id} + \sum_h A^h \otimes W_h)$ 可以看成卷积的推广：权重是 $[W_\text{Id}, ~ W_{h_0}, ~ W_{h_1},\ldots]$，注意力头取代了相对位置。
+        </p>
+        <p>
+            <em>在受限情形下与标准卷积严格等价。</em>作者断言所有卷积都能写成上面的张量积形式，因此 (1) 注意力是卷积的推广；(2) 特定配置的注意力就是卷积。卷积 $W \ast x$ 可以改写为
+        </p>
+        $$W \ast x ~=~ \sum_v A^v \otimes W_v$$
+        <p>
+            其中 $v$ 是卷积偏移，$A^v$ 是总是注意相对位置 $v$ 的注意力模式（例如前一个 token 头），$W_v$ 是该偏移对应的权重。Cordonnier 等人深入研究过这种等价，并在经验上发现视觉模型里常有很多二维相对位置头，类似这里看到的前一个 token 头。
+        </p>
+        <p>
+            <em>与卷积推广的类比。</em>对按固定相对位置以外的模式注意的“动态”注意力头，与标准卷积的对应就不成立了。但很多情况下它们在精神上仍很像卷积，例如“前一个动词”头并不是字面上的相对位置（至少在按 token 索引参数化输入时），但道理上像一种卷积。一种办法是考虑图卷积：把每个注意力模式看成图上的一组不同权重，张量积就是图卷积之和（Joshi 有一篇非正式讨论 Transformer 与图神经网络类比的文章）。但需要考虑多张权重图，不够优雅。还有基于抽象代数的特殊卷积，也许能找到精确对应的版本。根本的一点是：看到上面这类张量积时，可以把它想成带有动态的、软的、可能是语义上的“位置”的卷积。
+        </p>
+        <p>
+            <em>为什么有用。</em>逆向卷积网络时，Distill Circuits 系列从权重被组织成卷积这一点受益很多，例如可以看两个神经元之间的权重，了解不同空间位置怎样起作用。原文配图是两个曲线检测器之间的权重：沿着曲线的切线方向，另一个曲线检测器会激励它。如果要分别看 25 个不同的权重，就难理解得多，组织结构帮了大忙。作者预计类似的组织对理解 Transformer 权重也会有帮助，尤其是开始考虑 MLP 层之后。
+        </p>
+
+        <h3>激活的性质</h3>
+        <p>
+            <em>有特权基与无基。</em>当架构的某个方面鼓励神经网络特征对齐到基维度时（例如 ReLU 这类稀疏激活函数），就有特权基。在 Transformer 里，只有 token、注意力模式和 MLP 激活有特权基（完整列表见记号表）。有些可解释性方法只对有特权基的激活有意义，例如去看残差流、key、query、value 的“神经元”（基维度）就没什么意义。这不等于没法研究它们，很多关于词嵌入的有趣工作并不假设特权基；但有特权基会多出一些有用的手段。
+        </p>
+        <p>
+            <em>瓶颈激活。</em>如果一个激活是两个更高维激活之间的低维中间量，就叫瓶颈激活。残差流是瓶颈激活，因为它是 MLP 激活之间传递信息的唯一途径，而 MLP 激活通常是它的 4 倍大。不仅如此，残差流也是任意早期 MLP 层和任意晚期 MLP 层通信的唯一通道，所以它可能同时在许多对 MLP 层之间传递不同信息，瓶颈远比 4 倍极端。value 向量也是瓶颈激活：它比残差流低维得多，而且是把信息从上下文中一个位置的残差流搬到另一个位置的唯一途径（除非模型再用一个注意力头做同样的模式，它有时会这样做）。
+        </p>
+
+        <h3>用位置嵌入做指针运算</h3>
+        <p>
+            本文模型用的位置机制有点特别，不把位置信息放进残差流，流行的 rotary 方法也有这个性质。但如果模型有位置嵌入，就会多出几种可能。最基本的，位置嵌入有点像 token 的地址。注意力头可以用它偏好注意某些相对位置，还能做更多：
+        </p>
+        <ul>
+            <li>Transformer 可以对位置嵌入做“指针运算”式的操作。作者至少在 GPT-2 里观察到一个用这种方法实现的归纳头：先由一个注意力头注意相似的 token，取回它的位置嵌入；再由另一个头通过 Q 组合构造 query 向量，把这个位置嵌入往前旋转一个 token。结果就是一个归纳头。</li>
+            <li>作者推测给每个 token 一个标识符在某些情况下有用。例如想让同一句子里的所有 token 共享一个标识符，在带位置嵌入的模型里，一个注意力头可以注意前一个句号，把它的位置嵌入复制到某个子空间。</li>
+        </ul>
+
+        <h3>恒等注意力头？</h3>
+        <p>
+            可以引入一个“恒等注意力头” $h_\text{Id}$，令 $A^{h_\text{Id}} = \text{Id}$、$W_{OV}^{h_\text{Id}} = \text{Id}$，它对应残差流，能把方程里额外的项消掉，简化本文所有的数学。作者没有这样做，保留残差流作为一个显式的、单独的项，主要原因是它的性质确实和注意力头不同。但在其他场合换个角度想也会有用。
+        </p>
+    </section>
+
+    <section id="t18">
+        <h2>18. 附录：记号与张量积</h2>
+        <p><em>原文小节：Notation；Variable Definitions；Tensor Product / Kronecker Product Notation</em></p>
+
+        <h3>变量定义</h3>
+        <table>
+            <thead>
+                <tr><th>变量</th><th>形状 / 类型</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+                <tr><td colspan="3"><em>模型主要的激活和参数</em></td></tr>
+                <tr><td>$T(t)$</td><td>$[n_\text{context},~ n_\text{vocab}]$</td><td>对 token $t$ 的 Transformer logits［激活，有特权基］</td></tr>
+                <tr><td>$t$</td><td>$[n_\text{context},~ n_\text{vocab}]$</td><td>one-hot 编码的 token［激活，有特权基］</td></tr>
+                <tr><td>$x^n$</td><td>$[n_\text{context},~ d_\text{model}]$</td><td>第 $n$ 层的“残差流”或“嵌入”向量，每个上下文 token 一个［激活，无特权基］</td></tr>
+                <tr><td>$W_E$</td><td>$[d_\text{model}, n_\text{vocab}]$</td><td>token 嵌入［参数］</td></tr>
+                <tr><td>$W_P$</td><td>$[d_\text{model}, n_\text{context}]$</td><td>位置嵌入［参数］</td></tr>
+                <tr><td>$W_U$</td><td>$[n_\text{vocab}, d_\text{model}]$</td><td>反嵌入 / softmax 权重［参数］</td></tr>
+                <tr><td colspan="3"><em>注意力头的激活和参数</em></td></tr>
+                <tr><td>$H_n$</td><td>集合</td><td>第 $n$ 层的注意力头集合</td></tr>
+                <tr><td>$h(x)$</td><td>$[n_\text{context},~ d_\text{model}]$</td><td>注意力头 $h$ 的输出［激活，无特权基］</td></tr>
+                <tr><td>$A^h$</td><td>$[n_\text{context},~ n_\text{context}]$</td><td>注意力头 $h$ 的注意力模式［激活，有特权基］</td></tr>
+                <tr><td>$q^h, k^h, v^h, r^h$</td><td>$[n_\text{context},~ d_\text{head}]$</td><td>注意力头 $h$ 的 query、key、value 和结果向量，每个上下文 token 一个［激活，无特权基］</td></tr>
+                <tr><td>$W^h_Q, W^h_K, W^h_V$</td><td>$[d_\text{head},~ d_\text{model}]$</td><td>注意力头 $h$ 的 query、key、value 权重［参数］</td></tr>
+                <tr><td>$W^h_O$</td><td>$[d_\text{model},~ d_\text{head}]$</td><td>注意力头 $h$ 的输出权重［参数］</td></tr>
+                <tr><td>$W^h_{OV}$</td><td>$[d_\text{model},~ d_\text{model}]$</td><td>$W^h_{OV} = W^h_{O}W^h_{V}$［参数，低秩］</td></tr>
+                <tr><td>$W^h_{QK}$</td><td>$[d_\text{model},~ d_\text{model}]$</td><td>$W^h_{QK} = W^{h\,T}_{Q}W^h_{K}$［参数，低秩］</td></tr>
+                <tr><td colspan="3"><em>MLP 层的激活和参数</em></td></tr>
+                <tr><td>$m(x)$</td><td>$[n_\text{context},~ d_\text{model}]$</td><td>MLP 层 $m$ 的输出［激活，无特权基］</td></tr>
+                <tr><td>$a^m$</td><td>$[n_\text{context},~ d_\text{mlp}]$</td><td>MLP 层 $m$ 的激活［激活，有特权基］</td></tr>
+                <tr><td>$W^m_I$</td><td>$[d_\text{mlp},~ d_\text{model}]$</td><td>MLP 层 $m$ 的输入权重［参数］</td></tr>
+                <tr><td>$W^m_O$</td><td>$[d_\text{model},~ d_\text{mlp}]$</td><td>MLP 层 $m$ 的输出权重［参数］</td></tr>
+                <tr><td colspan="3"><em>函数</em></td></tr>
+                <tr><td>$\text{GeLU}()$</td><td>函数</td><td>Gaussian Error Linear Units</td></tr>
+                <tr><td>$\text{softmax}^*()$</td><td>函数</td><td>带自回归掩码的 softmax，用于生成注意力分布</td></tr>
+            </tbody>
+        </table>
+        <p>
+            不影响清晰时，变量的上下标可以省略。例如只讨论一个注意力头时，可以把 $A^h$ 写成 $A$。
+        </p>
+
+        <h3>张量积 / Kronecker 积记号</h3>
+        <p>
+            机器学习里常要对矩阵或张量的“某一边”做乘法。在 Transformer 里，激活常是二维数组，表示不同上下文位置上的向量，我们经常想“逐位置”乘或“跨位置”乘，往往两者都要。张量积（等价地，Kronecker 积）是表达这件事的干净方式，记作 $\otimes$。实用上：
+        </p>
+        <ul>
+            <li>$\text{Id} \otimes W$（左边是单位矩阵）表示上下文里每个位置的向量都乘以矩阵 $W$。</li>
+            <li>$A \otimes \text{Id}$（右边是单位矩阵）表示在位置之间相乘。</li>
+            <li>$A \otimes W$ 表示每个位置的向量乘 $W$，同时用 $A$ 跨位置相乘，两者先后顺序无关。</li>
+            <li>满足混合积性质 $(A \otimes B) \cdot (C \otimes D) = (AC) \otimes (BD)$。</li>
+        </ul>
+        <p>理解这些乘积有几种完全等价的方式，选自己顺手的即可：</p>
+        <ul>
+            <li>左右同时相乘：$x$ 乘以张量积 $A\otimes W$ 等价于同时左乘和右乘，$(A\otimes W) x = A x W^T$。相加时就是把这些结果相加：$(A_1\otimes W_1 + A_2\otimes W_2) x = A_1 x W_1^T + A_2 x W_2^T$。</li>
+            <li>Kronecker 积：我们要做的操作是对激活矩阵 $x$ 的展平（向量化）版本做线性变换。展平后是一个巨大的向量，需要把矩阵映射成更大的分块矩阵，执行“对原来属于同一个向量的那些元素乘以这个矩阵”这类操作，正确的运算就是 Kronecker 积。所以可以把 $\otimes$ 理解为作用在 $x$ 向量化结果上的 Kronecker 积，一切结果都等价。</li>
+            <li>张量积：$A\otimes W$ 可以理解为把矩阵 $A$ 和 $W$ 变成一个 4 维张量的张量积，用 NumPy 写等价于 <code>A[:,:,None,None] * W[None, None, :, :]</code>（实际计算时不会这样存）。更形式地说，$A$ 和 $W$ 是 “$(1,1)$ 型”张量（把向量映射到向量的矩阵），$A\otimes W$ 是 “$(2,2)$ 型”张量（可以把矩阵映射到矩阵）。</li>
+        </ul>
+        <p>下面这段 NumPy 代码帮助核对“左右同时相乘”这种理解（笔者为说明而写，原文没有代码）：</p>
+        <pre><code>import numpy as np
+
+n_ctx, d_model = 5, 8
+A = np.random.rand(n_ctx, n_ctx)        # attention pattern: mixes positions
+W = np.random.rand(d_model, d_model)    # acts on each position's vector
+x = np.random.rand(n_ctx, d_model)      # one row per token
+
+# (A ⊗ W) x  ==  A x W^T
+lhs = (np.kron(A, W) @ x.reshape(-1)).reshape(n_ctx, d_model)
+rhs = A @ x @ W.T
+print(np.allclose(lhs, rhs))  # True</code></pre>
+    </section>
+
+    <section id="t19">
+        <h2>19. 附录：技术细节</h2>
+        <p><em>原文小节：Technical Details；Model Details；Handling Layer Normalization；Working with Low-Rank Matrices</em></p>
+
+        <h3>模型细节</h3>
+        <ul>
+            <li>文中作为例子的模型是零层、一层和两层的仅解码器、只含注意力的 Transformer。</li>
+            <li>所有模型满足 $d_\text{model} = n_\text{heads} \times d_\text{head}$，通常 $n_\text{heads}=12$、$d_\text{head}=64$；另有一个明确标注的例子是 $n_\text{heads}=32$、$d_\text{head}=128$。</li>
+            <li>上下文长度 2048 个 token，使用稠密注意力（为简单起见选了稠密注意力而非稀疏注意力，这也使较短的上下文更合适）。</li>
+            <li>位置机制类似 Press 等人的做法：在乘 $W_Q$ 和 $W_K$ 得到 query 和 key 之前，加上正弦位置嵌入。（这排除了基于指针运算的算法，同时没有 rotary 那样对 QK 矩阵的扭曲。）</li>
+            <li>训练数据集与 Kaplan 等人描述的相同。</li>
+        </ul>
+
+        <h3>处理层归一化</h3>
+        <p>
+            这些模型每次从残差流读取时都会做层归一化，目的是让激活和梯度的尺度保持健康，使 Transformer 更容易训练。但这也让每层的“读”操作比前面描述的理想版本复杂。
+        </p>
+        <p>
+            先看更简单的批归一化。Transformer 通常用层归一化不用批归一化，是因为批归一化在自回归模型里有一些微妙问题；但批归一化好推导，而且能让理论与模型完全一致。批归一化维护输入均值和方差的滑动估计，用它独立地归一化各输入，再用学到的参数重新缩放。推理时使用固定的均值和方差估计，所以它只是一个固定的线性变换加偏置，可以乘进相邻的线性变换和偏置。因此对推理时的模型做可解释性分析时，批归一化通常可以吸收掉、不予考虑。
+        </p>
+        <p>
+            层归一化稍微微妙些。它对每个残差流向量减去平均激活，除以标准差归一化，再乘一组学到的对角权重、加一个学到的偏置向量。减去平均激活是固定的线性变换，因为它只是把向量空间里的一个维度清零。所以除了按方差归一化那一步，层归一化是一个固定的仿射变换。按方差归一化是乘一个标量，而乘标量与路径中的其他操作都可交换。于是可以把除归一化缩放以外的一切并进相邻参数，再把归一化缩放看成对经过这个层归一化的那组路径项的可变重新加权。主要缺点是经过不同层组合的路径不容易比较，例如不能直接比较由不同层的头组成的虚拟注意力头的重要性。
+        </p>
+        <p>
+            最后，第一个注意力层的层归一化也可以先作用在嵌入矩阵的每个向量上，然后忽略。有时这样更方便，例如作者在一层模型的 skip-trigram 分析中就这样做。作者认为将来也许值得尝试用批归一化训练模型，避开这个麻烦，尽管批归一化本身也有复杂之处。
+        </p>
+
+        <h3>处理低秩矩阵</h3>
+        <p>
+            本文处理的矩阵很大但秩极低，选对算法往往决定了是在 GPU 上慢得难受，还是在 CPU 上瞬间完成。
+        </p>
+        <ul>
+            <li>尽量保持矩阵的分解形式。乘一串矩阵时，找出“最小”的瓶颈点，在那里把矩阵表示为乘积 $AB$。</li>
+            <li>特征值：利用 $\lambda_i(AB) = \lambda_i(BA)$。算 64×64 矩阵的特征值远比算 50,000×50,000 的矩阵好。</li>
+            <li>SVD 也能高效计算，其变体可用于高效计算 PCA：先分别求 $A$ 和 $B$ 的 SVD，$U_AS_AV_A = A$，$U_BS_BV_B = B$；定义 $C=S_AV_AU_BS_B$；对 $C$ 做 SVD，$U_CS_CV_C = C$；则 $AB$ 的 SVD 为 $U_{AB} = U_AU_C$，$S_{AB} = S_C$，$V_{AB} = V_CV_B$。</li>
+        </ul>
+        <p>下面是对“特征值用小矩阵算”这一条的示意代码（笔者所写，原文没有代码；矩阵按记号表的形状构造）：</p>
+        <pre><code>import numpy as np
+
+d_vocab, d_model, d_head = 2000, 256, 64
+W_E = np.random.randn(d_model, d_vocab) / np.sqrt(d_model)
+W_U = np.random.randn(d_vocab, d_model) / np.sqrt(d_model)
+W_V = np.random.randn(d_head, d_model) / np.sqrt(d_model)
+W_O = np.random.randn(d_model, d_head) / np.sqrt(d_head)
+
+# Full OV circuit W_U W_O W_V W_E is d_vocab x d_vocab but rank d_head.
+# Split at the d_head bottleneck: (W_U W_O) @ (W_V W_E) = A @ B,
+# then lambda_i(AB) = lambda_i(BA), and BA is only d_head x d_head.
+A = W_U @ W_O          # [d_vocab, d_head]
+B = W_V @ W_E          # [d_head, d_vocab]
+eig_small = np.linalg.eigvals(B @ A)   # 64 eigenvalues
+
+# Copying score: share of eigenvalue mass that is positive
+score = eig_small.sum().real / np.abs(eig_small).sum()
+print(score)</code></pre>
+    </section>
+
+    <section>
+        <h2>这篇的要点</h2>
+        <ul>
+            <li>研究对象是两层以内、只含注意力、无偏置、忽略层归一化的仅解码器 Transformer；通常 12 个头、$d_\text{head}=64$，上下文 2048 token。作者明确说没有 MLP 是本工作的主要弱点。</li>
+            <li>残差流是所有层之和，自己不做计算，是各层的通信通道；它是线性的，没有特权基。任意两层之间有虚拟权重 $W_I^2W_O^1$。残差流带宽紧张（单个 MLP 的神经元数约为其 4 倍），有些神经元和头可能在做“内存管理”删除信息。</li>
+            <li>“拼接再乘 $W_O$”等价于各头独立相加。一个头可以写成 $h(x) = (A \otimes W_O W_V)\, x$，$A = \text{softmax}(x^T W_Q^T W_K x)$；$W_{OV}=W_OW_V$ 和 $W_{QK}=W_Q^TW_K$ 是低秩矩阵，key/query/value 只是中间产物。</li>
+            <li>零层模型 $T = W_U W_E$ 逼近 bigram 对数似然；任何 Transformer 的直接路径都对应这一项，例如 “Barack → Obama”。$W_U$ 不是 $W_E$ 的逆。</li>
+            <li>一层模型展开为 $\text{Id} \otimes W_U W_E + \sum_h A^h \otimes W_U W_{OV}^h W_E$。每个头拆成 QK 电路 $W_E^T W_{QK}^h W_E$（看哪里）和 OV 电路 $W_UW_{OV}^hW_E$（看到后怎样影响 logits）；冻结注意力模式后 logits 是 token 的线性函数。</li>
+            <li>一层模型是 bigram 加 skip-trigram（“A… B C”）的集成，大部分头在复制，是最原始的上下文学习；还有 Python、LaTeX、HTML、URL、英语搭配等 skip-trigram。分解形式带来 bug：提高 “keep… in mind” 和 “keep… at bay” 必然也提高 “keep… in bay”。</li>
+            <li>展开的 OV/QK 矩阵约 50,000 × 50,000（约 25 亿个元素），秩只有 64 或 128。用 OV 电路特征值的正性检测复制，12 个头里 10 个显著在复制；正特征值是很强的证据，但不构成证明。</li>
+            <li>两层模型的头可以通过 Q、K、V 三种方式组合。Q/K 组合改变注意力模式；V 组合产生虚拟注意力头 $(A^{h_2}A^{h_1}) \otimes (W_{OV}^{h_2}W_{OV}^{h_1})$。QK 电路需要用 $A_q \otimes A_k \otimes W$ 形式的 (4,2)-张量展开。</li>
+            <li>组合强度用归一化 Frobenius 范数度量并减去随机基线。所分析的两层模型里只有显著的 K 组合，来自第 0 层一个前一个 token 头，第二层的相关头是归纳头。</li>
+            <li>归纳头实现 <code>[a][b] … [a] → [b]</code>：通过与前一个 token 头的 K 组合让 key 错位一格，QK 项 $\text{Id} \otimes A^{h_{-1}} \otimes W$ 做相同匹配，OV 做复制。它在重复的随机 token 序列上也能工作；所有归纳头在 QK、OV 特征值正性平面上都落在右上角。</li>
+            <li>冻结注意力模式的多遍运行消融显示，二阶虚拟注意力头在这个模型里边际作用很小，应关注直接路径和第二层的单个头项；这只排除了 V 组合。</li>
+            <li>大模型同样形成很多由 K 组合构成的归纳头；但 MLP 占参数 2/3，不理解 MLP 就只能理解一小部分模型。</li>
+            <li>2023 年 2 月的更正：组合图因库中 Frobenius 范数计算 bug 有误；修正后与前一个 token 头的 K 组合仍然重要，另外两个归纳头还依赖一个注意最后若干 token 的头。</li>
+            <li>附录：MLP 激活前值可以同样展开为 $W^m_I W_E + \sum_h A^h \otimes W^m_I W_{OV}^h W_E$；路径展开的虚拟权重是卷积的推广，$W \ast x = \sum_v A^v \otimes W_v$；残差流和 value 向量是瓶颈激活；GPT-2 中观察到用位置嵌入指针运算实现的归纳头；低秩矩阵用 $\lambda_i(AB) = \lambda_i(BA)$ 和分解 SVD 高效计算。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Transformer Circuits Thread · A Mathematical Framework for Transformer Circuits · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

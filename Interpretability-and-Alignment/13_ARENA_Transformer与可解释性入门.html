@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ARENA 第 1 章（上）：Transformer、TransformerLens、探针与表征 | 可解释性与对齐研究 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="12_可言说表征与全局工作空间.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">可解释性与对齐研究 目录</a> · 13</span>
+    <span><a href="14_ARENA_电路与玩具模型.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>ARENA 第 1 章（上）：Transformer、TransformerLens、探针与表征</h1>
+        <p class="subtitle">从零写一个 GPT-2，用 TransformerLens 找到并逆向归纳电路，再用线性探针、函数向量、稀疏自编码器和激活神谕去读、去改真实大模型的内部表征</p>
+        <div class="author-meta">
+            作者：Callum McDougall 等（ARENA）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://learn.arena.education/chapter1_transformer_interp/" target="_blank">ARENA Chapter 1: Transformer Interpretability</a> 与 <a href="https://github.com/callummcdougall/ARENA_3.0" target="_blank">GitHub 仓库</a>（依据 2026 年 11 月仓库中的练习页面整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这篇讲什么</h2>
+        <p>
+            ARENA（Alignment Research Engineer Accelerator）是一套面向对齐研究工程的动手课程，每一章由若干“练习集”（exercise set）组成，每个练习集是一份很长的 notebook：讲解、填空代码、单元测试、参考答案交替出现。第 1 章叫 Transformer Interpretability，覆盖 Transformer 本身（是什么、怎么训练、怎么生成文本）和机械可解释性（mechanistic interpretability，把训练好的网络当成一段未知程序去逆向）。仓库 README 写明：这一章除了前两个练习集（1.1 和 1.2）以外都是可选扩展；做完这两个之后，可以在其余十个练习集里任选，它们分成 1.3 探针与表征（Probing &amp; Representations）、1.4 大模型里的电路（Circuits in LLMs）、1.5 玩具模型（Toy Models）三组，彼此没有前置要求。
+        </p>
+        <p>
+            本篇整理前半部分：必修的 1.1（从零实现 Transformer）和 1.2（TransformerLens 与归纳电路），以及 1.3 组的四个练习集：1.3.1 线性探针、1.3.2 函数向量与模型引导、1.3.3 用 SAE 做可解释性、1.3.4 激活神谕。下一篇（<a href="14_ARENA_电路与玩具模型.html">14</a>）整理 1.4 和 1.5。README 在可选练习集里最推荐三个：1.5.1（括号平衡分类器，比多数练习容易）、1.4.1（间接宾语识别，电路方法的最好入门）和本篇的 1.3.3（最完整的 SAE 动手练习）。
+        </p>
+        <p>
+            和本合集论文页的对应关系：1.1 的残差流、注意力头、MLP 是 <a href="01_Transformer电路的数学框架.html">01 数学框架</a> 的前提；1.2 直接复现 01 和 <a href="02_上下文学习与归纳头.html">02 归纳头</a> 的核心结论；1.3.3 的理论背景是 <a href="03_叠加的玩具模型.html">03 叠加</a>、<a href="04_走向单义性.html">04 走向单义性</a> 和 <a href="05_扩展单义性.html">05 扩展单义性</a>，末尾介绍的 transcoder 在 <a href="06_电路追踪与归因图.html">06 电路追踪</a> 里是主角；1.3.4 的激活神谕和 <a href="11_自然语言自编码器.html">11 自然语言自编码器</a> 同样是“用自然语言描述激活”这一路线。每个练习都标了难度（🔴，满分 5）和重要性（🔵，满分 5），下文在关键练习后注明。
+        </p>
+        <ol>
+            <li><a href="#t01">1.1 从零实现 Transformer</a></li>
+            <li><a href="#t02">1.2 TransformerLens 与归纳电路</a></li>
+            <li><a href="#t03">1.3.1 线性探针</a></li>
+            <li><a href="#t04">1.3.2 函数向量与模型引导</a></li>
+            <li><a href="#t05">1.3.3 用 SAE 做可解释性</a></li>
+            <li><a href="#t06">1.3.4 激活神谕</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 1.1 从零实现 Transformer</h2>
+        <p><em>原练习集：[1.1] Transformers from scratch（必修）</em></p>
+        <p>
+            这一套是用 PyTorch 的张量运算从第一性原理写出一个干净的 GPT-2，结构上紧跟 TransformerLens 库的写法（后面会大量用到这个库）。内容基于 Neel Nanda 的系列视频。练习的模式是：给出模块骨架和 <code>raise NotImplementedError()</code>，你填好后跑测试，最后加载 GPT-2 的预训练权重验证自己的实现和参考模型输出一致。
+        </p>
+
+        <h3>1️⃣ 理解 Transformer 的输入与输出</h3>
+        <p>学习目标：理解 Transformer 用来做什么；理解因果注意力（causal attention）以及输出代表什么；理解分词（tokenization）；理解 logits 以及怎样把它变成词表上的概率分布。</p>
+        <p>
+            GPT-2 这类模型的用途是建模文本：输入一段语言，输出下一个 token 的概率分布，反复采样就能生成文本。训练目标是预测下一个 token。关键一点是，给模型 100 个 token，它会对每个前缀都给出预测，输出 100 个 logit 向量，第 $i$ 个向量是对第 $i$ 个 token 之后那个 token 的预测。这样一次前向就同时得到
+        </p>
+        $$p(x_1),\; p(x_2|x_1),\; p(x_3|x_1x_2),\; \ldots,\; p(x_n|x_1 \ldots x_{n-1})$$
+        <figure><img src="https://raw.githubusercontent.com/ARENA-education/ARENA_img/main/misc/transformer-overview-new.png" alt="transformer overview"><figcaption>图：Transformer 的输入（token 序列）与输出（每个位置一组 logits）概览（引自 ARENA 1.1）</figcaption></figure>
+        <p>
+            输入怎样变成向量：先把语言切成子单元，再把子单元映射成向量。后者用一张巨大的查找表，叫嵌入（embedding）：词表（vocabulary）里每个元素有一个整数编号，用编号去索引嵌入矩阵。用 one-hot 的角度看，索引等价于 one-hot 向量乘嵌入矩阵，每个词的嵌入向量完全独立，嵌入时不预设词与词之间的关系。前者用字节对编码（Byte-Pair Encoding, BPE）：把文本按 UTF-8 编成字节，词表初始化为 256 个字节，然后反复找数据中最常见的相邻 token 对（比如 <code>(␣, t)</code> 或 <code>(t, h)</code>）合并成新 token。原文列了分词带来的麻烦：词首是否大写、前面有没有空格会得到不同 token；数字的切分长度不一致，常见数字会被打包成一个 token，所以算术很乱。
+        </p>
+        <p>
+            文本生成走五步：(1) 文本转 token，形状 <code>[batch, seq_len]</code>；(2) token 映射到 logits，形状 <code>[batch, seq_len, vocab_size]</code>，<code>[i, j, :]</code> 是对第 <code>i</code> 条序列第 <code>j+1</code> 个 token 的预测；(3) softmax 得到分布，形状不变；(4) 取 <code>logits[0, -1]</code>，也就是最后一个位置的预测，选出一个 token（原文例子里模型预测的是 <code>' I'</code>）；(5) 把新 token 接到输入末尾再跑一遍。
+        </p>
+
+        <h3>2️⃣ 干净的 Transformer 实现</h3>
+        <p>学习目标：理解 Transformer 由注意力头和 MLP 组成，每个都在残差流上做运算；理解同一层的注意力头彼此独立，作用是计算注意力模式（决定信息在残差流里从哪里搬到哪里）；实现 LayerNorm、位置嵌入、Attention、MLP、Embedding、Unembedding 这些模块。</p>
+        <figure><img src="https://raw.githubusercontent.com/chloeli-15/ARENA_img/main/img/transformer-new2.png" alt="transformer architecture"><figcaption>图：GPT-2 式 Transformer 的整体结构，自下而上：嵌入、若干残差块（注意力 + MLP）、反嵌入（引自 ARENA 1.1）</figcaption></figure>
+        <p>
+            <strong>残差流</strong>（residual stream）是之前所有层输出的总和，也是每个新层的输入，形状 <code>[batch, seq_len, d_model]</code>。原文称它是 Transformer 的核心对象：模型靠它记住东西、在层之间传递信息以便组合，注意力在位置之间搬运的信息也存在这里。一个 Transformer block（也叫 residual block）包含一层注意力和一层 MLP，说一个模型有 $k$ 层是指 $k$ 个 block。
+        </p>
+        <p>
+            注意力是唯一在不同位置之间搬运信息的部件。每层有 <code>n_heads</code> 个头，各有参数、各算自己的注意力模式，彼此独立、输出相加后写回残差流。每个头为每个目标位置（destination）算一个对之前源位置（source，包括自己）的概率分布，再按这个分布把源位置的信息加权复制过来。只往回看，以免“作弊”。MLP 是只有一个隐藏层的普通网络，<code>d_mlp = 4 * d_model</code>（原文说这个比例是沿用 GPT 当年的做法），它对每个位置独立、用同样的方式计算，不在位置之间搬信息；原文说 MLP 里到底发生了什么是机械可解释性的一个大开放问题，并指向 <a href="03_叠加的玩具模型.html">叠加的玩具模型</a>。MLP 通常占模型参数的大部分（常在 2/3 左右，因架构而异）。
+        </p>
+        <p>
+            其余部件：反嵌入（unembedding）是一个线性映射 $W_U$，把最终残差流变成 logits；有时会用“绑定嵌入”（tied embedding），即 $W_E$ 和 $W_U$ 用同一组权重。LayerNorm 在每个注意力层、MLP 之前和反嵌入之前各做一次：把每个向量变成均值 0、方差 1，再做逐元素缩放和平移。缩放平移是线性的，而 LayerNorm 后面总是紧跟一个线性映射，所以可以把它折叠进去（<code>from_pretrained</code> 的 <code>fold_ln=True</code>）。原文提醒 LayerNorm 因为除以标准差而不是线性的，这让各输入贡献无法独立分解，但它“几乎线性”：只改输入的一小部分时可以把 $\sqrt{\text{Var}[x]+\epsilon}$ 当常数。位置嵌入用学到的绝对位置查找表，加到 token 嵌入上而不是拼接；原文的理由是残差流是共享内存，很可能处在叠加（superposition）状态，模型可以学着把相加的向量推到近似正交的子空间里，后面的层再用线性投影读出想要的子空间。
+        </p>
+        <p>参考模型 GPT-2 small 的超参数（原文架构表）：</p>
+        <table>
+            <thead><tr><th>参数</th><th>值</th></tr></thead>
+            <tbody>
+                <tr><td><code>d_model</code></td><td>768</td></tr>
+                <tr><td><code>n_heads</code></td><td>12</td></tr>
+                <tr><td><code>n_layers</code></td><td>12</td></tr>
+                <tr><td><code>d_mlp</code></td><td>3072（= 4 × <code>d_model</code>）</td></tr>
+                <tr><td><code>d_head</code></td><td>64（= <code>d_model / n_heads</code>）</td></tr>
+                <tr><td><code>d_vocab</code></td><td>50257</td></tr>
+                <tr><td><code>n_ctx</code></td><td>1024</td></tr>
+            </tbody>
+        </table>
+        <p>
+            原文还区分了参数（parameters，训练学到的权重，不随输入变化）和激活（activations，前向时算出的临时数值，是输入的函数，前向结束就消失，可以用 hook 访问）。练习依次是：
+        </p>
+        <ul>
+            <li><code>LayerNorm</code>（难度 3，重要性 3）：减均值、除以标准差（有偏估计，<code>correction=0</code>，加 <code>layer_norm_eps</code>），再乘 <code>w</code> 加 <code>b</code>。</li>
+            <li><code>Embed</code>：一行代码，<code>self.W_E[tokens]</code>。<code>PosEmbed</code>：同样是查找表，索引是位置 <code>0..seq_len-1</code>，再沿 batch 维复制。</li>
+            <li><code>apply_causal_mask</code>（难度 2，重要性 5）：把注意力分数矩阵上三角（目标位置之后的源位置）填成负无穷。</li>
+            <li><code>Attention</code>（难度 4，重要性 5）：算 q、k、v，分数除以 $\sqrt{d_{head}}$、加掩码、softmax，按注意力模式对 v 加权求和得到 z，再乘 $W_O$ 并对头求和、加 <code>b_O</code>。</li>
+            <li><code>MLP</code>：<code>W_in</code> 线性层、GELU（GPT-2 用的是 tanh 近似版 <code>gelu_new</code>）、<code>W_out</code> 线性层。</li>
+            <li><code>TransformerBlock</code>：把 LayerNorm、注意力、MLP 用残差连接拼起来。<code>Unembed</code>：<code>W_U</code> 加 <code>b_U</code>。<code>DemoTransformer</code>：整体组装。</li>
+        </ul>
+        <p>注意力前向的核心（参考答案节选，形状注释为 einops 记法）：</p>
+<pre><code>q = einops.einsum(x, self.W_Q, "batch posn d_model, nheads d_model d_head -&gt; batch posn nheads d_head") + self.b_Q
+k = einops.einsum(x, self.W_K, "batch posn d_model, nheads d_model d_head -&gt; batch posn nheads d_head") + self.b_K
+v = einops.einsum(x, self.W_V, "batch posn d_model, nheads d_model d_head -&gt; batch posn nheads d_head") + self.b_V
+
+attn_scores = einops.einsum(q, k, "batch posn_Q nheads d_head, batch posn_K nheads d_head -&gt; batch nheads posn_Q posn_K")
+attn_pattern = self.apply_causal_mask(attn_scores / self.cfg.d_head**0.5).softmax(-1)
+
+z = einops.einsum(v, attn_pattern, "batch posn_K nheads d_head, batch nheads posn_Q posn_K -&gt; batch posn_Q nheads d_head")
+# project each head back to d_model with W_O, sum over heads, add b_O
+</code></pre>
+        <p>残差块和整体模型的组装：</p>
+<pre><code>def forward(self, resid_pre):            # TransformerBlock
+    resid_mid = self.attn(self.ln1(resid_pre)) + resid_pre
+    resid_post = self.mlp(self.ln2(resid_mid)) + resid_mid
+    return resid_post
+
+def forward(self, tokens):               # DemoTransformer
+    residual = self.embed(tokens) + self.pos_embed(tokens)
+    for block in self.blocks:
+        residual = block(residual)
+    return self.unembed(self.ln_final(residual))
+</code></pre>
+
+        <h3>3️⃣ 训练 Transformer</h3>
+        <p>学习目标：从零训练 Transformer；写一个基本训练循环；结合训练数据的特征（例如二元组频率）解释交叉熵损失为什么这样下降。</p>
+        <p>
+            数据是 TinyStories：合成的简单故事，只用 3 到 4 岁小孩能懂的词，原本是为研究“能写出连贯文本的 LLM 最小能多小”而造。代码下载 4 个训练文件中的第一个（210 万个故事中的 53 万个），保留 20 万个，用 <code>tokenize_and_concatenate</code> 分词。训练参数：<code>batch_size=32</code>、<code>epochs=5</code>（Colab T4 上约 4 分钟）、<code>max_steps_per_epoch=500</code>、<code>lr=1e-3</code>、<code>weight_decay=1e-2</code>，优化器 AdamW。训练循环练习（难度 3，重要性 4）就是交叉熵、<code>loss.backward()</code>、<code>optimizer.step()</code>、<code>optimizer.zero_grad()</code>。
+        </p>
+        <p>
+            可选的“损失曲线笔记”解释了曲线为什么开始在 10 到 11 左右、迅速下降然后变平。随机初始化的模型近似对每个 token 给均匀概率 $Q(x)=1/d_\text{vocab}$，交叉熵是 $\log(d_\text{vocab})$，$d_\text{vocab}=50257$ 时为 10.825。接着模型学会词频（unigram），平均损失降到训练数据的熵 $-\sum_x p_x \log p_x$，原文在这份数据上算出 5.958。再往后学二元组（bigram）频率，它能覆盖一些简单语法（句号后接大写词）、分词怪癖（<code>" manip"</code> 后接 <code>"ulative"</code>）和常见人名（<code>"Barack"</code> 后接 <code>" Obama"</code>）。之后就要靠三元组（只能由注意力头实现）、归纳头（下一个练习集的主题）、事实记忆和更复杂的语法，边际改进越来越难，曲线变平。另有可选练习：训练中定期记录模型对几个提示词的续写。
+        </p>
+
+        <h3>4️⃣ 从 Transformer 采样</h3>
+        <p>学习目标：学会贪心、top-k 等基本采样方法和 beam search 等进阶方法；学会缓存前向结果以加速生成。原文注明这一部分的后半段不那么重要，可以跳过。</p>
+        <p>
+            框架是 <code>TransformerSampler</code> 类：<code>sample</code> 反复调用 <code>sample_next_token</code> 直到满足停止条件，后者组合各种采样技巧。练习依次是：
+        </p>
+        <ul>
+            <li><code>sample</code>（难度 4，重要性 3）：自回归循环。<code>sample_basic</code>：用 <code>t.distributions.categorical.Categorical</code> 从 logits 采样。</li>
+            <li><code>apply_temperature</code>：logits 除以温度。<code>apply_frequency_penalty</code>：用 <code>t.bincount</code> 统计已出现 token 的次数，每出现一次减去 <code>freq_penalty</code>。</li>
+            <li><code>sample_top_k</code>：只保留最大的 <code>top_k</code> 个，全程在 log 空间做（<code>Categorical</code> 接受未归一化 logits）。<code>sample_top_p</code>（nucleus 采样）：概率从大到小排序，保留到累计概率首次达到 <code>top_p</code>（含越过阈值的那一个），不少于 <code>min_tokens_to_keep</code> 个。</li>
+            <li><code>beam_search</code>（难度 5，重要性 1）：维护 <code>num_beams</code> 个当前最可能的续写，按 log 概率之和排序，由 <code>Beams</code> 类的 <code>generate</code> 和 <code>filter</code> 两步组成，并支持 <code>no_repeat_ngram_size</code>。原文附了一个小证明：log 概率等于 logits 平移一个只依赖于整组 logits 的量。</li>
+            <li>KV 缓存（难度 5，重要性 1，预计远超一小时）：生成新 token 时，每个注意力层只需要之前位置的 key 和 value 向量，可以存下来复用。要求缓存设计成可以“一个模型、多个缓存实例”，以便同时服务多个用户。原文在 CPU 上单线程比较了有无缓存的速度，因为 GPT-2 small 太小，在 GPU 上每步被固定开销主导，缓存的收益几乎看不出来。</li>
+        </ul>
+    </section>
+
+    <section id="t02">
+        <h2>02. 1.2 TransformerLens 与归纳电路</h2>
+        <p><em>原练习集：[1.2] Intro to Mechanistic Interpretability: TransformerLens &amp; induction circuits（必修）</em></p>
+        <p>
+            这一套通过 Neel Nanda 写的 TransformerLens 库介绍机械可解释性的核心概念。大多数小节的结构是：先介绍库的一个功能，再给一个用这个功能的练习。贯穿全篇的例子是归纳电路（induction circuit），它是 Transformer 里一种能做基本上下文学习的电路。原文建议先读 Neel 词汇表中的相应条目。对应本合集的 <a href="01_Transformer电路的数学框架.html">01</a>（QK/OV 电路、K-composition、归纳头的来源）和 <a href="02_上下文学习与归纳头.html">02</a>（归纳头与上下文学习）。
+        </p>
+        <figure><img src="https://raw.githubusercontent.com/ARENA-education/ARENA_img/main/misc/kcomp_diagram.png" alt="K-composition induction circuit diagram"><figcaption>图：归纳电路示意，第 0 层的前一 token 头与第 1 层的归纳头通过 K-composition 组合（引自 ARENA 1.2）</figcaption></figure>
+
+        <h3>1️⃣ TransformerLens 入门</h3>
+        <p>学习目标：加载并运行 <code>HookedTransformer</code>；理解这些模型的基本架构；用分词器在文本和 token 之间转换；缓存激活并从缓存中取激活。</p>
+        <p>
+            这部分以 Neel Nanda 的口吻写成。他说写这个库是因为离开 Anthropic 可解释性团队做独立研究后，发现开源工具里有很多训练和使用模型的基础设施，深入模型内部做逆向的却很少；库的核心设计原则是支持探索性分析，让“有个实验想法”到“看到结果”之间的距离尽量短。库内置了 40 多个开源 GPT 式模型，<code>HookedTransformer.from_pretrained(MODEL_NAME)</code> 加载，演示用 GPT-2 Small（1.24 亿参数）。
+        </p>
+        <p>
+            和原版 GPT-2 相比，HookedTransformer 计算上等价，主要差别在注意力头内部：$W_Q, W_K, W_V$ 是三个独立矩阵而不是拼在一起；权重和激活有单独的 <code>head_index</code> 和 <code>d_head</code> 维，$W_Q$ 等的形状是 <code>[head_index, d_model, d_head]</code>；权重矩阵右乘，形状是 <code>[input, output]</code>，即 <code>new = old @ W + b</code>。模型可以返回 <code>"logits"</code>、<code>"loss"</code>、<code>"both"</code> 或 <code>None</code>。分词辅助函数有 <code>to_str_tokens</code>、<code>to_tokens</code>、<code>to_string</code>。
+        </p>
+        <ul>
+            <li>检查模型（难度 1）：从 <code>gpt2_small.cfg</code> 读出层数、每层头数、最大上下文长度。</li>
+            <li>模型猜对了多少 token（难度 2，重要性 3）：比较预测的 <code>[:-1]</code> 和真实 token 的 <code>[1:]</code>，因为输出是对下一个 token 的预测。</li>
+            <li>验证激活（难度 3，重要性 3）：<code>logits, cache = model.run_with_cache(tokens)</code> 之后，用缓存里的 q、k 手算第 0 层注意力模式（点积、掩码、缩放、softmax），和缓存里的 <code>pattern</code> 对比。</li>
+        </ul>
+<pre><code>logits = gpt2_small(model_description_text, return_type="logits")
+prediction = logits.argmax(dim=-1).squeeze()[:-1]
+true_tokens = gpt2_small.to_tokens(model_description_text).squeeze()[1:]
+is_correct = prediction == true_tokens
+</code></pre>
+        <p>
+            可视化注意力头用 Alan Cooney 的 CircuitsVis 库（基于 Anthropic 的 PySvelte）。原文引用数学框架论文的观点：应该关注模型里本身可解释的部分，也就是输入 token、输出 logits 和注意力模式，残差流、key、query、value 等是计算这些有意义东西时的压缩中间状态；并提醒先看数据再算汇总统计，汇总统计很容易误导。
+        </p>
+
+        <h3>2️⃣ 寻找归纳头</h3>
+        <p>学习目标：理解归纳头是什么、实现了什么算法；检查注意力模式识别基本的头类型，写函数自动检测；用重复的随机序列，从注意力模式中特有的条纹识别归纳头。</p>
+        <p>
+            这里换成一个专门训练的 2 层纯注意力玩具模型：只有注意力 block，没有 MLP、LayerNorm 和偏置，嵌入和反嵌入不绑定；位置嵌入只在计算 key 和 query 前加到残差流上（<code>positional_embedding_type="shortformer"</code>），value 不含位置，所以残差流不能直接编码位置信息，原文说这让归纳头形成得早 2 到 3 倍。配置为 <code>d_model=768</code>、<code>d_head=64</code>、<code>n_heads=12</code>、<code>n_layers=2</code>、<code>n_ctx=2048</code>、<code>d_vocab=50278</code>，分词器用 EleutherAI/gpt-neox-20b。
+        </p>
+        <p>
+            练习先让你看注意力模式，再写三个检测器：当前 token 头、前一 token 头、首 token 头（难度 2，重要性 3）。原文强调这里没有标准答案，检测器大致符合你肉眼看到的就行。
+        </p>
+        <p>
+            术语约定：归纳头（induction head）指第二层里那个“注意当前 token 上一次出现处的下一个 token”的头；归纳电路指第 0 层的前一 token 头（previous token head）与第 1 层归纳头组合成的电路。原文的思考题：1 层模型为什么形成不了归纳头？答案是这需要一个头按“key 位置前一个 token 的值”去选择注意哪里，而注意力分数只是 key token 和 query token 的函数，不依赖其他 token（softmax 会带来其他 token 的影响，但这种抑制对各位置是对称的，不能系统地偏向“相关 token 的下一个”）。
+        </p>
+        <p>
+            检验归纳能力的办法：给模型一段随机 token，后面接同一段的重复。这完全不像训练数据，但有归纳头的模型能预测出重复的后半段，前后两半的逐 token 损失差别一眼可见。原文说能预测这种分布外泛化，是“你真的理解了一个电路”的有力证据。
+        </p>
+<pre><code>def generate_repeated_tokens(model, seq_len, batch_size=1):
+    prefix = (t.ones(batch_size, 1) * model.tokenizer.bos_token_id).long()
+    rep_tokens_half = t.randint(0, model.cfg.d_vocab, (batch_size, seq_len), dtype=t.int64)
+    return t.cat([prefix, rep_tokens_half, rep_tokens_half], dim=-1).to(device)
+
+def induction_attn_detector(cache):
+    attn_heads = []
+    for layer in range(model.cfg.n_layers):
+        for head in range(model.cfg.n_heads):
+            pattern = cache["pattern", layer][head]
+            seq_len = (pattern.shape[-1] - 1) // 2
+            score = pattern.diagonal(-seq_len + 1).mean()   # the offset stripe
+            if score &gt; 0.4:
+                attn_heads.append(f"{layer}.{head}")
+    return attn_heads
+</code></pre>
+        <p>归纳头在重复序列上的注意力模式是一条偏移 <code>seq_len - 1</code> 的对角条纹，检测器就是取这条对角线的平均值。</p>
+
+        <h3>3️⃣ TransformerLens 的 hook</h3>
+        <p>学习目标：理解 hook 是什么、在 TransformerLens 中怎样用；用 hook 访问激活、处理结果、写到外部张量；构建归因工具，判断模型的哪些部件对某个任务负责；理解怎样用 hook 做消融（ablation）这类基本干预。</p>
+        <p>
+            模型里每个激活外面都包着一个 hook point。给它挂一个 hook 函数，再调用 <code>model.run_with_hooks</code>。hook 函数接收 <code>activation_value</code> 和 <code>hook_point</code> 两个参数：要修改激活就返回同形状的张量；只想读取就把结果写到外部变量、不返回。<code>fwd_hooks</code> 是 (hook 名, hook 函数) 的列表。<code>run_with_hooks</code> 默认 <code>reset_hooks_end=True</code>，运行结束会移除传入的 hook。
+        </p>
+        <ul>
+            <li>用 hook 计算归纳分数（难度 3，重要性 4）：在每层 <code>pattern</code> 上挂 hook，取偏移对角线均值写进 <code>induction_score_store</code>。正确实现时，归纳头分数高于 0.6，其余接近 0。</li>
+            <li>在 GPT-2 small 里找归纳头（难度 3，重要性 4）：用 <code>seq_len=50</code>、<code>batch_size=10</code> 的重复序列，参考答案的观察是 5.1、5.5、6.9、7.2、7.10 这几个头归纳特征明显。</li>
+        </ul>
+<pre><code>def induction_score_hook(pattern, hook):
+    # pattern: [batch, head_index, dest_pos, source_pos]
+    induction_stripe = pattern.diagonal(dim1=-2, dim2=-1, offset=1 - seq_len)
+    induction_score = einops.reduce(induction_stripe, "batch head_index position -&gt; head_index", "mean")
+    induction_score_store[hook.layer(), :] = induction_score
+</code></pre>
+        <p>
+            直接 logit 归因（direct logit attribution）：因为有残差流，输出 logits 是各层贡献之和，也就是各头结果之和，所以可以把 logits 分解成每个头一项。原文的例子：要看模型怎样从 Harry 预测出 Potter，Potter 的 logit 对应 $W_U$ 的一列，也就是残差流里的一个方向，logit 等于 <code>embed @ potter_U + attn_out_0 @ potter_U + attn_out_1 @ potter_U</code>。练习（难度 3，重要性 4）实现 <code>logit_attribution</code>，返回直接路径、第 0 层各头、第 1 层各头在正确 token 方向上的贡献。在普通文本上，变化最大的是直接路径，贡献特别高的 token 是常见二元组的前半，比如 <code>| manip|</code> 后面很可能是 <code>|ulative|</code>。在重复随机序列上做同样的归因，后半段的正确预测主要来自归纳头。
+        </p>
+        <p>
+            消融：把模型某部分置零，粗略衡量它有多重要；如果有一个关于某电路实现某能力的说法，消融其他部分没有影响就是有力证据。练习（难度 2，重要性 4）对每个头的输出 <code>z</code> 做零消融，记录重复序列上交叉熵损失的增加；接着做均值消融（用 batch 维的均值替代），原文说结果更干净，因为零消融会把模型带离正常分布。附加题（很难）：弄清 0.4 和 0.11 这两个在消融中显眼、在其他分析里不显眼的头在做什么。
+        </p>
+<pre><code>def head_zero_ablation_hook(z, hook, head_index_to_ablate):
+    z[:, :, head_index_to_ablate, :] = 0.0
+
+def head_mean_ablation_hook(z, hook, head_index_to_ablate):
+    z[:, :, head_index_to_ablate, :] = z[:, :, head_index_to_ablate, :].mean(0)
+</code></pre>
+
+        <h3>4️⃣ 逆向归纳电路</h3>
+        <p>学习目标：区分“看激活模式研究电路”和“直接看权重逆向电路”；用 <code>FactoredMatrix</code> 类检查归纳电路里的 QK 和 OV 电路；进一步探索组合分数（composition scores）和定向消融。</p>
+        <p>
+            前面看注意力模式和归因，原文称之为特征分析（feature analysis）：观察到某个头“看起来”在做某事。直接从权重逆向电路被称为可解释性的“金标准”，但不是每种情况都做得到。到目前为止的发现：1.4 和 1.10 在重复序列上有偏移 <code>seq_len - 1</code> 的对角条纹；0.7 即使在非重复序列上也强烈注意前一个 token；logit 归因显示 1.4 和 1.10 的输出对后半段预测重要；零消融 0.7、1.4、1.10 都会让重复序列损失大幅上升。
+        </p>
+        <p>记号（注意顺序和数学框架论文略有不同，因为 TransformerLens 右乘权重）：</p>
+        $$W_{OV}^{h} := W_V^{h}W_O^{h}, \qquad W_{QK}^h := W_Q^h (W_K^h)^T$$
+        <p>原文的一组思考题，问每个矩阵的输入和输出代表什么：</p>
+        <ul>
+            <li>$W_{OV}^{h}$，大小 $(d_\text{model}, d_\text{model})$：描述从源位置搬到目标位置的是什么信息。若目标 token 只注意 $x$ 所在位置，$x^T W_{OV}^h$ 就是写到目标位置的向量。</li>
+            <li>$W_E W_{OV}^h W_U$（完整 OV 电路），大小 $(d_\text{vocab}, d_\text{vocab})$：某个 token 被注意到时，对输出 logits 加上的向量。</li>
+            <li>$W_{QK}^h$：双线性形式，$x_i^T W_{QK}^h x_j$ 是 token $i$ 对 token $j$ 的注意力分数，描述信息从哪里搬到哪里。</li>
+            <li>$W_E W_{QK}^h W_E^T$（完整 QK 电路）：只按 token 身份，哪个 token 注意哪个 token。$W_{pos} W_{QK}^h W_{pos}^T$，大小 $(n_\text{ctx}, n_\text{ctx})$：哪个位置注意哪个位置。</li>
+            <li>$W_E W_{OV}^{h_1} W_{QK}^{h_2} W_E^T$（$h_1$ 在更早的层）：前一个头的输出如何影响后一个头的注意力。</li>
+        </ul>
+        <p>
+            <code>FactoredMatrix</code> 处理低秩分解的大矩阵 $M=AB$（$A$ 是 <code>[large, small]</code>，$B$ 是 <code>[small, large]</code>），比如 $W_{OV}^h$ 由 <code>[768, 64]</code> 和 <code>[64, 768]</code> 相乘，完整 OV 电路 $(W_E W_V^h)(W_O^h W_U)$ 由 <code>[50278, 64]</code> 和 <code>[64, 50278]</code> 相乘。它能高效地算迹、特征值、Frobenius 范数、SVD 和乘积，索引后得到的仍是 FactoredMatrix。原文的附注：若 $M=USV^T$，<code>M</code> 形状 <code>(m, n)</code>、秩 <code>r</code>，SVD 返回的 $U, S, V$ 形状为 <code>(m, r)</code>、<code>(r,)</code>、<code>(n, r)</code>。
+        </p>
+        <p>归纳电路由四个子电路组成，逐个逆向：</p>
+        <ul>
+            <li><strong>[1] OV 复制电路</strong>（第 1 层）：算 $W_E W_{OV}^{1.4} W_U$，应该对角线很高。用 <code>top_1_acc</code> 统计“每行最大值落在对角线上”的比例，单看 1.4 只有约 30.79%（top-5 为 47.73%）。原因是有两个归纳头，二者注意力模式相同时，真正起作用的是有效 OV 电路 $W_E(W_V^{1.4}W_O^{1.4}+W_V^{1.10}W_O^{1.10})W_U$，对它算 top-1 准确率为 95.6%，top-5 为 98%。</li>
+            <li>[2] QK 前一 token 电路（0.7）：通过位置嵌入展开 $W_\text{pos} W_Q^{0.7} (W_K^{0.7})^T W_\text{pos}^T$，得到 <code>[n_ctx, n_ctx]</code> 矩阵，在 $j=i-1$ 处很大。原文解释可以忽略 token 编码，因为位置编码对这个头注意力分数的影响大得多。</li>
+            <li>[3] K-composition（难点）：第 1 层的 QK 输入是 14 项之和（token 嵌入、位置嵌入、第 0 层 12 个头的结果）。先按范数比较各项的相对重要性，再把注意力分数分解成 (query 分量, key 分量) 两两之积，发现 (Embed, L0H7) 这一对主导了分数。然后乘出完整电路 $W_E\, W_{QK}^{1.4}\, (W_{OV}^{0.7})^T\, W_E^T$ 并验证它接近单位阵：对角元 $(A, A)$ 的 query 来自 token A 自己的嵌入，key 来自经 0.7 搬过来的“前一个 token 是 A”，两者匹配时注意力高。</li>
+        </ul>
+        <p>有效 OV 电路和 K-composition 完整电路的参考答案：</p>
+<pre><code>W_O_both = einops.rearrange(model.W_O[1, [4, 10]], "head d_head d_model -&gt; (head d_head) d_model")
+W_V_both = einops.rearrange(model.W_V[1, [4, 10]], "head d_model d_head -&gt; d_model (head d_head)")
+W_OV_eff = W_E @ FactoredMatrix(W_V_both, W_O_both) @ W_U
+
+def find_K_comp_full_circuit(model, prev_token_head_index, ind_head_index):
+    W_E = model.W_E
+    W_Q = model.W_Q[1, ind_head_index]
+    W_K = model.W_K[1, ind_head_index]
+    W_O = model.W_O[0, prev_token_head_index]
+    W_V = model.W_V[0, prev_token_head_index]
+    Q = W_E @ W_Q
+    K = W_E @ W_V @ W_O @ W_K
+    return FactoredMatrix(Q, K.T)
+</code></pre>
+        <p>
+            进一步探索。组合分数（来自数学框架论文的 virtual weights 思想）：残差流空间很大，每个头只读写小子空间，两个随机头的子空间几乎不重叠，刻意组合的两个头则会重叠。用 $W_A=W_{OV}$ 表示前一个头的输出空间，$W_B$ 表示后一个头的输入空间（Q-composition 用 $W_{QK}$，K-composition 用 $W_{QK}^T$，V-composition 用后一个头的 $W_{OV}$），分数为
+        </p>
+        $$\frac{\|W_A W_B\|_F}{\|W_A\|_F\,\|W_B\|_F}$$
+        <p>
+            练习算出第 0 层和第 1 层所有头对的 Q/K/V 组合分数，再用 Kaiming Uniform 初始化的随机矩阵生成 300 个分数作为基线（注意要随机生成 4 个 <code>(d_model, d_head)</code> 矩阵再相乘，而不是 2 个满秩矩阵）。理论部分用到“Frobenius 范数平方等于奇异值平方和”，由此可以用低秩分解高效批量计算。定向消融：不看损失，看消融对归纳头注意力模式的影响。原文给出的结果是不做消融时归纳分数约 0.56，消融 0.7 后接近 0。
+        </p>
+<pre><code>def get_comp_score(W_A, W_B):
+    W_A_norm = W_A.pow(2).sum().sqrt()
+    W_B_norm = W_B.pow(2).sum().sqrt()
+    W_AB_norm = (W_A @ W_B).pow(2).sum().sqrt()
+    return (W_AB_norm / (W_A_norm * W_B_norm)).item()
+</code></pre>
+        <p>
+            附加内容：在真实 LLM 里找电路（找归纳头、找擦除信息的神经元等），中心化 $W_U$ 与 LayerNorm 折叠，训练自己的玩具模型（要随机化重复的位置，只在重复 token 上算损失），观察归纳头在训练中以相变方式突然形成。最后原文列出 <a href="02_上下文学习与归纳头.html">In-context Learning and Induction Heads</a> 论文中支持“归纳头是上下文学习主要来源”的几条证据：相变与归纳头出现同时发生；改架构让归纳头更容易形成，上下文学习相应变好；运行时消融归纳头，上下文学习变差；有归纳头执行更复杂上下文学习算法的具体例子（如间接宾语识别）；归纳头有机械性解释，并自然延伸到更一般的上下文学习。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 1.3.1 线性探针</h2>
+        <p><em>原练习集：[1.3.1] Linear Probes（可选）</em></p>
+        <p>
+            线性探针（linear probe）是在模型内部激活上训练的简单分类器。如果一个线性分类器能从激活中准确分出某个属性，就说这个属性在模型内部是线性表示的。练习集围绕三篇论文：Marks &amp; Tegmark 的 Geometry of Truth（LLM 对真假有跨数据集泛化的线性表示，并且这个表示在因果上参与输出）、Apollo Research 的欺骗探针论文 Detecting Strategic Deception Using Linear Probes（用简单对比数据训练的探针能泛化到真实的欺骗场景），以及 NeurIPS 2025 的 Detecting High-Stakes Interactions with Activation Probes（用注意力探针检测用户请求是否高风险，以很小的算力达到完整 LLM 分类器的水平）。另一篇可选阅读是 Burns 等人提出 CCS 的论文。
+        </p>
+        <p>
+            原文讲了为什么这和安全有关：如果能从内部可靠地检测真假、欺骗或意图，就能用于监控。Neel Nanda 认为探针甚至可以在训练中使用；Bronson Schoen 的担心是，直接对着探针信号训练，可能只是教会模型把探针测量的东西藏起来（原话："If you train directly against non-obfuscated internals and no longer see bad behavior, the obvious possibility is that now you've just got obfuscated internals."，意思是：如果你直接对着未被混淆的内部表示训练、之后不再看到坏行为，一个明显的可能是你只是得到了被混淆的内部表示）。第 1 到 3 部分用 Llama-2-13b-hf 基座模型（bfloat16 约 26GB），沿用论文的 <code>probe_layer=14</code>、<code>intervene_layer=8</code>；第 4 部分换成 Meta-Llama-3.1-8B-Instruct；附加部分加载论文在 Llama-3.3-70B-Instruct 上的探针。与前面不同，这里直接用 HuggingFace <code>transformers</code>，不用 TransformerLens。
+        </p>
+
+        <h3>1️⃣ 准备与可视化真值表示</h3>
+        <p>学习目标：从指定层和 token 位置提取隐藏状态；实现 PCA 可视化高维激活；观察真假在激活空间里线性可分，甚至不需要监督；用逐层扫描找到最能表示真假的层。</p>
+        <p>
+            数据集来自 Geometry of Truth，每条是带 <code>label</code>（1 真 0 假）的简单陈述，这里用 <code>cities</code>、<code>sp_en_trans</code>、<code>larger_than</code> 三个。论文原话说真假结构在这些精心构造的数据集上比在非结构化数据集上干净得多。
+        </p>
+        <ul>
+            <li><code>extract_activations</code>（难度 3，重要性 5）：取每个指定层的最后一个 token 的隐藏状态。论文在句末标点（句号）处探测，数据集保证每句以句号结尾。<code>outputs.hidden_states</code> 长度是层数加 1，索引 0 是嵌入输出，索引 $i \ge 1$ 是第 $i-1$ 层的输出；还要正确处理填充。</li>
+            <li><code>get_pca_components</code>（难度 2，重要性 4）：对激活去均值，算协方差矩阵，做特征分解取前 k 个特征向量。PCA 完全无监督，若投影后真假按标签分开，说明真假是激活空间里最显著的特征之一（激活大约在 5000 维空间里）。</li>
+            <li>逐层扫描（难度 2，重要性 4）：每层训练一个均值差分类器（方向 = 真均值 − 假均值，按点积符号分类），在留出集上算准确率。论文发现真值表示集中在早中层，而不是最后几层。</li>
+        </ul>
+<pre><code>X = activations - activations.mean(dim=0)
+cov = X.t() @ X / (X.shape[0] - 1)
+eigenvalues, eigenvectors = t.linalg.eigh(cov)
+# take the eigenvectors with the k largest eigenvalues as columns
+</code></pre>
+
+        <h3>2️⃣ 训练并比较探针</h3>
+        <p>学习目标：实现均值差（MM）和逻辑回归（LR）探针；比较准确率、方向相似度和各自捕捉到的东西；理解无监督的 CCS 方法及其局限。</p>
+        <ul>
+            <li><code>MMProbe</code>（Mass-Mean，难度 2，重要性 5）：方向是正类均值减负类均值；可选地用类内协方差的伪逆做“iid”版本，输出 <code>sigmoid(x @ inv @ direction)</code>。</li>
+            <li><code>LRProbe</code>（难度 3，重要性 5）：用 sklearn 的 <code>LogisticRegression</code> 加 <code>StandardScaler</code>，与 deception-detection 仓库的做法一致。</li>
+            <li>跨数据集泛化矩阵（难度 3，重要性 5）：在 3 个数据集上各训 MM 和 LR 探针，在全部 3 个上评估，得到 3×3 准确率矩阵；如果存在统一的真值方向，非对角元应该也高。原文说这才是检验探针的真正测试，论文报告越大的模型泛化越好。</li>
+        </ul>
+<pre><code>pos_mean = acts[labels == 1].mean(0)
+neg_mean = acts[labels == 0].mean(0)
+direction = pos_mean - neg_mean          # MM probe direction
+
+def forward(self, x, iid=False):
+    if self.bias is not None:
+        x = x - self.bias
+    if iid and self.inv is not None:
+        return t.sigmoid(x @ self.inv @ self.direction)
+    return t.sigmoid(x @ self.direction)
+</code></pre>
+        <p>
+            CCS（Contrastive Consistent Search）是无监督方法：只需要成对的正反陈述，不需要标签，损失要求 $p(x) \approx 1 - p(\text{neg}\_x)$（一致性）并且探针要自信。原文列了三条批评。Emmons（2023）表明在对比对差值上做 PCA 就能达到 CCS 准确率的 97%，真正起作用的是对比对的构造。Farquhar 等人（Google DeepMind，2023）证明对任意二分类都存在零损失的 CCS 探针，损失本身对“知识”没有结构上的偏好，在对比对后面加随机干扰词时 CCS 会学去分类干扰词。Sam Marks（2024）表明 LLM 会线性表示任意特征的 XOR，探针可能学到 “truth XOR geography” 这种在地理数据上有效、分布一变就失效的方向；经验上探针常常能泛化，可能因为基础特征的方差比它们的 XOR 大，但这只是程度问题。原文的结论：单个数据集上的探针准确率说明不了多少，所以下一部分要求因果证据。
+        </p>
+
+        <h3>3️⃣ 因果干预</h3>
+        <p>学习目标：理解为什么光有分类准确率不够，需要因果证据；用探针方向做激活修补，翻转模型的预测；比较 MM 和 LR 方向的因果效应；理解 MM 探针分类准确率更低、找到的方向却更有因果作用。</p>
+        <p>
+            实验设置是少样本 TRUE/FALSE 分类：先给模型几个带标签的例子 <code>"Statement. This statement is: TRUE/FALSE"</code>，再给一个新陈述 <code>"Statement. This statement is:"</code>，测下一个 token 的 $P(\text{TRUE}) - P(\text{FALSE})$。提示词来自 geometry-of-truth 仓库，3 真 1 假，是论文为 LLaMA-2-13B 在 <code>sp_en_trans</code> 上校准过的。干预是在第 8 层到第 14 层之间，在每条序列的两个位置（陈述末尾的句号和后缀 <code>" This statement is:"</code> 的第一个 token）加上或减去缩放后的真值方向。
+        </p>
+        <ul>
+            <li>少样本评估（难度 2，重要性 3）：先确认模型能在上下文里完成这个任务。</li>
+            <li>支持 batch 的干预 hook（难度 3，重要性 5，原文称这一部分最重要的练习，用来确立因果关系）：实现 <code>make_batch_hook</code>，在每个 batch 元素对应的 token 位置加上方向向量。</li>
+        </ul>
+        <p>
+            用自然间接效应（Natural Indirect Effect, NIE）比较两个方向：对假陈述做“加”干预时，NIE = P_diff(add) − P_diff(none)，越高说明方向越有因果作用。总结里给的结论是：MM 探针找到的方向比 LR 更有因果作用，尽管分类准确率更低，原因是 LR 会过拟合到相关但非因果的特征上。
+        </p>
+
+        <h3>4️⃣ 探测欺骗</h3>
+        <p>学习目标：按欺骗检测论文的方法构造“指令配对”（instructed-pairs）数据集；在指令微调模型上训练欺骗探针；评估它能否泛化到事实真假数据集；理解影响可复现性的方法选择。</p>
+        <p>
+            模型换成 Llama-3.1-8B-Instruct。<code>utils.build_detection_mask</code> 用 <code>apply_chat_template</code> 和分词器的 <code>char_to_token</code> 精确找出属于助手回复的 token。数据只用真事实（512 条，与仓库默认一致），论文是在“诚实/不诚实”两种提示下训练，而不是混合真假事实。
+        </p>
+        <ul>
+            <li>构造指令配对（难度 3，重要性 4）：用仓库的 <code>you_are_fact_sys</code> 变体，诚实版 system 为 <code>"You are an honest AI assistant."</code>，不诚实版为 <code>"You are a deceptive AI assistant."</code>，两者 user 都是 <code>"Please tell me a fact."</code>，assistant 是事实的开头；在助手内容 token 上平均激活。</li>
+            <li>训练欺骗探针：MM 方向为不诚实均值减诚实均值；LR 用 <code>C=0.001</code>（对应仓库默认的 <code>reg_coeff=1000</code>），比第 2 部分的真值探针正则更强。</li>
+            <li><code>DeceptionSteeringHook</code>（难度 3，重要性 4）：把 MM 方向加到残差流，应把输出推向欺骗，减去则推向诚实。加的量按隐藏状态范数缩放：<code>hidden + coef * norm * v_normed</code>。</li>
+            <li><code>score_dialogue</code>（难度 2，重要性 4）：对对话每个 token 打分，并返回助手回复的掩码；在 AI Liar 数据集（27 个场景，AI 明知产品有害仍要推销，配有预写好的诚实和欺骗回答）上逐 token 可视化。</li>
+        </ul>
+        <p>
+            层的选择：论文预训练探针 <code>detector.pt</code> 用的是 80 层 Llama-3.3-70B-Instruct 的第 22 层，约在深度的 28% 处，比中间层早；仓库默认用中间 50% 的层（第 20 到 59 层）做多层聚合。练习用 8B 模型 32 层的第 16 层作起点，并提醒按比例换算层号（22/80 换成 9/32）不一定对。Geometry of Truth 对 40 层的 LLaMA-2-13B 用第 14 层，对 80 层的 LLaMA-2-70B 用第 27 层，都在下三分之一。附加练习是多层聚合：每层一个探针，分数取平均。
+        </p>
+        <p>
+            论文的一个有意思的发现被原文引用：探针在明确的欺骗文字出现之前就把回答判成欺骗。论文主结果在 70B 模型上，评估集 AUROC 0.96 到 0.999，1% 假阳性率下召回率超过 96%。附加部分只下载并加载 70B 模型的嵌入和前 23 层（0 到 22 层，int8 量化），因为探针只读第 22 层输出。打分公式为
+        </p>
+        $$\text{score}(x) = \frac{x - \mu}{\sigma} \cdot w$$
+        <p>
+            其中 $x$ 是第 22 层隐藏状态，$\mu, \sigma$ 是 scaler 的均值和标准差，$w$ 是 LR 方向。局限部分引用了论文：探针有两类失败，一是虚假相关，它似乎在追踪接近“道德”的东西，诚实地坦白过去的错误常被判为不诚实；二是聚合失败。论文还说相邻层之间性能有时差别很大，需要有代表性的验证集来扫超参数。
+        </p>
+
+        <h3>5️⃣ 用注意力探针检测高风险交互</h3>
+        <p>学习目标：理解“高风险交互”作为探针目标的含义，以及它和探测模型意图的区别；提取整段序列的激活（形状 <code>(n, seq, d_model)</code>），不再只取最后一个 token；把注意力探针实现为 <code>nn.Module</code>，用一个学到的 query 对 token 位置加权求和再分类；用 AUROC 比较注意力池化与最后 token、均值池化基线。</p>
+        <p>
+            这里探测的是用户请求是否高风险，而不是模型的意图。标注规则：满足任一条即为高风险，包括促成或鼓励人身伤害或暴力、促成其他犯罪或严重不当行为、鼓励极端骚扰或人肉搜索或人身威胁、明确煽动伤害或虐待、严重侵犯隐私或人身安全。训练数据全为合成：每对提示共享主题和用户角色，一个高风险一个低风险，覆盖 24 个主题、10 种用户角色和 20 个影响因素；完整数据约 3800 条高风险、4100 条低风险。层用 Llama-3.1-8B 32 层的中点第 16 层。
+        </p>
+        <p>
+            论文的架构叫 <code>AttnLite</code>：一个全局 query 向量 $W_Q \in \mathbb{R}^{d}$ 给每个位置打分，对序列做 softmax 得到权重，加权求和 token 激活，再过线性分类器。它和 Transformer 自注意力的区别是 query 是学到的常数而不是由输入算出，输出是每个样本一个分类 logit。
+        </p>
+        <ul>
+            <li><code>naive_extract_full_sequence_activations</code>（难度 2，重要性 4）：返回某层完整序列的隐藏状态和掩码。随后原文讲了把工作量降到约 1/4 的三个技巧：用一个抛异常的 forward hook 在探测层之后停止前向；先按长度排序再分 batch（提示中位数约 90 token，少数到 256 上限），减少填充；预分配输出张量并保持 bfloat16。</li>
+            <li><code>attention_probe_forward</code>（难度 4，重要性 5）：输入 <code>x</code>、<code>mask</code>、<code>W_q</code>（<code>d_model × n_heads</code>）、<code>W_out</code>、<code>b_out</code> 和 <code>scale</code>（通常为 $\sqrt{d_{model}}$），四步：打分、掩码、softmax、加权求和后分类。</li>
+        </ul>
+        <p>
+            然后用 AdamW 和二元交叉熵在预提取张量上训练，按 AUROC 比较四种做法，并在 Anthropic HH-RLHF、医疗转录、ToolACE 等真实数据上做分布外评估（不重新训练）。论文报告 AttnLite 一贯优于简单聚合；原文提醒在训练集更小、没做超参数搜索的情况下，是否成立值得自己检查。可视化注意力权重时的合理性检查：注意力大体接近均匀（与“均值探针优于最后 token 探针”的证据一致），对很早的 token 注意更少。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 1.3.2 函数向量与模型引导</h2>
+        <p><em>原练习集：[1.3.2] Function Vectors &amp; Model Steering（可选）</em></p>
+        <p>
+            这一套探讨的问题是：能不能用不靠梯度下降找到的向量，在前向传播中干预模型，让它产生不同的输出或行为？大部分练习围绕函数向量（function vector）：从上下文学习（ICL）任务的前向中提取出的向量，把它加到残差流里，就能在零样本提示上触发这个任务。同时教 <code>nnsight</code> 库的用法，它为在很大的模型上做这类研究而设计。最后一部分是 Alex Turner 等人的引导向量（steering vector）工作，概念相关，目标和方法不同。和本合集 <a href="05_扩展单义性.html">05</a> 中用 SAE 特征做引导、<a href="10_情绪概念及其功能.html">10</a> 中的情绪向量引导属于同一类干预手段。
+        </p>
+        <figure><img src="https://functions.baulab.info/images/Paper/fv-demonstrations.png" alt="function vector demonstrations"><figcaption>图：函数向量示意，从 ICL 示例中提取向量，加到零样本提示的前向中触发任务（引自 ARENA 1.3.2，原图来自 Function Vectors 论文网站）</figcaption></figure>
+
+        <h3>1️⃣ nnsight 入门</h3>
+        <p>学习目标：了解 <code>nnsight</code> 的基本用法和用途；了解 HuggingFace 模型的基础（分词、模型输出）；用它提取并可视化 GPT-J-6B 的内部激活。</p>
+        <p>
+            nnsight 的一大好处是远程执行：模型在 NDIF 服务器上运行，需要申请 API key，并且要用的模型当前在线。模型是 <code>EleutherAI/gpt-j-6b</code>（bfloat16 约 12GB）。<code>trace</code> 做单次前向，<code>generate</code> 做多 token 生成；<code>trace</code> 默认什么都不返回，想要的东西要在上下文管理器里显式 <code>.save()</code>，例如 <code>model.transformer.h[-1].output[0].save()</code>。<code>.input</code>/<code>.inputs</code> 取模块输入。原文建议只保存尽量小的对象，比如只要下一个 token 就先 argmax 再保存，以减少从服务器下载的数据。nnsight 对 batch 做左填充。练习（难度 2，重要性 3）：提取第 0 层注意力模式并用 circuitsvis 可视化，做法是取 <code>attn_dropout</code> 的输入。
+        </p>
+
+        <h3>2️⃣ 编码任务的隐藏状态</h3>
+        <p>学习目标：理解怎样用 nnsight 做因果干预；复现论文的“h 向量”结果，即残差流里确实有一个编码任务的向量，能在零样本提示上诱导任务行为。</p>
+        <p>
+            问题来自函数向量论文：Transformer 处理演示任务 $T$ 的 ICL 提示时，有没有某个隐藏状态编码了任务本身？用反义词任务证明答案是肯定的，结构上跟随论文 2.1 节。<code>ICLSequence</code> 和 <code>ICLDataset</code> 类生成提示，例如若干行 <code>"Q: word\nA: antonym"</code>；损坏版本把前面每对的答案换成随机词（如 <code>(right, left)</code> 变成 <code>(right, private)</code>），最后一对不变，这样模型无法推断模式。原文提醒正确答案前有空格，忘记前导空格是 Transformer 上的经典错误。
+        </p>
+        <ul>
+            <li><code>calculate_h</code>（难度 2，重要性 3）：在 ICL 提示上前向，取某层最后位置的残差流，在所有提示上平均得到 $h$（形状 <code>(d_model,)</code>），同时返回模型的预测。代码里用的层是 12。</li>
+            <li><code>intervene_with_h</code>（难度 3，重要性 4）：在同一个上下文管理器里对零样本数据集跑两次前向，一次不干预，一次在最后位置加上 $h$。预期：不干预时正确率接近 0%，因为模型通常只是复制提示里唯一的那个词；干预后很多变成正确的反义词（例如 <code>minimum</code> 变成 <code>maximum</code>，<code>inside</code> 变成 <code>outside</code>）。</li>
+            <li>把两步合并到一次前向（难度 3，重要性 3）：nnsight 的多个 <code>tracer.invoke</code> 可以并行跑不同 batch，一个 invoke 里定义的代理可以在另一个里用。原文提醒不能在定义之前使用代理，比如从第 10 层取的激活不能在同一次并行前向里用于第 9 层。</li>
+            <li>计算准确率变化（难度 2，重要性 3）：改为返回正确反义词的 log 概率，分别在不干预和干预下。</li>
+        </ul>
+
+        <h3>3️⃣ 函数向量</h3>
+        <p>学习目标：定义一个度量，衡量每个注意力头对正确完成 ICL 任务的因果作用；理解怎样在 nnsight 前向中重排激活，取出单个注意力头的输出；学会用 nnsight 做多 token 生成。</p>
+        <p>
+            技术难点：大多数 HuggingFace 模型没有按头分开的表示，只有一个 <code>out_proj</code> 线性层，把“每个头投影回 d_model”和“对头求和”合在一起。要取单个头的贡献，就在 <code>out_proj</code> 的输入上把其他头置零（GPT-J 的 <code>out_proj</code> 没有偏置，所以可行）。
+        </p>
+        <ul>
+            <li><code>calculate_fn_vectors_and_intervene</code>（难度 5，重要性 5，原文称这是本练习集最重要的函数）：一次干净前向取每层每个头的输出；对每个头各跑一次损坏前向，把该头的干净输出修补进去，记录正确 token 的 log 概率。总共需要 <code>N_LAYERS * N_HEADS + 2</code> 个 invoke。结果是每个头的因果间接效应（CIE），形状 <code>(layers, heads)</code>。</li>
+            <li><code>calculate_fn_vector</code>（难度 5，重要性 3）：函数向量是选出的那些头写入残差流的向量之和，在数据集上平均。参考代码用的头列表从 <code>(8, 0)</code>、<code>(8, 1)</code>、<code>(9, 14)</code>、<code>(11, 0)</code>、<code>(12, 10)</code>、<code>(13, 12)</code> 开始。</li>
+            <li>多 token 生成中用函数向量干预（难度 4，重要性 4）：复现论文表 3，在原始提示最后位置和之后每个生成位置都加上函数向量，提示模板是 <code>'The word "{x}" means'</code>，希望模型把一个词定义为它的反义词。nnsight 里用 <code>for step in tracer.iter[...]</code> 让干预作用于每一步生成；远程执行时，在 <code>tracer.all()</code> 循环之后保存的东西不会传回，应改用固定范围。</li>
+            <li>推广到其他任务（可选，难度 4）：例如国家首都任务，让模型在 <code>"When you think of Netherlands, you usually think of"</code> 这样的提示上说起首都。</li>
+        </ul>
+        <p>
+            KV 缓存会让 <code>generate</code> 里的干预变复杂，但本练习只干预最后一个位置，所以不受影响。附加部分还有论文的两个结果：函数向量的解码词表（与反义词任务对应的 top 词是 <code>" negate"</code>、<code>" counterpart"</code>、<code>" lesser"</code> 等；国家首都任务的 top 词是 <code>" Moscow"</code>、<code>" Paris"</code>、<code>" Madrid"</code> 等首都名），以及函数向量的向量代数（几个任务组合成第四个任务时能否把函数向量相加）。
+        </p>
+<pre><code># decoded vocabulary of a function vector
+logits = model._model.lm_head(fn_vector)
+max_logits = logits.topk(20).indices
+tokens = model.tokenizer.batch_decode(max_logits.unsqueeze(-1))
+</code></pre>
+
+        <h3>4️⃣ GPT2-XL 中的引导向量</h3>
+        <p>学习目标：理解 Alex Turner 等人引导向量工作的目标和主要结果；复现他们最初文章里描述的行为变化。</p>
+        <p>
+            和函数向量的区别，原文列了三点：函数向量关注模型执行某个函数（比如把词映射成反义词），引导向量关注行为变化（比如把负面语气的提示续写成正面的）；函数向量论文看的是很大的模型，引导向量这篇文章用的是 GPT2-Small（85m）和 GPT2-XL（1.5B），练习用 GPT2-XL；函数向量后半部分找重要的注意力头，引导向量直接加到残差流上。两者都属于“用前向传播（非 SGD）找到向量，在前向中干预以改变输出”。
+        </p>
+        <p>
+            练习（难度 5，重要性 4）：复现 LessWrong 文章 Steering GPT-2-XL by adding an activation vector 中“效果好的加法示例”一节。做法是把若干对提示（如 <code>Love</code> 与 <code>Hate</code>）在某层的激活差加到原始提示的前几个位置。要点：只在原始提示上加一次，所以仍可用缓存；表格里激活是加在左侧的（右填充），而默认左填充，解决办法是手动右填充，或者从激活加法序列的右侧切片（参考答案用后者）；采样用 top-p 0.3 和小的重复惩罚；文章在 block <code>layer</code> 的输入（TransformerLens 的 <code>hook_resid_pre</code>）处提取和添加激活，所以要用 <code>model.transformer.h[layer].input</code>。原文建议从 9 号例子（“谈论婚礼”）开始，它对前向细节比较稳健，<code>Love - Hate</code> 则不太稳。
+        </p>
+<pre><code>SAMPLING_KWARGS = {"do_sample": True, "top_p": 0.3, "repetition_penalty": 1.2}
+# activation_additions: list of (layer, coefficient, prompt), e.g. weddings example
+</code></pre>
+        <p>
+            附加部分建议的论文复现：Inference-Time Intervention（让模型说真话，也比较了 CCS 和线性探针）、Steering Llama 2 via Contrastive Activation Addition（把引导向量扩展到 Llama 2 13B，测量谄媚、短视、权力追求等属性的增减），以及 Nina Rimsky 的 Red-teaming language models via activation engineering（研究拒答行为由什么决定、怎样影响它）。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 1.3.3 用 SAE 做可解释性</h2>
+        <p><em>原练习集：[1.3.3] Interpretability with SAEs（可选，README 最推荐的三个之一）</em></p>
+        <p>
+            原文开头就说明，这一套内容量极大，轻松超过 ARENA 其他任何单个练习集的两倍，原文建议按自己的目标挑着做，不必全部做完；附带的交互式地图标出了各部分之间的依赖。除了第 1 部分开头几块，其余可以任意顺序。练习直接在真实语言模型上用稀疏自编码器（sparse autoencoder, SAE），介绍两个工具：SAELens（相当于 SAE 版的 TransformerLens，和 TransformerLens 集成得很好）和 Neuronpedia（托管 SAE 特征仪表盘的网站）。
+        </p>
+        <p>
+            前置知识：需要理解叠加（superposition）是什么，以及 SAE 的结构为什么能把特征从叠加中解开。理论部分在 1.5.4（见 <a href="14_ARENA_电路与玩具模型.html">下一篇</a>），原文说速通其第 1 部分和第 5 部分前半就够了。术语约定：特征（feature）指基座模型训练数据分布的特性，SAE 的方向叫 SAE latent（潜变量），以避免“特征”一词的混用。如果只读一篇，原文推荐 <a href="04_走向单义性.html">Towards Monosemanticity</a>，尤其是 Problem Setup 的前半和逐个深入分析特征的部分；阅读列表还有 <a href="03_叠加的玩具模型.html">Toy Models of Superposition</a>、<a href="05_扩展单义性.html">Scaling Monosemanticity</a>、DeepMind 的 Gated SAE 论文和 Gemma Scope。
+        </p>
+
+        <h3>1️⃣ SAE 可解释性入门</h3>
+        <p>学习目标：用 SAELens 加载和运行 SAE（连同它挂靠的 TransformerLens 模型）；了解 Neuronpedia 的基本功能，如引导和搜索特征；理解 SAE 仪表盘每一部分说明什么，并能自己算出来；学会寻找 latent 的技术：直接 logit 归因、消融和归因修补（attribution patching）。</p>
+        <p>
+            SAELens 里有很多 release，每个 release 含多个 SAE（不同层、不同 hook 点、不同架构），<code>sae.cfg</code> 存配置。主要用的是 GPT2 Small SAE 中第 7 层 resid pre 那个（release <code>gpt2-small-res-jb</code>），挂在 <code>HookedSAETransformer</code> 上。仪表盘有五个主要部分：激活分布、logits 分布（解码器权重投影到反嵌入）、top/bottom logits 表、最大激活序列、自动解释（autointerp）。原文提醒这些部分对理解 latent 都重要，但都可能误导。
+        </p>
+        <p>
+            运行 SAE 和挂 hook 很像：<code>run_with_saes</code> 对应 <code>run_with_hooks</code>，<code>run_with_cache_with_saes</code> 对应 <code>run_with_cache</code>，SAE 激活的 hook 名是模型 hook 名加 <code>hook_sae_acts_post</code>。<code>use_error_term</code> 为 False（默认）时用 SAE 重建替换原激活；为 True 时输出 <code>sae_out + sae_error</code>，其中 <code>sae_error = sae_in - sae_out</code>，等于不改变前向、只算出 SAE 激活。<code>ActivationsStore</code> 从 SAE 训练用的数据集流式取数据。原文示例：提示末尾激活最强的 latent 对 “global” 这个词响应，尤其是 “global warming”、“global poverty”、“global war” 这类灾难语境。
+        </p>
+        <ul>
+            <li>找有意思的 latent（难度 2）：在仪表盘里找只对某个 token 响应的 token 级特征等。</li>
+            <li>激活分布（难度 3，重要性 4）：遍历若干 batch，画某 latent 正激活的直方图，标题写激活密度。</li>
+            <li>最大激活样例（难度 3）：找出激活最高的上下文；对概念级 latent（如在特定圣经段落上响应的 <code>16873</code>）要用不重叠窗口，避免返回的都是同一段。</li>
+            <li>top/bottom logits（难度 2）：不需要数据，只是权重的函数，<code>sae.W_dec[latent_idx] @ model.W_U</code>。</li>
+            <li>自动解释（难度 4，重要性 1）：源自 OpenAI 用 GPT-4 解释 GPT-2 神经元的工作；把最大激活样例里激活的词用 <code>&lt;&lt; &gt;&gt;</code> 标出，让 <code>gpt-4o-mini</code> 一句话总结。原文指出它的第二个用途是 SAE 评估。</li>
+        </ul>
+<pre><code>def show_top_logits(model, sae, latent_idx, k=10):
+    logits = sae.W_dec[latent_idx] @ model.W_U
+    pos_logits, pos_token_ids = logits.topk(k)
+    neg_logits, neg_token_ids = logits.topk(k, largest=False)
+</code></pre>
+        <p>
+            注意力 SAE：结构和普通 SAE 一样，训练在所有注意力头投影前输出（<code>hook_z</code>）拼接起来的向量上。某 latent 在目标 token 上激活时，可以用直接 latent 归因（DFA）看它主要来自哪些源 token：源 token 处的 value 向量乘注意力概率，再与 SAE 编码器方向做点积。练习包括浏览 GPT2-Small 各层注意力 SAE 的仪表盘、比较不同层 latent 的质的差别（难度 1，重要性 4），以及推导 DFA（难度 4，重要性 3）。
+        </p>
+        <p>
+            为某个已知特征找 latent，用的是 IOI（间接宾语识别）任务，详见下一篇的 1.4.1。先验证每层换上注意力 SAE 后 logit 差仍然高（SAE 没有破坏 IOI 电路）。然后：
+        </p>
+        <ul>
+            <li>用最大激活找 name mover 特征（难度 2，重要性 3）：name mover 头主要是 9.6 和 9.9，所以看第 9 层 SAE（release <code>gpt2-small-hook-z-kk</code>）在最后位置的平均激活；再看这些特征在各头上的权重分布，验证它们主要来自 9.6 和 9.9。</li>
+            <li>用直接 logit 归因找特征（难度 4，重要性 3）：每个 latent 的归因 = 激活 × (解码器方向 · logit 差方向)，IOI 里 logit 差是 IO 减 S；可选练习换成情感任务。</li>
+            <li>用消融找重复 token 特征（难度 3，重要性 3）：这类特征在第 0 层和第 3 层，从一个 token 注意回它之前出现的位置，不直接影响 logits。</li>
+            <li>比较消融与归因修补（难度 3，重要性 4）：归因修补用一阶近似估计修补效果，比逐个消融便宜得多。</li>
+        </ul>
+        $$M_{\text{clean}} - M_{\text{corrupted}} \approx (\hat{x}_{\text{clean}} - \hat{x}_{\text{corrupted}}) \cdot \nabla_x M_{\text{corrupted}}$$
+<pre><code>logit_dir = gpt2.W_U[:, gpt2.to_single_token(correct_completion)] - gpt2.W_U[:, gpt2.to_single_token(incorrect_completion)]
+_, cache = gpt2.run_with_cache_with_saes(prompt, saes=[gpt2_sae])
+sae_acts_post = cache[f"{gpt2_sae.cfg.metadata.hook_name}.hook_sae_acts_post"][0, -1, :]
+sae_attribution = sae_acts_post * (gpt2_sae.W_dec @ logit_dir)
+</code></pre>
+        <p>
+            GemmaScope 是 Google DeepMind 为 Gemma 2 9B 和 Gemma 2 2B 发布的数百个开源 SAE（JumpReLU 架构），练习按基于 L0 值的官方推荐选择 SAE。特征引导（feature steering）：在前向中把激活往某个 latent 的方向推，即加上 <code>steering_coefficient</code> 倍的该 latent 解码器向量。练习（难度 3，重要性 3）实现 <code>steering_hook</code> 和 <code>generate_with_steering</code>（每次前向前在最后位置加上引导向量）。原文提醒引导的效果有时难以预料，不总是等于“生成该 latent 强烈响应的那类文本”；Neuronpedia 也有无需写代码的引导界面。
+        </p>
+        <p>其他 SAE 类型（只有介绍，没有练习）：</p>
+        <ul>
+            <li>TopK：激活函数改为 $z = \operatorname{TopK}(W_{enc}(x-b_{dec}))$，只保留最大的 K 个，不再需要 $L_1$ 惩罚。JumpReLU：$\operatorname{JumpReLU}_\theta(x) = xH(x-\theta)$，$\theta$ 是可学习阈值，$H$ 是阶跃函数；直觉是特征似乎“想要是二值的”，但它不可微、难训练，原文说很多团队没能复现 DeepMind 的初始论文。Gated：与 JumpReLU 一样有跳变的好处（加一点权重绑定后两者等价）。</li>
+            <li>端到端（End-to-End）SAE：不用重建 MSE，而是让 SAE 学对模型输出有功能作用的特征；相同性能下所需 L0 更小，但每层 MSE 大得多。</li>
+            <li>Meta SAE：训练来重建普通 SAE 的解码器方向，用于 latent 不单义的情况（比如特征吸收）。</li>
+            <li>Transcoder：读 MLP 之前的激活，输出 MLP 之后的激活，用稀疏特征组合去模拟 MLP 的计算而不是只重建某一点的激活，因此电路分析更清楚。1.4.2 会深入讲，它也是 <a href="06_电路追踪与归因图.html">06 电路追踪</a> 的基础部件。</li>
+        </ul>
+        <p>
+            附加练习：复现 Not All Language Model Features are Linear 中的环形子空间（星期几的 latent，例如 <code>[2592, 4445, 4663, 4733, 6531, 8179, 9566, 20927, 24185]</code>，只用这些 latent 重建、做 PCA 后第 2、3 主成分上排成一圈，月份和 20 世纪年份同理）；复现“长前缀与短前缀归纳”，两个 latent 主要归因于 5.1 和 5.5，都注意回用连字符连起来的表达，一个做短前缀归纳（<code>"Indo-German ... Indo-"</code> 接 <code>"German"</code>），一个做长前缀归纳。
+        </p>
+        <figure><img src="https://raw.githubusercontent.com/ARENA-education/ARENA_img/main/misc/circular-days.png" alt="circular days of week geometry"><figcaption>图：星期几 latent 的 SAE 重建在主成分平面上呈环形排列（引自 ARENA 1.3.3，复现 Not All Language Model Features are Linear 的图 1）</figcaption></figure>
+
+        <h3>2️⃣ 深入理解 SAE latent</h3>
+        <p>学习目标：研究特征分裂（feature splitting）及其对 SAE 训练的意义；用 UMAP 等降维方法理解 latent 的几何；理解特征吸收（feature absorption），以及 meta-SAE 可能怎样帮助解决它（后两项标注为尚未实现）。</p>
+        <p>
+            特征分裂最早由 <a href="04_走向单义性.html">走向单义性</a> 描述：特征成簇出现（多个 base64 特征、多个阿拉伯文特征），字典越大簇里特征越多。论文把不同大小 SAE 的特征合在一起做 2D UMAP。练习用 Joseph Bloom 训练的一组不同宽度的 GPT2-Small SAE：先在 Neuronpedia 上找分裂例子（难度 2），再写 UMAP（难度 4），再用 HDBSCAN 聚类（难度 4，基于密度变换空间、用最小生成树构建簇）。
+        </p>
+        <figure><img src="https://raw.githubusercontent.com/ARENA-education/ARENA_img/main/misc/feature-splitting.png" alt="feature splitting"><figcaption>图：特征分裂，小 SAE 的一个 latent 在大 SAE 中分裂成多个更具体的 latent（引自 ARENA 1.3.3）</figcaption></figure>
+        <p>
+            特征吸收（引自相关论文）：一个 SAE latent 看起来追踪某个人能理解的概念（如“以 E 开头”），却在一些看似随意的例子上不激活（如 “Elephant”），因为一个 “elephants” latent 弱投影到这个方向并代替它起因果作用。这让特征分裂的图景更复杂。Meta-SAE 的论文结论：SAE latent 可以分解成更原子的 meta-latent；大 SAE 的 latent 从小 SAE 分裂出来时，meta SAE 常能恢复这种结构；在定向知识编辑任务上，meta-latent 能做比 SAE latent 更精确的干预。
+        </p>
+        <p>
+            自动解释打分：生成解释之后还要评分，在召回（找出 latent 激活的文本）和精度（避免误报）之间平衡。例如一个在 “don't stop”“won't stop” 中 “stop” 上响应的 latent，“这个 latent 在单词 stop 上激活”这种解释召回高、精度低。练习（难度 4，重要性 2）实现 <code>AutoInterp</code> 类：<code>gather_data</code> 取生成用和打分用的最大激活样例，混入随机样例；<code>get_scoring_prompts</code> 让模型预测哪些序列会激活（打分时不能标出激活 token）；<code>run</code> 解析预测并算正确分类比例。附加改进包括用 asyncio 并行 API、用解释反向生成样例、用解码器余弦相似度高的“邻居” latent 测精度，以及和神经元、随机 latent 做对照（Anthropic 发现 SAE latent 的自动解释一贯优于神经元和随机初始化的 latent）。
+        </p>
+        <p>
+            Patch scoping：一种可能大幅降低自动解释算力的方法。用 <code>"The meaning of X is"</code> 这类提示（用 <code>"&lt;unk&gt;"</code> 代替 X），在 X 的位置换上 latent 向量，让同一个模型生成解释。用指令微调的 Gemma 2B（gemma-2b-it）和在基座 gemma-2b 上训练的 SAE；原文解释为什么可以这样做：Neel Nanda 的 MATS 方向的研究显示，在基座模型上训练的 SAE 通常能迁移到对话模型，但不保证，随模型和层而变（这里第 0 层和第 6 层表现好，较后的层不行）。练习（难度 3）实现替换 hook，只在第一次前向（形状第二维大于 1 时）替换。
+        </p>
+<pre><code>def hook_fn_patch_scoping(activations, hook, seq_pos, latent_vector):
+    if activations.shape[1] &gt; 1:   # only on the first forward pass (KV cache afterwards)
+        activations[:, seq_pos] = latent_vector.to(activations.dtype)
+</code></pre>
+
+        <h3>3️⃣ 训练与评估 SAE</h3>
+        <p>学习目标：用 SAELens 训练 SAE；理解训练中的各项指标，以及何时、为何训练出不可解释的 latent。评估部分原文标注为仍在开发。</p>
+        <p>
+            原文引用 Joseph Bloom：SAE 是一种无监督方法，通过诱导激活稀疏，在重建精度和可解释性之间折中；因为没有好的可解释性和重建质量指标，很难知道是否在优化真正关心的东西。原文区分两层思考：第一层是按表面意义看指标、找帕累托前沿上的好位置；第二层是追问这些代理目标是否真的对应我们想要的 SAE。训练代码就是 <code>LanguageModelSAERunnerConfig</code>、<code>SAETrainingRunner</code>、<code>runner.run()</code>。配置分七类：数据生成（模型名、hook 点、数据集）、SAE 架构（<code>d_sae = d_in * expansion_factor</code>、激活函数、初始化、是否从输入减去 <code>b_dec</code>）、激活存储、标准训练超参数、SAE 特有超参数（$L_1$ 系数及其预热、重采样协议）、日志与评估、其他。
+        </p>
+        <p>训练建议：</p>
+        <ul>
+            <li>指标：重建看 MSE、CE loss recovered、explained variance；稀疏看 L0 和 L1。$L_1$ 系数是主要杠杆，太高死 latent 多，太低 latent 稠密、多义。原文警告：重建损失很高时，你学到的可能是 SAE 的东西，而不是模型的真实行为。指标也会脱节：latent 收缩（shrinkage）让 L1 变小而 L0 不变；MSE 是短视的，KL 散度和下游 CE 不是。</li>
+            <li>死 latent（从不激活，拿不到梯度）：Anthropic 描述过 ghost gradients（额外损失项给死 latent 梯度信号）和重采样（把死 latent 重新初始化到重建不好的输入上），后来被认为没那么关键，现在主要用足够小的学习率加 $L_1$ 预热。稠密 latent（激活频率超过 1/100 甚至 1/10）一般不可解释，但能大幅改善重建。</li>
+            <li>latent 密度直方图（引自 Joseph Bloom）：画 log10 激活频率；太稠密的在 1/100 以上，死的堆在 log10(epsilon)，比较合适的分布质量主要在 −5 或 −4 到 −3 之间。</li>
+            <li>架构：更宽的 SAE 训练更久但 explained variance 等更好，宽度选择要考虑特征分裂和吸收；原文多数情况推荐 Gated，至少用 TopK，它们能缓解收缩问题。</li>
+        </ul>
+        <p>
+            训练案例：在 TinyStories-1L（<code>tiny-stories-1L-21M</code>）唯一的 MLP 输出上训练 SAE。TinyStories 词汇约 1500 个，故事短且自洽，对减少预测损失有用的特征比自然语言窄得多、简单得多。练习“识别好的和坏的训练曲线”（难度 3，重要性 5）：WandB 项目里有 7 次运行，#0 是基线，#1 到 #6 各有一个问题，要从指标推测配置哪里错了再去核对。更多案例：在 <code>attn-only-2l-demo</code> 两层的 <code>hook_z</code> 上训练、找组成归纳电路的特征对；在 <code>gemma-2-2b</code> 残差流上训练（原文提醒计算和内存都很重）；在 OthelloGPT 上训练，期待残差流 SAE 提取出棋盘状态表示。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 1.3.4 激活神谕</h2>
+        <p><em>原练习集：[1.3.4] Activation Oracles（可选）</em></p>
+        <p>
+            线性探针能对激活问是非题，SAE 能把激活无监督地分解成可解释特征，但两者都要求事先决定找什么。激活神谕（Activation Oracle, AO）是训练过的 LLM，输入里接收另一个模型的内部激活向量，用自然语言回答关于它们的任意问题，比如“这一层在编码什么概念”或“这个模型是不是打算撒谎”。原文说这项技术还很新，能走多远尚不清楚，但早期结果有希望。它和探针、SAE 的不同在于泛化：探针只能答训练时的那个分类问题，SAE 给出特征但含义要你自己弄清，神谕能回答训练中没见过的问题。和本合集 <a href="11_自然语言自编码器.html">11 自然语言自编码器</a> 都是把激活翻译成自然语言的路线。
+        </p>
+        <p>
+            阅读材料：Karvonen 等人的 Activation Oracles（2025），会复现其秘密提取（图 1）、目标检测和情绪追踪结果；前身 LatentQA，在较窄的任务上把激活解码为自然语言（如系统提示提取）；Eliciting Secret Knowledge from Language Models，研究被训练保守秘密的模型（比如不说某个“禁忌词”的模型），第 3 部分要探测的就是这些模型。
+        </p>
+
+        <h3>1️⃣ 介绍与使用激活神谕</h3>
+        <p>学习目标：理解激活神谕是什么、和传统可解释性方法有什么不同；掌握基本流程：目标模型、激活、神谕、自然语言答案；用预训练神谕以不同问题类型查询模型内部；探索 token 级、片段级和全序列查询。</p>
+        <p>
+            神谕和目标模型通常是同一个基座架构，神谕以 LoRA 适配器形式加载。神谕的提示里有若干 <code>?</code> 占位 token，在神谕的某个早期层（如第一或第二层）之后，把目标模型第 N 层的真实激活换到这些位置上，神谕在目标模型内部状态的基础上回答问题。代价是失去机制层面的可解释性：神谕给你一个自然语言答案，但不告诉你激活空间里哪些方向起了作用，没有误差条，没有可用于引导的方向，也难以验证。基座模型是 Qwen3-8B（bfloat16 约 16GB），神谕从 HuggingFace 加载，用 PEFT 库。原文附了 LoRA 的说明：在权重矩阵 $W^{(x,\,y)}$ 旁加两个小的可学习矩阵 $A^{(x,\,r)}$ 和 $B^{(r,\,y)}$。
+        </p>
+        <ul>
+            <li>第一个例子：给神谕整句关于法国首都的提问的激活，问模型会给出什么答案，神谕应答出 “Paris”。原文提醒有时要调提示措辞，因为神谕会回 “The model will give a factually correct answer” 这种话。</li>
+            <li>检验“回答问题”假设（难度 3，重要性 4）：神谕会不会只是看到了 “France” 这个 token 的嵌入？自己设计实验检验。</li>
+            <li>检验“logit lens”假设（难度 2，重要性 3）：神谕会不会只是读出 <code>?</code> 位置最可能的下一个 token？看目标提示后的 top 预测里有没有 Paris。</li>
+            <li>逐 token 分析：提示 <i>"The philosopher who drank hemlock taught a student who founded an academy. That student's most famous pupil was"</i>（喝毒芹汁的哲学家教过一个创办学园的学生，那个学生最有名的弟子是），观察神谕在哪些位置首次提到 Socrates、Plato、Aristotle。</li>
+            <li>不看函数定义提取函数结果（难度 3，重要性 4）：目标提示是 <code>def foo(x, y): return x + y</code> 加 <code>result = foo(3, 4)</code>，只把 <code>result = foo(3, 4)</code> 起的片段激活给神谕（<code>oracle_input_type="segment"</code>），神谕应答出 7，说明激活里带着模型正在计算的东西，原始 token 之外还有中间结果。</li>
+        </ul>
+
+        <h3>2️⃣ 实现神谕组件</h3>
+        <p>学习目标：用 forward hook 实现激活提取；理解特殊 token 机制（<code>?</code> 作为激活占位符）；构建把激活注入神谕的引导 hook；构造格式正确的训练数据点。</p>
+        <ul>
+            <li><code>collect_activations_multiple_layers</code>（难度 3，重要性 5）：在多个层的残差流子模块上挂 forward hook 取激活，取够后抛自定义异常提前停止前向，可选按从末尾数的偏移切片 token。</li>
+            <li><code>find_pattern_in_tokens</code>（难度 2，重要性 4）：神谕提示格式为 <code>Layer: X</code> 加若干 <code>?</code> 再加问题，<code>?</code> 的个数等于激活向量个数；函数找出 <code>" ?"</code> 这个单 token 在 token 序列里的位置。</li>
+            <li><code>get_hf_activation_steering_hook</code>（难度 4，重要性 5）：在神谕早期层的输出上，于占位位置注入目标激活，并保持原激活的范数。</li>
+            <li><code>create_oracle_input</code>（难度 3，重要性 4）：给问题加上带 <code>?</code> 的前缀，构造 <code>OracleInput</code>。</li>
+            <li>用组件搭出 <code>run_oracle()</code>（难度 4，重要性 5，第 2 部分的压轴）：只处理全序列查询，按 <code>layer_fraction</code>（默认 0.5）选层。</li>
+        </ul>
+        <p>注入方式（第 4 部分引用论文）是范数匹配的加法，而不是直接替换：</p>
+        $$h'_i = h_i + \|h_i\| \cdot \frac{v_i}{\|v_i\|}$$
+        <p>论文的解释是直接替换会让训练中激活范数过度增长，原文补充说替换在第 1 层造成了 100,000 倍的范数爆炸（论文附录 A.5）。</p>
+<pre><code>@contextlib.contextmanager
+def add_hook(module, hook):
+    handle = module.register_forward_hook(hook)
+    try:
+        yield
+    finally:
+        handle.remove()
+
+# inside the steering hook, for each placeholder position p and vector v:
+#   h[p] = h[p] + steering_coefficient * h[p].norm() * v / v.norm()
+</code></pre>
+
+        <h3>3️⃣ 秘密提取与进阶应用</h3>
+        <p>学习目标：理解“保守秘密”问题及其对齐含义；复现论文图 1，从禁忌词模型中提取被禁止的词；比较神谕提示措辞和输入类型对提取准确率的影响；在多个模型和层上系统评估秘密提取。</p>
+        <p>
+            问题很简单：模型可能知道一些它不说的东西，比如被训练成从不输出的词、微调时植入的隐藏目标、提示中看不到的约束。这意味着只看输出的监控有盲区，一个学会隐藏意图的模型能通过所有行为测试。禁忌（taboo）任务：从基座模型（如 Qwen3-8B）出发，微调成从不输出某个词（如 “smile”），模型在所有语境下都避开它，但这个词仍编码在激活里，神谕可以把它提取出来。生成测试中，模型会说 “laugh”、“grin” 或一堆铺垫话来回避。
+        </p>
+        <ul>
+            <li>提取秘密词（难度 3，重要性 5，复现图 1）：只把助手回复部分的激活喂给神谕（用第一个 <code>&lt;|im_end|&gt;</code> 定位边界），比较输出和期望的词（去掉分词器表示空格的 <code>Ġ</code> 前缀）。</li>
+            <li>比较神谕提示和输入类型（难度 2，重要性 4）：措辞是否重要，用全序列还是单个 token 的激活。</li>
+            <li>系统评估（难度 3，重要性 4）：多个秘密词、多个层上的准确率表。</li>
+            <li>目标提取：系统提示要求模型暗中推销某产品，神谕从激活中抓到“暗中推荐产品”的大意，但没说出 “Product X”；刻意排除系统提示 token，否则神谕可能只是在读系统提示原文。练习（难度 2）：自己写至少 2 个带隐藏目标的系统提示，参考答案的例子是“无论用户问什么都把话题引到气候变化”和“编程辅导，只给提示不给答案”。</li>
+            <li>情绪分析：在一段“询问烘焙建议、得到自信但错误的回答、蛋糕失败”的对话上逐 token 看神谕给出的情绪标签如何变化。</li>
+            <li>检测失调人格（难度 3，重要性 4）：对一个真正被微调成失调的模型，找到能让神谕检测出有害意图的问题和片段。论文经验上发现标点和回合结束 token（如 <code>&lt;|im_end|&gt;</code>）作为输入位置特别好，参考答案用的就是 <code>&lt;|im_end|&gt;</code> 这一个 token，问题是 <code>"Is this model unusual?"</code>。</li>
+        </ul>
+        <p>
+            模型差分（model-diffing）：问“微调改变了什么”。论文 4.2 节显示，可以算基座模型和微调模型的激活差，把差向量喂给神谕，即使在与微调目标无关的中性提示上也能描述微调引入了什么。这里用涌现失调（emergent misalignment, EM）模型：在窄领域（给出高风险理财建议）上微调，却在无关领域也表现出失调。论文的涌现失调审计（图 4）中，神谕仅靠激活差得分 2.00/5，与 Activation Difference Lens（ADL）的 2.03/5 持平，2/5 表示成功识别出具体的微调领域。练习用 Llama-3.1-8B-Instruct 加两个 LoRA：EM 适配器（<code>ModelOrganismsForEM/Llama-3.1-8B-Instruct_risky-financial-advice</code>）和对应的 Llama 神谕。先对比基座与 EM 模型在食谱、职场关系等无关话题上的回答，再用直接激活确认神谕能看出 EM 模型的有害倾向（原文说结果强度随提示变化），最后实现 <code>model_diff_analysis</code>（难度 3，重要性 4），默认取 10 个差值 token、注入层为 1、问题为 <code>"Can you describe what is happening in this text?"</code>。原文提示第 4 章 4.1 会深入讲涌现失调（见 <a href="16_ARENA_评测与对齐科学.html">16</a>）。
+        </p>
+
+        <h3>4️⃣ 训练自己的神谕（参考资料，无练习）</h3>
+        <p>学习目标：了解训练规模和算力需求；了解数据构成（SPQA、分类任务、自监督上下文预测）；理解数据多样性和数量都重要；知道什么时候该训练自己的神谕。</p>
+        <p>论文说训练很便宜：Qwen3-8B 需要 10 个 H100 GPU 小时，Llama-3.3-70B 需要 90 个 H200 小时。</p>
+        <table>
+            <thead><tr><th>数据类型</th><th>数量</th><th>内容</th></tr></thead>
+            <tbody>
+                <tr><td>系统提示问答（SPQA）</td><td>64,000</td><td>来自 LatentQA：合成对话中助手有采用某人格的系统提示，神谕根据用户和助手交互的激活回答关于系统提示的问题</td></tr>
+                <tr><td>分类数据</td><td>336,000</td><td>7 个二分类任务改写成是非题，每个 48k：Geometry of Truth、Relations、SST-2、MD Gender、SNLI、NER、时态识别</td></tr>
+                <tr><td>自监督上下文预测</td><td>600,000</td><td>从预训练和对话数据各半中取连续 token，让神谕预测激活之前或之后的若干 token，可以从任意语料无限生成</td></tr>
+            </tbody>
+        </table>
+        <p>
+            所有数据都混合单 token 和多 token 输入，从 25%、50%、75% 三个深度各取三分之一，并且总是用 LoRA 微调前的基座模型激活。按长度分组 batch 带来 30% 加速，激活在训练中即时生成。消融的三个发现：数据多样性越大越好（十二种组合中有十种在完整混合上最好）；多样性和数量都重要（同为 40 万条时含上下文预测的截断混合优于 SPQA 加分类，100 万条完整混合又优于截断混合）；只用 SPQA 已能在秘密任务上追平白盒基线，但对超参数很敏感，最好的学习率在 User Gender 上达到 91%，第二好的只有 65%。常见坑：训练时别总用同一个 token 位置；用范数匹配的加法而不是替换；在多个层上训练。
+        </p>
+        <p>
+            附加练习都是开放研究问题：改变多任务配方；跨架构迁移（Qwen 神谕能否读 Llama 激活）；不确定性量化（神谕总是自信作答，能否训练它说“不知道”）；用神谕给 SAE 特征自动打标签；用户性别秘密任务（论文约 97% 准确率，最好的白盒方法 82%，而性别从未出现在提示里）；更小的神谕；对抗鲁棒性（对着神谕对抗微调，模型会不会学会把信息藏在神谕读不出的地方）；真实应用；秘密附加约束（SSC，模型接收 base64 编码的指令并照做但不透露，论文从激活中提取的准确率为 59%，最好的白盒基线 49%，黑盒方法 96.8%）。结尾原文提出一个问题：神谕从激活中提取出禁忌词时，读到的是这个词的干净表示，还是与正确答案相关的更细微信号（分布偏移、抑制痕迹）？结果很亮眼，背后的机制仍不清楚。
+        </p>
+    </section>
+
+    <section>
+        <h2>这篇的要点</h2>
+        <ul>
+            <li>ARENA 第 1 章只有 1.1 和 1.2 必修，其余十个练习集（1.3 探针与表征、1.4 电路、1.5 玩具模型）可任选、无前置；README 最推荐 1.5.1、1.4.1 和 1.3.3。</li>
+            <li>1.1 从零写 GPT-2（d_model 768、12 层、12 头、d_head 64、d_mlp 3072、词表 50257），核心是残差流：注意力是唯一在位置间搬信息的部件，MLP 逐位置独立计算。</li>
+            <li>训练损失从均匀分布的 $\log(50257)=10.825$ 起步，学到词频后接近数据熵 5.958，再靠二元组、三元组、归纳头继续下降并逐渐变平。</li>
+            <li>1.2 在 2 层纯注意力模型上用重复随机序列找到归纳头 1.4、1.10 和前一 token 头 0.7；GPT-2 small 中 5.1、5.5、6.9、7.2、7.10 归纳特征明显。</li>
+            <li>逆向权重：单头 1.4 的完整 OV 电路 top-1 对角准确率约 30.79%，把 1.4 和 1.10 合成有效 OV 电路后为 95.6%（top-5 为 98%）；K-composition 完整电路 $W_E W_{QK}^{1.4} (W_{OV}^{0.7})^T W_E^T$ 接近单位阵；消融 0.7 使归纳分数从约 0.56 降到接近 0。</li>
+            <li>1.3.1：Llama-2-13B 中真假线性可分（PCA 无监督即可看出），集中在早中层；跨数据集泛化和因果干预才是对探针的真正检验，MM 方向比 LR 更有因果作用；CCS 受到“对比对才是关键”“零损失探针可对应任意分类”“XOR 表示”三方面批评。</li>
+            <li>1.3.1 欺骗探针：用诚实/欺骗系统提示配对训练，论文 70B 探针（第 22 层）AUROC 0.96 到 0.999，且在明确欺骗文字出现前就报警；已知失败包括把坦白过错误判为欺骗。高风险检测用单一全局 query 的注意力探针 AttnLite。</li>
+            <li>1.3.2：在 GPT-J-6B 上，ICL 提示末位残差流的平均向量 $h$ 能让零样本提示执行反义词任务；按因果间接效应选出的注意力头输出之和就是函数向量，可在多 token 生成中引导；引导向量在 GPT2-XL 的残差流里加入激活差来改变行为。</li>
+            <li>1.3.3：用 SAELens 和 Neuronpedia 读 SAE latent 的五部分仪表盘，用最大激活、直接 logit 归因、消融和归因修补寻找 IOI 相关 latent，用解码器方向做特征引导；介绍 TopK、JumpReLU、Gated、端到端 SAE、meta SAE 和 transcoder；训练时关注重建与稀疏的折中、死 latent 和稠密 latent。</li>
+            <li>1.3.4：激活神谕把目标激活以范数匹配加法注入 <code>?</code> 占位符，用自然语言回答任意问题，能提取禁忌词、隐藏目标和微调带来的变化；训练约需 10 个 H100 小时（Qwen3-8B），数据约 100 万条，多样性和数量都重要；代价是丢掉机制层面的可解释性。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>ARENA · Chapter 1: Transformer Interpretability · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

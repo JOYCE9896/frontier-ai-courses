@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ARENA 第 1 章（下）：大模型里的电路与玩具模型 | 可解释性与对齐研究 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="13_ARENA_Transformer与可解释性入门.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">可解释性与对齐研究 目录</a> · 14</span>
+    <span><a href="15_ARENA_强化学习.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>ARENA 第 1 章（下）：大模型里的电路与玩具模型</h1>
+        <p class="subtitle">在 GPT-2 small 里用激活修补和路径修补复现间接宾语识别电路，用 SAE、transcoder 和归因图追踪特征电路，再在括号分类、模加法、黑白棋和叠加玩具模型上把算法从权重里完整读出来</p>
+        <div class="author-meta">
+            作者：Callum McDougall 等（ARENA）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://learn.arena.education/chapter1_transformer_interp/" target="_blank">ARENA Chapter 1: Transformer Interpretability</a> 与 <a href="https://github.com/callummcdougall/ARENA_3.0" target="_blank">GitHub 仓库</a>（依据 2026 年 11 月仓库中的练习页面整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这篇讲什么</h2>
+        <p>
+            这是 ARENA 第 1 章的后半部分。上一篇（<a href="13_ARENA_Transformer与可解释性入门.html">13</a>）整理了必修的 1.1、1.2 和 1.3 组（探针与表征）。本篇整理另外两组：1.4 大模型里的电路（1.4.1 间接宾语识别、1.4.2 SAE 电路），1.5 玩具模型（1.5.1 括号平衡分类器、1.5.2 grokking 与模加法、1.5.3 OthelloGPT、1.5.4 叠加玩具模型与 SAE），最后简述 1.5.X 每月算法题。按仓库 README，这些都是可选练习集，做完 1.1 和 1.2 之后可以任选，彼此没有前置要求；在可选练习里 README 最推荐 1.5.1（比多数练习容易，适合在简单情形下摸清 Transformer 结构）和 1.4.1（电路方法最好的入门），另一个推荐是上一篇的 1.3.3。各练习集自己也写了建议的背景：1.4.2 希望你懂叠加和 SAE 结构（可看 1.5.4），并会用 SAELens（1.3.3 第一部分）。
+        </p>
+        <p>
+            和本合集论文页的关系：1.4.1 用到的残差流分解、QK/OV、归纳头来自 <a href="01_Transformer电路的数学框架.html">01</a> 和 <a href="02_上下文学习与归纳头.html">02</a>；1.4.2 的 transcoder、局部替换模型、归因图、Dallas/Austin 两跳回忆电路对应 <a href="06_电路追踪与归因图.html">06 电路追踪</a> 和 <a href="07_大模型的生物学.html">07 大模型的生物学</a>；1.5.4 复现 <a href="03_叠加的玩具模型.html">03 叠加的玩具模型</a>，其第 5 部分的 SAE 来自 <a href="04_走向单义性.html">04 走向单义性</a>。练习的难度（🔴）和重要性（🔵）都按 5 分制标注，下文在关键练习后注明。
+        </p>
+        <ol>
+            <li><a href="#t01">1.4.1 间接宾语识别（IOI）</a></li>
+            <li><a href="#t02">1.4.2 SAE 电路、transcoder 与归因图</a></li>
+            <li><a href="#t03">1.5.1 括号平衡分类器</a></li>
+            <li><a href="#t04">1.5.2 Grokking 与模加法</a></li>
+            <li><a href="#t05">1.5.3 OthelloGPT</a></li>
+            <li><a href="#t06">1.5.4 叠加玩具模型与稀疏自编码器</a></li>
+            <li><a href="#t07">1.5.X 每月算法题</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 1.4.1 间接宾语识别（IOI）</h2>
+        <p><em>原练习集：[1.4.1] Indirect Object Identification（可选，README 最推荐之一）</em></p>
+        <p>
+            这一套围绕 Redwood Research 的论文 Interpretability in the Wild，目标是理解 GPT-2 small 里的间接宾语识别（indirect object identification, IOI）电路：模型怎样把 <code>"John and Mary went to the shops, John gave a bag to"</code>（John 和 Mary 去了商店，John 把一个袋子给了）补全为 <code>" Mary"</code>。第 1 到 3 部分改编自 Neel Nanda 的 Exploratory_Analysis_Demo notebook。原文按目标给了选做建议，比如只想学激活修补就做 1、2、3 部分。原文强调要记住一条“工具谱”：一端是看注意力模式这类简单、探索性、有时会误导的工具，另一端是修补这类更严格、更复杂的工具。
+        </p>
+        <p>
+            论文严格逆向出一个 26 个头组成、分 7 类的电路，大致分三步：找出句中有哪些名字；找出哪个名字重复了；预测没有重复的那个名字。练习后面用到的电路字典（来自参考代码）：
+        </p>
+        <table>
+            <thead><tr><th>头的类别</th><th>头（层.头）</th></tr></thead>
+            <tbody>
+                <tr><td>name mover（名字搬运头）</td><td>9.9、10.0、9.6</td></tr>
+                <tr><td>backup name mover（备用名字搬运头）</td><td>10.10、10.6、10.2、10.1、11.2、9.7、9.0、11.9</td></tr>
+                <tr><td>negative name mover（负向名字搬运头）</td><td>10.7、11.10</td></tr>
+                <tr><td>S-inhibition（主语抑制头）</td><td>7.3、7.9、8.6、8.10</td></tr>
+                <tr><td>induction（归纳头）</td><td>5.5、5.8、5.9、6.9</td></tr>
+                <tr><td>duplicate token（重复 token 头）</td><td>0.1、0.10、3.0</td></tr>
+                <tr><td>previous token（前一 token 头）</td><td>2.2、4.11</td></tr>
+            </tbody>
+        </table>
+        <figure><img src="https://raw.githubusercontent.com/ARENA-education/ARENA_img/main/misc/ioi-main-full-d.png" alt="IOI circuit diagram"><figcaption>图：IOI 电路示意，早期头检测重复名字，S-inhibition 头把“S 重复了”的信息搬到 END，name mover 头据此注意 IO 并复制它（引自 ARENA 1.4.1）</figcaption></figure>
+
+        <h3>1️⃣ 模型与任务设置</h3>
+        <p>学习目标：理解 IOI 任务以及作者为什么选它；写函数展示模型在任务上的表现。</p>
+        <p>
+            模型是 GPT-2 small，12 层、1.24 亿参数（非嵌入参数 8500 万），加载时的若干选项在不改变输出的前提下简化内部结构。单个提示上模型给 Mary 约 70% 的概率。原文建议先在一个具体例子上弄懂细节，再推广：用 4 组提示、每组两个版本（第一个名字或第二个名字作间接宾语），并挑名字都是单 token、对应名字处在相同位置的提示。
+        </p>
+        <p>
+            性能指标是 logit 差（logit difference）：间接宾语名字的 logit 减主语名字的 logit。原文解释它为什么好用：模型训练优化的是 log 概率，给所有 logits 加同一个常数不改变 log 概率，所以单个 logit 不太有意义；但两个 token 的 logit 差等于它们 log 概率的差，而且取 logit 是对残差流的线性投影，logit 差同样是投影到一个方向上。练习（难度 3，重要性 4）实现 <code>logits_to_ave_logit_diff</code>。可选的“头脑风暴”小节建议实验前先推理行为可能怎样实现，并提醒两个极端陷阱：完全没有假设、拿到一堆数据不知所措，以及过度相信自己的假设。
+        </p>
+
+        <h3>2️⃣ Logit 归因</h3>
+        <p>学习目标：用直接 logit 归因找出哪些头在显著地写入残差流；学会 TransformerLens 中以不同方式分解残差流的辅助函数。</p>
+        <p>
+            从输出端开始倒推：logits = Unembed(LayerNorm(最终残差流))，反嵌入是线性的，LayerNorm 近似线性，所以 logits 可以分解成各部件贡献之和。用 <code>cache.apply_ln_to_stack</code> 把最终 LayerNorm 的缩放应用到一摞残差分量上，再投影到 logit 差方向。
+        </p>
+        <ul>
+            <li>logit lens：看每层之后的残差流算出的 logit 差（练习 <code>residual_stack_to_logit_diff</code>，难度 3，重要性 3）。</li>
+            <li>按层归因：等价于相邻残差流之差；原文提醒术语重载，“第 k 层”指第 k 个 block，每个 block 有一个注意力层和一个 MLP 层。</li>
+            <li>按头归因：每层 12 个头独立、相加，可以再拆开。然后用 circuitsvis 看直接 logit 归因最正、最负的各 3 个头的注意力模式。</li>
+        </ul>
+
+        <h3>3️⃣ 激活修补</h3>
+        <p>学习目标：理解激活修补的思想和用法；用 hook 从零实现 TransformerLens 中一些激活修补辅助函数。</p>
+        <p>
+            前面的方法只看直接影响 logits 的末端部件。激活修补（activation patching）由 ROME 论文推广（那里叫 causal tracing）：对干净输入和损坏输入各跑一次，干净输入给出正确答案、损坏输入不给，然后在损坏运行中把某个激活换成干净运行里的值，看正确答案的概率恢复多少，从而定位哪些激活重要。原文区分加噪（noising：在干净输入上换入损坏激活）和去噪（denoising：在损坏输入上换入干净激活）：去噪的结果更强，因为它表明一组部件足以完成任务。
+        </p>
+        <figure><img src="https://raw.githubusercontent.com/ARENA-education/ARENA_img/main/misc/simpler-patching-2c.png" alt="activation patching diagram"><figcaption>图：激活修补示意，在一次运行中把某个节点的激活换成另一种输入下的值（引自 ARENA 1.4.1）</figcaption></figure>
+        <p>
+            这里的干净输入是 <code>"When Mary and John went to the store, John gave a drink to"</code>，损坏输入把第二次出现的主语（S2）换掉：<code>"When Mary and John went to the store, Mary gave a drink to"</code>。原文注明这个损坏版本其实把信号反过来了，称“去噪”主要是框架上的说法。思考题：为什么不把三处名字都换掉？指标设计成损坏输入上为 0、干净输入上为 1：
+        </p>
+<pre><code>def ioi_metric(logits, answer_tokens=answer_tokens,
+               corrupted_logit_diff=corrupted_logit_diff, clean_logit_diff=clean_logit_diff):
+    patched_logit_diff = logits_to_ave_logit_diff(logits, answer_tokens)
+    return (patched_logit_diff - corrupted_logit_diff) / (clean_logit_diff - corrupted_logit_diff)
+
+def patch_residual_component(corrupted_residual_component, hook, pos, clean_cache):
+    corrupted_residual_component[:, pos, :] = clean_cache[hook.name][:, pos, :]
+    return corrupted_residual_component
+
+def patch_head_vector(corrupted_head_vector, hook, head_index, clean_cache):
+    corrupted_head_vector[:, :, head_index] = clean_cache[hook.name][:, :, head_index]
+    return corrupted_head_vector
+</code></pre>
+        <ul>
+            <li>残差流修补（难度 4，重要性 5）：在每层开头、每个位置修补 <code>resid_pre</code>，先用 TransformerLens 的 <code>patching</code> 模块看结果，再自己实现。</li>
+            <li>按 block 修补（可选）：分别修补 <code>resid_pre</code>、<code>attn_out</code>、<code>mlp_out</code>（一次只修一个），得到形状 <code>(3, n_layers, seq_len)</code> 的结果。</li>
+            <li>头修补（难度 3，重要性 4）：对每个头在所有位置修补输出 <code>z</code>。</li>
+            <li>分解头（可选）：分别修补头的输出、query、key、value 和注意力模式，区分“往哪里看”与“搬什么”。</li>
+        </ul>
+        <p>
+            关于 MLP0：在 GPT-2 small 上常观察到 MLP0 很重要，消融它会彻底破坏性能。目前公认的假设是第一层 MLP 起到“扩展嵌入”的作用，后面的层要读输入 token 时主要读的是 MLP0 之后的残差流；它在 S2 上重要，因为那是两个版本里唯一输入 token 不同的位置。原文认为这主要源于 GPT-2 small 的嵌入和反嵌入矩阵是绑定的（一个等于另一个的转置）。
+        </p>
+        <p>阶段性总结（原文“Consolidating Understanding”）：</p>
+        <ul>
+            <li>9.9、9.6、10.0 是直接写入残差流最重要的头，它们在 END 处强烈注意 IO，说明它们把 IO 复制到 END 作为预测。</li>
+            <li>第 7 层之前所有动作都发生在 S2 上，之后转到 END；注意力层重要，MLP 除 MLP0 外不太重要。这说明第 7、8 层有一簇头把信息从 S2 搬到 END，9.9、9.6、10.0 靠这些信息知道要注意 IO。</li>
+            <li>第 7、8 层的关键头是 7.3、7.9、8.6、8.10，修补它们的 value 效果大，query 和 key 较小，说明重要的计算在“从 S2 搬到 END 的是什么”，END 为什么注意 S2 倒是次要的。</li>
+            <li>第三簇是早期头（如 3.0、5.5、6.9），它们的 query 对性能重要。看 3.0 的注意力模式会发现 S2 注意 S1，即早期头检测目标 token 是否重复；“主语重复了”这一信息存在 S2 上，用来抑制后面的头去注意重复的名字，于是它们注意未重复的 IO。</li>
+        </ul>
+        <p>
+            其他细节：除了重复 token 头，第一簇里还有前一 token 头和归纳头，归纳头通过归纳机制完成同样的事，让 S2 注意 S1+1（原文注明论文的图暗示归纳头和重复 token 头相互组合，这是误导性的）。负向名字搬运头做的事和名字搬运头相反，抑制正确答案。备用名字搬运头在名字搬运头被消融后会接手任务，原文称之为模型内置的冗余。S-inhibition 头分为基于位置信息和基于 token 信息两种。修补 S-inhibition 头的 key 和 value 时 value 重要、key 不重要，所以这些头里没有真正的 K-composition。
+        </p>
+
+        <h3>4️⃣ 路径修补</h3>
+        <p>学习目标：理解路径修补及其与激活修补的区别；用 hook 从零实现路径修补。</p>
+        <p>
+            这部分更贴近论文作者的设置，用 <code>IOIDataset</code>（从名字列表、句式模板、物品列表随机生成），以及把三个名字都换成随机名字的 <code>abc_dataset</code> 作为另一种分布。激活修补问的是“把一个头写入残差流的值换成另一分布下的值、其他不变，会怎样”；路径修补（path patching）替换的是边而不是节点，问“头 A 直接输入到后面头 B 的那部分换成另一分布下的值，会怎样”。论文的做法把 MLP 算作直接路径的一部分，原文解释两种做法都说得通，在 IOI 电路里 MLP 不重要（MLP0 除外），两种做法结果相近。
+        </p>
+        <ul>
+            <li>到最终残差流的路径修补（难度 5，重要性 4）：接收节点是最终残差流。步骤是先在两种分布上各缓存一次，再运行时冻结所有头的输出为原始值、只把待测头换成新分布的值（<code>patch_or_freeze_head_vectors</code>），最后看最终输出的变化。</li>
+            <li>头到头的路径修补（难度 3，重要性 3）：接收节点是后面头的 query/key/value 输入，用来确认 S-inhibition 头的 value 输入来自哪些早期头。论文结果见其图 5(b)。</li>
+        </ul>
+<pre><code>def patch_head_input(orig_activation, hook, patched_cache, head_list):
+    heads_to_patch = [head for layer, head in head_list if layer == hook.layer()]
+    orig_activation[:, :, heads_to_patch] = patched_cache[hook.name][:, :, heads_to_patch]
+    return orig_activation
+</code></pre>
+
+        <h3>5️⃣ 完整复现：最小电路等</h3>
+        <p>学习目标：复现 IOI 论文的大部分其他结果；练习更开放、引导更少的编码。</p>
+        <ul>
+            <li>写入方向（难度 4，重要性 2）与复制分数（难度 5，重要性 2）：用散点图展示名字搬运头的注意力与其输出在 IO 方向上投影的关系，按论文第 6 页计算正负复制分数（跳过第 0 层，因为那在被当作扩展嵌入的 MLP0 之前）。原文说这两个练习难度远大于概念重要性。</li>
+            <li>早期头的验证（难度 3，重要性 3）：在随机重复序列上用注意力模式验证三类早期头（前一 token、重复 token、归纳）。</li>
+            <li>最小电路（难度 5，预计至少一小时，原文称本 notebook 最难的练习）：除了已识别的头（各在指定位置）以外全部做均值消融，看性能是否恢复。论文的三条标准：忠实（faithful，电路能和整个模型表现一样好）、完整（complete，包含完成任务用到的所有节点）、最小（minimal，不含与任务无关的节点）。</li>
+            <li>极小性分数（难度 5，原文称第二难）：计算 $F(C \setminus K)$，即从核心电路 $C$ 中去掉部件集 $K$ 后的 logit 差。</li>
+        </ul>
+        <p>
+            附加部分探索异常：早期检测重复的头里为什么有归纳头（原文猜测归纳头在训练中很早就会形成，模型顺手复用了现成的机制），用路径修补到 5.5 和 6.9 的 key 来验证前一 token 头；备用名字搬运头（消融最重要的名字搬运头 9.9 后，后面的头改变行为接手部分工作，所以朴素消融会低估重要性）；位置信息与 token 信息（论文附录 A 构造擦除或翻转某种信号的数据集，拆开 S-inhibition 头用的是哪一种）。延伸阅读和建议复现包括因果擦除（Causal Scrubbing）、4 层纯注意力模型中的 Python docstring 电路、GPT-2 small 中的“明天是星期几”和“大于”电路，以及自动电路发现 ACDC 与归因修补。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 1.4.2 SAE 电路、transcoder 与归因图</h2>
+        <p><em>原练习集：[1.4.2] SAE Circuits（可选）</em></p>
+        <p>
+            这一套研究由 SAE latent 组成的电路：不同层的一组 latent 相互通信，端到端地解释某个模型行为。从 latent 到 latent、token 到 latent、latent 到 logit 的梯度开始，然后介绍 transcoder，再从零实现完整的归因图（attribution graph）流程，最后用 <code>circuit-tracer</code> 库研究真实电路并做特征干预。阅读材料有 <a href="04_走向单义性.html">Towards Monosemanticity</a>、<a href="05_扩展单义性.html">Scaling Monosemanticity</a>、Dunefsky 等人的 Transcoders Find Interpretable LLM Feature Circuits，以及 Anthropic 2025 年的 <a href="06_电路追踪与归因图.html">Circuit Tracing</a>。原文开头有一段 SAELens 速览（加载、<code>run_with_saes</code>、<code>use_error_term</code>、<code>ActivationsStore</code>、Neuronpedia 仪表盘），做过 1.3.3 可以跳过；梯度练习里通常先用 <code>use_error_term=True</code> 拿到干净前向下的真实 latent 激活，算 Jacobian 时再用 False，让函数真正经过 SAE。
+        </p>
+
+        <h3>1️⃣ Latent 梯度</h3>
+        <p>学习目标：计算 Transformer 不同层 SAE latent 之间的 latent 到 latent 梯度；计算 token 到 latent 的梯度，看哪些输入 token 驱动某个 latent。</p>
+        <p>
+            原文的出发点：能用 SAE latent 引导出有意思的效果，是否说明找到了模型真正的计算单元，还是只找到了一个有趣的聚类算法？目前并不确定。如果 SAE latent 之间能组成稀疏、可解释的电路，就是“latent 是模型基本计算单元”的有力证据。对给定输入和不同层的两个 latent，第二个 latent 激活对第一个的导数构成偏导矩阵 $J_{ij} = \frac{\partial f_i}{\partial x_j}$，可以作为早层 latent 对晚层 latent 贡献的线性代理，用 PyTorch 的 <code>jacrev</code>（反向模式 Jacobian）计算。
+        </p>
+        <ul>
+            <li><code>SparseTensor</code> 类（难度 2，重要性 1）：在稠密和稀疏（非零值、非零索引、形状）两种格式之间转换。</li>
+            <li><code>latent_acts_to_later_latent_acts</code>（难度 3，重要性 3）：把早层 SAE 的 latent 激活经“SAE 解码器、中间各层、后层 SAE 编码器”映射成后层 latent 激活。</li>
+            <li><code>latent_to_latent_gradients</code>（难度 4，重要性 3）：对两个 SAE 所有同时激活的 latent 对求梯度。</li>
+            <li>token 到 latent 梯度、latent 到 logit 梯度（难度 4，重要性 2）：前者对嵌入乘一个缩放因子再对它求导。</li>
+            <li>（可选，难度 5）在注意力 SAE 中找归因电路：筛出在重复序列后半每个 token 都激活的第 5 层 latent。</li>
+        </ul>
+
+        <h3>2️⃣ Transcoder</h3>
+        <p>学习目标：理解 transcoder 及其与标准 SAE 的区别；学会解释 transcoder latent 的技术：拉回（pullback）、去嵌入（de-embedding）和扩展嵌入（extended embedding）。</p>
+        <p>
+            残差流 SAE 和注意力输出 SAE 只在模型的某一个点上把激活表示为 latent 的稀疏线性组合，并不学习 MLP 层的计算。Transcoder 读 MLP 之前的激活，去重建 MLP 之后的激活，仍然是稀疏线性组合。原文引用 transcoder 文章：它把 MLP 层的功能分解成稀疏、独立变化、有意义的单元（就像叠加被发现之前人们原本期望神经元的样子），大大简化电路分析。前面算 latent 梯度时只能算两个都激活的 latent 之间的梯度；transcoder 包住了整个 MLP（包括非线性），可以直接用早层 latent 的“写向量”和晚层 latent 的“读向量”做点积，判断一个 latent 会不会激活另一个（忽略中间层的影响）：
+        </p>
+        <ul>
+            <li>拉回：某个晚层 latent 的拉回是 $p = W_{dec} f_{later}$，即晚层 latent 的读向量与所有早层 latent 的解码器（写）向量的点积。</li>
+            <li>去嵌入是特例 $d = W_E f_{later}$：问哪些 token 最能激活某个晚层 latent（难度 1，重要性 3）。</li>
+            <li>修正去嵌入（难度 2，重要性 3）：直接用 $W_E$ 不够，要用经过第 0 层 MLP 的扩展嵌入，并在 <code>d_model</code> 维上标准化。</li>
+        </ul>
+<pre><code>def create_extended_embedding(model):
+    W_E = model.W_E.clone()[:, None, :]                       # [d_vocab, seq_len=1, d_model]
+    mlp_output = model.blocks[0].mlp(model.blocks[0].ln2(W_E))
+    # add mlp_output to W_E, then normalize along d_model (subtract mean, divide by std)
+
+def show_top_deembeddings_extended(model, sae, latent_idx, k=10):
+    de_embeddings = create_extended_embedding(model) @ sae.W_enc[:, latent_idx]
+    pos_logits, pos_token_ids = de_embeddings.topk(k)
+</code></pre>
+        <p>
+            盲案例研究（blind case study，开放练习）：来自 transcoder 文章，不看激活样例，只用与输入无关的电路分析（拉回、去嵌入）和与输入有关的影响（input-dependent influence，逐元素乘积）对某个 transcoder latent 提出假设。参考做法分四步：看去嵌入；看早层 transcoder latent 的直接影响；看经注意力头的影响（把目标 latent 的读向量经头的 OV 电路反推到源位置，和早层 transcoder 按注意力加权的写向量做点积）；按部件（嵌入、注意力头、MLP）汇总归因。参考答案最后的假设是这个 latent 主要在估计财务数量（或伤亡人数）的句子上激活，再用 Neuronpedia 仪表盘核对。
+        </p>
+
+        <h3>3️⃣ 归因图</h3>
+        <p>学习目标：理解局部替换模型，为什么冻结注意力模式、LayerNorm 缩放并把 MLP 换成线性跳连后残差流变成线性的；理解读/写向量抽象，即 token 嵌入、transcoder latent、MLP 误差和 logit 方向怎样与残差流交互。</p>
+        <p>
+            这里换成 Gemma 3-1B IT 和 GemmaScope 2 transcoder。GemmaScope 2 是 Google DeepMind 第二套 SAE 与 transcoder，覆盖 Gemma 3 家族（不是 Gemma 2），在 27B 及以下所有规模的预训练和指令微调模型的所有层上都训练了 transcoder。它们用 Matryoshka 损失训练，latent 有天然层级：编号小的激活更频繁、对重建更重要，编号大的代表更窄更具体的概念。它们还有仿射跳连 <code>W_skip</code>，捕捉 MLP 计算中的线性部分，latent 捕捉非线性部分。构图时要把前 4 个 token（BOS、<code>&lt;start_of_turn&gt;</code>、<code>user</code>、换行）遮掉，提示例子用的是 Anthropic 归因图工作中的押韵对句。
+        </p>
+        <p>
+            局部替换模型（local replacement model）：Transformer 残差流几乎是线性的，主要非线性是注意力模式（query 和 key 上的 softmax）、LayerNorm 缩放（RMSNorm 归一化因子）和 MLP 激活。把三者冻结在前向时的取值，残差流就成了各节点特征激活的线性函数，归因就有了明确定义。MLP 换成线性跳连 <code>mlp_out ≈ mlp_input @ W_skip.T</code>。关键细节是注意力只冻结注意力模式（softmax 输出），value 计算（<code>V @ W_O</code>）保持可微，否则跨位置的梯度就全断了。练习 <code>TranscoderReplacementHooks</code>（难度 3，重要性 5）：前向时 MLP 输出保持精确不变，反向时梯度只走线性跳连，同时记录 transcoder 特征激活；之后检查每层平均 L0（每个 token 位置非零 latent 的平均数），过高（如超过 50）会让图很大。
+        </p>
+        <p>节点与边。输出节点是显著 logit：取预测概率最高的若干 token（覆盖一定概率质量，或固定 3 到 5 个），用去均值的反嵌入向量作为读方向。去均值是因为给残差流加一个常向量会同等地影响所有 logits，不改变 softmax。各类节点的读写向量（原文表格）：</p>
+        <table>
+            <thead><tr><th>节点类型</th><th>写向量</th><th>读向量</th></tr></thead>
+            <tbody>
+                <tr><td>Token 嵌入</td><td>token 嵌入向量</td><td>零向量（嵌入是输入）</td></tr>
+                <tr><td>Transcoder latent</td><td><code>activation * W_dec[latent]</code></td><td><code>W_enc.T[latent]</code></td></tr>
+                <tr><td>MLP 误差</td><td><code>mlp_output - transcoder_reconstruction</code>（重建包含跳连项）</td><td>零向量（误差项不读）</td></tr>
+                <tr><td>输出 logit</td><td>零向量（logits 是输出）</td><td>去均值的 <code>W_U[:, token]</code></td></tr>
+            </tbody>
+        </table>
+        <p>
+            误差项为什么要把跳连算进重建：在线性化模型里跳连 <code>ln2(resid_mid) @ W_skip.T</code> 是一条活的线性路径，它写的东西已经通过反向传播归到了上游节点，误差里再包含跳连输出就会重复计算。定义误差为 <code>mlp_out - (decode(acts) + skip)</code>，latent、跳连和误差加起来正好等于真实 MLP 输出。
+        </p>
+        <ul>
+            <li><code>compute_salient_logits</code>（难度 2，重要性 3）；<code>build_embedding_nodes</code>、<code>build_intermediate_nodes</code>（难度 2 到 3，重要性 4）：后者为每层构建 latent 节点和 MLP 误差节点。</li>
+            <li><code>prepare_backward_batches</code>（难度 3，重要性 4）：按层把目标节点分批。</li>
+            <li><code>compute_adjacency_matrix</code>（难度 5，重要性 5，原文称本部分最难也最重要）：对每批目标节点，在冻结模型中前向，在目标位置把残差流与目标读向量点积后反向传播，再把梯度与源节点写向量缩并，得到边权。</li>
+        </ul>
+        <p>剪枝分三步。先归一化：取绝对值并按行除以行和，得到每行和为 1 的非负矩阵，可看作“转移矩阵”，表示目标节点的输入中有多少比例来自各源节点。</p>
+        $$A_{\text{norm}}[j, :] = \frac{|A[j, :]|}{\sum_i |A[j, i]|}$$
+        <p>再用 Neumann 级数算影响力（节点对输出 logits 的直接加间接效应）。图是分层的（边只从早层指向晚层），邻接矩阵严格下三角，因而幂零；节点层为 $E, 0, 1, \ldots, L-1, \text{logit}$，最长路径有 $L+1$ 条边：</p>
+        $$v_0 = w_{\text{logit}}, \quad v_{k+1} = v_k \cdot A_{\text{norm}}, \quad \text{influence} = \sum_{k=1}^{L+1} v_k$$
+        <p>
+            最后剪枝：节点剪枝按影响力排序，保留累计影响力超过阈值（如总量的 80%）的最小集合，logit 节点总保留；边剪枝的边分数为 $|A_{\text{norm}}[j,i]| \cdot \text{influence}[j]$，保留到累计分数达到阈值（默认 0.85），再去掉没有边的孤立节点。练习 <code>compute_influence</code>（难度 3，重要性 4）、<code>prune_nodes</code>、<code>prune_edges</code>（难度 3，重要性 3）。最后把这些串成 <code>attribute</code> 函数，用 <code>create_attribution_dashboard</code> 生成与 Anthropic 已发布归因图相同模板的交互式仪表盘，并导出 Neuronpedia 格式的 JSON。示例提示里的事实回忆题上，Gemma 3-1B 拿不准（<code>' Fort'</code> 约 41%，<code>' Austin'</code> 约 37%），图里两个答案在竞争。原文还说明怎样从 HuggingFace 的 gemma-scope-2-1b-it 仓库加载每个特征的激活直方图和最大激活样例，补全仪表盘。
+        </p>
+
+        <h3>4️⃣ 探索电路与干预</h3>
+        <p>学习目标：加载并检查预先算好的归因图及其超节点（supernode）；用零消融检验图所给出的因果结论。</p>
+        <p>
+            这部分换成 <code>circuit-tracer</code> 库（把第 3 部分的核心思想封装成 API），主要研究 Dallas/Austin 两跳事实回忆电路：提示 <code>"Fact: the capital of the state containing Dallas is"</code>（事实：包含 Dallas 的那个州的首府是），需要两跳推理，Dallas 在 Texas，Texas 的首府是 Austin。这个电路在 <a href="07_大模型的生物学.html">07 大模型的生物学</a> 中也有分析。图里有清晰的超节点（一组相关特征）：“capital”和“state”是由提示中这两个词激活的早层 transcoder 特征；“Dallas”表示城市实体；“Texas”包含编码“这个州是 Texas”的中间特征（第一跳）；“Say a capital”泛泛地推高首府类 token；“Say Austin”是专门推高 Austin 的晚层特征（第二跳）。原文提醒，所用 Neuronpedia 标注版本的分组和上面描述不同：其“Texas”超节点由 <code>" Dallas"</code> 位置（位置 9）上的特征组成，包括可能被称为“Dallas”特征的 <code>14_2268_9</code>、<code>16_25_9</code>。
+        </p>
+        <ul>
+            <li>预测并检验消融效果：先写下预测，再把“Say a capital”、“Texas”、“capital”、“state”分别按 −2 倍消融，看“Say Austin”怎样变化、什么取代 Austin 成为最高输出。</li>
+            <li>跨提示特征替换（难度 3，重要性 5）：关掉 Texas 特征、打开从另一提示取来的 California 特征（来自 Oakland/Sacramento 图，测试中先只开第 19 层、位置 10 的特征 9209），看预测是否转向；再用 Shanghai 的激活把 Texas 换成 China。</li>
+            <li>生成中持续干预（难度 2，重要性 3）：把固定位置的干预改成开放的 <code>slice</code>，让干预作用于所有生成的 token。</li>
+        </ul>
+<pre><code>shanghai_interventions = [Intervention(texas_node, -2), Intervention(china_node, 2)]
+svg_shanghai_swap, logits_shanghai_swap = supernode_intervention(
+    replacement_model, dallas_austin_graph, shanghai_interventions,
+    replacements={texas_node.name: china_node},
+)
+</code></pre>
+        <p>
+            附加内容：用 <code>compute_graph_scores</code> 评估图的替换分数和完整性分数；法语 “opposite” 多语言电路（<code>'Le contraire de "petit" est "'</code>）；Gemma IT 的“海盗腔注入”电路；手动实现 <code>map_through_ln</code>、<code>map_through_attn</code>、<code>map_through_mlp</code>，用显式前向追踪算邻接矩阵；以及把 1.3.3 的自动解释用到图节点上。原文指出剪枝后的图通常只有 10 到 50 个活跃 latent 节点，比完整 SAE 或 transcoder 少几个数量级，所以可以对它们跑高质量的解释生成。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 1.5.1 括号平衡分类器</h2>
+        <p><em>原练习集：[1.5.1] Balanced Bracket Classifier（可选，README 最推荐之一）</em></p>
+        <p>
+            在合成的算法任务上训练的模型，内部往往学到干净、可解释的计算。原文说研究算法问题让我们可以练习可解释性、积累直觉，并在已知真值的问题上检验工具和技术；研究玩具语言模型的两个理由是找到在大模型中反复出现的基本电路和模式（motif），以及更好地理解怎样逆向模型。这一套引导你部分地解释一个在括号分类任务上训练的双向模型。
+        </p>
+
+        <h3>1️⃣ 括号分类器</h3>
+        <p>学习目标：理解怎样用 Transformer 做分类；理解怎样用 TransformerLens 的永久 hook 实现特定行为（如屏蔽填充 token）。原文说这一部分主要是打基础，内容很轻。</p>
+        <p>
+            模型只判断一串括号是否平衡。与 GPT 的区别在注意力：GPT 用因果注意力，信息只能向前流；这个模型像 BERT 一样用双向注意力。分类模型的训练方式类似，只是不输出下一个 token 的分布，而是在第 0 个位置输出类别 logits <code>(l0, l1)</code>，分别对应（不平衡，平衡），其他位置的输出丢弃，但这些位置仍是重要中间计算发生的地方。每个序列是 <code>[start]</code>、最多 40 个括号、<code>[end]</code>，再用 <code>[pad]</code> 补齐；算注意力分数时，key 是填充 token 的位置全部屏蔽。数据集一半平衡一半不平衡。架构细节：
+        </p>
+        <ul>
+            <li>正弦位置嵌入（不学习）；<code>d_model</code> 为 56；双向注意力。</li>
+            <li>3 个注意力层和 3 个 MLP；每层 2 个头，<code>d_head</code> = 56 / 2 = 28；MLP 隐藏层 56 个神经元（线性层是方阵）。</li>
+            <li>每个注意力层和 MLP 的输入先做 LayerNorm，所有层之后的残差流上还有一个 LayerNorm（和 GPT 一样）。</li>
+            <li>词表只有 5 个 token：<code>[start]</code>、<code>[pad]</code>、<code>[end]</code>、<code>(</code>、<code>)</code>，嵌入矩阵 $W_E$ 有 5 行。</li>
+        </ul>
+        <p>先手写两种算法解（难度 2，重要性 3）：循环版和向量化版。</p>
+<pre><code>def is_balanced_vectorized(tokens):
+    # start/pad/end -&gt; 0, "(" -&gt; +1, ")" -&gt; -1
+    table = t.tensor([0, 0, 0, 1, -1])
+    change = table[tokens]
+    altitude = t.cumsum(change, -1)
+    # balanced iff the total is zero and no prefix goes negative
+    return (altitude[-1] == 0) and (altitude.min() &gt;= 0)
+</code></pre>
+        <p>
+            模型的解法（原文直接告诉你）：在每个位置 $i$，模型看从当前位置到末尾的后缀 <code>seq[i:]</code>，计算其中右括号数减左括号数，称为位置 $i$ 的“高度”（elevation）。序列不平衡当且仅当 <code>elevation[0]</code> 非零，或者存在某个位置高度小于 0（<code>any(elevation &lt; 0)</code>）。
+        </p>
+
+        <h3>2️⃣ 倒推回残差流</h3>
+        <p>学习目标：理解怎样做 logit 归因；理解怎样从模型末端倒推，找出对最终分类概率最重要的部件。这是第一次在练习中处理 LayerNorm。</p>
+        <p>分类头有三步：最终 LayerNorm、反嵌入、softmax。逐步倒推：</p>
+        <ul>
+            <li>穿过 softmax：两个元素的 softmax 等于 logit 差的 sigmoid，$P(\text{unbalanced}) = \text{sigmoid}(\text{logit}_0 - \text{logit}_1)$。</li>
+            <li>穿过线性层：<code>W_U</code> 形状 <code>(d_model, 2)</code>，所以最终 LayerNorm 输出应指向的方向是 <code>W_U[:, 0] - W_U[:, 1]</code>（练习 <code>get_post_final_ln_dir</code>，难度 1）。</li>
+            <li>穿过 LayerNorm（难度 4，重要性 3）：LayerNorm 非线性，这里用线性回归拟合它的输入到输出（<code>get_ln_fit</code>），把它近似成矩阵 $L_{final}$，再把方向乘回去，得到最终 LayerNorm 之前的“不平衡方向” <code>pre_final_ln_dir</code>。</li>
+        </ul>
+<pre><code>def get_pre_final_ln_dir(model, data):
+    post_final_ln_dir = get_post_final_ln_dir(model)
+    final_ln_fit = get_ln_fit(model, data, layernorm=model.ln_final, seq_pos=0)[0]
+    final_ln_coefs = t.from_numpy(final_ln_fit.coef_).to(device)
+    return final_ln_coefs.T @ post_final_ln_dir
+</code></pre>
+        <p>
+            然后把残差流写成 10 个部件之和：嵌入（位置加词表）、0.0、0.1、MLP0、1.0、1.1、MLP1、2.0、2.1、MLP2（练习 <code>get_out_by_components</code>，难度 3，重要性 2）。对每个部件，看它写到位置 0 的向量在不平衡方向上的点积（减去平衡样本上的均值），画直方图：如果某部件在不平衡输入上的点积明显高于平衡输入，它就对分类重要（难度 2，重要性 4）。再把失败类型分开：总高度不为零的失败、某处高度为负的失败（难度 3），并忽略以右括号开头的序列，因为它们可以立即判为不平衡。
+        </p>
+
+        <h3>3️⃣ 总高度电路</h3>
+        <p>学习目标：练习把特有的注意力模式和人能理解的算法联系起来，推断模型行为；理解怎样把 MLP 看作一组神经元。这是第一次在练习中处理 MLP，原文说这一部分在编码和概念上都有挑战。</p>
+        <ul>
+            <li>2.0 的注意力（难度 2）：对以左括号开头的序列，query 为位置 0 的 <code>[start]</code> 时，2.0 几乎只注意位置 1，相当于把位置 1 的残差向量乘上 $W_{OV}$ 搬到位置 0。</li>
+            <li>2.0 之前的不平衡方向（难度 2，重要性 3）：把不平衡方向经 2.0 的 OV 矩阵和第 2 层之前的 LayerNorm 倒推回去（<code>get_pre_20_dir</code>），再看前面各部件在位置 1 写入的向量在这个方向上的大小。</li>
+            <li>MLP 作为键值对：MLP 输出可写成 $f(x^T W^{in})W^{out}$，即每个神经元的激活乘上它的输出向量再求和。练习 <code>get_out_by_neuron</code>（难度 4，重要性 4）求每个神经元写入残差流的向量，再找出对 2.0 最重要的神经元，观察它们随左括号比例的变化。原文提醒深入到网络内部后“单一方向捕捉大部分意义”的假设越来越可疑。</li>
+            <li>0.0 的注意力与 OV 电路：从输入端往前推，用 hook 取 query 和 key（难度 2），用激活修补把 0.0 的 query 换成全左括号序列的值、key 换成全左和全右括号的均值。位置 1 近似均匀地注意后缀中所有位置，写入的向量近似为左括号和右括号对应向量的加权平均；验证练习（难度 3）计算 $v_L$ 与 $v_R$（经 LayerNorm 拟合和 $W_{OV}^{0.0}$ 后）的余弦相似度。</li>
+        </ul>
+<pre><code>W_OV = model.W_V[0, 0] @ model.W_O[0, 0]
+layer0_ln_fit = get_ln_fit(model, data, layernorm=model.blocks[0].ln1, seq_pos=None)[0]
+layer0_ln_coefs = t.from_numpy(layer0_ln_fit.coef_).to(device)
+v_L = embedding(model, tokenizer, "(") @ layer0_ln_coefs.T @ W_OV
+v_R = embedding(model, tokenizer, ")") @ layer0_ln_coefs.T @ W_OV
+print(f"Cosine similarity: {t.cosine_similarity(v_L, v_R, dim=0).item():.4f}")
+</code></pre>
+        <p>原文对总高度电路的总结：</p>
+        <blockquote>Head 0.0 pays attention uniformly to the suffix following each token, tallying up the amount of open and close parens that it sees and writing that value to the residual stream. ... The MLPs in residual stream 1 then operate nonlinearly on this tally ... Head 2.0 copies this signal to residual stream 0, where it then goes through the classifier and leads to a classification as unbalanced.</blockquote>
+        <p>中文：0.0 均匀注意每个 token 之后的后缀，清点看到的左右括号数，把这个值写入残差流，于是在位置 1 写入一个表示总高度的向量；位置 1 上的 MLP 对这个计数做非线性运算，写出区分“总高度为零”和“非零”的向量；2.0 把这个信号复制到位置 0，经分类器得出“不平衡”。</p>
+        <figure><img src="https://raw.githubusercontent.com/ARENA-education/ARENA_img/main/misc/bracket-transformer-attribution-2.png" alt="bracket total elevation circuit"><figcaption>图：总高度电路，粗黑线和橙色虚线（跳连）是构成电路的路径，标注了 0.0、MLP 层和 2.0 各自的作用及证据（引自 ARENA 1.5.1）</figcaption></figure>
+        <p>
+            附加练习：检测“某处为负”的失败（多数 query 位置也近似均匀地注意其后所有 token，所以位置 $i$ 写入的向量近似为后缀平均，$h(x)_i \approx \frac{1}{n-i+1}\sum_{j=i}^n x_j^T L^T W_{OV}^{0.0}$）；对抗攻击，模型在数据集上大约每一万个样本错一个，原文建议利用对模型的理解手工构造一个被误分类的输入（提示指向注意力模式右下角奇怪的斑块）；找出把以右括号开头的序列判为不平衡的部件。建议的后续项目包括训练并解释更多 LeetCode 式算法任务，以及复现因果擦除和 Python docstring 电路。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 1.5.2 Grokking 与模加法</h2>
+        <p><em>原练习集：[1.5.2] Grokking &amp; Modular Arithmetic（可选）</em></p>
+        <p>
+            目标是逆向一个在模加法上训练的单层 Transformer，它的电路用到离散傅里叶变换和三角恒等式。练习改编自 Neel Nanda 和 Tom Lieberum 的原始 notebook（以及配套论文）。原文推荐 Welch Labs 的视频 The most complex model we actually understand 作为可选的直观入门。
+        </p>
+        <p>
+            问题设置：单层 Transformer，无 LayerNorm，学习的位置嵌入，$d_{model} = 128$、$n_{heads} = 4$、$d_{head}=32$、$d_{mlp}=512$。任务是模素数 $p = 113$ 的加法，输入是三个 token <code>[x, y, =]</code>，$d_{vocab}=114$（0 到 $p-1$ 的整数加上 <code>=</code>），预测 <code>=</code> 之后的 $(x+y) \bmod p$。全批量训练，30% 的数据作训练集，AdamW，$lr=10^{-3}$，权重衰减很大（$wd=1$）。
+        </p>
+        <figure><img src="https://raw.githubusercontent.com/ARENA-education/ARENA_img/main/misc/basic_schematic.png" alt="modular addition model schematic"><figcaption>图：模加法模型示意，输入 x、y、= 三个 token，单层注意力加 MLP（引自 ARENA 1.5.2）</figcaption></figure>
+        <p>原文先给出算法概要：</p>
+        <ul>
+            <li>把 $x, y \in \{0, \ldots, p-1\}$ 映射为 $\sin(\omega x)$、$\cos(\omega x)$、$\sin(\omega y)$、$\cos(\omega y)$，其中 $\omega = \omega_k = \frac{2k\pi}{p}$。大部分频率被丢掉，只保留少数几个关键频率（key frequencies）。</li>
+            <li>用注意力和 ReLU 以“取巧”的方式算出二次项 $\cos(\omega x)\cos(\omega y)$、$\sin(\omega x)\sin(\omega y)$、$\cos(\omega x)\sin(\omega y)$、$\sin(\omega x)\cos(\omega y)$，从而得到线性组合：</li>
+        </ul>
+        $$\cos(\omega (x+y)) = \cos(\omega x) \cos(\omega y) - \sin(\omega x) \sin(\omega y)$$
+        $$\sin(\omega (x+y)) = \sin(\omega x) \cos(\omega y) + \cos(\omega x) \sin(\omega y)$$
+        <ul>
+            <li>输出 logit 向量的每个元素 $\text{logits}[z]$ 是以下形式项的线性组合：</li>
+        </ul>
+        $$\cos(\omega (x + y - z)) = \cos(\omega (x+y)) \cos(\omega z) + \sin(\omega (x+y)) \sin(\omega z)$$
+        <p>（笔者整理：当 $z \equiv x+y \pmod p$ 时每个频率的余弦都取最大值 1，各频率的贡献在正确答案处叠加，其他 $z$ 处则相互抵消一部分。原文把“为什么这个算法有效”留作思考题。）</p>
+
+        <h3>1️⃣ 周期性与傅里叶基</h3>
+        <p>学习目标：理解问题陈述、模型架构以及任何可能解的函数形式；了解一维和二维傅里叶基，以及怎样用它表示任意函数。</p>
+        <p>
+            因为输入只有 $p^2 = 113^2 = 12769$ 种，可以把所有序列放进一个 batch 一次跑完。练习先取出关键激活（第 2 个位置的注意力、最后位置 MLP 激活前后的值），回答几个关于函数形式的问题：位置 0 和 1 的位置嵌入是对称的（加法可交换），位置 2 对自己的注意力几乎为 0，所以 $A_{2\to 1}^h = 1 - A_{2\to 0}^h$。推导函数形式（难度 4，重要性 4，纯数学）后，定义有效权重矩阵：
+        </p>
+<pre><code>W_logit = W_out @ W_U
+W_OV = W_V @ W_O
+W_neur = W_E @ W_OV @ W_in
+W_QK = W_Q @ W_K.transpose(-1, -2)
+W_attn = final_pos_resid_initial @ W_QK @ W_E.T / (cfg.d_head**0.5)
+</code></pre>
+        <p>
+            在词表基下画注意力、神经元激活和 $W_{neur}$、$W_{attn}$，处处可见周期性，说明词表基可能不是最自然的基。一维傅里叶基由常数波和周期整除 $p$ 的余弦、正弦波组成（频率为 $2\pi/p$ 的整数倍），例如
+        </p>
+        $$\cos (\omega_k \vec{\textbf{x}}) = \big(1,\; \cos (\omega_k),\; \cos (2 \omega_k),\; \ldots,\; \cos ((p-1) \omega_k)\big)$$
+        <p>
+            周期函数在傅里叶基下是稀疏的。二维傅里叶基的每一项是两个一维基向量的外积，包含常数项、线性项（只依赖 x 或 y 的余弦正弦）和二次项（x 与 y 的乘积项）。练习实现 <code>make_fourier_basis</code>（难度 3）、一维变换、二维基和二维变换。对激活做二维傅里叶变换后结果极其稀疏，只有少数格子（大多在第 0 行或第 0 列，即常数和线性项）非零。原文有一段旁注：在 batch 维上换基很不寻常，注意力 softmax、ReLU、最终 softmax 以及与注意力模式的逐元素乘法这四个操作对 batch 维不是线性的，ReLU 变成“转回原基、逐元素 ReLU、再转回傅里叶基”。
+        </p>
+<pre><code>def fft2d(tensor):
+    # fourier_basis[i] is the i-th basis vector
+    return einops.einsum(tensor, fourier_basis, fourier_basis, "px py ..., i px, j py -&gt; i j ...")
+</code></pre>
+
+        <h3>2️⃣ 电路与特征分析</h3>
+        <p>学习目标：用一维和二维傅里叶基说明模型的激活和有效权重在傅里叶基下高度稀疏；把这些观察变成关于算法的具体假设，并用多种方式验证。</p>
+        <ul>
+            <li>嵌入：在傅里叶基下画 $W_E$，它只保留少数关键频率对应的信息（代码中的关键频率为 14、35、41、42、52）。</li>
+            <li>神经元产生二次项：每个神经元的激活是常数项与某一个特定频率的线性项、二次项的线性组合，例如第一个神经元只与常数和 $k=42$ 有关。练习计算平均平方系数（难度 2），看到只有少数频率的常数、线性、二次项非零。原文说明二次项的计算比较绕：模型同时用 ReLU 激活和逐元素乘积（注意力概率乘 value）来得到乘积项，并用一个回归练习（难度 4，重要性 1）验证一维和二维傅里叶分量的线性函数可以被一维分量线性函数的 ReLU 很好地近似。</li>
+            <li>神经元按频率聚类（难度 4，重要性 3）：给每个神经元找到它最敏感的频率，按频率分簇（不属于任何簇的放进第六簇，频率记为 −1）；验证练习（难度 4，重要性 4）用投影说明每簇神经元主要由该频率解释。</li>
+            <li>logit 计算：$W_{logit}=W_{out}W_U$ 抵消掉除 $\cos(\omega(x+y))$、$\sin(\omega(x+y))$ 以外的所有二维傅里叶分量，再分别乘上 $\cos(\omega z)$、$\sin(\omega z)$ 相加。把神经元激活和 logits 都变到二维傅里叶基，可以看到 logits 里线性项和常数项基本消失，二次项远大于神经元激活中的。练习只保留二次项验证（难度 3，重要性 3）。</li>
+        </ul>
+<pre><code>def project_onto_direction(batch_vecs, v):
+    # component of each vector along the unit vector v
+    components_in_v_dir = einops.einsum(batch_vecs, v, "n ..., n -&gt; ...")
+    return einops.einsum(components_in_v_dir, v, "..., n -&gt; n ...")
+</code></pre>
+
+        <h3>3️⃣ 训练过程中的分析</h3>
+        <p>学习目标：理解跟踪指标随时间变化，可以说明某些电路何时形成；研究模型权重矩阵奇异值随时间的演化。原文说这部分可选，观察比其他部分更具推测性，更多是展示论文结果。</p>
+        <p>
+            检查点每 100 个 epoch 一个，从 0 到 50K（前面用的模型取自 40K）。概括：模型在相变之前很早就开始学习泛化算法，并且发展得相当平滑；排除损失（excluded loss）显示模型在用 $\cos(w(x+y))$ 方向“更高效地记忆”，原文称这清楚地否定了“grokking 是损失地形上的随机游走、最后碰巧走对”的假设。
+        </p>
+        <ul>
+            <li>排除损失（难度 3，重要性 4）：在训练集上删去 logits 中对应 $\cos(w(x+y))$、$\sin(w(x+y))$ 的分量后的损失，每个关键频率一个。关键观察：排除损失（尤其频率 14）在 grokking 之前很久就开始上升，幅度远大于删掉一个随机方向。</li>
+            <li>嵌入的演化：每个 epoch 嵌入的各一维傅里叶分量范数（<code>fourier_embed</code>），以及 $W_E$ 的 SVD；grokking 之前模型已在突出少数分量，但多数分量仍不小。</li>
+            <li>三角分量的形成：logits 很早就具备“只保留三角方向、抵消其余”的能力，神经元直到接近 grokking 才出现显著的二次项和三角分量。原文推测电路可能倾向于“倒序”形成。</li>
+            <li>可交换性：模型很快学会不注意最后一个位置，但直到 grokking 才学会对位置 0 和 1 给相等的注意力（约 43K epoch 处还有一次没研究过的奇怪相变）。</li>
+            <li>三角损失：只保留关键频率三角方向的 logits 时，全数据上的三角损失与训练集上的训练损失完全相同，说明这些维度只用于对训练集和测试集一视同仁的通用算法，而不是记忆。</li>
+            <li>权重平方和的几个阶段：0 到 1K 用神经元记忆（$W_{in}$、$W_{out}$ 总权重大增）；1K 到 8K 把计算平摊到各矩阵，总和都在下降；8K 到 13K grokking，权重迅速下降，推测模型已能用三角方向，清理掉用于记忆的其他方向。</li>
+        </ul>
+        <p>
+            附加讨论（Neel Nanda 的观点）：grokking 发生在“学习通用算法表现出相变”并且“给的数据量刚好够相变仍然发生”的时候；相变可能出现在模型学习任何一个需要不同部分以非线性方式协作的泛化电路时。局限：玩具模型只需少数电路；模型过度参数化（学到很多做大致相同事情的冗余神经元）；只研究了权重衰减这一种正则化。与对齐的关系：相变意味着训练或放大模型时能力可能快速跃升，出现预警信号的可能性更小。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 1.5.3 OthelloGPT</h2>
+        <p><em>原练习集：[1.5.3] OthelloGPT（可选）</em></p>
+        <p>
+            背景是 Kenneth Li 等人的 ICLR 2023 Oral 论文 Emergent World Representations：用随机生成的黑白棋（Othello）对局（每步从合法着法中均匀随机选择）训练模型预测下一步。主要结论是 Othello-GPT 学到了涌现的世界表示：从未被告知棋盘状态，只被要求预测下一步，却学会在每一步计算棋盘状态（目标是下合法着法而不是好着法）。论文的两项证据：用非线性探针（两层 ReLU MLP）从残差流中提取棋盘状态；用探针做因果干预（梯度下降让探针输出新棋盘状态），模型随后在新棋盘上走合法着法，即使在旧棋盘上不合法、即使新棋盘不可能通过合法对局到达。练习中的“我”指主要研究者 Neel Nanda，他的贡献是把这些技术大幅简化：模型学到的是线性的世界表示，可以线性地因果干预；它表示的是“这一格是我的/对方的棋子”，而不是“黑子/白子”，因为模型同时为黑白双方走棋，从它的角度看前者更自然。
+        </p>
+        <figure><img src="https://res.cloudinary.com/lesswrong-2-0/image/upload/f_auto,q_auto/v1/mirroredImages/nmxzr2zsjNtjaHh7x/eoi5u5fodorjswnmbqk7" alt="OthelloGPT board and probe"><figcaption>图：OthelloGPT 练习开头的示意图（引自 ARENA 1.5.3，原图来自 Neel Nanda 的 LessWrong 文章）</figcaption></figure>
+
+        <h3>1️⃣ 模型设置与线性探针</h3>
+        <p>学习目标：理解 Othello-GPT 的基本结构；熟悉棋盘可视化等基本工具。</p>
+        <p>
+            Neel 对论文的看法：探针给出的是提示性而非决定性的证据，训练探针提取特征时很容易骗自己，要区分探针只是读出特征还是自己在计算特征；因果干预更有说服力，但论文的技术“太强了”。他的判断是网络形成可分解的线性表示：模型算出一组有用的特征，表示为残差流中的方向；按这个框架，线性探针能找到的特征模型已经算好了，如果下游电路用到它，就应该能用线性干预（只改这个方向上的坐标）影响行为。
+        </p>
+        <p>
+            技术细节：对局有 60 步（8×8 棋盘，中间 4 格开局已占），模型上下文长度为 59，输入 <code>moves[0:59]</code> 预测 <code>moves[1:60]</code>。训练数据是随机合法着法；一步合法当且仅当它在横、竖或斜线上夹住对方棋子并把它们翻成己方颜色，所以预测合法着法并不简单。用交叉熵训练，模型的分布收敛到在所有合法下一步上均匀分布。模型 8 层、<code>d_model=512</code>、<code>d_mlp=2048</code>。取 50 局作为“焦点对局”（focus games），缓存全部激活。
+        </p>
+        <p>
+            探针（来自 MI Dynalist 笔记的定义）：给网络一批有某特征和没有该特征的输入，在某个激活上训练一个线性映射区分两者。原文说当初的探针训练有点乱，有三种模式：<code>full_linear_probe[0]</code>（黑方走棋即奇数步）、<code>[1]</code>（白方走棋即偶数步）、<code>[2]</code>（所有步），形状都是 <code>(d_model, 8, 8, 3)</code>，类别为 <code>[empty, white, black]</code>，在第 6 层（共 8 层）的 <code>resid_post</code> 读取。
+        </p>
+        <ul>
+            <li>探针余弦相似度（难度 3，重要性 3）：比较奇数步和偶数步的“黑减白”方向。原文的关键结论是探针学到的是“我的/对方的”而不是“黑/白”，所以奇数步和偶数步的这两个方向应当近似相反（两种步里“我的”对应的颜色正好对调）；据此把它们合并换成“我的/对方的”基：新探针的“对方”方向是黑方走棋时的白方向与白方走棋时的黑方向的平均。在 50 局上算准确率，探针在角落附近较差。</li>
+            <li>定义探针方向（难度 2，重要性 4）：每格探针有 3 个向量，但 softmax 平移不变，只有两个自由度。</li>
+            <li><code>apply_scale</code>（难度 3，重要性 3）：在某位置沿 <code>flip_dir</code> 方向翻转并缩放残差流，从而改变模型对某一格的“认识”，观察合法着法预测随之改变。</li>
+        </ul>
+<pre><code># blank(0) - (theirs(1) + mine(2)) / 2
+blank_probe = linear_probe[..., 0] - linear_probe[..., 1] * 0.5 - linear_probe[..., 2] * 0.5
+# mine(2) - theirs(1)
+my_probe = linear_probe[..., 2] - linear_probe[..., 1]
+</code></pre>
+
+        <h3>2️⃣ 寻找模块化电路</h3>
+        <p>学习目标：在多个层上使用线性探针；在给定序列位置做激活修补来检验假设。</p>
+        <p>
+            跨层探测：探针输入是前七层在残差流中的累加，所以可以把每个注意力层和 MLP 层的输出投影到探针方向上，看棋盘信息在哪里、何时被写入（难度 3，重要性 4，原文称 logit 归因是最重要的工具之一）。读神经元权重：有了探针就有了一组可解释的残差流方向，可以读出任意神经元输入和输出权重的含义。以 L5N1393 为例，把它的输入权重投影到归一化的 blank 探针和 my 探针上（难度 3，重要性 4）。探针方向合起来秩为 124（128 个方向减去中间 4 格的 blank 方向），略少于 <code>d_model=512</code> 的 1/4；输入权重被探针很好地解释，输出权重只是部分被解释。看第 3 层激活标准差最大的神经元，验证这一层的神经元在直接计算“是否空格”，并把它直接送进反嵌入，提高空格的 logit（空格是合法着法的必要条件）。
+        </p>
+        <p>
+            激活修补：构造只差一个关键细节的干净与损坏对局，取一局并把最近一步从 E0 改为 C0，这使 F0 对白方从合法变为不合法。指标是 F0 的 log 概率的线性函数，损坏时为 0、原始时为 1（难度 2，重要性 4）；修补函数只修补最后一个位置（难度 4，重要性 4），因为两局之前的着法相同、模型是自回归的。
+        </p>
+<pre><code>def patching_metric(patched_logits):
+    patched_log_probs = patched_logits.log_softmax(dim=-1)
+    return (patched_log_probs[0, -1, F0_index] - corrupted_F0_log_prob) / (original_F0_log_prob - corrupted_F0_log_prob)
+
+def patch_final_move_output(activation, hook, clean_cache):
+    activation[:, -1, :] = clean_cache[hook.name][:, -1, :]
+    return activation
+</code></pre>
+
+        <h3>3️⃣ 神经元可解释性深入</h3>
+        <p>学习目标：用直接 logit 归因理解神经元的输出权重怎样直接影响预测；用基于 SVD 的方法评估神经元输入/输出行为有多少被某个子空间捕捉。原文说这部分的精神是练习可以搬到任何神经元上的标准做法，结尾作者自己仍很困惑、留有许多悬而未决的线索。</p>
+        <ul>
+            <li>直接 logit 归因 <code>w_out @ W_U</code>：L5N1393 推高 C0（符合之前关于对角模式的假设），也推高 D1，这出乎意料。假设“C0 和 D1 的反嵌入高度对齐”，计算余弦相似度（难度 2）发现接近 0，基本正交，假设不成立。</li>
+            <li>反嵌入子空间解释的方差（难度 3）：约 1/4。随后分析一局具体对局里发生了什么（难度 3，重要性 4，原文称这个练习检验的是提出新假设的能力）。</li>
+            <li>最大激活数据集：简单而“笨”的技术，受到过批评（The Interpretability Illusion 发现不同数据集给出的样例各指向不同解释）；这里空格出现频率高，是要注意的数据集定义问题。用“我的 = +1、对方 = −1”的张量取平均看“我的与对方”。批量分析更多神经元（难度 3，重要性 4）。</li>
+            <li>谱图（spectrum plot）：在整个数据分布上画神经元激活的直方图，按是否符合假设的棋盘配置分类。结果显示假设没有完全刻画这个神经元：几乎所有高激活都有假设的配置，但一些低激活也有。原文称这暴露了最大激活数据集的弱点，后续两个练习（难度 5 和 4）开放探索。</li>
+        </ul>
+
+        <h3>4️⃣ 训练探针</h3>
+        <p>学习目标：搭建并训练线性探针；同时训练多个探针并记录到 Weights &amp; Biases。原文说这部分更多是标准机器学习技术。</p>
+        <p>
+            练习补全训练代码（难度 4，重要性 3）：<code>get_board_states</code> 比带合法着法的版本快约 25 倍，1 万局约 5 秒就能预先算好所有棋盘状态；附加练习同时训练三种模式并互相检验泛化。
+        </p>
+        <p>
+            附加部分直接取自 Neel 的第二篇 OthelloGPT 文章，列出他想看到的后续方向：为什么值得研究玩具模型（他认为阻碍逆向最强模型的是概念框架等因素，而“这不是关于世界模型”）；寻找模块化电路，即从某个中间激活开始或结束的电路，与端到端电路相对；神经元可解释性与叠加，他认为当前 Transformer 机械可解释性最大的开放问题是理解占参数 2/3 以上的 MLP 层，Othello-GPT 可以用来实证检验 <a href="03_叠加的玩具模型.html">Toy Models of Superposition</a> 的预测（例如似乎有一个神经元表示 C0 为空、D1 为对方、E2 为己方，即能否在 C0 落子夹住对方）；一个案例说明神经元和探针可能让人困惑，第 4 层神经元的输出权重看似都在算空格，实际是 blank 探针与反嵌入高度相关（余弦相似度约 0.8 到 0.9）；以及“Transformer 电路实验室”，例如残差流中是否有内存管理（找输入输出向量余弦相似度高度为负、即擦除信息的神经元）。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 1.5.4 叠加玩具模型与稀疏自编码器</h2>
+        <p><em>原练习集：[1.5.4] Toy Models of Superposition &amp; Sparse Autoencoders（可选）</em></p>
+        <p>
+            叠加（superposition）是理解 Transformer 的关键概念。Neel Nanda 词汇表中的定义：模型在 $n$ 维激活空间中表示多于 $n$ 个特征，特征仍对应方向，但可解释方向的集合比维数多。原因是世界上的特征比模型的维数多，无法一一对应。这一套专注于叠加理论，较少涉及在真实语言模型上的 SAE 应用（那是 1.3.3 和 1.4.2 的内容）；1.3.3 说速通本套第 1 部分和第 5 部分前半就够作为它的前置。阅读材料是 200 COP in MI: Exploring Polysemanticity and Superposition（约 15 分钟）和 Neel 的叠加笔记（约 10 分钟）。练习开头列了一组自测问题，比如什么是特权基（privileged basis），为什么神经元激活默认是特权的而残差流不应该是。练习主线跟随本合集 <a href="03_叠加的玩具模型.html">03 叠加的玩具模型</a> 论文的 Demonstrating Superposition 一节往后的顺序。
+        </p>
+
+        <h3>1️⃣ 非特权基中的叠加</h3>
+        <p>学习目标：理解叠加的概念及它怎样帮模型表示更多特征；理解叠加与多义性（polysemanticity）的区别。</p>
+        <p>论文中的瓶颈叠加（bottleneck superposition）玩具模型：取 5 维输入 $x$，映射到 2 维，再用第一个矩阵的转置映回 5 维，加偏置和 ReLU：</p>
+        $$h = W x, \qquad x' = \operatorname{ReLU}(W^T h + b)$$
+        <p>
+            五个特征在 0 到 1 之间均匀采样。每个特征有重要性（importance，对降低损失有多大用）和稀疏度（sparsity，在输入中缺席的频率）。重要性是加权 MSE 损失中的系数，$L = \sum_x \sum_i I_i (x_i - x_i')^2$；稀疏度是对应元素为零的概率，影响数据生成。练习实现 <code>forward</code>、<code>generate_batch</code>、<code>calculate_loss</code>，一次训练多个实例（instances）以比较不同稀疏度。
+        </p>
+        <p>
+            解读图（难度 3，重要性 4）：从左到右稀疏度增加（最右特征概率为 2%）。没有稀疏时模型最多忠实表示 2 个特征，于是只表示两个最重要的，正交地放在二维里，其余 3 个置零。高稀疏时出现五边形结构：大多数时候最多一个特征活跃，干扰（interference）变小，把二维点投影到五个方向上恢复特征时，特征 $i$ 出现时投影基本只反映它自己。可选的“相关性”小节：负相关的特征更容易叠加，因为同时活跃的情况少；原文举例“这是排好序的 Python 列表”和“这是一段青少年吸血鬼言情小说”大概率负相关。
+        </p>
+
+        <h3>2️⃣ 特权基中的叠加</h3>
+        <p>学习目标：理解神经元叠加与瓶颈叠加（计算叠加与表示叠加）的区别。</p>
+        <p>
+            上面的模型没有特权基：任取正交矩阵 $O$，$W' = OW$ 给出完全相同的模型，因为 $(OW)^T(OW) = W^T W$。这类似词嵌入和残差流。要研究有神经元的表示（Transformer 的 MLP 层），最简单的办法是在隐藏层加 ReLU：
+        </p>
+        $$h = \operatorname{ReLU}(W x), \qquad x' = \operatorname{ReLU}(W^T h + b)$$
+        <p>
+            练习 <code>NeuronModel</code> 后解读图（难度 3，重要性 4）：稀疏度很低时没有叠加，每个特征由一个神经元忠实表示或干脆不表示，即纯单义性；稀疏度升高后出现多义神经元。原文指出这个模型的问题是它在重建恒等函数（线性），用不着 ReLU，会想尽办法绕开它。所以“叠加中的计算”小节训练模型计算绝对值，数据改为 $[-1, 1]$ 上采样；$\operatorname{abs}(x) = \operatorname{ReLU}(x) + \operatorname{ReLU}(-x)$ 是最简单的非线性函数之一，模型必须用到 ReLU（练习 <code>NeuronComputationModel</code>）。附加内容复现论文的非对称叠加模式（asymmetric superposition motif）：一个神经元以不同幅度存两个特征。
+        </p>
+
+        <h3>3️⃣ 特征几何</h3>
+        <p>学习目标：了解维度（dimensionality），它衡量一个特征分到了多少比例的维度。</p>
+        <p>
+            实验设所有特征同等重要、只改变稀疏度（200 个特征、20 维隐藏层、20 个实例）。表示的特征数可以用 $\|W\|_F^2 = \sum_j \|W_{[:, j]}\|^2$ 估计，因为每个嵌入向量表示了特征时平方范数约为 1，没表示时约为 0；再画“每个特征的维数” $m/\|W\|_F^2$。原文说特征会把自己组织成五边形、四面体这样的几何结构。单个特征的维度为
+        </p>
+        $$D_i = \frac{\|W_i\|^2}{\sum_j (\hat{W}_i \cdot W_j)^2}$$
+<pre><code>def compute_dimensionality(W):              # W: [n_inst, d_hidden, n_features]
+    W_norms = W.norm(dim=1, keepdim=True)
+    numerator = W_norms.squeeze() ** 2
+    W_normalized = W / (W_norms + 1e-8)
+    denominator = einops.einsum(W_normalized, W, "i h f1, i h f2 -&gt; i f1 f2").pow(2).sum(-1)
+    return numerator / denominator
+</code></pre>
+
+        <h3>4️⃣ 叠加与深度双下降</h3>
+        <p>学习目标：理解并刻画深度双下降（deep double descent）现象；把双下降的各阶段与叠加联系起来；练习以较少引导的方式复现论文。原文说这更像有引导的复现，可作为可选扩展。</p>
+        <p>
+            复现 Anthropic 关于双下降与叠加的论文。理论大致是：模型先学到记忆解，把数据点放在叠加中，训练损失低、测试损失高；之后学到泛化解，把特征放在叠加中，训练和测试损失都低；损失尖峰出现在两者转换时。做法是用第一部分的玩具模型，生成一个随机 batch 并在整个训练中只用它，batch 大小称为数据量（data size），看数据量变化时会发生什么。参考代码为小数据量和大数据量各用一个模型，避免把小数据量全部补齐到 500。
+        </p>
+
+        <h3>5️⃣ 玩具模型中的稀疏自编码器</h3>
+        <p>学习目标：了解 SAE 及其怎样帮助解开叠加中的特征；在前面的玩具模型上训练自己的 SAE 并可视化特征重建过程；理解重要的训练策略（如重采样）和架构变体（Gated、JumpReLU）。</p>
+        <p>
+            SAE 由 <a href="04_走向单义性.html">Towards Monosemanticity</a>（2023）推广，现已是机械可解释性最常用的工具之一。这里在 <code>ToyModel</code> 的隐藏激活上训练 SAE（注意与论文不同，论文在 MLP 层上训练，这里在非特权基上），提取特征并验证它们就是模型学到的特征。记号：SAE 隐藏激活称为 SAE latent，<code>d_sae</code> 是隐藏层大小，要求 <code>d_sae &gt;= n_features</code>。练习依次实现 <code>__init__</code>、<code>W_dec_normalized</code>、<code>generate_batch</code> 和 <code>forward</code>（难度 3，重要性 5）：
+        </p>
+<pre><code>def forward(self, h):
+    h_cent = h - self.b_dec
+    acts_pre = einops.einsum(h_cent, self.W_enc, "batch inst d_in, inst d_in d_sae -&gt; batch inst d_sae") + self.b_enc
+    acts_post = F.relu(acts_pre)
+    h_reconstructed = einops.einsum(acts_post, self.W_dec_normalized,
+                                    "batch inst d_sae, inst d_sae d_in -&gt; batch inst d_in") + self.b_dec
+    L_reconstruction = (h_reconstructed - h).pow(2).mean(-1)
+    L_sparsity = acts_post.abs().sum(-1)
+    loss = L_reconstruction + self.cfg.sparsity_coeff * L_sparsity
+    return {"L_reconstruction": L_reconstruction, "L_sparsity": L_sparsity}, loss, acts_post, h_reconstructed
+</code></pre>
+        <figure><img src="https://raw.githubusercontent.com/chloeli-15/ARENA_img/main/img/sae-diagram-2.png" alt="sparse autoencoder diagram"><figcaption>图：稀疏自编码器示意，编码到更宽的稀疏隐藏层再解码重建输入（引自 ARENA 1.5.4）</figcaption></figure>
+        <p>
+            训练时每步优化前做神经元重采样，并提到 Anthropic 2024 年 2 月更新发现把 Adam 的 $\beta_1$ 设为 0 能减少死特征。重采样：论文发现训练中有些 latent 不再激活，重采样这些死 latent 能让模型表示更多特征。<code>resample_simple</code>（难度 4，重要性 3）为每个死 latent 生成随机单位向量，设为新的解码器和编码器权重（编码器乘 <code>resample_scale</code>）；<code>resample_advanced</code>（难度 5，重要性 2）按重建损失加权采样输入来重新初始化，原文说在二维里看不出多少改进，高维时收益明显。
+        </p>
+        <p>
+            Gated SAE（DeepMind）出于两点观察：特征经验上“想要是二值的”（比如“这是不是关于篮球”）；SAE 有收缩（shrinkage）问题，L1 作为 L0 的代理，和重建项目标冲突，把激活压小。Gated SAE 把“是否激活”的阶跃门和“激活多大”的幅度项解耦：
+        </p>
+        $$\tilde{\mathbf{f}}(\mathbf{x}) := \mathbf{1}[\mathbf{W}_{\text{gate}}(\mathbf{x}-\mathbf{b}_{\text{dec}})+\mathbf{b}_{\text{gate}}&gt;0] \odot \operatorname{ReLU}(\mathbf{W}_{\text{mag}}(\mathbf{x}-\mathbf{b}_{\text{dec}})+\mathbf{b}_{\text{mag}})$$
+        <p>
+            练习实现 Gated SAE（难度 5，重要性 4）并演示它的优势（难度 4）。JumpReLU SAE 有类似优点，但不需要 Gated SAE 那样为辅助损失做一次 detach 的前向：激活为 $\operatorname{JumpReLU}_\theta(z) = z H(z - \theta)$，$\theta$ 是每个 latent 的阈值向量；原文注明只用 JumpReLU 不能解决收缩，JumpReLU 加 L0 惩罚才能。阶跃函数不可微，用直通估计器（straight-through estimator）定义导数：用在跳变处很陡的累积分布函数近似阶跃，$\frac{\partial}{\partial \theta} H(z-\theta) := -\frac{1}{\varepsilon} K\left(\frac{z-\theta}{\varepsilon}\right)$，$K$ 是宽度为 1、以 0 为中心的矩形核；原文给了函数图像和概率两种直觉。用 L0 而非 L1 的好处是可以瞄准特定稀疏度，例如惩罚 L0 与目标值之差的平方。练习实现自定义梯度函数（难度 3）和 JumpReLU SAE（难度 5，重要性 4，<code>THETA_INIT = 0.1</code>）。
+        </p>
+<pre><code>class JumpReLU(t.autograd.Function):
+    # forward:  J(z, theta, eps) = z * 1[z &gt; theta]
+    # backward: dJ/dtheta := -theta/eps * K((z - theta)/eps)
+    #           dJ/dz     := 1[z &gt; theta]
+    # K is the rectangle kernel of width 1 centered at 0: K(u) = 1[|u| &lt; 1/2]
+    ...
+</code></pre>
+        <p>
+            附加部分建议的复现与探索：Toy Models of Superposition 中本练习未覆盖的“叠加作为相变”；Redwood Research 的 Polysemanticity and Capacity in Neural Networks（研究的 capacity 就是上面的维度，解释为何特征常被“钉”在 0 或 1 的容量上）；Softmax Linear Units（激活函数 $\vec{x} \to \vec{x} * \operatorname{softmax}(\vec{x})$，可能减少叠加）；Towards Monosemanticity 中的自动解释、特征模式和有限状态自动机；Neel 的 Exciting Open Problems In Mech Interp v2；训练 SAE 的项目强烈推荐 Arthur Conmy 关于训练单层 SAE 技巧的文章。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 1.5.X 每月算法题</h2>
+        <p><em>原页面：[1.5.X] Monthly Algorithmic Problems（附加挑战）</em></p>
+        <p>
+            这是 ARENA 每月算法题的主页，灵感来自 Stephen Casper 的挑战，专门设计成适合 TransformerLens 和本章的工具。共 7 题，2023 年年中到 2024 年末之间不定期发布，原文说更适合看作有趣的挑战或黑客松式题目。必备前置：1.1 第 1 到 3 部分和 1.2 第 1 到 3 部分；动机见 Neel 的 200 COP in MI: Interpreting Algorithmic Problems。原文说它们主要用来练习标准工具（解释注意力、直接 logit 归因）和 TransformerLens 等库的使用，不求开辟新领域。怎样才算解出：参照 1.5.1 的完整解答，用若干注意力头的 QK 和 OV 电路（以及直接路径、LayerNorm 的非线性效应等）描述机制，用注意力图、定向消融或修补、直接 logit 归因提供证据；可选地找出用于信息传递的线性子空间，或据此构造对抗样例。
+        </p>
+        <table>
+            <thead><tr><th>题目</th><th>时间</th><th>任务</th><th>模型（原文给出时）</th></tr></thead>
+            <tbody>
+                <tr><td>Palindromes</td><td>2023 年 7 月</td><td>判断序列是否回文（值在 0 到 30，起止 token 为 31、32）</td><td>2 层、2 头、因果注意力，有 LayerNorm，无 MLP</td></tr>
+                <tr><td>First Unique Character</td><td>2023 年 8 月</td><td>对每个字符，找出到当前为止第一个唯一出现的字符（<code>?</code> 兼作起始符和“不存在”）</td><td>2 层、3 头，有 LayerNorm，无 MLP</td></tr>
+                <tr><td>4-Digit Sum</td><td>2023 年 9 月</td><td>两个 4 位数相加，输入输出都按低位在前（little-endian）</td><td>3 层、3 头，有 LayerNorm，无 MLP</td></tr>
+                <tr><td>Sorted List</td><td>2023 年 10 月</td><td>判断 10 个数的序列是否排好序</td><td>1 层、3 头，有 LayerNorm，无 MLP</td></tr>
+                <tr><td>Cumulative Sum</td><td>2023 年 11 月</td><td>计算序列的累加和</td><td>见原页面</td></tr>
+                <tr><td>Caesar Cipher</td><td>2024 年 1 月</td><td>解码凯撒密码加密的序列</td><td>见原页面</td></tr>
+                <tr><td>Trigrams</td><td>2024 年 11 月</td><td>在含特殊三元组模式的序列中预测下一个 token</td><td>见原页面（目录只列了题目链接）</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section>
+        <h2>这篇的要点</h2>
+        <ul>
+            <li>1.4 和 1.5 组都是可选练习集，无前置；README 最推荐 1.4.1（电路方法入门）和 1.5.1（较容易的玩具模型）。</li>
+            <li>1.4.1：IOI 论文在 GPT-2 small 中逆向出 26 个头、7 类的电路，三步为找名字、找重复名字、预测未重复的名字；用 logit 差作指标，直接 logit 归因找到 9.9、9.6、10.0，激活修补找到第 7、8 层 S-inhibition 头（7.3、7.9、8.6、8.10，value 关键）和早期重复检测头（如 3.0）；路径修补替换边而不是节点；最小电路按忠实、完整、最小三条标准检验；备用名字搬运头体现模型内置冗余。</li>
+            <li>1.4.2：latent 之间的 Jacobian 是早层到晚层贡献的线性代理；transcoder 用稀疏 latent 模拟 MLP 计算，可以用拉回 $W_{dec} f_{later}$ 和去嵌入 $W_E f_{later}$ 做与输入无关的电路分析。</li>
+            <li>1.4.2 归因图：冻结注意力模式和 LayerNorm 缩放、MLP 换成线性跳连后残差流线性化；节点有嵌入、transcoder latent、MLP 误差、logit 四类读写向量；行归一化邻接矩阵后用 Neumann 级数算影响力，按 80% 节点影响力、85% 边分数剪枝；在 Dallas/Austin 电路上用 −2 倍消融和跨提示特征替换（Texas 换成 California 或 China）检验因果结构。</li>
+            <li>1.5.1：括号分类器（d_model 56、3 层、每层 2 头、双向注意力）通过“后缀高度”判断平衡；0.0 均匀注意后缀清点括号写到位置 1，MLP 区分高度是否为零，2.0 把信号复制到位置 0 的分类器；模型约每一万个样本错一个，可据理解构造对抗样例。</li>
+            <li>1.5.2：模 113 加法的单层模型（d_model 128、4 头、d_mlp 512、30% 训练数据、wd=1）只用关键频率 14、35、41、42、52，靠注意力和 ReLU 得到二次项，再用 $\cos(\omega(x+y-z))$ 组合出 logits；排除损失在 grokking 前很久就上升，否定了“随机游走碰巧走对”的说法；权重平方和呈现记忆、平摊、清理三个阶段。</li>
+            <li>1.5.3：OthelloGPT（8 层、d_model 512）学到线性的世界表示，基是“我的/对方的”而非“黑/白”；探针方向可以解读神经元权重、做线性干预；L5N1393 等神经元的分析显示最大激活样例会误导，谱图能暴露假设的漏洞。</li>
+            <li>1.5.4：5 维到 2 维的玩具模型在高稀疏时用五边形叠加 5 个特征；加 ReLU 后出现特权基和多义神经元，计算绝对值时出现非对称叠加；维度 $D_i$ 刻画每个特征分到的维数；双下降对应从记忆数据点到学习特征的转换；在玩具模型上训练 SAE，重采样死 latent，Gated 和 JumpReLU 通过解耦门和幅度、L0 惩罚缓解收缩。</li>
+            <li>1.5.X：7 道每月算法题（回文、首个唯一字符、4 位数加法、有序列表、累加和、凯撒密码、三元组），以 1.5.1 的解答形式为标准。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>ARENA · Chapter 1: Transformer Interpretability · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

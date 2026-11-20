@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>导读：从零认识机制可解释性 | 可解释性与对齐研究 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="index.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">可解释性与对齐研究 目录</a> · 00</span>
+    <span><a href="01_Transformer电路的数学框架.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>导读：从零认识机制可解释性</h1>
+        <p class="subtitle">机制可解释性想做的事，是把一个训练好的神经网络拆开，弄清它内部用什么"变量"、按什么步骤算出答案。这一篇按顺序讲清楚这个领域的基本名词，再给出本合集的阅读顺序</p>
+        <div class="author-meta">
+            整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：Chris Olah 的两篇短文 <a href="https://transformer-circuits.pub/2022/mech-interp-essay/index.html" target="_blank">Mechanistic Interpretability, Variables, and the Importance of Interpretable Bases</a>（2022 年 6 月）和 <a href="https://transformer-circuits.pub/2023/interpretability-dreams/index.html" target="_blank">Interpretability Dreams</a>（2023 年 5 月），以及本合集各篇论文的引言部分（Transformer Circuits Thread）。本文是中文讲解，各概念出处在文中注明
+        </div>
+    </header>
+
+    <section>
+        <h2>这篇讲什么</h2>
+        <p>
+            这个合集收的是两类材料。第一类是 Anthropic 可解释性团队在 Transformer Circuits Thread（transformer-circuits.pub）上发表的论文，从 2021 年底的《A Mathematical Framework for Transformer Circuits》一直到 2026 年的情绪、自然语言自编码器和"全局工作空间"研究。第二类是 ARENA 课程的练习，ARENA 是一个对齐方向的开源训练营，它的第 1 章教你亲手写 Transformer、找归纳头、训练稀疏自编码器，第 2 到 4 章教强化学习、模型评测和对齐科学。
+        </p>
+        <p>
+            这些论文默认读者已经熟悉一套专门名词。这一篇从零开始，把这些名词按依赖顺序讲一遍：每个名词先给一句白话定义，再说它在哪篇论文里出现、具体指什么。读完这一篇，再去读 01 以后的论文页就不会卡在术语上。
+        </p>
+        <ol>
+            <li><a href="#t01">机制可解释性是什么，为什么要做</a></li>
+            <li><a href="#t02">Transformer 的内部结构：残差流和注意力头</a></li>
+            <li><a href="#t03">特征与线性表示假说</a></li>
+            <li><a href="#t04">多义神经元和叠加</a></li>
+            <li><a href="#t05">稀疏自编码器与字典学习</a></li>
+            <li><a href="#t06">电路、转码器和归因图</a></li>
+            <li><a href="#t07">干预、引导和探针</a></li>
+            <li><a href="#t08">这个领域最近在做什么</a></li>
+            <li><a href="#t09">阅读顺序和 ARENA 的对应关系</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 机制可解释性是什么，为什么要做</h2>
+        <h3>把神经网络当成一段编译后的程序</h3>
+        <p>
+            机制可解释性（Mechanistic Interpretability）想把神经网络"逆向工程"出来，做法类似于逆向分析一段编译好的二进制程序。Chris Olah 在 2022 年的短文里给了一张对照表：
+        </p>
+        <table>
+            <thead><tr><th>普通计算机程序</th><th>神经网络</th></tr></thead>
+            <tbody>
+                <tr><td>逆向工程 Reverse Engineering</td><td>机制可解释性 Mechanistic Interpretability</td></tr>
+                <tr><td>程序二进制 Program Binary</td><td>网络参数 Network Parameters</td></tr>
+                <tr><td>虚拟机 / 处理器 / 解释器</td><td>网络架构 Network Architecture</td></tr>
+                <tr><td>程序状态 / 内存</td><td>某一层的表示 / 激活值 Activations</td></tr>
+                <tr><td>变量 / 内存位置</td><td>神经元 / 特征方向 Neuron / Feature Direction</td></tr>
+            </tbody>
+        </table>
+        <p>
+            这里的激活值（activation）指模型在处理一段输入时，每一层算出来的那串中间数字。参数是固定的"指令"，激活值是运行时的"内存"。读程序要同时搞清楚两件事：变量代表什么，操作怎样作用在变量上。写着 <code>y = x + 5;</code> 的一行代码，如果不知道 <code>x</code> 和 <code>y</code> 是什么，这一行就没有意义。神经网络同理：一个参数的意义取决于它连接的输入激活和输出激活各代表什么。Olah 由此认为，找到可以理解的"变量"是这个方向的核心任务。
+        </p>
+        <h3>维度灾难</h3>
+        <p>
+            任何解释方法都要面对维度灾难（curse of dimensionality）：神经网络的输入空间维度极高，体积随维度指数增长，逐点去看函数在每个输入上的行为不可能看完。Olah 的回答是借鉴读程序的经验：程序员能理解一个输入空间巨大的程序，是因为代码本身给出了一个长度有限的描述。神经网络的参数也是一个有限的描述，只要能读懂它。他也提醒，参数可能有几千亿个，所以不要指望机制可解释性很容易，或者有一套照着做的固定流程，难度应该至少和逆向一个大型复杂程序相当。
+        </p>
+        <p>
+            激活值本身也是高维向量，同样有维度灾难。读程序时能理解内存，是因为内存可以切成一个个能单独理解的变量。所以神经网络的激活值也需要切成能单独理解的小块。这句话是整个合集的出发点：论文 03 到 05 讲的都是怎么切。
+        </p>
+        <h3>为什么从"微观"做起</h3>
+        <p>
+            Olah 在 2023 年的《Interpretability Dreams》里解释了团队为什么选择自下而上：先研究特征、参数、电路这些微观对象，没有预设的理论。原因是从上往下找证据很容易被误导。他举的例子是 ImageNet 视觉模型：模型里确实有狗头检测器，但在它之前的几层已经有狗鼻子、狗毛、眼睛等检测器，组合起来就能很准地预测狗头是否出现。这时用一个线性探针去找，会"找到"一个狗头检测器，哪怕那一层其实还没有这个特征。微观分析的好处是对足够小的电路，关于它行为的陈述可以变成数学推理题，真假能确定下来。
+        </p>
+        <p>
+            这篇短文还列了几个更长远的目标：在特征和电路之上找到更大尺度的结构（比如特征家族 feature family，一组按某个变量排列的相似特征）；普遍性（universality），同一类特征和电路在不同模型里反复出现，研究一个模型的收获可以迁移到下一个；把微观发现和宏观现象连起来，比如归纳头会在损失曲线上造成一个可见的鼓包（论文 02）；以及用 AI 自动化可解释性。安全方面的"北极星"是能对模型做"它永远不会撒谎""它永远不会操纵我们"这一类全称陈述，Olah 自己说这是一个很可能做不成的长期设想。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. Transformer 的内部结构：残差流和注意力头</h2>
+        <p>
+            这一节的名词来自论文 01《A Mathematical Framework for Transformer Circuits》。如果你对 Transformer 本身还不熟，可以先看本站 CS336 或 CS224N 的 Transformer 部分，或者直接做 ARENA 1.1（见 13 页）。
+        </p>
+        <h3>残差流 Residual Stream</h3>
+        <p>
+            一个只有解码器的 Transformer 语言模型（如 GPT-3）的结构是：先把 token 变成向量（token embedding），然后经过一串残差块，每个残差块里有一个注意力层和一个 MLP 层，最后用反嵌入（unembedding）把向量变回每个词的分数（logits）。论文 01 把贯穿所有层的那条向量通道叫作残差流：每一层先从残差流"读"输入（做一次线性投影），再把自己的结果"加"回残差流。
+        </p>
+        <p>
+            残差流是线性的，各层只往里加东西，所以可以把它看成各组件之间的通信通道。一个后果是任意两层之间存在"虚拟权重"（virtual weights）：把前一层的输出矩阵和后一层的输入矩阵相乘，例如 $W_I^2 W_O^1$，就得到后一层读到前一层多少信息。另一个后果是残差流的维度像是"带宽"：小模型几百维，大模型可以上万维，而每个注意力头只在 64 或 128 维的小子空间上工作，不同层可以把信息写进不同子空间互不干扰。一层 MLP 的神经元数一般是残差流维度的 4 倍，所以残差流总是供不应求。
+        </p>
+        <h3>注意力头 Attention Head，以及 QK 电路和 OV 电路</h3>
+        <p>
+            每个注意力层由多个注意力头并行组成。论文 01 证明了常见的"把各头结果拼接后乘一个大矩阵"的写法，在数学上等价于每个头各乘自己的输出矩阵再相加：
+        </p>
+        <p>$$W_O^H \begin{bmatrix} r^{h_1} \\ r^{h_2} \\ \vdots \end{bmatrix} = \sum_i W_O^{h_i} r^{h_i}$$</p>
+        <p>
+            所以每个头可以单独理解。一个头做的事情是搬运信息：从某个 token 位置的残差流读信息，写到另一个 token 位置的残差流。论文 01 把一个头拆成两部分，它们基本独立：
+        </p>
+        <ul>
+            <li><strong>QK 电路</strong>（query-key circuit），由 $W_Q^T W_K$ 决定，负责算注意力模式（attention pattern），也就是"当前位置该从哪些位置搬信息"。</li>
+            <li>OV 电路（output-value circuit），由 $W_O W_V$ 决定，负责"如果搬了某个位置，会往当前位置写什么"。</li>
+        </ul>
+        <p>
+            query、key、value 向量在这个视角下只是计算这两个低秩矩阵时的中间结果。把注意力模式固定住以后，一个只有注意力层的模型可以写成一组从 token 到 logits 的线性"路径"之和，这就是论文 01 的"路径展开"（path expansion）。
+        </p>
+        <h3>归纳头 Induction Head</h3>
+        <p>
+            论文 01 发现，两层的纯注意力模型会让两个头组合（composition）起来，形成一种叫归纳头的结构：当序列里出现过 "A B"，后面又出现 "A" 时，它会去看上次 "A" 后面那个 token，并预测下一个是 "B"。这是一种通用的上下文学习（in-context learning）算法，也就是模型不改参数、只靠提示里的内容学会新模式。论文 02 专门研究它，并提出归纳头可能是大模型上下文学习能力的主要来源。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 特征与线性表示假说</h2>
+        <h3>特征 Feature</h3>
+        <p>
+            "特征"是整个领域最常用、也最难定义的词。论文 03《Toy Models of Superposition》列了三种可用的定义：
+        </p>
+        <ul>
+            <li>特征是输入的任意函数。缺点是按这个定义，"猫"和"车"是特征，"猫加车"也是特征，可直觉上后者只是两个特征的混合。</li>
+            <li>特征是人能理解的性质。缺点是会排除人看不懂但模型确实在用的东西，比如 AlphaFold 可能发现了人类一开始不理解的化学结构。</li>
+            <li>特征是"足够大的模型会专门分配一个神经元去表示的输入性质"。论文 03 主要按这个定义写，但作者说不想过早锁定定义。</li>
+        </ul>
+        <p>
+            Olah 在 2022 年短文里更倾向另一种说法：特征就是一个网络的表示能被分解成的那些"独立单元"。直观的例子有 InceptionV1 视觉模型里的曲线检测器、车辆检测器神经元，以及词向量里的性别方向。
+        </p>
+        <h3>线性表示假说 Linear Representation Hypothesis</h3>
+        <p>
+            论文 03 把这个假说拆成两个性质。可分解性（decomposability）：网络的表示可以用一组能单独理解的特征来描述。线性（linearity）：特征用激活空间里的方向来表示。写成公式，每个特征 $f_i$ 对应一个方向 $W_{f_i}$，几个特征同时以强度 $x_{f_1}, x_{f_2}, \ldots$ 出现时，激活向量是
+        </p>
+        <p>$$x_{f_1} W_{f_1} + x_{f_2} W_{f_2} + \cdots$$</p>
+        <p>
+            特征本身通常是输入的非线性函数，线性的只是"特征到激活向量"这一步映射。经典证据是词向量算术 V("king") − V("man") + V("woman") = V("queen")。论文 03 给了三条理由说明神经网络为什么倾向线性表示：线性是一层网络做模板匹配的自然输出；线性表示的特征在下一层可以被一个神经元直接"选出来"；用方向表示特征有统计效率上的好处。
+        </p>
+        <h3>特权基 Privileged Basis</h3>
+        <p>
+            特征是方向，那么是哪些方向？如果一层表示没有任何东西让坐标轴特殊，比如词向量，你可以对它乘一个随机可逆矩阵 $M$，再在下一层乘 $M^{-1}$，模型完全不变，这时单独看某一维没有意义，叫非特权基。如果架构让坐标轴特殊，比如后面接了逐元素的激活函数，那么坐标轴方向就成了特权基，这些方向才叫"神经元"。论文 01 也指出，残差流以及 key、query、value 这些激活都没有特权基，所以去看它们的单个"神经元"没有意义。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 多义神经元和叠加</h2>
+        <h3>多义神经元 Polysemantic Neuron</h3>
+        <p>
+            如果每个特征正好对应一个神经元，读模型会容易很多。可实际上很多神经元会对几种毫不相干的输入都有反应，这种神经元叫多义神经元。只对一种东西有反应的叫单义（monosemantic）。论文 04 的标题《Towards Monosemanticity》就是想得到单义的分析单元。
+        </p>
+        <h3>叠加 Superposition</h3>
+        <p>
+            叠加假说是对多义性的一种解释：网络"想要表示的特征数比它的神经元数多"，于是利用高维空间的性质，把更多特征塞进同样多的维度里，相当于在模拟一个更大的网络。在高维空间里可以放下远多于维度数、彼此几乎正交的方向；只要特征很稀疏（大多数时候只有少数几个同时出现），它们互相干扰的代价就不大。
+        </p>
+        <p>
+            论文 03 用一个很小的玩具模型明确演示了叠加：把 $n$ 个稀疏特征压进 $m &lt; n$ 维，再还原出来。特征越稀疏，模型越愿意用叠加；特征排成五边形、四面体等几何结构；叠加和"特征对神经元是否对齐"之间存在相变。论文 04 的引言说，叠加意味着即使在一个很简单的单层 Transformer 里，MLP 层也可能用叠加表示比神经元多得多的特征，要读懂它，必须先把这些特征分解出来。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 稀疏自编码器与字典学习</h2>
+        <h3>字典学习 Dictionary Learning</h3>
+        <p>
+            论文 04 把"把激活切成特征"写成了一个具体的分解：把一个激活向量 $\mathbf{x}^j$ 近似写成一组方向 $\mathbf{d}_i$ 的加权和
+        </p>
+        <p>$$\mathbf{x}^j \approx \mathbf{b} + \sum_i f_i(\mathbf{x}^j)\, \mathbf{d}_i$$</p>
+        <p>
+            其中 $\mathbf{d}_i$ 是第 $i$ 个特征的方向（这组方向合起来叫"字典"），$f_i(\mathbf{x}^j)$ 是这个特征在这个输入上的激活强度。关键要求是稀疏：对任意一个输入，只有很少几个 $f_i$ 不为零。方向的数目可以远多于神经元数，这样才能把叠加在一起的特征拆开。从数据中学出这样一组方向，就叫字典学习。
+        </p>
+        <h3>稀疏自编码器 Sparse Autoencoder（SAE）</h3>
+        <p>
+            论文 04 用稀疏自编码器来做字典学习。SAE 是一个只有一个隐藏层的小网络：编码器把模型激活乘一个矩阵、过 ReLU，得到一个很宽但大多数是零的隐藏向量（每一维就是一个特征），解码器再用一个线性层把它还原成原来的激活。训练目标是还原误差（L2）加上隐藏层激活的 L1 惩罚，L1 惩罚逼着隐藏向量变稀疏。论文 04 的设置如下表（数字照原文）：
+        </p>
+        <table>
+            <thead><tr><th></th><th>被研究的 Transformer</th><th>稀疏自编码器</th></tr></thead>
+            <tbody>
+                <tr><td>层</td><td>1 个注意力块 + 1 个 MLP 块（ReLU）</td><td>1 层 ReLU（升维）+ 1 层线性（降维）</td></tr>
+                <tr><td>MLP 宽度</td><td>512</td><td>512（1×）到 131,072（256×）</td></tr>
+                <tr><td>数据</td><td>The Pile（1000 亿 token）</td><td>该 Transformer 的 MLP 激活（80 亿个样本）</td></tr>
+                <tr><td>损失</td><td>自回归对数似然</td><td>L2 重建误差 + 隐藏层 L1</td></tr>
+            </tbody>
+        </table>
+        <p>
+            论文 05《Scaling Monosemanticity》把同样的方法放大到 Claude 3 Sonnet 这样的生产级模型，训练了约 1M、4M、34M 个特征的三个 SAE，特征里有多语言、多模态的抽象特征和与安全相关的特征，比如著名的"金门大桥"特征。
+        </p>
+        <p>
+            SAE 的特征是从数据里无监督学出来的，没有人事先告诉它要找什么。这一点和下面要讲的"探针"不同。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 电路、转码器和归因图</h2>
+        <h3>电路 Circuit</h3>
+        <p>
+            有了特征，下一步是看特征之间怎么相互作用，最后产生输出。论文 06《Circuit Tracing》的引言把团队方法概括成两步：先找到特征，也就是模型计算时用的可解释积木；再描述电路，也就是这些特征怎样相互作用产生输出。论文 01 和 02 里的归纳头就是一个由两个注意力头组成的电路，ARENA 1.4.1 里的 IOI（间接宾语识别）是 GPT-2 small 里一个更大的电路。
+        </p>
+        <h3>转码器 Transcoder 和跨层转码器 Cross-Layer Transcoder（CLT）</h3>
+        <p>
+            SAE 只能把一处激活拆成特征，不能直接告诉你特征之间怎么连。转码器换了一个目标：它读 MLP 的输入，去还原 MLP 的输出，相当于用一组稀疏、可解释的特征"替代"这一层 MLP。论文 06 用的是跨层转码器：第 $\ell$ 层的特征从第 $\ell$ 层残差流读入，可以向第 $\ell$ 层及之后所有层的 MLP 输出写入。它的激活和重建写成
+        </p>
+        <p>$$\mathbf{a}^{\ell} = \text{JumpReLU}\left(W_{enc}^{\ell}\, \mathbf{x}^{\ell}\right), \qquad \hat{\mathbf{y}}^{\ell} = \sum_{\ell'=1}^{\ell} W_{dec}^{\ell' \to \ell}\, \mathbf{a}^{\ell'}$$</p>
+        <p>
+            JumpReLU 是一种带阈值的 ReLU：低于阈值输出零，高于阈值原样输出。用这些特征替换掉原模型的所有 MLP，就得到一个"替代模型"（replacement model）。论文 06 报告，在 Claude 3.5 Haiku 和一个 18 层小模型上训练的 CLT 特征总数从 30 万到 3000 万不等，最大的 18 层 CLT 在约 50% 的提示上和原模型的下一个 token 预测一致。
+        </p>
+        <h3>归因图 Attribution Graph</h3>
+        <p>
+            归因图描述模型在一个具体提示上，为了输出某个 token 走过了哪些步骤。图里的节点是被激活的特征、提示中的 token 嵌入、重建误差和输出 logits；边是节点之间的线性影响。为了让边是线性的、能明确算出来，论文 06 冻结了注意力模式和归一化的分母。因为一个提示上激活的特征太多，还要剪枝，只留下对输出贡献最大的节点和边。论文 07《On the Biology of a Large Language Model》用这套工具研究了 Claude 3.5 Haiku 的多步推理（Dallas → Texas → Austin）、写诗时提前规划韵脚、多语言、加法、幻觉、越狱等行为。
+        </p>
+        <p>
+            替代模型不等于原模型，它可能用了不同的机制。所以论文 06 要求用扰动实验（perturbation）去验证：在原模型里沿某个特征方向加减，看下游特征和输出是否按归因图预测的那样变化。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 干预、引导和探针</h2>
+        <h3>干预 Intervention 与引导 Steering</h3>
+        <p>
+            找到一个特征以后，要证明它真的被模型使用，最直接的办法是改它：在前向传播中把这个特征的激活调高、调低或清零，看输出怎么变。这类操作叫干预。调高某个特征让模型的行为朝某个方向偏，叫引导（steering）。论文 05 把"金门大桥"特征（编号 34M/31164353）钳制在它最大激活值的 10 倍，Claude 3 Sonnet 就开始把自己当成金门大桥。不经过 SAE、直接用两组激活的差得到一个方向再加到残差流里，叫引导向量（steering vector），ARENA 1.3.2 有这部分练习。
+        </p>
+        <h3>探针 Probe</h3>
+        <p>
+            探针是在某一层激活上训练的一个小分类器（通常是线性的），用来检测这层激活里是否含有某种信息，比如"这句话是真是假"。和 SAE 相比，探针是有监督的：你得先决定要找什么、准备好标注。前面 Olah 举的狗头例子说明了它的风险：探针能找到一个和目标相关的方向，不代表模型在那一层真的有这个特征。ARENA 1.3.1 先用线性探针找模型内部的"真/假"表示，再训练检测欺骗的探针。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 这个领域最近在做什么</h2>
+        <p>
+            合集里 2025 年 10 月以后的几篇，研究对象从"一个提示上的电路"扩展到更抽象的问题：
+        </p>
+        <ul>
+            <li>论文 08（2025 年 10 月）研究 Claude 3.5 Haiku 怎样在固定行宽的文本里决定何时换行，发现它把"已经写了多少字符"表示成一条弯曲的低维流形（manifold），并用注意力头去"旋转"这条流形来比较。这说明有些特征更适合用几何结构而不是孤立方向来理解。</li>
+            <li>论文 09（2025 年 10 月）用"概念注入"检验模型能否觉察到自己内部状态的变化，即所谓内省（introspection）。</li>
+            <li>论文 10（2026 年 4 月）找到 Claude 内部的情绪概念表示，并测量它们怎样影响模型行为。</li>
+            <li>论文 11（2026 年 5 月）训练模型把激活直接翻译成自然语言解释，叫自然语言自编码器（NLA）。</li>
+            <li>论文 12（2026 年 7 月）提出模型里能被说出来的表示构成一个"全局工作空间"。</li>
+        </ul>
+        <p>
+            每篇的具体方法、数字和局限见对应页面。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 阅读顺序和 ARENA 的对应关系</h2>
+        <h3>论文页</h3>
+        <ol>
+            <li><a href="01_Transformer电路的数学框架.html">01 Transformer 电路的数学框架</a>：残差流、QK/OV 电路、路径展开、归纳头的起点。</li>
+            <li><a href="02_上下文学习与归纳头.html">02 上下文学习与归纳头</a>：归纳头在训练中突然形成，同时上下文学习能力跃升。</li>
+            <li><a href="03_叠加的玩具模型.html">03 叠加的玩具模型</a>：用小模型证明叠加存在，给出它的几何和相变。</li>
+            <li><a href="04_走向单义性.html">04 走向单义性</a>：第一次用 SAE 在真实（单层）语言模型上拆出大量单义特征。</li>
+            <li><a href="05_扩展单义性.html">05 扩展单义性</a>：SAE 放大到 Claude 3 Sonnet。</li>
+            <li><a href="06_电路追踪与归因图.html">06 电路追踪与归因图</a>：CLT、替代模型、归因图的方法论文。</li>
+            <li><a href="07_大模型的生物学.html">07 大模型的生物学</a>：用归因图研究 Claude 3.5 Haiku 的各种行为。</li>
+            <li><a href="08_模型怎样操纵流形.html">08</a> 到 <a href="12_可言说表征与全局工作空间.html">12</a>：2025 年下半年到 2026 年的新方向。</li>
+        </ol>
+        <p>
+            01 和 03 是两条基础线：01 讲"注意力怎么算"，03 讲"一层激活里装了什么"。04、05 从 03 接下来，06、07 把两条线合在一起。如果时间有限，可以按 01、03、04、06、07 的顺序先读主干。
+        </p>
+        <h3>ARENA 练习页</h3>
+        <ul>
+            <li><a href="13_ARENA_Transformer与可解释性入门.html">13</a>：ARENA 1.1 从零写 Transformer；1.2 用 TransformerLens 找归纳头（对应论文 01、02）；1.3 线性探针、函数向量与引导、SAE（对应论文 04、05）、Activation Oracles。</li>
+            <li><a href="14_ARENA_电路与玩具模型.html">14</a>：ARENA 1.4 IOI 电路和 SAE 电路（对应论文 06 的思路）；1.5 括号分类器、grokking 与模加法、OthelloGPT、叠加玩具模型（对应论文 03）。</li>
+            <li><a href="15_ARENA_强化学习.html">15</a>：ARENA 第 2 章，从多臂老虎机、DQN、策略梯度、PPO 到 RLHF、RLVR 和 AlphaZero。</li>
+            <li><a href="16_ARENA_评测与对齐科学.html">16</a>：ARENA 第 3 章模型评测和第 4 章对齐科学（涌现性失调、推理模型可解释性、persona vectors、调查智能体）。</li>
+        </ul>
+        <p>
+            ARENA 第 1 章把 1.1 和 1.2 定为必做，其余各组练习互不依赖，可以任选。它的 README 最推荐 1.5.1（括号分类器）、1.4.1（IOI）和 1.3.3（SAE）三组。
+        </p>
+    </section>
+
+    <section>
+        <h2>这篇的要点</h2>
+        <ul>
+            <li>机制可解释性把神经网络当作编译后的程序来逆向：参数是指令，激活值是内存，要先把激活切成能单独理解的"变量"（特征）。</li>
+            <li>Transformer 里各组件通过线性的残差流通信；每个注意力头可单独分析，分成决定"看哪里"的 QK 电路和决定"写什么"的 OV 电路。</li>
+            <li>线性表示假说：特征是激活空间里的方向，激活向量是各特征方向按强度的加权和。</li>
+            <li>叠加：网络用比神经元多的方向表示特征，代价是神经元变得多义；特征越稀疏，叠加越多。</li>
+            <li>稀疏自编码器用"还原误差 + 稀疏惩罚"学出一个比神经元多得多的特征字典，把叠加拆开。</li>
+            <li>跨层转码器用稀疏特征替代 MLP，得到替代模型，再对具体提示画归因图，并用扰动实验在原模型上验证。</li>
+            <li>引导和干预用来检验特征的因果作用；探针是有监督的检测器，能找到相关方向，不一定是模型真正用的特征。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>Transformer Circuits Thread · Introduction to Mechanistic Interpretability · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>
