@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alex Zhang：递归语言模型和 harness 设计 | Latent Space 播客笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="16_OpenAI_新Agent平台.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Latent Space 播客目录</a> · 17</span>
+    <span><a href="18_Erik_Bernhardsson_Modal算力.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Alex Zhang：递归语言模型和 harness 设计</h1>
+        <p class="subtitle">RLM 论文第一作者从 GPU kernel 讲起，谈博士生该押什么注、为什么主流编程 Agent 的 harness 大同小异、RLM 怎样让模型在代码环境里调用自己，以及 OpenAI 一万个 Agent 的实验和 Agent 集群的浪费</p>
+        <div class="author-meta">
+            主持：swyx、Vibhu · 嘉宾：Alex Zhang（MIT 二年级博士生，递归语言模型 RLM 论文第一作者，GPU Mode 社区成员，参与过 KernelBench）· 发布日期：2026 年 10 月 2 日 · 时长：1 小时 43 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=kog7mwsDqnk" target="_blank">Recursive Language Models — Alex Zhang, MIT PhD</a>（本文依据 Latent Space 官方播客文字稿、视频章节和节目说明整理，是中文转述，不是逐字翻译；观点属于说话人，内容以发布当天为准）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一期的内容</h2>
+        <p>Alex Zhang 是 MIT 的博士生（他说现在是博士第二年，导师是 Omar），本科在 Princeton，在 Karthik 的实验室里和 SWE-bench 团队一起做过研究。他最出名的工作是递归语言模型（Recursive Language Models，RLM），读博之前还在 GPU Mode 社区里参与了 KernelBench 和 kernel 排行榜。节目说明里写，Latent Space 每年会请一位研究方向一直押对的博士生，2024 年是 Shunyu Yao，2025 年是 Jack Morris，今年是他。</p>
+        <p>这一期从 GPU kernel 讲起，经过研究品味、GEV 这类不走自回归解码路线的模型，转到他这两年的主题：harness（包在模型外面、负责调用模型和工具、管理上下文的那层程序）。他的核心看法是，Claude Code、Codex、Pi 这些 harness 的设计几乎一样，而 harness 的设计可以改变模型的泛化能力。后半段讲 RLM 的定义、和 Prime 合作的 Prime Agent、第三方的 RLM 工作，再到 OpenAI 用一万个 Agent 解难题的实验、Kimi 的 Agent 集群、Sakana 和开放式研究、能力过剩，最后聊到 Neuralese 和 AI 做科学。swyx 追问最多的是“你说所有 harness 都一样，那什么叫更聪明的 harness”，以及 Agent 集群该不该有中心协调者。视频开头约两分钟是精彩片段预告，文字稿里没有，这里不单独整理。节目里没有广告口播。</p>
+        <ol>
+            <li><a href="#t01">GPU Mode、KernelBench 和 AI 写的 kernel</a> · <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">人的专业知识和暴力搜索</a> · <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=574s" target="_blank">0:09:34</a></li>
+            <li><a href="#t03">研究品味：博士生要押大注</a> · <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=916s" target="_blank">0:15:16</a></li>
+            <li><a href="#t04">GEV，重新想“语言模型”是什么，以及打游戏的模型</a> · <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=1284s" target="_blank">0:21:24</a></li>
+            <li><a href="#t05">为什么 Claude Code、Codex 和 Pi 这么像</a> · <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=1977s" target="_blank">0:32:57</a></li>
+            <li><a href="#t06">harness 是组合泛化器</a> · <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=2318s" target="_blank">0:38:38</a></li>
+            <li><a href="#t07">RLM 到底是什么</a> · <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=2780s" target="_blank">0:46:20</a></li>
+            <li><a href="#t08">Prime Agent 和持久子 Agent</a> · <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=3237s" target="_blank">0:53:57</a></li>
+            <li><a href="#t09">别人怎么用 RLM</a> · <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=3577s" target="_blank">0:59:37</a></li>
+            <li><a href="#t10">OpenAI 的 Agent 集群和未来的“语言模型”</a> · <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=3746s" target="_blank">1:02:26</a></li>
+            <li><a href="#t11">开放式研究和 Sakana AI</a> · <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=4162s" target="_blank">1:09:22</a></li>
+            <li><a href="#t12">Kimi 和 OpenAI 的 Agent 集群，Gemini 和 GDM</a> · <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=4668s" target="_blank">1:17:48</a></li>
+            <li><a href="#t13">投机式程序化工具调用和能力过剩</a> · <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=4922s" target="_blank">1:22:02</a></li>
+            <li><a href="#t14">Neuralese、下一步研究和 AI 做科学</a> · <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=5415s" target="_blank">1:30:15</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. GPU Mode、KernelBench 和 AI 写的 kernel</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=0s" target="_blank">0:00:00</a>–0:09:34 · Hook / Introduction / GPU Mode, KernelBench, and AI-Written Kernels</em></p>
+        <h3>GPU Mode 是什么</h3>
+        <p>GPU kernel 是在 GPU 上直接运行的底层程序，比如一次矩阵乘法或一次 attention 计算，写得好坏决定模型跑多快。GPU Mode 是一个 Discord 社区，最早叫 CUDA Mode，Alex 说大概因为法律原因改了名。节目说明里写它在 2023 年由 Mark Saroufim、Andreas 和 Jeremy Howard 发起，最初的内容就是教人写 GPU kernel，加上一些讲座。swyx 说在他看来这里像是 PyTorch 团队的招聘渠道，后来 Mark 离开了 PyTorch。</p>
+        <p>Alex 加入是偶然的。他当时在 Snapchat 实习，做推荐系统，觉得很无聊。公司有个项目想看能不能为 Google 的 Infini-attention 论文写专门的 kernel，最后没做出什么，但他因此进了社区，认识了 Mark、Matei 等人。Mark 提出过一个叫 Popcorn 的想法，就是现在的 kernel 排行榜。</p>
+        <h3>KernelBench 的出发点</h3>
+        <p>他们的直觉是 GPU 编程很像算法竞赛：有约束，要在很小的空间里抠性能，常用的优化手法种类其实不多，大家关心的 kernel 也不多。Codeforces 有几百万道题，如果 GPU 代码也能积累这么多数据，就有可能规模化地自动写 kernel。Alex 说这对研究者很重要，比如 Mamba 发论文时必须附带 kernel，否则没人能真正用上，而不是每个团队都有 Tri Dao。KernelBench 就是在这个背景下出来的，问的是 LLM 能不能自动写 GPU kernel。那是他本科毕业到读博之间的事，现在他只偶尔帮忙办讲座，社区的比赛也没以前多。</p>
+        <p>swyx 问这和以前的 MLSys、MLPerf 是不是竞争关系。Alex 说 GPU Mode 更像社区，讲座初学者也能跟上，比赛可以拿来学习；MLPerf 那类基准基本只有大实验室和公司认真参加（他说这是他的理解，可能不对）。现在还有 LeetGPU 这类网站，相当于 GPU 版的 LeetCode。他说自己 2023 年对 GPU 编程感兴趣，是因为 Tri Dao 去 Princeton 应聘教职时讲了 FlashAttention，那时这还是很小众的方向，现在“人人都写 kernel”，这个领域在某种意义上已经接近饱和。</p>
+        <h3>AI 写的 kernel 和验证问题</h3>
+        <p>Vibhu 提到最近的新闻：GPT-5.6 写出了更高效的 kernel，让 Terra 和 Luna 的成本可能降低 80%；还有一些没有 kernel 背景的人用自动研究循环在比赛里刷新纪录。Alex 说 GPU Mode 排行榜上最近的题，几乎所有解法都是 AI 生成的。但有个现象：社区里有位叫 Gauners 的老成员，大家早知道他是顶尖的 kernel 作者，他也用 AI，不过主要是由他来写提示、把方向往特定路子上推。结果他的 kernel 几乎是前十名里唯一一个放进真实端到端系统还能稳定运行的，代码行数也少得多。</p>
+        <p>Alex 说 GPU kernel 一直有验证问题，KernelBench 发布以来就有大量 reward hacking（模型钻评测的空子，拿到高分但代码并不真正正确）。他的结论是会写 kernel 仍然有很大优势。他把这推广到别的领域：数学证明也一样，公司仍在雇数学家做数据标注或引导模型解题，懂行的人还有价值。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 人的专业知识和暴力搜索</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=574s" target="_blank">0:09:34</a>–0:15:16 · Human Expertise vs. Brute-Force AI Search</em></p>
+        <h3>专家是很强的验证者</h3>
+        <p>swyx 问这只是知识，还是也有某种更好的规划方式。他说自己写代码前一定画图，图里有一块不懂就一直弄到懂为止。Alex 说两者都有：知道怎么看这些问题、怎么解的人，也知道怎么用 AI 去做，因为他们充当了很强的验证者。从各种 Agent 集群的经验看，给一个问题砸足够多的算力，就能充分探索解空间；可能你烧了一千亿甚至一万亿个 token，但请来一个懂这个问题的人，他可能给模型指出一个点，让那一万亿 token 的开销变得没必要。他说趋势还不清楚，但现实中要解决的问题太多，不可能每次都砸最大的算力，效率仍然很重要。</p>
+        <h3>理论上限，和 mega kernel</h3>
+        <p>swyx 问有没有按物理极限算出来的“标准答案”。Alex 说 GPU kernel 可以算一个 speed of light（理论最快速度）估计，矩阵乘法很好算，复杂问题就不容易，而且要看数据一开始在 CPU 还是在 GPU 的显存里，这会改变数字。这个上限假设数据传输和计算完美重叠，现实中常有绕不过去的瓶颈，大多数人写的 kernel 离这个数也差得很远。</p>
+        <p>swyx 提到 Jeff Dean 在他们节目里说自己会追踪每次操作的皮焦耳能耗，问 Alex 在不在意功耗。Alex 说不在意，这里看的都是速度。不过速度分两种：单个 kernel 的速度，和整个模型端到端的速度。单个 kernel 的测试默认所有数据从 HBM（GPU 上的高带宽显存）开始；而在整模型里，你可能宁愿让第一个操作慢一点，好让数据留在缓存里给第二个操作用。这就是 kernel fusion（把多个算子合成一个 kernel，省去中间读写显存）或 mega kernel（把整段甚至整个模型合进一个大 kernel）的问题，通常只在受内存带宽限制时才有意义。</p>
+        <p>模型越来越强，是不是应该直接生成 mega kernel？Alex 认为很难，因为需要数据，他还没见过在没有任何样例的情况下自举出解决一类难题的能力。另一个原因是，单个 kernel 不复杂、结构不多，而 mega kernel 由单个 kernel 组合而成，组合性很强，除了少数奇怪的融合，大部分情况他觉得交给一个在高层算子上工作的编译器更合适。他说有一家公司在做这件事，在 GPU Mode 上讲过。swyx 在这里提醒大家 GPU Mode 的讲座都在 YouTube 上，Alex 说现在主要由 Mark 主讲，Matei 有时也讲，入门材料也不少。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 研究品味：博士生要押大注</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=916s" target="_blank">0:15:16</a>–0:21:24 · Research Taste and Taking Big Bets</em></p>
+        <h3>Princeton 的那批人</h3>
+        <p>Alex 说他读博前参与过很多基准测试，起因是在 Princeton 和 SWE-bench 团队一起工作（John、Carlos、Ofir、Karthik）。swyx 说很多人不知道有多少基准出自 Princeton 同一个组。Alex 认识 Shunyu Yao，Shunyu 当时带他的朋友 Michael Tang（现在在 Anthropic），他们俩是 Karthik 实验室的两个本科生。swyx 说 Shunyu 现在在腾讯，Latent Space 每年会请一个整个博士阶段都“押中”的博士生，Shunyu 和 Jack Morris 都是。</p>
+        <h3>做工业界不看的问题</h3>
+        <p>swyx 问研究品味从哪里来。Alex 说一半运气一半聪明，品味是通过机会练出来的，他觉得自己幸运，先在 Princeton，后来在 MIT 遇到导师 Omar。他观察到学术界最成功的研究，往往来自关心工业界大多数人没在看的问题。很多博士生做的东西是“工业界实验室会喜欢的”，比如做个热门基准，或者为某个任务做专用 harness、meta harness，这些都是围绕今天的模型设定好目标的工作。</p>
+        <p>他拿 RLM 举例：这个想法很简单，论文出来时很多人问“这有什么用”“这不就是子 Agent 吗”。他说得到这种反应反而是个好信号，说明大家没想过它的目的。SWE-bench 也一样，Ofir 喜欢讲这个故事：刚发布时没人在意，大家觉得这任务不可能完成，为什么拿它当基准，直到 Devin 出来，大家才开始想在上面刷分。他最喜欢的例子是 Eric Zelikman 的 STaR 和 Quiet-STaR，他第一次读时觉得“这不是很显然吗”，chain of thought 和 Shunyu 的 ReAct 也给人这种感觉。这些论文的价值在于讲了一个“这个领域应该长什么样”的故事。</p>
+        <p>他说 Quiet-STaR、ReAct、RLM、SWE-bench 都不是“GPT-6 Astra 发布”那种所有人马上拿来用的东西，学术界目前也做不出那种东西。博士生几乎可以做任何想做的事，如果不利用这一点去做没人在意、或者别人觉得太简单的问题，研究就不会有意思；否则不如去工业界实验室，那里资源和人才都多。大注里很多会失败，这很正常，但博士生最大的优势就是不用应付官僚流程。swyx 说他问过很多人这个问题，大多数人都含糊带过，Alex 给了认真的回答：其他一切条件都对你不利，这就是你唯一的优势。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. GEV，重新想“语言模型”是什么，以及打游戏的模型</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=1284s" target="_blank">0:21:24</a>–0:32:57 · GEV and Rethinking the Language Model / Video Game Agents and the Harness Problem</em></p>
+        <p>（GEV 在 YouTube 描述里写作 GEV，节目说明写作 Jev，文字稿里两种拼法都有。节目里没有说明它出自哪家机构，只说不是学术项目。）</p>
+        <h3>被骂“不就是个分类器”</h3>
+        <p>Alex 说 RLM 和 GEV 都经历过同样的事：先被过度炒作，然后有人说“这很简单、很蠢、早就知道了”。GEV 发布时很多讨论说它不过是个 MLP 分类器，像入门机器学习课里做的那种。他认为这没抓到重点。GEV 有意思的地方在于它提出了一个问题：语言模型现在的形式是对的吗，能不能考虑文本进、文本出以外的设计？</p>
+        <p>按他的理解，GEV 利用了语言模型的主干网络，因为它学到了大量语言信息，但改掉了模型的输出空间，换来一个取舍：如果你对问题有先验，比如只需要做二分类，就能做很快的推理。用一个完整的语言模型做二分类、付大约 400 倍的成本，在他看来很傻。只是长期以来最好的模型都在几家实验室手里，大家只会用 GPT-4、GPT-6 或 Fable，于是习惯了“语言模型就是自回归解码器”这个前提。自回归解码器的意思是模型一次生成一个 token，每个新 token 依赖前面所有 token。</p>
+        <p>RLM 遭到的一个常见批评也是“这不是语言模型”或者“我以为是新架构，结果不是”。他的回答是，语言模型就是给语言建模，不一定非得是 transformer 解码器。GEV 给了一个新的可调维度：输出空间是什么，它怎样影响推理延迟。循环 transformer（looped transformer，让同一组层反复运行多次）也类似，被说成傻点子，但它打开了一组新问题：只循环模型的一部分会怎样？加一个路由器把输入送到模型不同部分会怎样？能不能把 harness 里做的事放到模型内部？harness 的设计选择和模型架构的选择之间能搭什么桥？他说 GEV 我们不知道能走多远，循环 transformer 也不知道。</p>
+        <h3>对 RLM 有什么用</h3>
+        <p>他看到 GEV 时的第一反应是这对 RLM 很有用。RLM 和 Agent 集群这类系统最大的瓶颈是慢：不停地调用语言模型，算力分配不对，有些很简单的事本来交给一个小模型就行，但手里只有笨重的大模型。他预计会出现标准前沿模型之外的新类型模型。swyx 补充了 Thinky（Thinking Machines）的 interaction models，Alex 同意。</p>
+        <p>swyx 总结为“打破仅解码器的序列到序列范式，做点别的”。Alex 说如果你想和前沿实验室在自回归解码器上拼算力，赢不了；他说不了解 Thinky，不想乱说，但如果它的策略是复制 OpenAI 或 Anthropic，那是很糟的策略，因为同样的设定下能比的只有数据和算力。除了 OpenAI、Anthropic，也许再加 Meta 和 GDM，其他人都得做点不一样的。他说这其实是好事：规模化有效，这些公司会继续做下去，他怀疑前沿实验室不会认真把大量算力分给新赌注，既然旧赌注已经有效。swyx 说这就是很多新兴实验室（neolab）分出来的原因：你有个副线想法，分不到算力，就出去自己做。</p>
+        <h3>GEV 怎么训练的，以及校准</h3>
+        <p>被问到 GEV 到底是什么，Alex 说有人猜是 diffusion，也就是并行解码，也有开源复现。他最感兴趣的是不知道它的优化目标和训练方法。RLM 也是这样：想法很简单，论文出来谁都能用，真正的价值在于能不能把它训练好，能不能围绕这个系统设计架构，他说自己正在做这件事。网上有人说 GEV 是在 Qwen 上后训练出来的，但他说你用的开源 Qwen 都会比它差，说明它的训练方法很有效。</p>
+        <p>swyx 提到校准（calibration）：模型输出的“我有多大把握”和它实际答对的概率是否一致。他引用之前和 Hugging Face 的 Clémentine Fourrier 的对话，说模型被问“你有多确定”时只会给出最可能的下一个 token，比如“43%”，而不是真正校准过的数字。他猜 GEV 这类模型的校准数据很好合成：知道真实答案，合成一批回答，让模型分类再和真值比较。他认为大家目前只拿它当快速分类器，没有用它的概率或置信度估计；它的特点在于分类有真实依据。Alex 说它当然解决不了所有问题，但能解决一类过去很难的低延迟问题，他很喜欢用它打游戏（Doom）的例子。</p>
+        <h3>语言模型打电子游戏</h3>
+        <p>Alex 做过一个让语言模型玩电子游戏的基准。他说那些数字已经过时了，现在有人用新模型在跑。这个基准想看视觉语言模型能不能在有延迟约束的情况下直接接入游戏，大约两年前、Claude Plays Pokémon 刚出来之后发布。游戏种类多样，大多是大家熟悉的游戏。他看了 GEV 玩 Doom，认为它玩的是很简单的关卡；他说大部分模型还不能有意义地通关这些游戏，见过 Astra 能通关 Kirby 那个游戏。这个基准有意只用了很简单的 harness。</p>
+        <p>swyx 说老版 Claude Plays Pokémon 是从 RAM 里读游戏状态，看哪些格子能走。Alex 说 GEV 也一样，它没有视觉，得把游戏状态喂进去。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 为什么 Claude Code、Codex 和 Pi 这么像</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=1977s" target="_blank">0:32:57</a>–0:38:38 · Why Claude Code, Codex, and Pi Are So Similar</em></p>
+        <h3>它们都一样</h3>
+        <p>swyx 念出 Alex 一篇博客的标题“语言模型 harness 是组合泛化器”，说自己读得很吃力，请他解释。Alex 先说他不满意大家讨论 harness 的方式：有人说爱 Claude Code，有人爱 Codex、Pi、Oh My Pi、Prime Agent，他觉得它们都一样，大部分设计选择相同。Prime Agent 稍有不同，因为它的内核就是一个 RLM。</p>
+        <p>他从 harness 为模型做了什么讲起。用语言模型解很难的任务时，大家发现“预测下一个 token”这种形式很别扭。以 SWE-bench 为例，在代码库里导航，你不可能一次模型调用就说“解决我在这个代码库上的问题”，所以要靠 harness。他对 harness 的定义是：一个很有主见的程序，规定语言模型以什么方式贴合到一个问题上。</p>
+        <h3>在 harness 里训练很别扭</h3>
+        <p>他接着说，我们应该想 harness 里哪些选择让模型解出了任务，以及能不能让模型自己就做到这些。比如循环 transformer 某种意义上可以用 harness 模拟，就是在模型外面循环（区别是不解码）。但大家一直守着同一种架构选择。现在模型是围绕 harness 的 rollout（模型在 harness 里一次完整运行的轨迹）来训练的，轨迹很长，可能有多个 Agent，做法很别扭、很取巧。</p>
+        <p>这篇博客想说的是：如果 harness 的作用是帮模型解某个任务，不同的 harness 设计除了提供几个工具调用、一个 grep 代码库的方式，还能不能做更多事。他说这个想法在 RLM 论文时就有，只是当时没这么包装；RLM 背后还有很多想法会陆续发出来。RLM 是他试过很多版本的抽象之后最合理的那个，原因有很多没公开。</p>
+        <h3>两个看起来不同的任务，解法相同</h3>
+        <p>他展示博客里的例子：一个检索任务，一个聚合任务，领域完全不同。用普通语言模型在这两个任务上训练，轨迹看起来很不一样；用 Pi 或 Claude Code（博客里没有，但他们有结果）也会把两个问题区分得太开，尽管解法其实一样。RLM 把上下文卸载（context offloading，把长上下文放进外部环境而不是塞进提示词）出去，再让模型写代码处理它，就出现一个奇怪但有用的性质：子 Agent 看到的是不同问题，但子 Agent 解的是更容易的子任务，你相信它够聪明；而顶层的总体策略是一样的，所以在左边任务上训练，右边任务马上就能解。</p>
+        <p>图上的结果是，简单地在这些任务上训练 RLM，它会自然泛化到更长的任务，因为策略基本相同，只改了一个长度变量。这对完全不同的任务也成立，比如数学任务和写作任务，高层的解法相同，在一个上训练会泛化到另一个。他强调这里没有魔法。swyx 问能不能用话说出它们学到了什么，博客里写在短任务上训练能泛化到 8 到 30 倍长的任务。Alex 说它们学会的是在某个长度上解这类问题的策略，这个策略可以直接迁移到更长的长度，实际上是同一个程序。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. harness 是组合泛化器</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=2318s" target="_blank">0:38:38</a>–0:46:20 · Harnesses as Compositional Generalizers</em></p>
+        <h3>可以递归地成立</h3>
+        <p>Alex 说这意味着两件事：一是可以在更少的环境上训练，泛化到比现有做法更多的任务；二是你仍然想用上所有数据，希望它能泛化到更广的问题。对 RLM 这种递归调用的系统，这个论证还可以归纳地成立。他回到前面说的算法竞赛和 GPU 优化技能相近：harness 可能（也许要推一下）学会“解 GPU 编程题的办法和我在算法竞赛里学到的很像”，先让子 Agent 列出有希望的方案，再写一个循环逐个检查、在验证器上演化它们。两个任务在顶层看起来一样，子 Agent 做的事可能不同，但子 Agent 解的问题也可能是同一种形式，这是个递归的论证。</p>
+        <p>他说这篇博客的意思是要重新想 harness 的角色，harness 可以大幅提高模型的泛化能力和数据利用效率，这不限于 RLM，还有很多 harness 没被发现。再往前推一步：RLM 里哪些部分是必需的？能不能直接训练一个模型，在前向计算里隐式地做 RLM 的事？有人会说代码不可微，但他认为会出现很多近似做法。他相信有主见、设计得好、更适合规模化的 harness 能带来很大收益。RLM 是一个很原始的归纳偏置，设计上没什么特别，只是和现在的做法很不一样，但可能随数据和环境扩展得更好。</p>
+        <h3>主持人的反问：通用 harness 不是已经在扩展了吗</h3>
+        <p>主持人反问：现在的 harness 都偏向编程，而编程被证明在很多领域都管用，Claude Code 被拿来做设计、做演示文稿，Muse Spark、GrokBot 也是很简单、没什么主见的 harness，编程好，也在扩展，怎么改进它们？Alex 提到最近一篇 harness tax 论文，他记得是 Arena 发的，说这篇论文证实了他的先验：大部分 harness 选择不重要，因为这些 harness 都一样。不过他说 GrokBot 据他了解设计挺不一样，他很喜欢。他推测 Anthropic 和 OpenAI 只在自己的 harness 里训练，不会在竞争对手的 harness 里训练。</p>
+        <p>主持人说开源模型也一样，Qwen 很会用 OpenCode，老版本的 Gemma 在这方面很差，模型再好也得在 harness 里训练过。Alex 说模型越强，这个区别越不重要，比如把 Astra 放进 OpenCode 也不会出大问题，各个 harness 的差别主要就是成本。</p>
+        <h3>“轨迹即提示”</h3>
+        <p>但把这些模型放进 RLM，表现还是一般。他认为原因是大家训练所围绕的都是同一类 harness，也就是 Pi 那种循环，他称为 trajectory as a prompt（轨迹即提示）：把整个 rollout 的轨迹都留作主模型的上下文，就算用子 Agent，也还是这个形式。要探索新 harness，需要有专门的团队做有意义的实验，比如在不同 harness 设计上做后训练规模化。</p>
+        <p>他说 Fable 有很长一段时间是最适合 RLM 的模型，因为它有 dynamic workflows，这显然是训练进去的能力，即使模型本身还有点笨，在 RLM harness 里也比别的模型好得多；现在 Astra 也够好了。swyx 问这个结论在哪里能看到，Alex 说是内部结果，没公开。他的总体判断是大家还没为 RLM 式的工作流优化过模型，优化好了效率会高很多。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. RLM 到底是什么</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=2780s" target="_blank">0:46:20</a>–0:53:57 · RLMs Explained</em></p>
+        <h3>定义</h3>
+        <p>主持人请他给出十秒钟的定义。Alex 用的是组合泛化器那篇博客里的说法（他说希望原论文里就这么写）：RLM 是一种 harness 设计，harness 里唯一的工具是代码。它做的是程序化的子 Agent 调用，模型可以把自己当作一个工具来调用；它也有别的工具，但都是代码里的函数；它处理的上下文始终存放在这个代码环境的某块内存里，可以是文件系统。</p>
+        <p>他以 Prime Agent 为例：它的轨迹和上下文（包括压缩之后）都存在磁盘上，所以模型随时能回头看原始上下文，即使已经压缩过；所有工具都在 Python REPL 或 Bash REPL 里运行。REPL 是一种交互式环境，输入一段代码，立刻执行并返回结果。他说大多数 harness 不同的地方首先是上下文卸载不这样做。Prime Agent 做了上下文卸载但没做到底，它仍然保留标准 Claude Code、Codex 那种轨迹即提示、压缩上下文的循环，额外加了卸载；它独特的地方是唯一的工具是 IPython。</p>
+        <h3>它要解决什么</h3>
+        <p>主持人问 RLM 核心要解决什么。Alex 说最初的问题是 harness 很难处理长上下文，通常只在代码这类训练过的场景里还行。现在的重点是组合性：希望语言模型系统对每一步的行动有更多控制。工具调用很受限，每一轮都得调用，先调 A，再调 B，再调 C，没有一个可以随时回头取用的中心上下文。RLM 就是围绕组合、围绕一个随时可取用的中心上下文设计的，这个上下文是按现有语言模型的能力设计的。</p>
+        <p>他说 Agent 集群在设计上很相似，比如那次 Hugging Face 事件（节目没展开）：集群里的 Agent 会学着在一个留言板上交流，这个留言板就是它们共享的上下文。RLM 的主张是最好的交流方式是代码，因为模型很会写代码。swyx 说这种组合性一直延伸到为具体任务生成自己的 harness，Alex 说对。</p>
+        <h3>局部分布内</h3>
+        <p>他接着讲博客里的“局部分布内任务”（locally in-distribution）概念。分布内任务指提示是模型见过的，或者见过某个版本的。大多数 harness 不断把轨迹追加到提示里，所以除非你是 Anthropic 或 OpenAI、在用户轨迹上训练过，大部分情况最后都会落到分布外。局部分布内是组合的论证：RLM 把计算拆成一种 meta harness，也就是一段调用子 Agent、每个子 Agent 看一个局部问题的程序，这样整个任务虽然是分布外的，过程中的每一次语言模型调用都是分布内的。每次调用都在分布内，大概率就能得到正确答案。</p>
+        <p>swyx 说 RLM 的逻辑极限是不只写 harness，还训练一个定制模型、自己收集数据，相当于 harness 里装了一个全自动 AI 研究员。Alex 说要看 RLM 的训练会走到哪里。他在 MIT 不做大规模训练，因为负担不起，但有公司在做，他说 Prime（Prime Intellect，文字稿此处写作 Prime and Select）显然在做。他期待也许能看到围绕聪明 harness 训练时更好的后训练 scaling law。</p>
+        <h3>“你刚说它们都一样”</h3>
+        <p>swyx 追问：什么叫更聪明的 harness？你刚说它们都一样。Alex 说 Claude Code、Codex、Pi 把逻辑拆开几乎是同一个东西，就是在循环里调工具；而 RLM 和其他 harness 抽象看起来很不一样。他类比模型架构：很多架构选择放大规模后差别很小（对实验室来说不小，可能收敛稍好一些），预训练 scaling law 之所以成立，是因为架构选择现在比较稳定，如果彻底换架构，那条幂律可能完全不同。harness 也一样，现有的大体相同，但有一些例外正在出来。</p>
+        <p>swyx 补充说也有博士生在走另一条路：换数据，预训练 scaling law 也会变。现在训练用的是互联网上的原始非结构化文本，如果有更好的数据表示，scaling law 也会变。所以架构、数据都可以动。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. Prime Agent 和持久子 Agent</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=3237s" target="_blank">0:53:57</a>–0:59:37 · Prime Agent and Persistent Subagents</em></p>
+        <h3>怎么开始和 Prime 合作</h3>
+        <p>swyx 问他怎么和 Prime 合作的，这是不是 Prime 对 Hermes Agent 的回应。Alex 说 Prime 先发了一篇博客，说他们相信 RLM 是未来，这和他没关系；他在那里有个 GPU Mode 的朋友 Matei，联系上后发现很认同那边研究者对 harness 设计的看法。他欣赏的是对方理解了 RLM 论文的目的：解决长上下文任务只是结果之一，论文想推动的是更有主见的 harness 设计。swyx 说论文总有“你选择突出的结果”和“真正的论点”之分。双方决定一起研究训练 RLM、做 RLM harness，于是有了 Prime Agent，他说反响不错。他当时担心的是，在做的时候（Fable 和 Astra 之前）没有哪个模型擅长 RLM 这套。</p>
+        <h3>Prime Agent 的结构</h3>
+        <p>主持人请他讲 Prime Agent 和传统 Claude Code 有什么不同。Alex 说它是建在 Pi（Pi Mono）上的 harness，Pi 是一个极简的核心 Agent harness，他拿 Pi 做一切的参照，因为别的 harness 基本都是 Pi。Prime Agent 就是 Pi，但明确限制 IPython 是唯一可用的工具，其他工具都作为 Python 模块或 bash 脚本加载进来。所以它在 Pi 之上用了 RLM 的核心抽象。</p>
+        <p>它还有一个 continual harness（持续 harness），来自另一位博士生 Seth，他用这个方法让语言模型 harness 玩游戏，和做 Gemini Plays Pokémon 的 Joel 合作很多。continual harness 也很简单，是一条设计原则：harness 的哪些部分可以让 harness 自己改，比如它自己的 skills、可用的子 Agent、给模型的系统提示。它作为 IPython 内核里的一个工具提供。除此之外，Prime Agent 其他部分都是标准的。</p>
+        <h3>Agent 之间的通信和持久子 Agent</h3>
+        <p>他说运气好的是很多新的前沿模型在里面表现很好，一些新的开源模型也不错。另一点是它有一套特定的 Agent 间通信框架：RLM 往往会生成很多子 Agent，需要让子 Agent 能和根 Agent 或彼此通信，规定每个子 Agent 能和谁说话、怎么说，而且都写在代码里。还有持久子 Agent：子 Agent 可以在原始 Agent 运行结束后继续存在，你可以进到那个子 Agent 里继续给它提示，看到更多正在发生的事。</p>
+        <p>swyx 说这是他现在用 Codex 最大的痛点，Codex 的子 Agent 很短命，还主动劝你别拿它做长时间任务。他说诀窍就是把东西外置到文件系统，再强制一切都通过代码运行，相信会写代码的模型自己写 harness。</p>
+        <p>swyx 问 Prime 会不会训练定制模型，还是一次性合作。Alex 说 Prime 在训练一个模型，他们大约 3 月就公开说过，这本来就是他们的业务，用来展示在他们的托管训练栈上能训练。他自己不参与模型训练，因为博士阶段还有别的大注要押，有些还不能透露。他说现在做研究很令人兴奋，因为领域里大部分进展的过程其实挺无聊，结果不无聊。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 别人怎么用 RLM</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=3577s" target="_blank">0:59:37</a>–1:02:26 · RLMs in the Wild</em></p>
+        <ul>
+            <li>Harvey：做法律 AI 的公司，和他没有关系，发了一篇博客，在自己的法律工作上后训练了一个 RLM。法律工作要翻大量文档，找一些纯检索系统不容易找到的具体信息，他们给出的结果很好。Alex 说事先不知道，看到时很惊讶。</li>
+            <li>Headlong：Andy Konwinski 的大项目，Laude Institute（文字稿写作 law institute）的持续运行 harness，主持人说这个项目和 Baseten 有合作，之前叫 Terminus 之类的名字。Alex 说它用了 RLM 的抽象，但做的事比 RLM 更酷：系统会“持续思考”，即使你不问它，它也会处理上下文里的问题，而且控制了 token 成本，不会烧光你的额度。</li>
+            <li>RLM 的 GitHub 页面下面列了很多第三方工作，比如 Axe，一个人做的、围绕 DSPy 和 RLM 的 harness；DSPy 自己也有 RLM 模块。</li>
+            <li>ARC-AGI-3：官方 Kaggle 比赛里（不是 Prime Intellect 那个公开版本）有很多 harness 声称用了 RLM 抽象，或受它启发（他举了一个名字，文字稿不清）。他说这类场景最能体现组合、使用代码、把神经符号系统和 AI 结合带来的好处。</li>
+        </ul>
+    </section>
+
+    <section id="t10">
+        <h2>10. OpenAI 的 Agent 集群和未来的“语言模型”</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=3746s" target="_blank">1:02:26</a>–1:09:22 · OpenAI Swarms and the Future of Language Models</em></p>
+        <h3>OpenAI 用了 RLM 吗</h3>
+        <p>swyx 说 OpenAI 宣布在 ARC-AGI-3 上做到 99.9%，还说解决了 Navier-Stokes 问题，“只是把模型丢上去”，外界在争论是不是只靠模型；他问 OpenAI 用的是不是 RLM。Alex 说他猜不是，但要小心，因为大家对什么算 RLM 有争论。比较清楚的是他们用了某种共享上下文（比如共享文件系统）的 Agent 集群，这很符合 RLM 的精神，但他们还做了很多和 RLM 本身无关的巧妙的事。</p>
+        <p>他部分同意“harness 对他们做的事没那么必要”。他的说法是：GPT-6 Astra 这类模型在拿到正确信息的条件下，技术上够聪明，能为这些很难的问题写出证明；问题是怎么拿到那些信息。OpenAI 的情况可能是在集群里很多 Agent 上做了很长的搜索，也许研究员还加入了直觉，告诉它该探索哪里（他说这部分不确定），最后产出了某些信息，让某个 Agent 拿去完成了证明。在这个意义上 harness 的细节不重要，harness tax 那篇论文也指向这一点：除了用户对 harness 的感受，真正重要的是怎样有意义地组合这些 Agent 得到最终答案。</p>
+        <h3>用户看到的只是前端</h3>
+        <p>他说用户想要的是 Claude Code、Codex 的好部分，比如那种可以看着它工作的流式输出；底下跑的可以是很复杂的 Agent 集群，用户不想看那些，那不是可读的信息。这也是 RLM 起名的用意：叫“递归语言模型”，但不是一种语言模型架构。他写过一篇博客，认为未来我们以为是语言模型、实际在调用的那个东西，可能是一个集群、一个脚手架，或者某种扩展得很好的 harness 设计，用户只看到它的前端。他认为这是相对稳妥的判断。他说直接拿一个基础 transformer 让它“解 Navier-Stokes”是不会成功的；他能接受的说法是，把模型或 Agent 指向一个不断增长的信息上下文，也许就足以解很难的问题。</p>
+        <h3>一万个 Agent，四千万美元</h3>
+        <p>swyx 说 OpenAI 花了多少是半公开的：一万个 Agent，88 个小时，1300 亿个输出 token，按公开价格估算大约 4000 万美元。Alex 说比他想的少。swyx 还说了一组数字，大意是最终结果的输出约 300 亿，加上 Agent 之间传来传去的消息，总量是它的两倍多（这段文字稿说得不太清楚）。</p>
+        <p>swyx 又提到 Cursor 今年 2 月关于集群的文章，他们最后得到的多 Agent 架构基本就是一个普通软件团队的组织架构图。他认为子 Agent 有一个 gather（汇总）步骤，很像 GPU 编程，这是瓶颈：一个主 Agent 协调所有子 Agent，就得反复汇总再重新分配，很慢；真正的集群应该是每个 Agent 都是独立的个体。</p>
+        <h3>大部分集群在空转</h3>
+        <p>Alex 同意，但提出一个问题。他用压缩和 RLM 做类比：很多情况下 RLM 能解压缩（compaction，把过长的对话历史总结成短的）解不了的更难的任务，但大多数时候你还是选压缩，因为更便宜更快。Agent 集群也一样，他相当确定 95% 的集群是完全没用的，只是在烧 token。swyx 说 Cursor 那种设定里每个人都有分工、有 Jira 看板，可能好一些；搜索问题本来就会产生大量无用信息，最后只用到一个检索结果，这是大家清楚的。</p>
+        <p>Alex 说真正的问题是什么设计适合什么问题。理论上 OpenAI 可以把它打包成 API，叫 swarms，说“指向任何问题，我们给你答案”（swyx 插话说这就叫 Pro），也许你要付 4000 万美元。他说能拿 4000 万美元砸向一个问题并解决它，这本身很令人兴奋，但还有很多研究要做：不是所有东西都该是集群，界线划在哪里，Agent 能不能自己决定。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 开放式研究和 Sakana AI</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=4162s" target="_blank">1:09:22</a>–1:17:48 · Open-Endedness and Sakana AI</em></p>
+        <h3>开放式问题怎么挑结果</h3>
+        <p>swyx 问他怎么看 open-endedness（开放式研究，不给具体目标，让系统自己跑），即“没有提示，直接开始”。Alex 读博前在 Sakana 待过一个夏天，那里做很多这方面的工作。swyx 提到刚请过 Richard Sutcliffe 上节目，两人确认 Tim Rocktäschel 也在那家公司（swyx 说他是主要联合创始人，以前是 Google 的开放式研究负责人）。</p>
+        <p>Alex 说他把开放式问题看得和未解数学问题有点像，方法基本相同：演化搜索和放出一群 Agent、指望它们找到有意思的东西很像，AlphaEvolve 等工作一两年前就这么做。不清楚的是，是否要把所有开放式搜索都当成目标明确的难题；如果不是，他还不完全清楚它的价值。他在 Sakana 的感受是，最终还是要像 OpenAI 做 Navier-Stokes 那样，往特定方向推很多次，才能得到有意思的东西。</p>
+        <p>swyx 的看法是这像基础科学和应用科学的区别：基础科学是为研究而研究，应用科学有目标、在最小化某个 loss。他觉得有意思的大注是“如果没有提示呢”，选个领域，放出一群 Agent，回头问它们“你们在做什么”，再决定哪个问题有意思。Alex 说他在 Sakana 时大家最大的难题是最后怎么挑：Agent 可能自己定目标，但面对一大堆低质量产出（slop），怎么找出里面的好东西。他提到 Sakana 有个叫 Foo 的东西（名字以文字稿为准），像个模型路由器，灵感来自“挑一个能选出最佳解的问题”，在这里就是为问题挑最好的模型。swyx 笑说他是第一个把模型路由和开放式研究联系起来的人。Alex 说也许解法就是让模型一直跑、做超高吞吐的数据生成，再让 Agent 去里面找有意义的东西，他不确定这够不够。</p>
+        <p>swyx 说对他而言这是整个机器学习的反面：机器学习有目标，这里没有目标，或者目标定义得不清楚，研究着研究着发现某个目标有意思，就像 GEV 找到了一个没人探索的目标函数。他把这和前面博士生的话题连起来：留在学校是为了追求开放式研究，想赚钱就去实验室。两人顺带聊了湾区“不进实验室付不起房租”的话题，Alex 说他在东海岸很少听到这种讨论。</p>
+        <h3>Sakana 是一家什么样的公司</h3>
+        <p>swyx 提到 Sakana 的博客：他们的 Ultra 系统在几乎没有人工干预的情况下做自动化数据科学研究，比有目标的 auto research 更开放一些。swyx 问 Alex 怎么看 Sakana，除了“日本那家”。Alex 说那里的人很聪明，团队是从 GDM 早先做开放式、演化式研究的团队分出来的。swyx 提到 AI Scientist，Alex 说他指的是之前 GPU kernel 那次事故（节目没展开），大家到现在还不原谅他们；AI Scientist 有些批评，他不做那个方向，没看法。</p>
+        <p>他喜欢 Sakana 的地方是它更偏研究，不和 OpenAI、Anthropic 在同一个赛道，至少他在的时候没有一个大家都在用的大模型；它运作起来有点像博士实验室，他说 David Ha 很聪明。他还说日本的 AI 市场不太一样，目标客户和交易方式都和美国不同。swyx 在网页上找到 Sakana 有一个专门面向日本市场的模型，回答方式按日本文化调过，它不追求基准上的前沿，随后有人念出页面上写着它是 Kimi 的微调版。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. Kimi 和 OpenAI 的 Agent 集群，Gemini 和 GDM</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=4668s" target="_blank">1:17:48</a>–1:22:02 · Kimi vs. OpenAI Agent Swarms</em></p>
+        <h3>集群收敛不是白来的</h3>
+        <p>从 Kimi 说开去，swyx 说 Moonshot 那边也是一个研究生出来做了 Kimi Delta Attention，最后做成了公司。Alex 说他了解那个人很强，很多中国实验室做了很好的工作。</p>
+        <p>swyx 问他对 Kimi 的 Agent 集群怎么看。Alex 说 OpenAI 在 Agent 集群上的做法显然是对的。他的理由是，没有一个很聪明的 harness 设计（他认为目前还没人有），什么都不会白来。集群设计不是理所当然的，不是 GPT-6 Astra 够聪明，集群就自然跑得好；他们显然训练过，Hugging Face 那次事件就是他们在训练一个集群式的系统，而且做得好到可以砸 4000 万美元解出一个未解问题。他读 Kimi 的 Agent 集群时的感觉是“有意思，但不知道它能不能解出任何新东西”。swyx 说 Kimi 的说法是“它帮你做电子表格”。</p>
+        <p>Alex 说 dynamic workflows 也一样，他觉得那次发布有点失败，据他了解用的人不多。主持人说太贵了，等于“把我的银行卡拿走”。Alex 说他试过，行为不像预期。他说自己不是 OpenAI 的铁粉，但 OpenAI 做到的很厉害：让集群真正朝一个目标行动。swyx 总结说集群的效率就是这里的目标函数，有多少是 slop；Alex 说大家把“集群收敛到一个答案”看得太理所当然了。swyx 提到他们和 Noam Brown 的那期节目：以前做竞争型 Agent，现在做协作型 Agent，现在这就叫集群。</p>
+        <h3>Gemini 和 GDM</h3>
+        <p>主持人问 Gemini 也拿过 IMO 金牌，曾经让 Agent 长时间推理，怎么看。Alex 先说他没在这些公司工作过，听听就好。他说那项工作很厉害：在模型还不够好的时候，他们在 harness 上做得很聪明，更早一年还有 AlphaGeometry。但他说和他聊过的人对 GDM 的看法都一样：太官僚，有人才有资源，什么都能做，但这一点不解决就不行。他说不是针对 Antigravity，但他不认识用 Antigravity 的人，自己试过一次，看不出换过去的理由。swyx 说 Meta 也被骂了很久，后来恢复了，Google 正在经历那个阶段。</p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 投机式程序化工具调用和能力过剩</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=4922s" target="_blank">1:22:02</a>–1:30:15 · Capability Overhang and Speculative Tool Calling</em></p>
+        <h3>投机式 PTC</h3>
+        <p>PTC 是 programmatic tool calling，程序化工具调用，指模型写一段代码，在代码里调用工具，而不是每轮输出一个工具调用。Alex 对 speculative PTC（投机式程序化工具调用）只说了一句：这是个很简单的想法，几乎显然应该这么做，对 RLM、CodeAct 这类程序化调用 Agent 的系统是不用想的选择。一句话说法是：模型写代码时，或者写完代码后，很多工具是顺序执行、要等的，那就提前启动它们。如果能 JIT 编译这段代码，即使有变量，也能想办法确定要调用什么。swyx 说就是静态分析加投机执行。</p>
+        <p>Alex 说有编程语言方向的学者告诉他有很巧妙的做法，以后可能会多做。swyx 说基本得换语言，JavaScript 和 Python 做不到，Haskell、Lisp、OCaml 这类函数式语言可以流水线化，TypeScript 可以用 Effect TS。</p>
+        <h3>Mismanaged Geniuses 和能力过剩</h3>
+        <p>swyx 说 Mismanaged Geniuses 这篇文章在他看来像是在重述“好好做 harness，模型能做的远比现在多，这是技能问题”。Alex 基本同意。他说欣赏文章强调 jagged intelligence（参差不齐的智能，模型在某些事上很强，在另一些事上很差），但希望有人（也许学术界）认真想一件事：即使是 Astra 这样的前沿模型，也做不到在一个月里持续、稳定地做好一份具体工作。他觉得这个问题很蠢，相信能解决，不需要前沿实验室为 IPO 做的那些花哨东西。这些模型已经很聪明，哪怕用笨办法，也应该能让它做得像一个 18 岁高中生做某份工作那样好。他说做不到很荒唐，部分原因是语言模型的形式不适合，但可以围绕它设计 harness，不管 RLM 还是别的抽象，他认为有人能设计出这样的 harness。</p>
+        <p>swyx 问“做这个”具体是什么，和 Harvey 用 LLM 做法律工作有什么不同。Alex 说是做长时间但简单的任务，并且做得可靠，有点像 Harvey，只是瓶颈不在专业知识。他举例说像跟实习生说话那样让它去探索一个小问题，很初级的 auto research 算一个，不一定找出新解法，但能把任何问题里容易的部分优化掉，只是现在这类东西往往偏向机器学习训练。很多人的工作流可以 vibe code 一个专用 harness 来自动化，比如找论文，或者做一个 Slack 机器人；他想要的是一个标准形式的 harness，插进任何场景，告诉它“帮我找这个”就行。</p>
+        <p>主持人问这是不是能力过剩（capability overhang）的论点：就算模型停在今天的水平，也还有很多影响可以发挥。Alex 说某种程度上是，他讲的是最简单的形式。模型在编程和数学上格外强，这些能力可以迁移到很多别的事上。他说一个拿过 IMO 金牌的人放到很多不同领域通常都能搞明白，但不知道模型是否如此。他举 GPU 优化的思想实验：如果把模型训练数据里所有 GPU 编程数据去掉，模型其他方面和 Astra 一样强，它还能优化 GPU kernel 吗？能不能在上下文里学到需要的东西，搭一条流水线去解优化任务？他认为一个和 Astra 知道得一样多的人，能做的事和 Astra 套在 harness 里能做的事之间存在差距，而我们能让模型更接近那个人。</p>
+        <p>swyx 说这听起来就是持续学习（continual learning，模型在部署后持续从新经验里学习）问题，问他为什么不直接这么说。Alex 说他想过要不要直接说出“持续学习”这个词，但对这个词很谨慎。swyx 说 Alex 像是用范畴论的方式思考，在乎的是一般结构，再翻译到具体例子，而听众都在听具体的，所以容易沟通错位；他建议用“我在第二层，要上到第三层再回来”这种简写。</p>
+    </section>
+
+    <section id="t14">
+        <h2>14. Neuralese、下一步研究和 AI 做科学</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=5415s" target="_blank">1:30:15</a>–1:43:24 · Neuralese, Future Research, and AI for Science</em></p>
+        <h3>模型该用什么语言思考</h3>
+        <p>swyx 问是否该转向 Neuralese（模型内部的、非人类语言的表示），有没有比英语、Python、JavaScript 更好的输出形式，有人说二进制（他说这是 Marc Andreessen 的说法），也有人插话说 PTX。Alex 说他倾向于英语和 Python 的混合，因为模型的能力在一定程度上反映了训练数据；他不太信二进制的说法。</p>
+        <p>swyx 提出萨丕尔-沃尔夫假说：所用的语言会约束思考方式。他举例说中文没有时态（Alex 说他会说中文，但中文不太好），韩语对每个说话对象都要体现社会地位，非洲有语言有“蔬菜”这个语法性，德语动词放在句末。所以用英语输出思维链，就偏向了英语擅长解决的东西。主持人补充说模型的思维链本来就会切换语言，最明显的是中国模型说英语时可能用中文推理；大部分模型多语言能力很强，加一门语言收益不大，但推理时会互换。</p>
+        <p>swyx 又提到电影《降临》：外星人七肢桶对时间的感知是平的，整句话一次输出，接近自回归和 diffusion 的区别。人类用自回归说话，如果能用 diffusion 说话，整个想法一下子出现，逐渐清晰。Alex 觉得很有意思，但问：有些推理链本身是不是就是自回归的，比如时间顺序、代码的因果性。swyx 说那是函数式编程和关系型语言探索得还不够，那里一切都是纯函数、关系式的，把始终成立的关系翻译成代码的事交给求解器。Alex 说这超出了他的了解范围。</p>
+        <h3>为什么从 GPU 转到 harness</h3>
+        <p>swyx 说他注意到很多人从 GPU 起步，再转向“零梯度”的一侧（他说这是 Shunyu 的叫法），问这会不会感觉没那么“正经”。Alex 说他喜欢用数学的方式思考问题，做 harness 和 Agent 有时很不舒服，因为太模糊，在他们能用的算力下，很多结论在实证上很难验证。但他转过来的原因是他认为大部分创新还没发生在这里。对他来说 GPU 层是探索其他想法的手段：会写 kernel 甚至自动写 kernel，是为了探索想法时不被系统问题卡住。他说自己也对模型层面的东西感兴趣，但不多说了。</p>
+        <h3>怎样找他合作</h3>
+        <p>被问到想找什么样的合作者，他说没有特别需要合作的事，除非是和公司谈算力之类，但他从不拒绝和别人一起做想法。他常收到本科生或其他学生的邮件，内容大多是“我很喜欢 RLM，想一起合作”，swyx 说这是糟糕的联系方式，最糟的是“能请教一下吗”。Alex 说他喜欢有主见的人，即使意见不同，只要能讲清楚自己为什么这样想，他都愿意聊，甚至一起做。swyx 说好的简单想法执行到位，前沿实验室的人也会注意到，他们在找这样的人。</p>
+        <p>Alex 说现在人的注意力很稀缺，他也管不过来手上的项目，Agent 根本没帮上忙，他会给 Agent 下个提示然后再也不看。他通常有 10 到 15 个想法，大多数是坏的；别人找他时也可能想法其实不好，但看起来有意思，就花点时间研究，觉得真有东西就用接下来几周全力推进。他说这是他喜欢读博的原因：跑步或打网球时想问题是最开心的时候，一旦确信某件事，就放下一切去做，等到能跑实验了，又可以轻松一阵。</p>
+        <h3>AI 做科学</h3>
+        <p>swyx 说很多人认为科学（物理、生物、数学）是下一个前沿，Latent Space 还开了一档科学播客，问他怎么区分偏工业的项目和偏科学的项目。Alex 说他读博前做过 AI 做生物的工作，后来这个领域变化很大。他说自己对这些领域了解有限，如果发现他们现在思考的设计原则适合某个科学问题，他也会兴奋，但更难，因为经验科学或应用科学的反馈周期很长。swyx 说这最后会变成机器人问题。</p>
+        <p>Alex 还说要小心选择把时间押在哪里：花很多时间做一个问题，也许六个月后新模型出来就好得多。swyx 说 ARC-AGI-3 已经饱和了，Alex 说它不到一年就被做到饱和，如果你是选了这个问题的实验室，现在可能有点难过。swyx 说知识工作、游戏这些都饱和了，GDPval 已经八十多、九十多分，剩下从 90 到 100 会很难、要花十年，所以下一个低垂的果实是科学。Alex 说 MIT 有很多很强的自然科学家，说“我来解决你们的问题”几乎有点冒犯。swyx 举了采访 Yi Tay 的例子：做 IMO 那项工作的人说自己没参加过 IMO，甚至不知道它是什么，只是规模化的模型；这听起来不太尊重人，但进展确实在发生。</p>
+        <p>最后两人聊到一些数学家对用 AI 的反对（文字稿这里人名不清）。Alex 觉得这件事有点怪，如果其中很多人之前没和 OpenAI 合作过，他们的立场会更有说服力；swyx 说这是人身攻击式的论证，人可以和不同意的人合作，也可以改变主意，他支持他们表达的权利，但也有很多人有理由不同意。收尾时 swyx 说没想到整期没过 RLM 论文本身，Alex 说论文更多是实证结果，想法本身很简单，已经讲过很多次，现在有更有意思的东西可看。他现在是博士第二年。</p>
+    </section>
+
+    <section>
+        <h2>这一期值得记下的原话</h2>
+        <ul>
+            <li>“they can uncover something for the model that would, like, erase that one trillion token spend.”<br>懂行的人可能给模型指出一个点，让那一万亿 token 的开销变得没必要。（<a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=548s" target="_blank">0:09:08</a>）</li>
+            <li>“you kind of need to take big bets if you're gonna be in academia.”<br>要待在学术界，你就得押大注。（<a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=1159s" target="_blank">0:19:19</a>）</li>
+            <li>“a language model is just modeling language. It doesn't have to be this transformer decoder, you know?”<br>语言模型就是给语言建模，不一定非得是 transformer 解码器。（<a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=1410s" target="_blank">0:23:30</a>）</li>
+            <li>“a harness is a very, very opinionated program over how you want a language model to be form fit over a problem.”<br>harness 是一个极有主见的程序，规定语言模型以什么方式贴合到一个问题上。（<a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=2006s" target="_blank">0:33:26</a>）</li>
+            <li>“An RLM is basically just a harness design where the only tool in the harness is code”<br>RLM 基本上就是一种 harness 设计，harness 里唯一的工具是代码。（<a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=2759s" target="_blank">0:45:59</a>）</li>
+            <li>“every individual language model call over the course of this task is in distribution, even if the entire task itself is out of distribution”<br>即使整个任务在分布外，过程中的每一次语言模型调用都在分布内。（<a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=3008s" target="_blank">0:50:08</a>）</li>
+            <li>“what we think of as a language model, like the thing that we query might actually be like a swarm or like a scaffold”<br>我们以为是语言模型、实际在调用的那个东西，可能是一个集群或者一个脚手架。（<a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=3868s" target="_blank">1:04:28</a>）</li>
+            <li>“95% of the swarm is entirely useless”<br>集群里 95% 完全没用。（<a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=4058s" target="_blank">1:07:38</a>）</li>
+            <li>“I think we, we take for granted what it means for a swarm to converge to an answer.”<br>我觉得我们把“集群收敛到一个答案”看得太理所当然了。（<a href="https://www.youtube.com/watch?v=kog7mwsDqnk&t=4751s" target="_blank">1:19:11</a>）</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Latent Space Podcast · Recursive Language Models — Alex Zhang, MIT PhD · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

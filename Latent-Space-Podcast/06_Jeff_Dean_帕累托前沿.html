@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jeff Dean：占住帕累托前沿，从 Deep Think 蒸馏到 Flash | Latent Space 播客笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="05_Goodfire_可解释性.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Latent Space 播客目录</a> · 06</span>
+    <span><a href="07_Doug_OLaughlin_内存短缺.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Jeff Dean：占住帕累托前沿，从 Deep Think 蒸馏到 Flash</h1>
+        <p class="subtitle">Google 首席 AI 科学家 Jeff Dean 讲为什么 Pro 和 Flash 两头都要做、蒸馏怎样让下一代 Flash 追上上一代 Pro、用皮焦耳算能耗来理解 batching 和 TPU 设计、让模型“看起来”能关注万亿 token 的检索系统，以及 Gemini 的由来和他怎样用编程 Agent</p>
+        <div class="author-meta">
+            主持：Alessio Fanelli、swyx · 嘉宾：Jeff Dean（Google 首席 AI 科学家，Gemini 项目的主要推动者之一）· 发布日期：2026 年 2 月 12 日 · 时长：1 小时 23 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ" target="_blank">The AI Frontier: from Gemini 3 Deep Think distilling to Flash — Jeff Dean</a>（本文依据 Latent Space 官方播客文字稿、视频章节和节目说明整理，是中文转述，不是逐字翻译；观点属于说话人，内容以发布当天为准）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一期的内容</h2>
+        <p>Jeff Dean 是 Google 的首席 AI 科学家。节目说明里列了他经手过的几层：2000 年代初重写 Google 搜索系统，推动过万亿参数的稀疏模型，参与 TPU 和前沿模型研究的协同设计，也是 Gemini 的主要推动者。他 1990 年本科论文做的就是神经网络并行训练，2011 年底开始在 Google 做神经网络，所以这期从模型、芯片、系统到组织都能聊到。swyx 开场就说要恭喜他“占住了帕累托前沿”（Pareto frontier，在能力和成本/延迟两个维度上，没有别的模型能同时比你更强又更便宜，这条边界就是帕累托前沿）。</p>
+        <p>节目围绕几个问题展开：为什么既要做最强的 Pro 模型，又要做便宜低延迟的 Flash 模型；蒸馏（distillation）从哪来，为什么最小的模型要靠最大的模型才能做好；公开基准为什么会失效；长上下文怎样从一两百万 token 走向“看起来能关注万亿 token”；为什么要用能量（皮焦耳）来理解硬件和 batching；TPU 怎样预测两到六年后的模型需求；通用模型和垂直模型、知识和推理怎样取舍；最后是 Gemini 怎么来的，以及他怎样看编程 Agent 和写规格说明。swyx 在“RL 和蒸馏的关系”“该不该为某个基准加归纳偏置”“小模型能不能把知识和推理拆开”这几处追问得最多；Jeff 多半先说想要什么能力，再谈具体做法。这一期没有插播广告。</p>
+        <ol>
+            <li><a href="#t01">为什么 Pro 和 Flash 都要做，蒸馏的起源</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">蒸馏和 RL，Flash 追上上一代 Pro</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=309s" target="_blank">0:05:09</a></li>
+            <li><a href="#t03">Flash 进了哪些产品，延迟为什么重要</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=455s" target="_blank">0:07:35</a></li>
+            <li><a href="#t04">基准的寿命、内部留出集和长上下文测试</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=671s" target="_blank">0:11:11</a></li>
+            <li><a href="#t05">“看起来”能关注万亿 token，以及上百种模态</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=901s" target="_blank">0:15:01</a></li>
+            <li><a href="#t06">LLM 的检索漏斗和 Google 搜索的演进</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=1211s" target="_blank">0:20:11</a></li>
+            <li><a href="#t07">2001 年把索引放进内存，系统设计原则和延迟数字</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=1449s" target="_blank">0:24:09</a></li>
+            <li><a href="#t08">用皮焦耳看 batching、TPU 协同设计和低精度</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=1929s" target="_blank">0:32:09</a></li>
+            <li><a href="#t09">研究前沿：可靠性、多模型编排、不可验证领域的 RL</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=2541s" target="_blank">0:42:21</a></li>
+            <li><a href="#t10">IMO 金牌从符号系统转到单一模型</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=2787s" target="_blank">0:46:27</a></li>
+            <li><a href="#t11">知识和推理、垂直模型和可安装模块</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=3038s" target="_blank">0:50:38</a></li>
+            <li><a href="#t12">低资源语言和 DeViSE 的跨模态例子</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=3358s" target="_blank">0:55:58</a></li>
+            <li><a href="#t13">1990 年的本科论文、Google Brain 起步和稀疏模型</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=3540s" target="_blank">0:59:00</a></li>
+            <li><a href="#t14">Gemini 的由来：一页备忘录和名字</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=4035s" target="_blank">1:07:15</a></li>
+            <li><a href="#t15">用 AI 写代码：50 个实习生怎么管</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=4167s" target="_blank">1:09:27</a></li>
+            <li><a href="#t16">写清楚规格说明成了核心技能</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=4466s" target="_blank">1:14:26</a></li>
+            <li><a href="#t17">延迟再降 20 到 50 倍，每秒 1 万 token，以及两个预测</a> · <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=4794s" target="_blank">1:19:54</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 为什么 Pro 和 Flash 都要做，蒸馏的起源</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=0s" target="_blank">0:00:00</a>–0:05:09 · Intro；Frontier vs Flash &amp; Distillation Strategy</em></p>
+        <h3>“占住帕累托前沿”靠的是整套栈</h3>
+        <p>swyx 说，占住帕累托前沿意味着既要有前沿能力，又要有效率，还要提供一系列大家愿意用的模型；这里面有硬件工作，有模型工作，也有很多累积下来的独门做法。Jeff 同意这不是一件事，是“上上下下整个栈”的很多东西合在一起：一方面做出能力很强的大模型，另一方面用软件技术把大模型的能力装进小得多、轻得多的模型里，让它们更便宜、延迟更低，在同等体量里仍然很能干。</p>
+        <h3>为什么不能只追顶端</h3>
+        <p>Alessio 问：新实验室总在推顶端性能，因为要融资；Google 有几十亿用户，当年做 TPU 时就算过“如果每个用 Google 的人每天用三分钟语音模型，CPU 数量就得翻倍”。今天 Google 内部怎么权衡前沿能力和“做出来就得真能部署”？</p>
+        <p>Jeff 说他们一直想要站在前沿、推动前沿的模型，因为只有在那里才能看到哪些能力是去年、半年前稍弱一点的版本还没有的。但这些模型对很多更广的用途来说会慢一点、贵一点。所以他们想同时有两样：一个能力很强又负担得起、能支撑大量低延迟场景的模型，人们可以更放心地拿它做 agentic coding（让模型自己连续多步写代码、跑代码的编程方式）；另一个是高端的前沿模型，用来做深度推理、解很复杂的数学题。两者都有用，所以两头都做。</p>
+        <p>他还补了一条硬约束：蒸馏是让小模型变强的关键技术，而要蒸馏，就得先有前沿模型。蒸馏（distillation）指让小模型去学大模型的输出，把大模型的能力压缩进小模型。“所以这不是二选一”，想得到一个能力强、体量适中的模型，你先得有前沿模型。</p>
+        <h3>蒸馏最初为了什么</h3>
+        <p>Alessio 提到 Jeff 和 Geoffrey Hinton 2014 年提出蒸馏，Jeff 马上补上 Oriol Vinyals 也是作者。Alessio 接着问：像蒸馏、稀疏模型这类老想法，在下一代模型里怎么判断值不值得重拾？</p>
+        <p>Jeff 讲了蒸馏的来历。当时他们有一个很大的图像数据集，3 亿张图，他记得大约 2 万个类别，比 ImageNet 大得多。他们发现，先在大范围图像上预训练，再把类别聚类，给不同子集分别训练“专家”模型，比如一个特别擅长哺乳动物、一个特别擅长室内场景，用富集过的数据流继续训练，效果会好很多。把这大约 50 个模型当成一个大集成（ensemble），性能更好，但没法实际部署。蒸馏就是为了解决这个问题：训练好这些独立的专家模型之后，把它们“挤”进一个真正能上线服务的尺寸里。他说今天做的事情差别不大，只是把“50 个模型的集成”换成了“一个大得多的模型”，再蒸馏进小得多的模型。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 蒸馏和 RL，Flash 追上上一代 Pro</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=309s" target="_blank">0:05:09</a>–0:07:35 · Distillation, RL &amp; Flash Economic Advantage</em></p>
+        <p>swyx 提出一个他自己也说不太清的想法：RL（强化学习，让模型按奖励信号调整行为）会让模型在分布的某一块“冒尖”，但可能在别的地方有损失，是一种不均衡的技术；大家的梦想是提升能力而不在其他方面倒退，他觉得这种“无损合并能力”里应该有一部分是蒸馏过程，但没见过多少相关论文。</p>
+        <p>Jeff 没有直接接 RL 这个话题，他讲的是蒸馏本身的优势：小模型可以配一个很大的训练集，并且可以在这个数据集上反复多遍训练还能持续有收益，因为它拿到的是大模型的 logits（模型对每个候选输出给出的原始分数，比只给一个“正确答案”包含更多信息），这能把小模型“哄”出只用硬标签（hard labels，只标对错的标签）得不到的正确行为。他们观察到，用蒸馏可以让小模型很接近最大模型的表现。</p>
+        <p>他给了一个具体结果：在好几代 Gemini 里，他们都做到了让下一代的 Flash 和上一代的 Pro 一样好，甚至明显更好，并且打算继续这样做。</p>
+        <p>swyx 问：最初的规划是 Flash、Pro、Ultra 三档，你们是不是一直藏着 Ultra，从它往下蒸馏？Jeff 说他们有很多种模型，有些是内部的，不一定发布或上线；也可以从 Pro 级模型蒸馏到 Flash 级模型。他还提到推理时扩展（inference time scaling，推理时让模型多想、多花算力）也是提升能力的一种手段。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. Flash 进了哪些产品，延迟为什么重要</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=455s" target="_blank">0:07:35</a>–0:11:11 · Flash in Products + Importance of Latency</em></p>
+        <h3>Flash 的经济性</h3>
+        <p>swyx 说 Flash 的经济性带来了“全面统治”，他记得最新数字大约是 50 万亿 token，并说这个数每天都在变。Jeff 笑说按市场份额“希望是在涨”。swyx 列举 Flash 已经进了 Gmail、YouTube；Jeff 补充说搜索产品里的 AI Mode 和 AI Overviews 也越来越多地用 Flash。</p>
+        <h3>延迟是一等目标</h3>
+        <p>Jeff 说 Flash 的好处除了便宜，还有延迟低。他认为延迟对这些模型很重要，因为我们会让模型做复杂得多的事，从提问到模型做完要生成多得多的 token。以后不是“帮我写个 for 循环”，是“帮我写一整个软件包来做 X、Y、Z”，所以需要能低延迟完成这些事的系统。Flash 是一条路。他也提到硬件平台：TPU 芯片之间的互连性能很高，很适合长上下文的注意力运算，也适合有很多专家的稀疏模型，这些对能否大规模上线服务影响很大。</p>
+        <h3>需求会不会被 Flash 吃满</h3>
+        <p>Alessio 提出一个推论：在某些任务上，今天的 Pro 已经饱和，下一代同样的任务会在 Flash 价位饱和；再过两代，Flash 大概能做大多数人想做的所有事，那继续推 Pro 前沿怎么划算？</p>
+        <p>Jeff 说如果人们让模型做的事情分布不变，这个推论成立；但通常是模型越强，人们让它做得越多。他拿自己举例：一年前他用自家模型做编程任务，简单的还行，复杂的不太行；之后复杂编程任务进步很大，他现在会让它做复杂得多的事。编程之外也一样，比如“分析全世界的可再生能源部署，给我一份太阳能板部署的报告”，这比一年前人们会问的复杂得多。所以仍然需要更强的模型去推前沿，而且这些新需求也告诉他们模型在哪里会崩，下一代该改进哪里。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 基准的寿命、内部留出集和长上下文测试</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=671s" target="_blank">0:11:11</a>–0:15:01 · Benchmarks, Long Context &amp; Real Use Cases</em></p>
+        <h3>好基准的起点是 10% 到 30%</h3>
+        <p>Alessio 问内部用什么基准，因为每次报告的都是同一批，从 97 涨到 99。Jeff 说公开的外部基准有用，但有“有效寿命”。他心中最好的基准，一开始的分数大概是 10% 到 20%、30%，不要更高；然后围绕它要测的能力去改进，把分数拉到 80%、90%。到了 95% 左右，再专门盯着它收益递减：要么这个能力已经达成，要么存在泄漏问题，公开数据或高度相关的数据进了训练集。</p>
+        <p>所以他们有一批内部留出基准（held-out benchmark，确认完全没出现在训练数据里的测试集），对应模型现在还没有、他们想要的能力。然后再判断怎样补：是需要更针对这类任务的专门数据，还是需要架构改进，或者其他模型能力上的改进。</p>
+        <h3>大海捞针已经饱和</h3>
+        <p>swyx 问有没有哪个基准反过来催生了架构改进。Jeff 说 Gemini 1.5 首次带来的长上下文能力算一个。swyx 插话说“大海捞针”（needle in a haystack，在很长的文本里藏一句话，看模型能不能找出来）一出来，大家的图表全都变绿了。Jeff 说单针的大海捞针在至少 128K 以内已经饱和；他认为现在多数模型的上下文也就 128K 或 256K 左右，他们在推 100 万、200 万 token。swyx 说 Google 仍是 200 万这一档的领先者。</p>
+        <p>Jeff 说长上下文有很多真实用途，比如放进一千页文字，或者几段一小时长的视频，然后真的用上这些内容。所以需要更复杂的测试：多根针，或者更接近真实的“读完这些内容，给出这样的答案”，这比“告诉我这个东西的产品编号”更能反映人们想用长上下文干什么。</p>
+        <h3>该不该为了基准加归纳偏置</h3>
+        <p>swyx 往上抽了一层：看到基准就知道该怎么改架构，但该不该改？那可能是一种归纳偏置（inductive bias，人为塞进模型结构里的假设），前 Google 研究员 Jason Wei 说过，这样短期能赢，长期不一定能扩展，以后可能还得拆掉。Jeff 说他不太关心具体该用哪种解法，更关心想要什么能力。他们很确定长上下文有用，但今天的长度“太短了”。他真正想要的是回答问题时能关注整个互联网。但这不能靠单纯扩展现有方法实现，因为现有方法的成本随长度平方增长（quadratic）：100 万 token 已经在推极限，做不到 10 亿，更别说 1 万亿。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. “看起来”能关注万亿 token，以及上百种模态</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=901s" target="_blank">0:15:01</a>–0:20:11 · Attending to Trillions of Tokens &amp; Multimodality</em></p>
+        <h3>万亿 token 的“错觉”</h3>
+        <p>Jeff 说，如果能给人一种“模型能关注万亿 token”的错觉，用途会很多：关注整个互联网；关注 YouTube 的像素，以及对单个视频、跨大量视频形成的更深表征；在个人 Gemini 层面，经你允许关注你的全部个人状态，比如邮件、照片、文档、你买的机票。问题是需要什么算法改进和系统改进，才能以有意义的方式做到这一点。</p>
+        <p>swyx 插了一个他算过的数：一个人每天说八小时话，最多也就产生大约 10 万 token，完全装得下。Jeff 说但如果你要理解人们放进视频里的所有内容，就完全是另一回事。swyx 又补充，一旦超出语言，像蛋白质这类东西信息密度极高。</p>
+        <h3>非人类模态</h3>
+        <p>Jeff 说 Gemini 从一开始就想做成多模态。人们通常理解的多模态是文字、图像、视频、音频这些“像人类”的模态，但他认为让 Gemini 了解非人类模态也很有用：Waymo 车辆或机器人的激光雷达数据，X 光、MRI、影像、基因组这类健康数据。他估计可能有上百种数据模态，希望模型至少接触过、知道“这是一种有意义的模态”。就算没有把全部激光雷达或 MRI 数据放进主预训练数据配比（从数据取舍上可能不划算），放一点进去也很有用。</p>
+        <h3>视觉是不是“王者模态”</h3>
+        <p>swyx 问有没有统领其他模态的“王者模态”：视觉可以在像素层面编码文字（他提到 DeepSeek 的 OCR 论文），音频也能做成频谱图变成视觉问题。Jeff 说视觉和运动都很重要，运动就是随时间变化的视觉，也就是视频。他说进化独立演化出眼睛大约 23 次，因为感知周围世界的能力太有用，而这也是我们希望模型做的：理解我们看到、关注的东西，帮我们用这些信息做事。</p>
+        <p>swyx 说他认为 Gemini 仍是唯一的原生视频理解模型，他天天拿它看 YouTube。Jeff 说很多人不知道 Gemini 对视频能做什么，举了他演讲里用过的例子：一个 YouTube 集锦，收了过去 20 年左右 18 个难忘的体育瞬间，比如 Michael Jordan 在总决赛最后的跳投、一些足球进球。把视频直接丢给模型，说“请做一张表，列出这些事件、发生日期和简短描述”，就能得到一张 18 行的表。swyx 称之为把视频变成 SQL 式的表。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. LLM 的检索漏斗和 Google 搜索的演进</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=1211s" target="_blank">0:20:11</a>–0:24:09 · LLM Search &amp; Google Search Evolution</em></p>
+        <h3>从万亿 token 收窄到 117 篇文档</h3>
+        <p>Alessio 问：Google 之所以存在，是因为人没法看完整个互联网，需要排序；人大概只看前五六个链接，LLM 可能需要 20 个高度相关的链接，Google 内部怎么设计这种更宽的 AI Mode 检索？</p>
+        <p>Jeff 说即使在语言模型之前，排序系统也是从索引里海量网页出发，先用很轻量的方法找出相关子集，降到比如 3 万篇文档左右，再逐步用越来越复杂的算法和信号细化，最后得到展示给用户的 10 条结果加其他信息。他认为基于 LLM 的系统不会差太多：你要“关注”万亿 token，先找出大约 3 万篇、也许 3000 万个有意思的 token，再从中挑出完成用户任务真正该看的 117 篇文档。可以想象：大量高度并行的轻量模型筛出最初 3 万个候选，稍复杂一点的模型或一组模型从 3 万收窄到 117，最后由最强的模型看这 117 篇。他说一定是类似这样的系统，才能给出“关注万亿 token”的错觉，就像 Google 搜索让你在整个互联网里搜索，最后找到的是很小一部分相关内容。</p>
+        <h3>LLM 已经接管了高流量系统</h3>
+        <p>swyx 提到 BERT 几乎一出来就用进了 Google 搜索，结果改善很多。Jeff 说用基于 LLM 的文字表示，可以摆脱“页面上必须出现某个词”的硬性要求，转而判断“这个页面或这一段的主题和查询高度相关”。swyx 说大家不知道 LLM 已经接管了多少超高流量系统，比如 YouTube 的语义 ID（semantic ID，词表里每一项对应一个视频，用码本来预测视频），最近 xAI 的 Grok 也是。</p>
+        <p>Jeff 说早在 LLM 大量用进搜索之前，他们就很重视“软化”用户输入的查询。swyx 问有没有演进史可讲。Jeff 说他 2009 年在 Web Search and Data Mining 会议上做过一次演讲，因为 Google 从没发表过关于搜索起源的论文；从大约 1999 年到 2004、2005 年，搜索和检索系统重新设计了四到六代，那次演讲讲的就是这段演进。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 2001 年把索引放进内存，系统设计原则和延迟数字</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=1449s" target="_blank">0:24:09</a>–0:32:09 · Systems Design Principles + Latency Numbers</em></p>
+        <h3>1200 台机器装得下一份索引</h3>
+        <p>Jeff 说 2001 年他们在多个维度上扩展系统。一是索引要更大，因为页面不在索引里就不可能搜得好；二是流量增长很快，要扩容量。系统是分片（sharding，把数据切成多份放在不同机器上）的：索引变大就加分片，比如 30 个分片，索引翻倍就做 60 个，以便控制每个查询的响应延迟；流量增长就给每个分片加副本。算下来，一个数据中心里如果有 60 个分片、每个分片 20 份副本，就是 1200 台带磁盘的机器。他们发现一份完整索引其实能放进这 1200 台机器的内存里。</p>
+        <p>于是 2001 年他们把整个索引放进了内存。他说这对质量的提升很惊人：以前每个查询词都意味着在 60 个分片上各做一次磁盘寻道，索引越大越低效，所以查询里能用的词必须很克制；索引进了内存之后，用户输入三四个词，系统往里加 50 个词也完全没问题，可以加同义词，比如 restaurant、restaurants、cafe、bistro，开始抓住词的意思，不再拘泥于用户敲下的确切形式。他强调这是 2001 年，远在 LLM 之前，核心是软化用户字面输入，去找含义。</p>
+        <h3>为 5 到 10 倍设计，别为 100 倍设计</h3>
+        <p>主持人问设计系统的原则，因为 2001 年互联网每年翻两三倍，今天 LLM 每年的跳跃也很大。Jeff 说先要弄清最重要的设计参数：每秒要处理多少查询，索引多大，每篇文档要存多少数据，检索时怎么读，流量翻两三倍时系统还能不能工作。他的原则是让最重要的特性能扩展 5 到 10 倍，但大概不要超过这个范围。原因是如果某个量突然变成 100 倍，设计空间里会出现一个完全不同的点，在原规模下没意义，在 100 倍时就完全合理。磁盘索引转内存索引就是例子：流量够大、副本够多，这些机器的内存合起来就装得下一份完整索引。他说自己很喜欢先在脑子里推演设计、在设计空间里多试几下，再动手写大量代码。</p>
+        <h3>更新频率是变化最大的参数</h3>
+        <p>Jeff 说早期 Google 不只在扩索引，也在提高索引更新频率，出人意料的是这是变化最大的参数：以前一个月更新一次，后来做到任意页面在一分钟以内更新。这是竞争优势，因为新闻类查询如果用的是上个月的索引就没什么用。swyx 问新闻能不能单独拆一个系统，Jeff 说他们确实推出了 Google News，但用户在主搜索里输入的新闻类查询也需要及时更新。后台还有一整套系统决定每个页面的更新频率和重要性：有些重要页面变化概率低，但保持更新的价值高，所以仍要经常重新抓取。</p>
+        <h3>“每个程序员都该知道的延迟数字”</h3>
+        <p>swyx 提到 Jeff 那份经典的 “Latency Numbers Every Programmer Should Know”：缓存未命中多久，分支预测失败多久，访问一次主存多久，从美国发一个包到荷兰多久。swyx 问为什么是荷兰，Jeff 说当时那里有个数据中心。Jeff 说这份表的用处是做“信封背面计算”（back of the envelope calculation，用几个基础数字快速估算方案可不可行）。比如设计图片搜索和缩略图：是预先算好缩略图，还是从大图实时生成？需要多少磁盘带宽、多少次磁盘寻道？有了这些基础数字，30 秒到一分钟就能做完思想实验。用更高层的库写软件时，也要建立同样的直觉，比如在某种哈希表里查一次要多久，排序一百万个数要多久。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 用皮焦耳看 batching、TPU 协同设计和低精度</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=1929s" target="_blank">0:32:09</a>–0:42:21 · Energy, Batching &amp; TPU Co-Design</em></p>
+        <h3>一次乘法不到 1 皮焦耳，搬数据要 1000 皮焦耳</h3>
+        <p>swyx 说他两年来一直想做一份“每个 AI 程序员都该知道的数字”，但不像原版那样有物理常数，比如参数量换算磁盘大小只是简单的字节换算。Jeff 说思考训练或推理的计算时，一个好办法是看要从存储里搬多少状态进来：片上 SRAM、加速器挂的 HBM（高带宽内存，贴在加速器旁边的大容量内存）、DRAM，或者走网络；再比较这次数据搬运和一次矩阵乘法单元里乘法的成本。乘法的成本很低，按精度不同，大概不到 1 皮焦耳。swyx 意识到他是按能量算的，Jeff 说“一切都会落到能量上”，看怎么做出最省能的系统。</p>
+        <p>而从同一颗芯片另一侧的 SRAM 搬数据，甚至没出芯片，就可能要 1000 皮焦耳。这就是加速器需要 batching（把多个请求打包一起算）的原因：把一个参数从片上 SRAM 搬进乘法单元要花 1000 皮焦耳，那最好让这次搬运被用很多次。batch 是 256 左右还不算坏；batch 是 1 就很糟，等于花了 1000 皮焦耳去做一次 1 皮焦耳的乘法。swyx 说他从没听过从能量角度分析 batching。Jeff 说理想情况下大家都想用 batch size 1，因为延迟最好，但能耗和算力上的低效太大。</p>
+        <h3>小模型铺满 SRAM</h3>
+        <p>主持人提到 Nvidia 押注 SRAM、和 Groq 相关的动作引起很大关注，问 TPU 是否早就看到这一点。Jeff 说 TPU 是规则的 2D 或 3D 网格，很多芯片互连，每颗挂着 HBM。对某些模型，从 HBM 读数据的成本和延迟比从片上 SRAM 读高得多；如果模型够小，可以做模型并行，把它分散到 16 或 64 颗芯片上，全部放进 SRAM，吞吐和延迟都会好很多。他说这不意外，但是好技术。</p>
+        <h3>TPU N+2：预测两到六年后的计算</h3>
+        <p>Alessio 问 TPU 的改进方向怎么定，能不能把 1000 皮焦耳降到 50，值不值得为此做新芯片，甚至有人说“把模型烧进 ASIC”。Jeff 说 TPU 芯片架构团队和上层建模专家之间有大量互动，目的是根据 ML 研究的走向协同设计未来的 TPU。芯片从今天开始设计，可能两年后才进数据中心，之后还要用三到五年，所以要在一个变化极快的领域里预测两到六年后人们要跑什么计算。研究人员提供“那个时间段可能开始奏效或更重要”的想法，才能把有意思的硬件特性放进 TPU N+2（N 是今天在用的这一代）。有时能把一些改动塞进 N+1，但大改动要在芯片设计流程更早的阶段进去。</p>
+        <p>他说有时可以放“投机性”的特性：占不了多少芯片面积，成功了能让某件事快 10 倍，不成功也只浪费一点面积。有些改动很大，就要先做大量仔细的 ML 实验，确认方向对。</p>
+        <p>反过来，swyx 问芯片定了以后会不会限制模型架构。Jeff 说会，两边互相适配：模型架构要调整到在那一代训练和推理用的芯片上高效。有时也可以利用下一代才有的低精度格式，提前用低精度训练，即使当前这代芯片还不完全支持。</p>
+        <h3>精度能低到多少</h3>
+        <p>swyx 问精度能降到多低，有人说三值（ternary）就有用。Jeff 说他很支持极低精度，因为能耗按每传输一个 bit 的皮焦耳算，减少 bit 数是省能的好办法。他说很多人在极低 bit 精度上收获不少，做法是给一大组权重配上共用的缩放因子（scaling factor）。</p>
+        <h3>能量模型、扩散模型、投机解码和模拟计算</h3>
+        <p>swyx 问最近“基于能量的模型和处理器”这股潮流。Jeff 说有几个有意思的趋势：energy-based models 是一个；扩散模型不按顺序逐个解码 token，是另一个；投机解码（speculative decoding，用一个小的草稿模型先猜几个 token，再让大模型一次性验证）也是。他举了数：一次预测 8 个 token，相当于把有效 batch 放大 8 倍，最后也许接受其中 5 到 6 个，就让“把权重搬进乘法单元”的成本摊薄了大约 5 倍。他说这些技术都应该从能量（真实的能耗，他特意说不是指 energy-based models）以及延迟和吞吐的角度去看，这会把你引向能更便宜、更低延迟地服务更大模型或同等模型的方案。</p>
+        <p>他也谈了更“异域”的方向，比如模拟计算基板：可能功耗很低，但往往要和数字系统对接，在数模、模数转换上会丢掉大部分功耗优势。他的结论是，在能效上，针对我们关心的模型做更好、更专用的硬件，从今天出发还有很长的路可以走。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 研究前沿：可靠性、多模型编排、不可验证领域的 RL</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=2541s" target="_blank">0:42:21</a>–0:46:27 · Research Frontiers: Reliability &amp; RL Challenges</em></p>
+        <p>Alessio 问有没有 Google 不做、但希望别人去做的研究。Jeff 笑说 Google 研究人员很多，组合很广。他列了几个开放问题：怎样让模型可靠，能完成更长、更复杂、包含很多子任务的工作；怎样编排，比如一个模型把其他模型当工具，合起来完成比单个模型大得多的工作；以及怎样让 RL 在不可验证领域工作。数学和编程能进步很快，部分因为结果可以自动验证；如果能想出在可验证性较弱的领域也有效的 RL 技术，他认为模型会进步很多。</p>
+        <p>Alessio 提到 Noam Brown 上节目时说，Deep Research 已经证明可以做到，AI Mode 某种程度上也是，它们都不可验证，都和信息检索相关，是不是检索那部分可以打分？Jeff 说可以让另一个模型评估第一个模型的结果，比如问“你检索到的这些东西相关吗”，或者“给这 2000 条打分，找出最相关的 50 条”，这类方法相当有效；有时甚至是同一个模型，换个提示词让它当评审（critic）。</p>
+        <p>swyx 说每年都感觉“容易的做完了，下一步特别难，没人想出来”，现在 RLVR（基于可验证奖励的强化学习）之后，大家都在问不可验证的下一步怎么做，回答都是“不知道，靠评判”。Jeff 说这个领域的好处是有大量聪明人在想办法；模型在某些事上很强，在边缘处会掉链子，提出技术、试出哪些真有用，就是这个领域的研究在做的事。他拿数学举例：两年前大家还在为 GSM8K 发愁（“Fred 有两只兔子，又得到三只，现在有几只”），现在模型能在纯语言下做 IMO 题和网上的 Erdős 问题，这是一年半左右的跳跃。他希望其他领域也能有这种跳跃；有些领域他们还看不清怎么做，有些看得到。</p>
+        <p>swyx 开玩笑说 YouTube 缩略图生成才是 AGI。Jeff 说他不是 YouTube 创作者，不太在乎，但承认人们确实会以封面判断一本书。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. IMO 金牌从符号系统转到单一模型</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=2787s" target="_blank">0:46:27</a>–0:50:38 · Unified Models vs Symbolic Systems (IMO)</em></p>
+        <p>swyx 说他还没缓过来：一年前还有 AlphaProof、AlphaGeometry，今年就“全扔进 Gemini”。符号系统和 LLM 融合曾是很核心的信念，后来大家说“不用了，全在 LLM 里做”。Jeff 说这对他很合理：人类会操作符号，但脑子里大概没有符号表示，有的是某种分布式、类似神经网络的表示，很多神经元在看到某些东西时以某种模式激活，这让我们能推理、规划、做思维链、回退（“这个解法看来不行，换一个”）。神经网络模型在很多方面就是在模拟我们直觉上认为真实大脑里发生的事。所以他从不觉得应该把完全独立的离散符号系统和另一套思考方式分开。</p>
+        <p>swyx 说这对 Jeff 也许显而易见，对他一年前可不是。Jeff 回顾了 IMO 的路线：先是翻译成 Lean（一种形式化证明语言）并用 Lean 验证；第二年再加一个专门的几何模型；今年换成单一的统一模型，大致就是生产模型，多给一点推理预算。他说这说明通用模型能力提升很大，不再需要专门模型。他把这比作 2013 到 2016 年的机器学习：那时每个问题训一个模型，认路牌一个模型，语音识别一个模型；现在统一模型的时代到了，问题是这些模型对从没被要求做过的新事情泛化得怎样，而它们在变得越来越好。</p>
+        <p>swyx 提到他采访过 IMO 团队的 Yi Tay，Yi Tay 说他不知道 IMO 在哪办、规则是什么，“我只是擅长训模型”。swyx 说这种通用的机器学习技能，给数据和足够算力就能处理任何任务，也许就是“苦涩的教训”（bitter lesson，Rich Sutton 的观点：长期看，利用算力的通用方法胜过人工设计的专门知识）。Jeff 说他认为多数情况下通用模型会胜过专门模型。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 知识和推理、垂直模型和可安装模块</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=3038s" target="_blank">0:50:38</a>–0:55:58 · Knowledge vs Reasoning + Vertical/Modular Models</em></p>
+        <h3>小模型的参数该装什么</h3>
+        <p>swyx 往回推了一下：模型有容量上限，能装的 bit 数有限。他说天知道 Gemini Pro 有 1 万亿到 10 万亿参数，外界不知道；但 Gemma 这类大家想在本地跑的开源小模型，装了很多不必要的知识，蒸馏到小模型时，等于在记一些没用的东西。能不能把知识和推理拆开？</p>
+        <p>Jeff 说如果模型能检索，就该让它把力气用在推理上：把宝贵的参数空间拿来记能查到的冷门事实不是最好的用法，更通用的能力更值得占那些参数。但这是一种张力，你也不希望模型完全不了解世界：知道金门大桥大概多长，有助于知道桥一般多长；不需要知道世界某个偏僻角落一座小桥多长。有相当多的世界知识是有帮助的，模型越大能装越多。他认为把检索和推理结合起来、让模型擅长多轮检索并基于中间结果推理，会让模型显得能干得多。他拿个人 Gemini 举例：他们大概不会拿他的邮件训练 Gemini，更可能用同一个模型，把“检索我的邮件、照片”当工具，让模型推理，多轮交互。</p>
+        <h3>垂直模型是在富集数据分布</h3>
+        <p>主持人问“最好的医疗 LLM”“最好的法律 LLM”这类垂直模型是不是短期权宜之计。Jeff 说他觉得垂直模型有意思：要从不错的基础模型出发，然后为某个垂直领域富集数据分布。以机器人为例，他们大概不会把所有可用的机器人数据都训进 Gemini，因为要保持能力均衡；会让它接触一些，但要做很好的机器人模型，就从 Gemini 出发再训更多机器人数据，这也许会损伤多语言翻译，但提升机器人能力。</p>
+        <p>他说训练基础 Gemini 时一直在做这类数据配比取舍：他们很想加入另外 200 种语言、每种语言有多少数据就放多少，但这会挤掉其他能力，比如 Perl 编程会变差（Python 还会好，因为放了足够多），一些长尾编程语言或多模态推理可能受损，换来多语言变强。</p>
+        <p>所以他设想的是专门模型加上更模块化的模型：200 种语言模块、很好的机器人模块、很好的医疗模块，可以拼在一起，按情况调用；遇到健康相关的问题，就把健康模块和主模型一起用。swyx 称之为“可安装的知识”，像下载一个包。Jeff 说其中一部分可以来自检索，另一部分大概要来自在比如一千亿或一万亿 token 的健康数据上训练。swyx 提到 Gemma 3N 论文里有一点这方面的东西。</p>
+        <h3>需要多少 token 才能跑赢前沿模型</h3>
+        <p>主持人追问：要多少 token 才能跑赢还在持续进步的主模型？500 亿？1000 亿？如果要一万亿医疗 token，外面可能根本没有。Jeff 说医疗是特别难的领域，很多医疗数据他们不能合规获取，但很多医疗机构想用自己的非公开数据训练模型，所以有机会和大型医疗机构合作，为它们训练更定制的模型，可能比只用公开数据训的通用模型更好。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 低资源语言和 DeViSE 的跨模态例子</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=3358s" target="_blank">0:55:58</a>–0:59:00 · Multilingual + Low-Resource Language Insights；Vision-Language Representations Example（前段）</em></p>
+        <p>swyx 提到 Jeff 喜欢的一个例子：把低资源语言放进上下文，模型就能在上下文里学会。Jeff 说他们用的是 Kalamang，全世界大约只有 120 人说，没有书面文本。他说对索马里语、埃塞俄比亚的阿姆哈拉语这类语言，世界上有相当多的文本，他们大概没把这些语言的全部数据放进 Gemini 训练，只放了一部分，放得更多就能提升这些语言的能力。</p>
+        <p>swyx 说他对语言学有兴趣，如果他是语言学家，会拿这些模型问很根本的问题：萨丕尔-沃尔夫假说（语言是否影响思维）；有些语言里有别的语言没有的概念，很多则是重复的；还有人们爱提的论文 “The Platonic Representation”，说杯子的图片和大量含 “cup” 的文字最后会映射到潜空间里大致同一个位置，这应当也适用于语言，例外之处正好体现人类发现的、英语也许没有的概念。</p>
+        <p>Jeff 接着讲了他做过的一个早期模型 DeViSE（swyx 先猜是 Flamingo，Jeff 纠正）：把一个有词表示的语言模型和一个在 ImageNet 类数据上训练的图像模型融合，在顶层多训练一点，把两种表示合起来。结果是给一张图像模型训练类别里没有的新图，模型常常能给出对的标签。例子是：望远镜和双筒望远镜都在图像模型的训练类别里，显微镜不在；给一张显微镜的图，模型能给出含 “microscope” 的标签，尽管它从没见过标着显微镜的图。</p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 1990 年的本科论文、Google Brain 起步和稀疏模型</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=3540s" target="_blank">0:59:00</a>–1:07:15 · Vision-Language Representations Example（后段）</em></p>
+        <h3>32 个处理器的并行计算机</h3>
+        <p>swyx 问 Jeff 希望被多问什么。Jeff 说他 1990 年第一次接触神经网络，本科论文做的是神经网络的并行训练。他一直觉得神经网络是对的抽象，只是需要的算力比当时多得多：系里那台 32 个处理器的并行计算机，能让模型稍微有意思一点，但不够解决真实问题。到 2008、2009 年，摩尔定律带来了足够算力，也有了更大更有意思的数据集，神经网络开始能解决人们关心的问题：语音识别、视觉，最后是语言。</p>
+        <p>2011 年底他开始在 Google 做神经网络时，觉得应该用大规模并行计算把能训练的网络做大。他把本科论文里的想法翻了出来：那时他做过也比较过模型并行和数据并行（他当时叫 pattern partitioned 和 model partitioned 之类），那篇论文在网上能找到。模型并行指把一个模型切到多台机器上，数据并行指每台机器一份模型、各吃一部分数据。</p>
+        <h3>在微厨房碰到 Andrew Ng</h3>
+        <p>swyx 说听说 Google Brain 也是在微厨房（Google 办公室里的小茶水间）开始的。Jeff 说他在那碰到斯坦福教授 Andrew Ng，问他来干嘛；Andrew 说刚来几周，每周来一天做顾问，还不确定做什么，但他在斯坦福的学生用神经网络做语音识别开始有好结果。Jeff 说“神经网络，我喜欢神经网络”，想起了自己 1990 年的论文，就说“我们该训真正很大的神经网络”。</p>
+        <p>他说 Google 计算能力多，那时数据中心里没有 GPU，也没有任何加速器，只有大量 CPU。他们做了一个软件系统，能同时用模型并行和数据并行把训练分布到很多台机器上，最后训了一个据他们所知比此前任何神经网络大 50 倍的模型：20 亿参数的视觉模型，在 16000 个 CPU 核上训练了好几周。这个模型在 ImageNet 22K（2.2 万个类别的版本）上带来了 70% 的相对错误率改进。他说那时他们没写复杂的 scaling 分析，只有一句口号：“更大的模型，更多的数据，更好的结果”，这句话当了他们六七年的口头禅，每次照做，语音、语言、视觉都变好。</p>
+        <h3>稀疏模型和“乘在一起”的改进</h3>
+        <p>Jeff 说过去 15 年把规模做上去需要几方面一起推：推动专用硬件（文字稿此处写的是 like GPUs）；让人能高效表达 ML 想法的软件抽象层；以及稀疏模型。他很早就认为稀疏激活模型很重要，因为既要大容量去记很多东西，又要激活时高效：比如万亿参数，只激活 1%、5% 或 10%。他们早期有篇论文把网络做到“outrageously large”，那是论文标题，他说是 Noam 起的，很抓人；swyx 说 2017 年 Noam 就在谈万亿参数模型。</p>
+        <p>Jeff 给了两个数：稀疏模型相对非稀疏模型，在达到给定质量的时间或算力成本上带来约 10 倍改进；Transformer 相对当时的 LSTM，在达到给定质量的算力成本上带来 10 到 100 倍改进。这些改进会相乘：硬件、系统基础设施、模型架构的算法、数据改进、RL 配方，叠在一起，才让 2026 年的模型比 2025 年好得多，比 2024、2023、2022 年好得多。</p>
+        <h3>上千人的协作</h3>
+        <p>swyx 说这也是巨大的组织挑战，第一篇 Gemini 论文好像有上千位作者。Jeff 说作者列表有 10 页，他认为多作者很好；难的是组织这么多人，让大家朝同一方向推、工作能乘在一起变成下一代模型。他说他自己、Noam 和 Oriol 在帮着掌舵，下面有人分别负责预训练设置、基础设施、后训练配方、数据准备、多模态、国际化（I18n）、编程能力等。swyx 说听说 Sergey 回来了，很积极地参与编程方面的工作，Jeff 说是的，“我们用同一个微厨房”。</p>
+        <h3>Brain 的算力配额是不是问题</h3>
+        <p>Alessio 提到之前一位嘉宾 David Wan（字幕拼写如此），他在 OpenAI 和 Google 都待过，认为 Brain 内部的算力配额市场（compute quotas，每个人分一份算力）是 Google 没在语言模型上投够的原因：OpenAI 愿意把全部押在一件事上，Google 更“民主”，人人有配额；如果相信 scaling，这应该是全组织层面的决定。Jeff 说他某种程度上同意，他当时写过一页备忘录，说他们分散资源“很蠢”。</p>
+    </section>
+
+    <section id="t14">
+        <h2>14. Gemini 的由来：一页备忘录和名字</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=4035s" target="_blank">1:07:15</a>–1:09:27 · Gemini Origin Story + Organizational Memo</em></p>
+        <p>Jeff 说当时 Google Research 和 Brain 团队里有大语言模型的工作，Brain 和 Google Research 其他部分有多模态模型的工作，原 DeepMind 有 Chinchilla 和 Flamingo 这类工作。他们分散的除了算力，还有最好的人和最好的想法。所以他说“这太蠢了，为什么不合起来，做一个从一开始就是多模态、什么都擅长的统一模型”，这就是 Gemini 的起源。他说那份一页备忘录起了作用。</p>
+        <p>名字也是他起的。当时有另一个提名，他觉得两个组织合在一起像一对双胞胎（Gemini 是双子座）；另外还有 NASA 的含义：Gemini 计划是通往 Apollo 计划路上的重要一步。所以他觉得这是个好名字。</p>
+    </section>
+
+    <section id="t15">
+        <h2>15. 用 AI 写代码：50 个实习生怎么管</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=4167s" target="_blank">1:09:27</a>–1:14:26 · Coding with AI &amp; Agent Interaction Style</em></p>
+        <h3>你怎么说话，决定了它怎么干活</h3>
+        <p>Alessio 引用一篇写 Jeff 和 Sanjay（Sanjay Ghemawat）友谊的文章，里面 Jeff 说要找一个思维方式和你相容的人结对编程，两人互补。他问：编程 Agent 怎么塑造成和你的思维相容？现在的工具打几分？</p>
+        <p>Jeff 说编程工具和一两年前比好了很多，现在能放心地把相当复杂的事交给它们。他觉得人和编程模型互动的一个好处是：你跟它说话的方式决定了它怎样回应你。你可以说“请给这个写一批好测试”，也可以说“请帮我头脑风暴性能优化思路”；你的方式决定它处理什么问题，以及你要它独立去做大块工作，还是频繁交互、确保方向对。他认为没有一种风格适合所有事：有些问题需要频繁交互，有些你只说“我知道要什么，能讲清楚，去写吧，写完回来”。</p>
+        <p>他预计会有更多“很多独立 Agent 替你干活”的形态，需要摸索出合适的人机交互模式和界面：什么时候它该打断你说“这里我需要多一点指导”，或者“这件做完了，接下来做什么”。他说这个问题还没有最终答案，而且模型越强，这些交互设计决策也可能会变。</p>
+        <h3>50 个实习生</h3>
+        <p>Jeff 问：如果你有一个 50 个实习生的团队，而且他们是人，你会怎么管？swyx 问“你想要 50 个实习生吗”，Jeff 说如果他们真的很好，也许想要，这在可能性范围之内，很多人都可能有 50 个实习生。那你大概会让他们组成小组，你只和五个小组打交道，他们替你去干活。但他说不知道具体会怎么演变。</p>
+        <h3>人和人之间会不会更隔绝</h3>
+        <p>Alessio 担心：结对编程能带进新想法，但如果 50 个 Agent 并行做了大量工作，你想找 Noam Shazeer 一起看，得先给他补上大量上下文，人会不会更困在自己的团队里？Jeff 说也许，但反过来想：没有 AI 工具的传统软件组织，50 个人做事，互动天然是层级式的，这群人做系统这部分，不怎么和那边的人交流；如果是五个人各管 50 个虚拟 Agent，这五个人之间可能有高得多的沟通带宽，比五个各自协调 50 人团队的人要高。</p>
+    </section>
+
+    <section id="t16">
+        <h2>16. 写清楚规格说明成了核心技能</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=4466s" target="_blank">1:14:26</a>–1:19:54 · Prompting Skills &amp; Spec Design</em></p>
+        <h3>以前没人真信“要写规格说明”</h3>
+        <p>主持人问他的工作节奏有没有变，比如是否花更多时间在前期和人对规格、设计目标。Jeff 说有意思的是，教人写软件时都说清楚写规格说明很重要，但没人真信，英文规格说明从来不是大家特别重视的产物，没有真正驱动创作过程。现在如果你要 Agent 替你写软件，就得很小心地写规格，因为这决定输出质量：没写明要处理某种情况、某个边界条件很重要、你很在意某部分性能，它可能就不会照你想的做。他认为人们和模型协作变强的一个途径，就是学会把事情说得清楚利落，不留歧义；不管是不是软件工程师，这都是好技能。</p>
+        <p>swyx 的玩笑是：好的提示词和足够高级的高管沟通无法区分，就像写内部备忘录，字斟句酌。他还说多模态很重要，提到 Google 的 Antigravity 一上来就在多模态上很强，包括视频，那是带宽最高的提示方式。</p>
+        <h3>把通用经验写下来给模型用</h3>
+        <p>主持人提到 Jeff 写过的性能优化提示文档，问是否值得多写这类通用指南，作为模型的检索材料，比如做系统时脑子里的边界情况每次都要重复说。Jeff 说写得好的软件工程指南会有用，既能作为模型输入，也能让其他开发者读，让他们的提示更清楚。不一定每种情况都要定制一份；把通用指南放进编程 Agent 的上下文就有帮助。他举分布式系统的例子：告诉它要考虑哪些故障、有哪些应对技巧，比如 Paxos 式复制，或者把请求发到两处、只要一处返回就行来容忍故障；写 20 条这样的技巧，大概能让编程 Agent 拼出更可靠稳健的分布式系统。</p>
+        <p>swyx 问 Gemini 什么时候能造出 Spanner，Jeff 说它大概已经有那些代码在里面了。一位主持人提到 CAP 定理（分布式系统里一致性、可用性、分区容错三者不能同时满足），说有人造出了“打破”它的东西，大家补充说是在一些假设下，比如时钟很准。他的意思是有时不必永远遵循已知为真的东西，而模型一旦被告知某件事，就会很信。</p>
+        <h3>三次快速调用加人纠正，还是一次长提示</h3>
+        <p>swyx 说他一直想看一个实验：三次“笨但快”的模型调用、每次由人看结果再写新提示，对比花很长时间写一个大提示、交给很聪明的模型。他认为很多表现差是因为规格没写够：没说清楚，模型可能产出 10 种结果，只有一种是你想要的。他的意思是多轮配 Flash 也许就够。</p>
+    </section>
+
+    <section id="t17">
+        <h2>17. 延迟再降 20 到 50 倍，每秒 1 万 token，以及两个预测</h2>
+        <p><em>节目位置 <a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=4794s" target="_blank">1:19:54</a>–1:23:31 · Latency Predictions &amp; Tokens/sec Vision；Future Predictions: Personal Models &amp; Hardware；Closing</em></p>
+        <h3>低延迟的 Deep Think</h3>
+        <p>Jeff 说他很相信要推低延迟：和一个低延迟系统交互，比和慢 10 倍、20 倍的系统交互愉快得多。他预计未来模型和底层软硬件系统的延迟会比今天低 20 倍、50 倍，这对两次交互之间要做大量工作的系统很重要。swyx 说另一头是 Deep Think。Jeff 说如果不是成本和延迟，你会一直用 Deep Think；如果底层硬件和系统让延迟和成本改进 20 倍，就没有理由不用。但到那时大概又会有一个更好的模型，即使在新硬件上也要多花 20 倍时间。swyx 说帕累托曲线一直在往上爬，两人说“onward and outward”。</p>
+        <h3>两个预测</h3>
+        <p>swyx 问他有没有一直在跑的私人测试、哪些事快要做成。Jeff 给了两个预测：</p>
+        <ul>
+            <li>个性化模型：一个了解你、能检索你有权访问并选择授权的全部状态的模型，会比没有这些信息的通用模型有用得多。比如能关注你看过的一切：每封邮件、每张照片、每段看过的视频。</li>
+            <li>越来越专用的硬件，会让延迟低得多、能力强得多的模型以负担得起的价格出现，比现状好很多。</li>
+        </ul>
+        <h3>每秒 1 万 token 有没有意义</h3>
+        <p>swyx 问，说低延迟时大家常用每秒 token 数，现在大约 100，可以到 1000，到 10000 有意义吗？Jeff 说绝对有意义，因为思维链和推理：可以想更多 token，做更多并行 rollout（同一个问题让模型生成多条完整的尝试），生成多得多的代码，再用思维链推理检查代码对不对。swyx 说到每秒 1 万 token，人就不读代码了。Jeff 说不一定会产出 1 万 token 的代码，可能是 1000 token 的代码，背后有 9000 token 的推理，这样的代码大概更好读。swyx 接了一句“如果我有更多时间，我会写一封更短的信”，节目结束。</p>
+    </section>
+
+    <section>
+        <h2>这一期值得记下的原话</h2>
+        <ul>
+            <li>“you have to have the frontier model in order to then distill it into your, your smaller model.”<br>要先有前沿模型，才能把它蒸馏进更小的模型。（<a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=190s" target="_blank">0:03:10</a>）</li>
+            <li>“I think latency is actually a pretty important characteristic for these models”<br>我认为延迟对这些模型是一个相当重要的特性。（<a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=499s" target="_blank">0:08:19</a>）</li>
+            <li>“if you could give the illusion that you can attend to trillions of tokens, that would be amazing”<br>如果能给人一种“能关注万亿 token”的错觉，那会很了不起。（<a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=938s" target="_blank">0:15:38</a>）</li>
+            <li>“So in 2001, we introduced, uh, we put our entire index in memory.”<br>所以 2001 年，我们把整个索引放进了内存。（<a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=1546s" target="_blank">0:25:46</a>）</li>
+            <li>“But if you have a batch of one, that's really not good.”<br>但如果 batch 只有 1，那就真的很糟。（<a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=2018s" target="_blank">0:33:38</a>）</li>
+            <li>“I think, uh, general models, uh, will win out over specialized ones in most cases.”<br>我认为多数情况下，通用模型会胜过专门模型。（<a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=2984s" target="_blank">0:49:44</a>）</li>
+            <li>“Bigger model, more data, better results.”<br>更大的模型，更多的数据，更好的结果。（<a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=3992s" target="_blank">1:06:32</a>）</li>
+            <li>“I actually wrote a one-page memo saying we were being stupid by, uh, fragmenting our resources.”<br>我当时写了一页备忘录，说我们把资源分散开是在犯蠢。（<a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=4069s" target="_blank">1:07:49</a>）</li>
+            <li>“if you have a team of 50 interns, how would you manage that if they were people?”<br>如果你有一个 50 个实习生的团队，而且他们是人，你会怎么管？（<a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=4331s" target="_blank">1:12:11</a>）</li>
+            <li>“being able to crisply specify what it is you want is gonna be really important.”<br>能把自己想要什么说得清楚利落，会变得很重要。（<a href="https://www.youtube.com/watch?v=F_1oDPWxpFQ&t=4545s" target="_blank">1:15:45</a>）</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Latent Space Podcast · Jeff Dean · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>
