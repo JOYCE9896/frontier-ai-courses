@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>附录：集合通信与性能分析 | Ultra-Scale Playbook 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="11_结语与参考资料.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Ultra-Scale Playbook 目录</a> · 12</span>
+    <span><a href="index.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>12 · 附录：集合通信与性能分析</h1>
+        <p class="subtitle">正文反复用到的工具补课：PyTorch 里的各种集合通信怎么用，怎样 profile 一个 kernel，LLM 训练里各种量的典型大小，以及判断通信能否藏在计算后面的公式</p>
+        <div class="author-meta">
+            作者：Nouamane Tazi、Ferdinand Mom、Haojun Zhao、Phuc Nguyen、Mohamed Mekkouri、Leandro von Werra、Thomas Wolf（Hugging Face）· 2025 年 2 月发布 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook" target="_blank">The Ultra-Scale Playbook</a> 中的 “Appendix” 一章（A0 Parallel Programming Crash Course、A1 Distributed Training Profiling、A2 Typical Scales in LLM Training、A3 Math for Compute/Communication Overlap）（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>附录有四部分。A0 是集合通信的速成课，每种操作都配一段可以用 <code>torchrun</code> 跑的 PyTorch 代码和输出，正文讲数据并行、ZeRO、张量并行时用到的 all-reduce、all-gather、reduce-scatter 都在这里定义。A1 讲怎样给 kernel 计时和 profile。A2 列出 LLM 训练里输入、激活、权重、优化器状态、FLOPs 的典型量级。A3 用 A2 的公式推导数据并行、ZeRO-3、张量并行、流水线并行四种情况下，通信能否和计算完全重叠。第一次接触分布式训练的读者，可以在读 <a href="02_数据并行与ZeRO.html">02 篇</a> 之前先读 A0。</p>
+        <ol>
+            <li><a href="#t01">A0：并行编程速成课</a></li>
+            <li><a href="#t02">A1：分布式训练的性能分析</a></li>
+            <li><a href="#t03">A2：LLM 训练中的典型规模</a></li>
+            <li><a href="#t04">A3：通信与计算重叠的数学</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. A0：并行编程速成课</h2>
+        <p><em>原书小节：A0: Parallel Programming Crash Course</em></p>
+        <p>把训练从 1 张 GPU 扩展到几百张，需要在所有机器之间通信和同步权重、梯度和数据。完成这件事的一组分布式模式叫集合操作（collective operations）。这一节依次讲 Broadcast、AllReduce、Scatter 等操作。</p>
+        <p>一般设定是：有若干独立的节点（node），可以是 CPU 核、GPU 或计算节点。每个节点做一些计算，然后要把结果或其中一部分发给其他节点，用于下一个计算步（$t+1$）。</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/a0_general.png" alt="general setup"><figcaption>图：集合通信的一般设定，多个节点计算后交换结果（引自原书）</figcaption></figure>
+        <p>可能要把一个节点的结果发给所有其他节点，也可能要把所有节点的中间结果加起来得到总结果。通常有一个地位特殊的节点起中心作用，叫 root，它是某些操作的目标或数据来源。（TPU 语境下四种集合通信的代价推导，见 <a href="../How-to-Scale-Your-Model/03_分片矩阵与矩阵乘法.html">How to Scale Your Model 第 3 章</a>。）</p>
+
+        <h3>Broadcast</h3>
+        <p>常见情形：数据在节点 1 上，要分享给所有其他节点做计算。Broadcast（广播）就是干这个的：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/a0_broadcast.png" alt="broadcast"><figcaption>图：Broadcast，root 的数据复制到所有节点（引自原书）</figcaption></figure>
+        <p>PyTorch 原生提供集合操作。先用 <code>dist.init_process_group</code> 初始化一个进程组（process group），它设置通信后端（后面会讲 NCCL），确定有多少个 worker（也就是节点），给每个 worker 分配一个 rank（编号，可以用 <code>dist.get_rank</code> 取得），最后在 worker 之间建立连接。（原文这里把函数名拼成了 <code>dist.initi_process_group</code>，下面代码里是正确的写法。）</p>
+        <p>演示 <code>dist.broadcast</code>：在 <code>rank=0</code> 上建一个非零张量，其他 worker 上是全零张量，再用 <code>dist.broadcast(tensor, src=0)</code> 把 rank 0 的张量发给所有 rank：</p>
+        <pre><code>import torch
+import torch.distributed as dist
+
+def init_process():
+    dist.init_process_group(backend='nccl')
+    torch.cuda.set_device(dist.get_rank())
+
+def example_broadcast():
+    if dist.get_rank() == 0:
+        tensor = torch.tensor([1, 2, 3, 4, 5], dtype=torch.float32).cuda()
+    else:
+        tensor = torch.zeros(5, dtype=torch.float32).cuda()
+    print(f"Before broadcast on rank {dist.get_rank()}: {tensor}")
+    dist.broadcast(tensor, src=0)
+    print(f"After broadcast on rank {dist.get_rank()}: {tensor}")
+
+init_process()
+example_broadcats()</code></pre>
+        <p>用 <code>torchrun --nproc_per_node=3 dist_op.py</code> 运行（需要 3 张 GPU，或者相应修改 <code>nproc_per_node</code>），输出如下（原书代码最后一行把函数名拼成了 <code>example_broadcats</code>，照原样保留，实际运行要改成 <code>example_broadcast</code>）：</p>
+        <pre><code>Before broadcast on rank 0: tensor([1., 2., 3., 4., 5.], device='cuda:0')
+Before broadcast on rank 1: tensor([0., 0., 0., 0., 0.], device='cuda:1')
+Before broadcast on rank 2: tensor([0., 0., 0., 0., 0.], device='cuda:2')
+
+After broadcast on rank 0: tensor([1., 2., 3., 4., 5.], device='cuda:0')
+After broadcast on rank 1: tensor([1., 2., 3., 4., 5.], device='cuda:1')
+After broadcast on rank 2: tensor([1., 2., 3., 4., 5.], device='cuda:2')</code></pre>
+        <p>各 rank 的打印顺序可能是乱的，因为无法控制哪条 print 先执行，这里为了可读性排了序。</p>
+
+        <h3>Reduce 和 AllReduce</h3>
+        <p>Reduce（归约）是分布式数据处理里最基础的模式之一：用一个函数 <code>f()</code>（例如求和或求平均）把各节点上的数据合并起来。Reduce 只把结果发给 root 节点；AllReduce 则把结果广播给所有节点：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/a0_reduce_allreduce.png" alt="reduce and allreduce"><figcaption>图：Reduce 与 AllReduce 的区别（引自原书）</figcaption></figure>
+        <p>并没有一个“凭空存在”的节点来做这件事。一般是每个节点做一部分计算，节点之间组织成环（ring）或树（tree）结构。例子：节点连成环，要对各节点上的数求和。第一个节点把自己的数发给邻居，邻居加上自己的数再转给下一个邻居，绕环一圈后第一个节点就拿到总和。</p>
+        <p>下面是一个求和的 Reduce，用 <code>op=dist.ReduceOp.SUM</code> 指定操作（支持的操作见 <a href="https://pytorch.org/docs/stable/distributed.html#torch.distributed.ReduceOp" target="_blank">PyTorch 文档</a>）：</p>
+        <pre><code>def example_reduce():
+    tensor = torch.tensor([dist.get_rank() + 1] * 5, dtype=torch.float32).cuda()
+    print(f"Before reduce on rank {dist.get_rank()}: {tensor}")
+    dist.reduce(tensor, dst=0, op=dist.ReduceOp.SUM)
+    print(f"After reduce on rank {rank}: {tensor}")
+
+init_process()
+example_reduce()</code></pre>
+        <p>Reduce 只更新 <code>dst</code> 节点上的张量：</p>
+        <pre><code>Before reduce on rank 0: tensor([1., 1., 1., 1., 1.], device='cuda:0')
+Before reduce on rank 1: tensor([2., 2., 2., 2., 2.], device='cuda:1')
+Before reduce on rank 2: tensor([3., 3., 3., 3., 3.], device='cuda:2')
+
+After reduce on rank 0: tensor([6., 6., 6., 6., 6.], device='cuda:0')
+After reduce on rank 1: tensor([2., 2., 2., 2., 2.], device='cuda:1')
+After reduce on rank 2: tensor([3., 3., 3., 3., 3.], device='cuda:2')</code></pre>
+        <p>AllReduce 的写法类似，不需要指定目标：</p>
+        <pre><code>def example_all_reduce():
+    tensor = torch.tensor([dist.get_rank() + 1] * 5, dtype=torch.float32).cuda()
+    print(f"Before all_reduce on rank {dist.get_rank()}: {tensor}")
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    print(f"After all_reduce on rank {dist.get_rank()}: {tensor}")
+
+init_process()
+example_all_reduce()</code></pre>
+        <p>结果出现在所有节点上：</p>
+        <pre><code>Before all_reduce on rank 0: tensor([1., 1., 1., 1., 1.], device='cuda:0')
+Before all_reduce on rank 1: tensor([2., 2., 2., 2., 2.], device='cuda:1')
+Before all_reduce on rank 2: tensor([3., 3., 3., 3., 3.], device='cuda:2')
+
+After all_reduce on rank 0: tensor([6., 6., 6., 6., 6.], device='cuda:0')
+After all_reduce on rank 1: tensor([6., 6., 6., 6., 6.], device='cuda:1')
+After all_reduce on rank 2: tensor([6., 6., 6., 6., 6.], device='cuda:2')</code></pre>
+
+        <h3>Gather 和 AllGather</h3>
+        <p>很多实际情况下，各节点各自做了复杂的计算，需要在所有节点间分享最终结果，这时用 Gather 和 AllGather。它们和 Broadcast 相似，都是不加修改地在节点间分发数据。区别在于 Broadcast 是把一个节点上的一份数据发给所有节点；Gather/AllGather 中每个节点各有一块自己的数据，Gather 把所有数据收集到一个节点上，AllGather 把所有数据收集到所有节点上：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/a0_gather_allgather.png" alt="gather and allgather"><figcaption>图：Gather 与 AllGather，虚线表示有的数据本来就在节点上，不需要移动（引自原书）</figcaption></figure>
+        <p>Gather 需要准备一个容器存放收集来的张量，这个例子里是 <code>gather_list</code>：</p>
+        <pre><code>def example_gather():
+    tensor = torch.tensor([dist.get_rank() + 1] * 5, dtype=torch.float32).cuda()
+    if dist.get_rank() == 0:
+        gather_list = [
+            torch.zeros(5, dtype=torch.float32).cuda()
+            for _ in range(dist.get_world_size())
+            ]
+    else:
+        gather_list = None
+    print(f"Before gather on rank {dist.get_rank()}: {tensor}")
+    dist.gather(tensor, gather_list, dst=0)
+    if dist.get_rank() == 0:
+        print(f"After gather on rank 0: {gather_list}")
+
+init_process()
+example_gather()</code></pre>
+        <p><code>gather_list</code> 里确实有所有 rank 的张量：</p>
+        <pre><code>Before gather on rank 0: tensor([1., 1., 1., 1., 1.], device='cuda:0')
+Before gather on rank 1: tensor([2., 2., 2., 2., 2.], device='cuda:1')
+Before gather on rank 2: tensor([3., 3., 3., 3., 3.], device='cuda:2')
+
+After gather on rank 0: [tensor([1., 1., 1., 1., 1.], device='cuda:0'),
+                         tensor([2., 2., 2., 2., 2.], device='cuda:0'),
+                         tensor([3., 3., 3., 3., 3.], device='cuda:0')]</code></pre>
+        <p>AllGather 只需要改一处：每个节点都要准备一个存放结果的占位容器：</p>
+        <pre><code>def example_all_gather():
+    tensor = torch.tensor([dist.get_rank() + 1] * 5, dtype=torch.float32).cuda()
+    gather_list = [
+        torch.zeros(5, dtype=torch.float32).cuda()
+        for _ in range(dist.get_world_size())
+        ]
+    print(f"Before all_gather on rank {dist.get_rank()}: {tensor}")
+    dist.all_gather(gather_list, tensor)
+    print(f"After all_gather on rank {dist.get_rank()}: {gather_list}")
+
+init_process()
+example_all_gather()</code></pre>
+        <p>现在每个节点都有全部数据：</p>
+        <pre><code>Before all_gather on rank 0: tensor([1., 1., 1., 1., 1.], device='cuda:0')
+Before all_gather on rank 1: tensor([2., 2., 2., 2., 2.], device='cuda:1')
+Before all_gather on rank 2: tensor([3., 3., 3., 3., 3.], device='cuda:2')
+
+After all_gather on rank 0: [tensor([1., 1., 1., 1., 1.], device='cuda:0'),
+                             tensor([2., 2., 2., 2., 2.], device='cuda:0'),
+                             tensor([3., 3., 3., 3., 3.], device='cuda:0')]
+After all_gather on rank 1: [tensor([1., 1., 1., 1., 1.], device='cuda:1'),
+                             tensor([2., 2., 2., 2., 2.], device='cuda:0'),
+                             tensor([3., 3., 3., 3., 3.], device='cuda:0')]
+After all_gather on rank 2: [tensor([1., 1., 1., 1., 1.], device='cuda:2'),
+                             tensor([2., 2., 2., 2., 2.], device='cuda:2'),
+                             tensor([3., 3., 3., 3., 3.], device='cuda:2')]</code></pre>
+
+        <h3>Scatter 和 ReduceScatter</h3>
+        <p>Gather 的反向操作：数据全在一个节点上，要切开分给各节点，中间可能还要做些处理。这时用 Scatter；如果分发前要先对数据做一个操作，就用 ReduceScatter。</p>
+        <p>Scatter（分散）把一个节点上的数据切片，每个节点分到一片。它和 Broadcast 不同，Broadcast 给每个节点发一份完整副本，不切片；Scatter 在逻辑上是 Gather 的逆操作。</p>
+        <p>ReduceScatter 稍复杂一些。和 AllReduce 一样，它对所有节点的数据做一个操作；但 AllReduce 中每个节点拿到完整的输出张量，ReduceScatter 中每个节点只拿到输出张量的一片：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/a0_scatter_reducescatter.png" alt="scatter and reducescatter"><figcaption>图：Scatter 与 ReduceScatter（引自原书）</figcaption></figure>
+        <p>Scatter 的代码写法和 Gather 相反：要准备的是要分发出去的源数据列表（Gather 准备的是接收用的张量列表），还要指定 <code>src</code>：</p>
+        <pre><code>def example_scatter():
+    if dist.get_rank() == 0:
+        scatter_list = [
+            torch.tensor([i + 1] * 5, dtype=torch.float32).cuda()
+            for i in range(dist.get_world_size())
+            ]
+        print(f"Rank 0: Tensor to scatter: {scatter_list}")
+    else:
+        scatter_list = None
+    tensor = torch.zeros(5, dtype=torch.float32).cuda()
+    print(f"Before scatter on rank {dist.get_rank()}: {tensor}")
+    dist.scatter(tensor, scatter_list, src=0)
+    print(f"After scatter on rank {dist.get_rank()}: {tensor}")
+
+init_process()
+example_scatter()</code></pre>
+        <p>空张量被填上了 <code>scatter_list</code> 的内容：</p>
+        <pre><code>Rank 0: Tensor to scatter: [tensor([1., 1., 1., 1., 1.], device='cuda:0'),
+                            tensor([2., 2., 2., 2., 2.], device='cuda:0'),
+                            tensor([3., 3., 3., 3., 3.], device='cuda:0')]
+Before scatter on rank 0: tensor([0., 0., 0., 0., 0.], device='cuda:0')
+Before scatter on rank 1: tensor([0., 0., 0., 0., 0.], device='cuda:1')
+Before scatter on rank 2: tensor([0., 0., 0., 0., 0.], device='cuda:2')
+
+After scatter on rank 0: tensor([1., 1., 1., 1., 1.], device='cuda:0')
+After scatter on rank 1: tensor([2., 2., 2., 2., 2.], device='cuda:1')
+After scatter on rank 2: tensor([3., 3., 3., 3., 3.], device='cuda:2')</code></pre>
+        <p>为了演示 ReduceScatter，造一些更有意思的数据：每个节点上建一个二元向量列表，元素是节点 rank 的函数，带幂次和偏移：</p>
+        <pre><code>def example_reduce_scatter():
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    input_tensor = [
+        torch.tensor([(rank + 1) * i for i in range(1, 3)], dtype=torch.float32).cuda()**(j+1) 
+        for j in range(world_size)
+        ]
+    output_tensor = torch.zeros(2, dtype=torch.float32).cuda()
+    print(f"Before ReduceScatter on rank {rank}: {input_tensor}")
+    dist.reduce_scatter(output_tensor, input_tensor, op=dist.ReduceOp.SUM)
+    print(f"After ReduceScatter on rank {rank}: {output_tensor}")    
+
+init_process()
+example_reduce_scatter()</code></pre>
+        <p>打印结果显示了数据的规律，也能直接看到 ReduceScatter 的效果：rank 0 收到各节点第一个张量之和，rank 1 收到各节点第二个张量之和，依此类推：</p>
+        <pre><code>Before ReduceScatter on rank 0: [tensor([1., 2.], device='cuda:0'),
+                                 tensor([1., 4.], device='cuda:0'),
+                                 tensor([1., 8.], device='cuda:0')]
+Before ReduceScatter on rank 1: [tensor([2., 4.], device='cuda:1'),
+                                 tensor([4., 16.], device='cuda:1'),
+                                 tensor([8., 64.], device='cuda:1')]
+Before ReduceScatter on rank 2: [tensor([3., 6.], device='cuda:2'),
+                                 tensor([9., 36.], device='cuda:2'),
+                                 tensor([27., 216.], device='cuda:2')]
+
+After ReduceScatter on rank 0: tensor([6., 12.], device='cuda:0')
+After ReduceScatter on rank 1: tensor([14., 56.], device='cuda:1')
+After ReduceScatter on rank 2: tensor([36., 288.], device='cuda:2')</code></pre>
+
+        <h3>Ring AllReduce</h3>
+        <p>Ring AllReduce 是 AllReduce 的一种为可扩展性优化的实现，它用 ReduceScatter 加 AllGather 实现。所有设备两两直接通信可能造成通信瓶颈；Ring AllReduce 把过程拆成两步：</p>
+        <ol>
+            <li>ReduceScatter
+                <ul>
+                    <li>每个设备把自己的数据（例如梯度）切成 N 块（N 是 GPU 数），把一块发给一侧的邻居，同时从另一侧的邻居收到一块。</li>
+                    <li>每收到一块，就把自己对应的那块加上去（归约）。</li>
+                    <li>绕环一直进行，直到每个设备都持有一块完全归约好的数据，即这一块在所有设备上的梯度之和。</li>
+                </ul>
+            </li>
+            <li>AllGather
+                <ul>
+                    <li>每个设备需要收集其他设备上归约好的块。</li>
+                    <li>每个设备把自己归约好的块发给邻居，同时从另一侧邻居收一块。</li>
+                    <li>设备不断转发收到的块，直到每个设备都有全部归约好的块，也就拿到了完整的梯度和。</li>
+                </ul>
+            </li>
+        </ol>
+        <p>下面两张动画里有 5 张 GPU，每张上有一个长度为 5 的张量。第一张是 ReduceScatter 步骤，结束时每张 GPU 拿到某一块数据的归约结果（橙色矩形）：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/a0_reduce_scatter.gif" alt="ring reduce-scatter"><figcaption>图：Ring AllReduce 的 ReduceScatter 步骤（引自原书）</figcaption></figure>
+        <p>第二张是 AllGather 步骤，结束时每张 GPU 都拿到 AllReduce 的完整结果：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/a0_all_gather.gif" alt="ring all-gather"><figcaption>图：Ring AllReduce 的 AllGather 步骤（引自原书）</figcaption></figure>
+        <p>通信量的计算：$N$ 张 GPU 中每一张在 ReduceScatter 和 AllGather 两步里各发送、接收 $N-1$ 次。每次传 $\frac{K}{N}$ 个值，$K$ 是要在各 GPU 间求和的数组的总元素数。所以每张 GPU 收发的总数据量是 $2 \times (N-1) \times \frac{K}{N}$。$N$ 很大时，约等于 $2 \times K$，这里 $K$ 是参数总数。</p>
+        <p>关于 AllReduce 要记住两点：</p>
+        <ul>
+            <li>$N$ 很大时，AllReduce 的通信代价约为 $2 \times K$。</li>
+            <li>一次 AllReduce 可以拆成一次 ReduceScatter 加一次 AllGather，这两个操作各自的通信代价是 AllReduce 的一半，约为 $K$。</li>
+        </ul>
+        <p>这种实现即使在节点间带宽有限时也能把带宽用得很充分。</p>
+
+        <h3>Barrier</h3>
+        <p>Barrier（屏障）是一个用来同步所有节点的简单操作：所有节点都到达屏障之前，屏障不会解除；全部到齐后，节点才能继续往下算：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/a0_barrier.png" alt="barrier"><figcaption>图：Barrier，先到的节点等待其余节点（引自原书）</figcaption></figure>
+        <p>给每个节点设不同的 sleep 时间来模拟有快有慢的节点，看它们各花多久通过屏障：</p>
+        <pre><code>def example_barrier():
+    rank = dist.get_rank()
+    t_start = time.time()
+    print(f"Rank {rank} sleeps {rank} seconds.")
+    time.sleep(rank)  # Simulate different processing times
+    dist.barrier()
+    print(f"Rank {rank} after barrier time delta: {time.time()-t_start:.4f}")
+
+init_process()
+example_barrier()</code></pre>
+        <p>rank 0 一秒也没睡，但它也花了 2 秒才通过屏障：</p>
+        <pre><code>Rank 0 sleeps 0 seconds.
+Rank 1 sleeps 1 seconds.
+Rank 2 sleeps 2 seconds.
+
+Rank 0 after barrier time delta: 2.0025
+Rank 1 after barrier time delta: 2.0025
+Rank 2 after barrier time delta: 2.0024</code></pre>
+        <p>这样同步所有节点要小心，它违背了并行独立运算的初衷，可能拖慢整体处理。很多情况下，让快的节点先开始下一个任务完全没问题，因为它下一轮可能变慢，整个过程中的延迟会平均掉。</p>
+
+        <h3>NCCL</h3>
+        <p>在很多 GPU 上训练大模型，总会碰到 NCCL（读音同 nickel，原书在这里玩了个 “strike gold … encounter nickel” 的谐音梗）。PyTorch 支持几个实现集合通信的库：经典的 MPI（Message Passing Interface）、Meta 的 Gloo，以及 NCCL（NVIDIA Collective Communications Library）。它们提供的集合通信模式差不多，但针对不同硬件优化：NCCL 专为高效的 GPU 到 GPU 通信设计，MPI 和 Gloo 面向 CPU 到 CPU 或 CPU 到 GPU 的通信。PyTorch 有一份 <a href="https://pytorch.org/docs/stable/distributed.html#which-backend-to-use" target="_blank">选择后端的指南</a>，归结起来就是：</p>
+        <ul>
+            <li>GPU 训练：用 NCCL</li>
+            <li>CPU 训练：用 Gloo</li>
+        </ul>
+        <p>决策树里还有一些细节，原书留给读者去看上面那份指南。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. A1：分布式训练的性能分析</h2>
+        <p><em>原书小节：A1: Distributed Training Profiling</em></p>
+        <h3>Kernels</h3>
+        <p>先假设 kernel 已经集成在 PyTorch 里。以 PyTorch 的层归一化函数 <code>torch.nn.functional.layer_norm</code> 为例，有几种方法 profile 它背后的 kernel。最直接的是用 Python 的 <code>time</code> 模块，但 CUDA 操作是异步的，这种方法只能测到在 Python 里启动 kernel 的开销，测不到 kernel 本身的执行时间。</p>
+        <p>解决办法是用 <code>torch.cuda.Event</code> 精确计时，并用 <code>torch.cuda.synchronize()</code> 等 kernel 执行完：</p>
+        <pre><code>def profile_pytorch(func, input):
+    # Create CUDA events to track time. CUDA operations are asynchronous.
+    start = torch.cuda.Event(enable_timing=True)  # Event to mark the start time
+    end = torch.cuda.Event(enable_timing=True)    # Event to mark the end time
+    # Warm up to eliminate any overhead from the first run, which might not reflect 
+    # the actual performance
+    for _ in range(10):
+        func(input)
+    # Record the start time before executing the function
+    start.record()  
+    func(input)  # Call the function we want to profile
+    # Record the end time after the function has completed
+    end.record()  
+    # Synchronize the CUDA operations to ensure all operations are completed
+    # before measuring the elapsed time
+    torch.cuda.synchronize()  
+    # Calculate and return the elapsed time in milliseconds
+    return start.elapsed_time(end)</code></pre>
+        <p>更高效的办法是用 PyTorch profiler，例如：</p>
+        <pre><code>import torch
+import torch.nn.functional as F
+
+def pytorch_layer_norm(input):
+    return F.layer_norm(input, input.size()[1:])
+
+a = torch.randn(10000, 10000).cuda()
+
+with torch.profiler.profile(
+    activities=[
+        torch.profiler.ProfilerActivity.CPU,  # Profile CPU activities
+        torch.profiler.ProfilerActivity.CUDA,  # Profile CUDA activities
+    ],
+    # Define a schedule for the profiler
+    schedule=torch.profiler.schedule(
+        wait=1,      # Wait for 1 iteration before starting to profile
+        warmup=3,    # Warm up for 3 iterations to stabilize performance
+        active=2,    # Profile for 2 active iterations
+        repeat=1,    # Repeat the profiling schedule once
+    ),
+    on_trace_ready=torch.profiler.tensorboard_trace_handler('.'),
+
+) as p:
+    for iter in range(10):
+        pytorch_layer_norm(a)
+        p.step()
+
+# Print a table of the profiling results, sorted by total CUDA time, limited to the top 10 entries
+print(p.key_averages().table(sort_by="cuda_time_total", row_limit=8))</code></pre>
+        <p>这会打印按 CUDA 总时间排序的汇总结果：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/a1_kernels.png" alt="profiler table"><figcaption>图：PyTorch profiler 输出的汇总表（引自原书）</figcaption></figure>
+        <p>也可以在 <code>chrome://tracing/</code> 里看 trace。原书的小提示：用左右方向键在 trace 里移动，按住 Alt 键同时左右滚动鼠标可以缩放。放大后能看到调用 <code>layer_norm</code> 时的操作流程：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/a1_profile_trace.png" alt="profile trace"><figcaption>图：layer_norm 的 trace（引自原书）</figcaption></figure>
+        <p>流程从 CPU（上半部分）开始，依次是 <code>aten::layer_norm</code>、<code>aten::native_layer_norm</code>，然后进入 <code>cudaLaunchKernel</code>；之后转到 GPU，调用 <code>vectorized_layer_norm_kernel</code> 这个 kernel。</p>
+        <p>（在 profiler 里把 <code>profile_memory</code> 设为 <code>True</code> 可以开启显存 profiling，但 trace 会更复杂。）</p>
+        <p>PyTorch profiler 能快速给出性能概况；NVIDIA Nsight Compute 的命令行工具 <code>ncu</code> 能更深入地看 GPU 性能，包括每个 kernel 的详细执行时间和显存使用。运行很简单：</p>
+        <pre><code>ncu --set full python layer_norm.py</code></pre>
+        <p>其中 <code>layer_norm.py</code> 是一个只执行层归一化函数的简单脚本。这个命令会输出日志，更好的办法是设置输出文件，便于可视化：</p>
+        <pre><code>ncu --set full -o output python layer_norm.py</code></pre>
+        <p>用 Nsight Compute 打开 <code>output.ncu-rep</code>，会看到下面这样的界面，里面有关于计算和显存利用率的明确警告，以及怎样让 kernel 更好地平衡计算与显存访问、达到最大占用率（occupancy）的建议：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/a1_ncu.png" alt="Nsight Compute"><figcaption>图：Nsight Compute 的分析界面（引自原书）</figcaption></figure>
+        <p>（TPU 上看 profiler 的方法，见 <a href="../How-to-Scale-Your-Model/09_怎样分析TPU程序性能.html">How to Scale Your Model 第 9 章</a>。）</p>
+
+        <h3>CPP 扩展</h3>
+        <p>如果要 profile 的 kernel 还没集成进 PyTorch，可以用 PyTorch 的 <code>cpp_extension</code> 模块编译运行自定义 CUDA 代码：在一个 .cu 文件里写 CUDA kernel，再在 Python 里用 <code>cpp_extension</code> 的 <code>load</code> 函数加载。一个简单的 <code>add</code> kernel 的 .cu 文件：</p>
+        <pre><code>#include &lt;torch/extension.h&gt;
+#include &lt;cuda.h&gt;
+#include &lt;cuda_runtime.h&gt;
+
+__global__ void add_kernel(float* x, float* y, float* output, int size) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index &lt; size) {
+        output[index] = x[index] + y[index];
+    }
+}
+
+void add_cuda(torch::Tensor x, torch::Tensor y, torch::Tensor output) {
+    int threads = 1024;
+    int blocks = (x.size(0) + threads - 1) / threads;
+
+    add_kernel&lt;&lt;&lt;blocks, threads&gt;&gt;&gt;(x.data_ptr&lt;float&gt;(), y.data_ptr&lt;float&gt;(), output.data_ptr&lt;float&gt;(), x.size(0));
+}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("add_cuda", &amp;add_cuda, "Vector addition (CUDA)");
+}</code></pre>
+        <p>加载这个 kernel 的 Python 文件：</p>
+        <pre><code>import torch
+from torch.utils.cpp_extension import load
+
+# Load and compile the CUDA extension
+vector_add = load(
+    name="vector_add",
+    sources=["add_kernel.cu"],
+    verbose=True
+)
+
+# Define input tensors
+size = 10000
+x = torch.randn(size, device='cuda')
+y = torch.randn(size, device='cuda')
+output = torch.empty(size, device='cuda')
+
+# Run the CUDA kernel
+vector_add.add_cuda(x, y, output)</code></pre>
+        <p>这样就能像前面那样，用 PyTorch profiler 或 NVIDIA 的工具 profile 这个自定义 CUDA kernel。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. A2：LLM 训练中的典型规模</h2>
+        <p><em>原书小节：A2: Typical Scales in LLM Training</em></p>
+        <p>这一节给 LLM 训练里各种量的典型大小一个直观感受。谈显存或计算时，常常是在数“元素”，即张量里的数。要换算成字节，乘以每个数的字节数（BF16 是 2 字节，FP32 是 4 字节）。粗略的数字：</p>
+        <ul>
+            <li>输入 token：每个 batch 处理 $seq \cdot mbs$ 个 token，$mbs$ 是 micro-batch 大小，$seq$ 是序列长度。</li>
+            <li>激活（隐藏状态）：单层的隐藏状态张量有 $seq \cdot mbs \cdot h$ 个元素。</li>
+            <li>模型权重和梯度：模型里每个权重矩阵（例如一个线性层）约有 $h^2$ 个元素，梯度和权重一样大。</li>
+            <li>优化器状态：对每个 $h^2$ 元素的权重矩阵，混合精度训练下的 Adam 用 FP32 保存动量和方差（$2 \times 2 h^2$），再加 FP32 的 master weights（$2 h^2$），合计每个权重矩阵约 $6 h^2$。</li>
+            <li>模型总参数：每个 Transformer 块存
+                <ul>
+                    <li>attention 参数：QKV 投影 $3h^2$，输出投影 $h^2$；</li>
+                    <li>带门控线性单元（GLU）的 MLP 参数：gate 和 up 投影 $8h^2$（两个 $h \times 4h$ 矩阵），down 投影 $4h^2$（一个 $4h \times h$ 矩阵）；</li>
+                    <li>每块合计：用 GLU MLP 是 $16h^2$，不用 GLU 是 $12h^2$；</li>
+                    <li>整个模型：$16h^2 \cdot num\_layers$（GLU）；</li>
+                    <li>其他参数：输入 embedding $vocab\_size \cdot h$；LM head $vocab\_size \cdot h$（如果不和输入 embedding 共享）；位置 embedding（如果用）$max\_seq\_len \cdot h$。</li>
+                </ul>
+            </li>
+            <li>前向和反向的计算量（FLOPS）：前向约为 $2 \cdot num\_tokens \cdot num\_params$，反向是它的两倍，$4 \cdot num\_tokens \cdot num\_params$。</li>
+        </ul>
+        <p>原书注：更精确的前向加反向 FLOPs 公式是 $6 \cdot seq\_len \cdot num\_params + 12 \cdot num\_layers \cdot h \cdot seq\_len^2$，第二项来自 attention 在整条序列上的平方增长。为了简化，这里假设 $seq\_len^2 \ll h$。</p>
+        <p>（参数量、FLOPs 和 $6 \times$ 参数量 $\times$ token 数这条经验公式的完整推导，见 <a href="../How-to-Scale-Your-Model/04_Transformer的全部数学.html">How to Scale Your Model 第 4 章</a>。）</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. A3：通信与计算重叠的数学</h2>
+        <p><em>原书小节：A3: Math for Compute/Communication Overlap</em></p>
+        <p>用 A2 的公式，可以估计分布式训练中通信什么时候能有效地和计算重叠。下面用到的 $peak\_bw$ 是峰值带宽，$peak\_flops$ 是峰值算力，比值 $\frac{t_{comm}}{t_{compute}} \leq 1$ 时通信能完全藏在计算后面。</p>
+
+        <h3>数据并行的通信分析</h3>
+        <p>以数据并行（ZeRO-0）为例。需要通信的梯度总量：梯度 = 参数 ≈ $num\_layers \cdot 16h^2$。</p>
+        <p>反向传播时，梯度按 bucket（默认 25 MB）分批通信。每个 bucket 做 all-reduce 的通信时间：</p>
+        $$t_{comm} = t_{comm\_bucket} = \frac{bucket\_size \cdot 2(DP-1)}{DP \cdot peak\_bw}$$
+        <p>（带宽计算用的是 <a href="https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md#summary" target="_blank">NCCL 文档</a>里的 bus bandwidth 公式，它考虑了 GPU 间计算有效带宽时的具体通信模式。）</p>
+        <p>反向传播的计算时间：</p>
+        $$t_{compute} = \frac{4 \cdot num\_tokens \cdot num\_params}{peak\_flops}$$
+        <p>要有效重叠，需要：</p>
+        $$\frac{t_{comm}}{t_{compute}} = \frac{num\_params}{2 \cdot num\_tokens} \cdot \frac{DP-1}{DP} \cdot \frac{peak\_flops}{peak\_bw} \leq 1$$
+        <p>这个比值用来判断通信会不会成为训练瓶颈。小于 1 时，通信可以完全和计算重叠。</p>
+
+        <h3>ZeRO-3（FSDP）的通信分析</h3>
+        <p>ZeRO-3 把参数和梯度切到各 GPU 上。设模型的每个 Transformer 块有 $16h^2$ 个参数：</p>
+        <ul>
+            <li>前向时每个块：all-gather 参数，每个 rank $16h^2/DP$ 字节；</li>
+            <li>反向时每个块：all-gather 参数 $16h^2/DP$ 字节，reduce-scatter 梯度 $16h^2/DP$ 字节（都是每个 rank）；</li>
+            <li>每块总通信量：$3 \cdot 16h^2/DP$ 字节；</li>
+            <li>整个模型：$3 \cdot num\_layers \cdot 16h^2/DP$ 字节。</li>
+        </ul>
+        <p>all-gather 的通信时间：</p>
+        $$t_{comm} = 16h^2 \cdot \frac{DP-1}{DP \cdot peak\_bw}$$
+        <p>一个 decoder 层前向的计算时间：</p>
+        $$t_{compute} = \frac{2 \cdot seq\_len \cdot mbs \cdot (16 \cdot h^2)}{peak\_flops} = \frac{32 \cdot seq\_len \cdot mbs \cdot h^2}{peak\_flops}$$
+        <p>要有效重叠，需要：</p>
+        $$\frac{t_{comm}}{t_{compute}} = \frac{1}{2 \cdot seq\_len \cdot mbs} \cdot \frac{DP-1}{DP} \cdot \frac{peak\_flops}{peak\_bw} \leq 1$$
+        <p>比值小于 1 时，下一层参数的通信可以藏在当前层的计算后面（ZeRO-3 的预取机制见 <a href="02_数据并行与ZeRO.html">02 篇</a>）。</p>
+
+        <h3>张量并行的通信分析</h3>
+        <p>张量并行在 TP 区域（例如 MLP 块）里把激活切到各 GPU 上：</p>
+        <ul>
+            <li>前向时每个列切分线性层（column-linear）：all-gather 激活，每个 rank $seq \cdot mbs \cdot h/TP$ 字节；</li>
+            <li>反向时每个列切分线性层：reduce-scatter 梯度，每个 rank $seq \cdot mbs \cdot h/TP$ 字节；</li>
+            <li>行切分线性层（row-linear）反过来。每个 Transformer 块有 2 个列切分和 2 个行切分线性操作；</li>
+            <li>每块总通信量：$8 \cdot seq \cdot mbs \cdot h/TP$ 字节；</li>
+            <li>整个模型：$8 \cdot num\_layers \cdot seq \cdot mbs \cdot h/TP$ 字节。</li>
+        </ul>
+        <p>取一层里的一个 TP 区域，分析 all-gather 通信能否和下一个线性层的计算重叠。all-gather 的通信时间：</p>
+        $$t_{comm} = \frac{seq \cdot mbs \cdot h \cdot (TP-1)}{TP \cdot peak\_bw}$$
+        <p>下一个线性层（参数 $h^2$）的计算时间：</p>
+        $$t_{compute} = \frac{2 \cdot seq \cdot mbs \cdot h^2}{TP \cdot peak\_flops}$$
+        <p>要有效重叠，通信时间要小于计算时间：</p>
+        $$\frac{t_{comm}}{t_{compute}} = \frac{TP-1}{2 \cdot h} \cdot \frac{peak\_flops}{peak\_bw} \leq 1$$
+        <p>这个比值决定 all-gather 能否藏在下一个线性层的计算后面。原书特意指出，它只取决于隐藏维度 $h$ 和张量并行度 $tp$，和序列长度、batch 大小无关。</p>
+
+        <h3>流水线并行的通信分析</h3>
+        <p>流水线并行在各流水线阶段之间传激活和梯度：</p>
+        <ul>
+            <li>前向时每个 micro-batch：接收和发送激活，$2 \cdot seq \cdot mbs \cdot h$ 字节；</li>
+            <li>反向时每个 micro-batch：接收和发送梯度，$2 \cdot seq \cdot mbs \cdot h$ 字节；</li>
+            <li>每个 micro-batch 总通信量：$4 \cdot seq \cdot mbs \cdot h$ 字节；</li>
+            <li>梯度累积 $gas$ 步的总通信量：$4 \cdot gas \cdot seq \cdot mbs \cdot h$ 字节。</li>
+        </ul>
+        <p>分析激活/梯度的通信能否和下一个 Transformer 块的计算重叠。下一个流水线阶段里各 Transformer 块的计算时间：</p>
+        $$t_{compute} = \frac{32 \cdot seq \cdot mbs \cdot h^2 \cdot num\_layers\_in\_next\_pp}{peak\_flops}$$
+        <p>点对点（P2P）传输的通信时间：</p>
+        $$t_{comm} = \frac{seq \cdot mbs \cdot h}{peak\_bw}$$
+        <p>要有效重叠，需要：</p>
+        $$\frac{t_{comm}}{t_{compute}} = \frac{peak\_flops}{32 \cdot h \cdot num\_layers\_in\_next\_pp \cdot peak\_bw} \leq 1$$
+        <p>和 TP 一样，这个比值与序列长度和 batch 大小无关，只取决于隐藏维度 $h$、下一个流水线阶段的层数，以及硬件的算力与 P2P 带宽之比。</p>
+        <p>（同样的“通信时间对比计算时间”的分析在 TPU 上的版本，见 <a href="../How-to-Scale-Your-Model/05_训练时怎样并行Transformer.html">How to Scale Your Model 第 5 章</a>。）</p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>集合操作：Broadcast（一份发给所有）、Reduce/AllReduce（合并后给 root/给所有）、Gather/AllGather（各自的块收集到一个/所有节点）、Scatter/ReduceScatter（切片分发/归约后切片分发）、Barrier（同步）。</li>
+            <li>Ring AllReduce = ReduceScatter + AllGather；每张 GPU 收发 $2 \times (N-1) \times \frac{K}{N} \approx 2K$，ReduceScatter 和 AllGather 各约 $K$。</li>
+            <li>GPU 训练用 NCCL，CPU 训练用 Gloo。</li>
+            <li>给 CUDA kernel 计时要用 <code>torch.cuda.Event</code> 加 <code>torch.cuda.synchronize()</code>；更深入用 PyTorch profiler 和 Nsight Compute（<code>ncu</code>）；自定义 kernel 用 <code>cpp_extension</code> 加载。</li>
+            <li>典型规模：每块 $16h^2$ 参数（GLU），前向 $2 \cdot num\_tokens \cdot num\_params$ FLOPs，反向是两倍。</li>
+            <li>重叠条件：DP 为 $\frac{num\_params}{2 \cdot num\_tokens} \cdot \frac{DP-1}{DP} \cdot \frac{peak\_flops}{peak\_bw} \leq 1$；ZeRO-3 为 $\frac{1}{2 \cdot seq\_len \cdot mbs} \cdot \frac{DP-1}{DP} \cdot \frac{peak\_flops}{peak\_bw} \leq 1$；TP 为 $\frac{TP-1}{2h} \cdot \frac{peak\_flops}{peak\_bw} \leq 1$；PP 为 $\frac{peak\_flops}{32 \cdot h \cdot num\_layers\_in\_next\_pp \cdot peak\_bw} \leq 1$。TP 和 PP 的比值与序列长度、batch 大小无关。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>The Ultra-Scale Playbook · Appendix · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

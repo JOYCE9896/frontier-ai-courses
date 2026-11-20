@@ -57,6 +57,7 @@ Stanford、CMU、Harvard 和 MIT 2025-2026 学年 AI 课程的中文笔记，附
 | [Lauren Tan](https://joyce9896.github.io/frontier-ai-courses/Lauren-Tan-Grok-Bot/) | Grok Bot 工程负责人“土豆姐”2026 年 9–11 月的 3 期访谈和演讲，34 节：团队在用的 Bot、一个月 11,000 个 PR 怎样守住质量、AI 同事的身份和权限 |
 | [How to Scale Your Model](https://joyce9896.github.io/frontier-ai-courses/How-to-Scale-Your-Model/) | Google DeepMind 的大模型扩展书，导读加 12 章：roofline、TPU/GPU、分片与集合通信、训练并行、推理、LLaMA 3 算例，含习题解答 |
 | [Smol Training Playbook](https://joyce9896.github.io/frontier-ai-courses/Smol-Training-Playbook/) | Hugging Face 训练 SmolLM3 的完整记录，导读加 8 章：消融实验、架构与超参数、数据配方、训练中排错、SFT/偏好优化/RL 后训练、GPU 集群基础设施 |
+| [Ultra-Scale Playbook](https://joyce9896.github.io/frontier-ai-courses/Ultra-Scale-Playbook/) | Hugging Face 的 GPU 集群训练手册，导读加 12 篇：显存账、数据并行与 ZeRO、张量/序列/上下文/流水线/专家并行、5D 组合与选配置、GPU kernel、FlashAttention、FP8 混合精度 |
 
 ### 产业与系统
 

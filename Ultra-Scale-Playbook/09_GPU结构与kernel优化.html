@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPU 结构与 kernel 优化 | Ultra-Scale Playbook 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="08_寻找最佳训练配置.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Ultra-Scale Playbook 目录</a> · 09</span>
+    <span><a href="10_融合kernel_FlashAttention与混合精度.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>09 · GPU 结构与 kernel 优化</h1>
+        <p class="subtitle">从多卡调度往下走到单块 GPU 内部：SM、线程、warp 和多层显存怎么组织，以及怎样用 torch.compile、Triton 和 CUDA 把一个 kernel 写快</p>
+        <div class="author-meta">
+            作者：Nouamane Tazi、Ferdinand Mom、Haojun Zhao、Phuc Nguyen、Mohamed Mekkouri、Leandro von Werra、Thomas Wolf（Hugging Face）· 2025 年 2 月发布 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook" target="_blank">The Ultra-Scale Playbook</a> 中的 “Diving into the GPUs: A Primer on GPUs and Improving Performance with Kernels” 一章（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            前面几章讨论的都是模型运算在高层怎么组织：把计算挪到不同的加速器上，考虑整体的显存限制，安排计算单元的大致调度。这些讨论忽略了更底层的一类优化，也就是弄清楚模型里的每个运算在单块 GPU 上是怎么被调度、怎么执行的，再针对它去改。
+        </p>
+        <p>
+            原书这一大章的标题是 “Diving into the GPUs – Fusing, Threading, and Mixing”，以 NVIDIA 的 GPU 架构为例（书里说这些思路大多也适用于类似的加速器），依次讲 GPU 的组织方式、FlashAttention、怎样在 GPU 上高效调度工作负载、怎样高效使用各种数值精度。本页覆盖前两节：GPU 入门，以及用 kernel 提升性能的几种手段（合并访存、分块、线程粗化、减少控制分歧）。融合 kernel、FlashAttention 和混合精度放在<a href="10_融合kernel_FlashAttention与混合精度.html">下一篇</a>。读完这一页，你能看懂一个 CUDA kernel 的基本结构，知道 PyTorch、<code>torch.compile</code>、Triton、CUDA 四条路各自的取舍，也能说出一个朴素的矩阵乘法 kernel 慢在哪里、每一步改动换来了多少提升。
+        </p>
+        <ol>
+            <li><a href="#t01">GPU 入门</a></li>
+            <li><a href="#t02">用 kernel 提升性能</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. GPU 入门</h2>
+        <p><em>原书小节：A primer on GPUs</em></p>
+        <h3>计算这一侧：SM 和核心</h3>
+        <p>
+            GPU 的组织是层层嵌套的。计算这一侧，一块 GPU 由一组叫流式多处理器（streaming multiprocessor，SM）的计算单元组成，SM 可以理解为 GPU 里一个能独立调度线程的计算模块。每个 SM 里又包含并控制着一组流式处理器（streaming processor），也叫核心（core）。以 NVIDIA H100 为例：132 个 SM，每个 SM 有 128 个核心，合计 16,896 个核心（细节见 NVIDIA 的 <a href="https://resources.nvidia.com/en-us-tensor-core" target="_blank">tensor core 文档</a>），每个核心都能同时处理多个线程。原书旁注说明，这里只讲到后文需要的概念层面。
+        </p>
+        <p>（GPU 结构、SM 和 NVLink 的更多细节见 <a href="../How-to-Scale-Your-Model/12_怎样理解GPU.html">How to Scale Your Model 第 12 章</a>。）</p>
+        <figure>
+            <img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/diving_primergpu.svg" alt="GPU 由多个 SM 组成，每个 SM 内有多个核心">
+            <figcaption>图：GPU 计算侧的层级，整块 GPU 由许多 SM 组成，每个 SM 内含一组核心（引自原书，原图来源 <a href="https://blog.codingconfessions.com/p/gpu-computing" target="_blank">codingconfessions</a>）</figcaption>
+        </figure>
+
+        <h3>显存这一侧：从寄存器到全局显存</h3>
+        <p>
+            存储这一侧同样分好几层缓存和内存：
+        </p>
+        <ul>
+            <li>寄存器（register）：最小的存储单元，执行时归单个线程私有。</li>
+            <li>共享内存（shared memory）和 L1 缓存：由运行在同一个 SM 上的线程共享。</li>
+            <li>L2 缓存：再往上一层，所有 SM 共享。</li>
+            <li>全局显存（global memory）：GPU 上最大的存储，比如 H100 宣传的 80 GB 指的就是它，但它也是访问和读取最慢的一层。</li>
+        </ul>
+        <figure>
+            <img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/diving_primergpu2.svg" alt="GPU 显存层级：寄存器、共享内存/L1、L2、全局显存">
+            <figcaption>图：GPU 存储侧的层级，越靠近线程越小越快，全局显存最大也最慢（引自原书，原图来源 <a href="https://www.youtube.com/watch?v=ZQKMZIP3Fzg" target="_blank">YouTube 讲座</a>）</figcaption>
+        </figure>
+        <p>
+            用 GPU 的目标，是借助这种计算和存储的层级结构，在可用的核心上并行跑尽可能多的工作。
+        </p>
+
+        <h3>kernel、host 代码和 device 代码</h3>
+        <p>
+            在 GPU 核心上运行的一段代码叫 kernel。kernel 可以用 CUDA 或 Triton 这类高层语言来写，然后编译成 PTX（Parallel Thread Execution），也就是 NVIDIA GPU 使用的底层汇编。
+        </p>
+        <p>
+            要跑起一个 kernel，还需要一段 host 代码。它在 CPU（host）上执行，负责分配显存、把数据和代码搬到 GPU 上。下面是两个向量相加的例子，先看 host 代码（改编自 <a href="https://docs.nvidia.com/cuda/cuda-c-programming-guide/" target="_blank">CUDA C Programming Guide</a> 和 <a href="https://blog.codingconfessions.com/p/gpu-computing" target="_blank">codingconfessions</a>）：
+        </p>
+<pre><code>// Host code
+void vecAdd(float* h_A, float *h_B, float *h_c, int n) {
+    // Allocate vectors in device memory
+    int size = n * sizeof(float);
+    float *d_A, *d_B, *d_C;
+    cudaMalloc(&amp;d_A, size);
+    cudaMalloc(&amp;d_B, size);
+    cudaMalloc(&amp;d_C, size);
+
+    // Copy vectors from host memory to device memory
+    cudaMemcpy(d_A, h_A, size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B, size, cudaMemcpyHostToDevice);
+
+    // Invoke kernel
+    int threadsPerBlock = 256;
+    int blocksPerGrid =
+            (N + threadsPerBlock - 1) / threadsPerBlock;
+    VecAdd&lt;&lt;&lt;blocksPerGrid, threadsPerBlock&gt;&gt;&gt;(d_A, d_B, d_C, N);
+
+    // Copy result from device memory to host memory
+    // h_C contains the result in host memory
+    cudaMemcpy(h_C, d_C, size, cudaMemcpyDeviceToHost);
+
+    // Free device memory
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+}</code></pre>
+        <p>
+            流程是：在 GPU 上分配三块向量的显存（<code>cudaMalloc</code>），把 A、B 从 CPU 内存拷到 GPU（<code>cudaMemcpy ... HostToDevice</code>），按每个 block 256 个线程算出需要多少个 block，用 <code>&lt;&lt;&lt;blocksPerGrid, threadsPerBlock&gt;&gt;&gt;</code> 语法启动 kernel，最后把结果拷回 CPU 并释放显存。（代码照原书保留，其中 <code>n</code>/<code>N</code>、<code>h_c</code>/<code>h_C</code> 大小写不一致是原文如此。）
+        </p>
+        <p>再看 device 代码，也就是 kernel 本身的定义：</p>
+<pre><code>// Device code
+__global__ void VecAdd(float* A, float* B, float* C, int N)
+{
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i &lt; N)
+        C[i] = A[i] + B[i];
+}</code></pre>
+        <p>
+            每个线程用自己所在的 block 编号 <code>blockIdx.x</code>、block 大小 <code>blockDim.x</code> 和 block 内的线程编号 <code>threadIdx.x</code> 算出一个全局下标 <code>i</code>，只负责相加这一个位置。<code>if (i &lt; N)</code> 用来防止最后一个 block 里多出来的线程越界。
+        </p>
+
+        <h3>kernel 的调度：线程、warp、block</h3>
+        <p>kernel 一般这样调度：</p>
+        <ul>
+            <li>线程被分成 warp，每个 warp 有 32 个线程。warp 是 GPU 一起发射指令的最小线程组。同一个 warp 里的所有线程同步执行同一条指令，只是作用在不同的数据上。</li>
+            <li>warp 再组成更大的 block（线程块），block 的大小更灵活，例如一个 block 可以有 512 或 1,024 个线程。每个 block 分配给一个 SM，一个 SM 可以并行跑多个 block。但受资源限制，不是所有 block 都能马上被分配执行，有些会排队等资源空出来。</li>
+        </ul>
+        <p>
+            这里要记住的是：各级存储的容量、同时能跑的 block 数、warp 里的线程数，都是有大小和分配上的约束的。想把 GPU 架构用到最高效，就得把这些约束考虑进去。
+        </p>
+        <p>
+            大多数时候你不需要钻到这么细，可以直接复用社区里别人写好的 kernel 和代码。不过原书还是给了一些入门写 kernel 的建议，就是下一节。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 用 kernel 提升性能</h2>
+        <p><em>原书小节：Improving performance with kernels</em></p>
+        <h3>先从 torch.compile 开始</h3>
+        <p>
+            如果你想加一个还没有优化好的 kernel 的新运算，或者想让某个现有的 PyTorch 函数跑得更快，从零写 kernel 看起来是最直接的办法。但从零写出高性能的 CUDA kernel 需要大量经验，学习曲线很陡。原书建议更好的起点是 <code>torch.compile</code>：它会捕获你的运算，动态优化 PyTorch 代码，生成更底层、更高性能的 Triton kernel。
+        </p>
+        <p>以指数线性单元（Exponential Linear Unit，ELU）激活函数为例：</p>
+        $$\text{ELU}(x) = \begin{cases}
+e^x - 1 & \text{if } x \lt 0 \\
+x & \text{if } x \geq 0
+\end{cases}$$
+        <p>先写一个简单的 PyTorch 实现，再在上面加上 <code>@torch.compile</code> 装饰器：</p>
+<pre><code>@torch.compile
+def elu(x, alpha=1.0):
+    return torch.where(x &lt; 0, alpha * (torch.exp(x) - 1), x)</code></pre>
+        <p>
+            下图里编译版和未编译版的性能差距很明显，而改动只是加了一个装饰器（图中 $N$ 是列数）。
+        </p>
+        <figure>
+            <img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/torch-compile-triton.png" alt="ELU 在 PyTorch 原生实现和 torch.compile 版本下的性能对比">
+            <figcaption>图：ELU 的 PyTorch 原生实现与加了 @torch.compile 的版本随列数 N 变化的性能对比（引自原书）</figcaption>
+        </figure>
+
+        <h3>从生成的 Triton kernel 入手</h3>
+        <p>
+            如果这样的提升还不够，可以考虑自己写 Triton kernel。Triton 是 OpenAI 开源的一种用 Python 语法写 GPU kernel 的语言，以 block 为单位编程。起点可以是 <code>@torch.compile</code> 生成的那个 Triton kernel，只要把环境变量 <code>TORCH_LOGS</code> 设成 <code>"output_code"</code>：
+        </p>
+<pre><code>export TORCH_LOGS="output_code"</code></pre>
+        <p>运行带 <code>@torch.compile</code> 装饰器的 Python 脚本后，它会输出对应的 Triton kernel，本例中是：</p>
+<pre><code>@triton.jit
+def triton_(in_ptr0, out_ptr0, xnumel, XBLOCK : tl.constexpr):
+    xnumel = 100000000
+    xoffset = tl.program_id(0) * XBLOCK
+    xindex = xoffset + tl.arange(0, XBLOCK)[:]
+    xmask = xindex &lt; xnumel
+    x0 = xindex
+    tmp0 = tl.load(in_ptr0 + (x0), xmask)
+    tmp1 = 0.0
+    tmp2 = tmp0 &lt; tmp1
+    tmp3 = tl_math.exp(tmp0)
+    tmp4 = 1.0
+    tmp5 = tmp3 - tmp4
+    tmp6 = tl.where(tmp2, tmp5, tmp0)
+    tl.store(out_ptr0 + (x0), tmp6, xmask)</code></pre>
+        <p>为了好读，可以改改变量名、加注释、做些小调整（也可以让 LLM 来做），得到下面的版本：</p>
+<pre><code>@triton.jit
+def elu_kernel(input_ptr, output_ptr, num_elements, BLOCK_SIZE: tl.constexpr):
+    # Calculate the starting index for this block
+    block_start = tl.program_id(0) * BLOCK_SIZE
+    # Create an array of indices for this block
+    block_indices = block_start + tl.arange(0, BLOCK_SIZE)[:]
+    # Create a mask to ensure only valid indices are processed
+    valid_mask = block_indices &lt; num_elements
+    # Load input values from the input pointer based on valid indices
+    input_values = tl.load(input_ptr + block_indices, valid_mask)
+    # Define the ELU parameters
+    zero_value = 0.0  # Threshold for ELU activation
+    negative_mask = input_values &lt; zero_value
+    exp_values = tl.math.exp(input_values)
+    # Define the ELU output shift
+    one_value = 1.0
+    shifted_exp_values = exp_values - one_value
+
+    output_values = tl.where(negative_mask, shifted_exp_values, input_values)
+
+    # Store the computed output values back to the output pointer
+    tl.store(output_ptr + block_indices, output_values, valid_mask)</code></pre>
+        <p>
+            逐行看：<code>tl.program_id(0)</code> 给出当前 block 的唯一编号，用它决定这个 block 处理哪一段数据。<code>block_start</code> 算出这一段的起始下标，<code>block_indices</code> 是这一段里的下标范围。<code>valid_mask</code> 保证只处理 <code>num_elements</code> 以内的下标，这样 <code>tl.load</code> 读数据时不会越界。接着按值是否为负套用 ELU，最后用 <code>tl.store</code> 把结果写回显存。
+        </p>
+        <p>用 <code>triton.testing.Benchmark</code> 对这个 kernel 做基准测试，结果如下：</p>
+        <figure>
+            <img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/torch-compile-triton-kernel.png" alt="独立 Triton ELU kernel 与 torch.compile 的性能对比">
+            <figcaption>图：独立的 Triton ELU kernel 与 torch.compile 版本的性能对比（引自原书）</figcaption>
+        </figure>
+        <p>
+            这个独立 kernel 在较小的尺寸上甚至比 <code>@torch.compile</code> 还快，但作者认为这多半只是 <code>torch.compile</code> 编译时间带来的假象。无论如何，不必从零开始：可以从这样生成出来的 kernel 出发，把精力放在优化它的性能上，能省下很多时间。
+        </p>
+
+        <h3>Triton 的上限和四种写法的取舍</h3>
+        <p>
+            即使用 Triton，有时也达不到设备的峰值性能，因为这门语言处理不了 SM 内部的共享内存、调度这类底层细节。Triton 能控制的只到 block 这一层，以及 block 在各个 SM 之间怎么调度。想要更深的控制，就得直接用 CUDA 写 kernel，那里所有底层细节都能碰到。
+        </p>
+        <p>
+            CUDA 里有很多提升 kernel 效率的技巧，原书只讲其中几种：优化访存模式以降低延迟，用共享内存存放频繁访问的数据，以及管理线程的工作量以减少空闲时间。
+        </p>
+        <p>进入 CUDA 例子之前，先总结一下能在 GPU 上写 kernel 代码的几种工具：</p>
+        <table>
+            <thead><tr><th>工具</th><th>难度</th><th>速度</th><th>灵活性</th></tr></thead>
+            <tbody>
+                <tr><td>PyTorch</td><td>容易</td><td>慢</td><td>（原书未提）</td></tr>
+                <tr><td><code>@torch.compile</code></td><td>容易</td><td>快</td><td>不灵活</td></tr>
+                <tr><td>Triton</td><td>较难</td><td>更快</td><td>更灵活</td></tr>
+                <tr><td>CUDA</td><td>最难</td><td>最快</td><td>最灵活（前提是写对了）</td></tr>
+            </tbody>
+        </table>
+        <p>
+            先看 CUDA 最常见的用途之一：优化访存。GPU 的全局显存（前面说过，它是最大的那块存储）和缓存相比延迟长、带宽低，在很多应用里是主要瓶颈。从全局显存高效地读数据，能大幅提升性能。（一个运算被访存还是被计算卡住，可以用 roofline 模型判断，见 <a href="../How-to-Scale-Your-Model/01_Roofline分析.html">How to Scale Your Model 第 1 章</a>。）
+        </p>
+
+        <h3>合并访存（Memory coalescing）</h3>
+        <p>
+            要用好全局显存的带宽，得先了解它的结构。在 CUDA 设备上，全局显存是用 DRAM 实现的。
+        </p>
+        <p>
+            合并访存（memory coalescing）利用的是 DRAM 按突发（burst）方式送数据的特性：每次访问 DRAM 的某个地址，芯片里的多个传感器会并行读出包括这个地址在内的一串连续位置，读出后作为一次突发快速传给处理器。CUDA 的合并访存就是利用这一点：让一个 warp（32 个线程按同一条指令同步执行）里的线程访问连续的内存位置。比如线程 0 访问位置 $M$，线程 1 访问 $M + 1$，线程 2 访问 $M + 2$，依此类推，GPU 硬件就会把这些请求合并成一次大的、高效的 DRAM 突发访问，不用逐个处理。
+        </p>
+        <p>以矩阵乘法为例。最直接的实现是让每个线程计算输出矩阵的一个元素：</p>
+<pre><code>__global__ void matmul_naive(int M, int N, int K, const float *A, const float *B, float *C) {
+    const uint x = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x &lt; M &amp;&amp; y &lt; N) {
+        float tmp = 0.0;
+        for (int i = 0; i &lt; K; ++i) {
+            tmp += A[x * K + i] * B[i * N + y];
+        }
+        C[x * N + y] = tmp;
+    }
+}</code></pre>
+        <p>下图是 Simon Boehm 的<a href="https://siboehm.com/articles/22/CUDA-MMM" target="_blank">博客文章</a>里对这个 kernel 的可视化：</p>
+        <figure>
+            <img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/memorycoalescing.png" alt="朴素矩阵乘法 kernel 的可视化">
+            <figcaption>图：朴素矩阵乘法 kernel，每个线程负责输出矩阵 C 的一个元素（引自原书，原图来自 Simon Boehm 的博客）</figcaption>
+        </figure>
+        <p>但用 <code>ncu</code>（NVIDIA 的 kernel 性能分析工具 Nsight Compute）分析这个 kernel，会看到一些问题，包括内存吞吐低、访存没有合并：</p>
+        <figure>
+            <img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/memorycoalescing2.png" alt="ncu 分析朴素 kernel：内存吞吐低">
+            <figcaption>图：ncu 对朴素 kernel 的分析，内存吞吐偏低（引自原书）</figcaption>
+        </figure>
+        <figure>
+            <img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/memorycoalescing3.png" alt="ncu 提示未合并的全局访存">
+            <figcaption>图：ncu 给出的未合并访存（uncoalesced memory accesses）警告（引自原书）</figcaption>
+        </figure>
+        <p>
+            原因在于：这个 kernel 里，同一个 block 中线程 ID 为 <code>(0, 0)</code> 和 <code>(1, 0)</code> 的两个线程（它们会落在同一个 warp 里）读的是矩阵 B 的同一列、矩阵 A 的不同行。矩阵按行优先（row-major）存储，也就是同一行的元素在内存里地址连续（见下图）。于是在第一轮迭代 $i = 0$ 时，线程 <code>(0, 0)</code> 读 $A_{0,0}$，线程 <code>(1, 0)</code> 读 $A_{1,0}$，这两个元素在内存里离得很远。每一轮迭代都是这样错开的，访存就没法合并。
+        </p>
+        <figure>
+            <img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/memorycoalescing4.png" alt="行优先存储下，同一 warp 的线程读 A 的不同行，地址不连续">
+            <figcaption>图：行优先存储时，同一 warp 的相邻线程读 A 的不同行，地址不连续，无法合并（引自原书）</figcaption>
+        </figure>
+        <p>改进办法是换一种算 <code>x</code> 和 <code>y</code> 坐标的方式：</p>
+<pre><code>const int x = blockIdx.x * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
+const int y = blockIdx.y * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
+
+if (x &lt; M &amp;&amp; y &lt; N) {
+float tmp = 0.0;
+for (int i = 0; i &lt; K; ++i) {
+    tmp += A[x * K + i] * B[i * N + y];
+}
+C[x * N + y] = tmp;
+}</code></pre>
+        <p>
+            这里不再用二维 block，改用一维 block，并重新定义 <code>x</code>、<code>y</code> 的算法。这样，同一个 warp 里的线程（<code>threadIdx.x</code> 相近）有相同的 <code>x</code>、不同的 <code>y</code>，也就是读矩阵 A 的同一行、矩阵 B 的不同列。B 的同一行相邻列在行优先存储下地址连续，所以对行优先矩阵，访存可以合并了。
+        </p>
+        <p>
+            重新分析新 kernel，未合并访存的警告消失了，GPU 的内存吞吐提高了大约 10 倍。
+        </p>
+        <figure>
+            <img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/memorycoalescing5.png" alt="改进后 kernel 的 ncu 分析，内存吞吐提高约 10 倍">
+            <figcaption>图：改为合并访存后，ncu 显示内存吞吐提高约 10 倍（引自原书）</figcaption>
+        </figure>
+        <p>kernel 的执行时间也缩短到原来的约十分之一。</p>
+
+        <h3>分块（Tiling）</h3>
+        <p>
+            接下来是文献里经常提到的另一种技巧：分块（tiling）。它利用共享内存来优化访存模式。前面说过，共享内存是一块又小又快的存储，同一个 block 里的所有线程都能访问。数据放进去后可以被多个线程重复使用，减少从较慢的全局显存反复读取。
+        </p>
+        <p>
+            还是以矩阵乘法为例。block 里的每个线程都可能需要 A、B 两个矩阵里的元素。如果每个线程各自从全局显存读自己要的那一行和那一列，就会有大量重复读取，因为同一个 block 里的多个线程要的数据有重叠。分块的做法是把 A 和 B 的一块（tile）一次性读进共享内存，让 block 里的所有线程共用这份数据。
+        </p>
+        <p>
+            具体来说，每一轮迭代里，block 内所有线程合作把两块 tile 读进共享内存：A 的一块，大小 <code>BLOCK_SIZE_M</code> × <code>BLOCK_SIZE_K</code>；B 的一块，大小 <code>BLOCK_SIZE_K</code> × <code>BLOCK_SIZE_N</code>。tile 进了共享内存后，线程们对这两块做矩阵乘法，所需数据都能快速取到。tile 相乘的结果存到一个累加矩阵里，每轮迭代都把当前 tile 的乘积加上去，直到两个矩阵的所有 tile 都处理完。
+        </p>
+        <figure>
+            <img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/tiling.png" alt="分块矩阵乘法：A 的一行 tile 与 B 的一列 tile 依次相乘累加">
+            <figcaption>图：分块矩阵乘法，A 的 tile 沿列方向、B 的 tile 沿行方向依次读入共享内存并累加（引自原书，原图来自 <a href="https://cnugteren.github.io/tutorial/pages/page4.html" target="_blank">Cedric Nugteren 的教程</a>）</figcaption>
+        </figure>
+        <p>实现里需要看懂的部分如下（原书旁注：为简单起见，这里用正方形 tile）：</p>
+<pre><code>// Set pointers to the starting elements
+A += blockRow * TILE_SIZE * K; // Start at row = blockRow, column = 0
+B += blockCol * TILE_SIZE; // Start at row = 0, column = blockCol
+C += blockRow * TILE_SIZE * N + blockCol * TILE_SIZE; // Start at row = blockRow, column = blockCol
+float sum = 0.0;
+// The outer loop moves through tiles of A (across columns) and B (down rows)
+for (int tileIdx = 0; tileIdx &lt; K; tileIdx += TILE_SIZE) {
+sharedA[localRow * TILE_SIZE + localCol] = A[localRow * K + localCol];
+sharedB[localRow * TILE_SIZE + localCol] = B[localRow * N + localCol];
+
+// Ensure all threads in the block have completed data loading
+__syncthreads();
+
+// Shift pointers to the next tile
+A += TILE_SIZE;
+B += TILE_SIZE * N;
+
+// Compute the partial dot product for this tile
+for (int i = 0; i &lt; TILE_SIZE; ++i) {
+    sum += sharedA[localRow * TILE_SIZE + i] * sharedB[i * TILE_SIZE + localCol];
+}
+// Synchronize again to prevent any thread from loading new data
+// into shared memory before others have completed their calculations
+__syncthreads();
+}
+C[localRow * N + localCol] = sum;</code></pre>
+        <p>
+            每个线程先从 A 和 B 各读一个元素放进共享内存。这种情况下做到合并访存很简单：把 <code>threadIdx.x</code> 用作局部列下标 <code>localCol</code>，同一个 warp 里的线程访问的就是两个矩阵里相邻的元素。block 里每个线程都把元素读进共享内存后（由 <code>__syncthreads()</code> 保证），再计算两块 tile 的点积。第二个 <code>__syncthreads()</code> 防止有线程在别人还没算完时就往共享内存里装下一块数据。所有 tile 遍历完（A 横向、B 纵向）后，累加和写到矩阵 C 的对应位置。
+        </p>
+        <p>
+            用 <code>ncu</code> 测这个 kernel，内存吞吐升到 410 Gb/s，kernel 执行时间减少约 43%，性能达到约 6.6 TFLOPS。
+        </p>
+
+        <h3>线程粗化（Thread coarsening）</h3>
+        <p>
+            分块让 kernel 性能提升了很多。但分析 warp 状态（统计每种状态各花了多少个时钟周期）时，看到的是下面这样：
+        </p>
+        <figure>
+            <img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/threadcoarsening.png" alt="分块 kernel 的 warp 停顿状态分布，mio_throttle 占比高">
+            <figcaption>图：分块 kernel 的 warp 状态采样，停顿主要来自 mio_throttle（引自原书）</figcaption>
+        </figure>
+        <p>
+            这些难懂的状态名，可以在 NVIDIA 的 <a href="https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-reference" target="_blank">Kernel Profiling Guide</a> 的 “Warp Stall Reasons” 一节查到。其中 <code>smsp__pcsamp_warps_issue_stalled_mio_throttle</code> 的解释是：warp 停下来，在等 MIO（memory input/output，内存输入输出）指令队列不再是满的。MIO 流水线被极度占用时这个停顿原因会很高，这条流水线负责特殊数学指令、动态分支和共享内存指令。如果是共享内存访问造成的，可以尝试用更少但更宽的读取来减轻流水线压力。
+        </p>
+        <p>
+            也就是说，warp 在等共享内存访问返回。解决办法叫线程粗化（thread coarsening）：把几个线程合并成一个“粗化”的线程，让每个线程负责多个输出元素。这样共享内存的访问次数会大幅减少。
+        </p>
+
+        <h3>减少控制分歧（Minimizing control divergence）</h3>
+        <p>
+            写或改进自定义 kernel 时，最后一个要考虑的重要问题是减少控制分歧。
+        </p>
+        <p>
+            SM 按单指令多数据（Single Instruction, Multiple Data，SIMD）模型执行一个 warp 里的所有线程：任一时刻，取一条指令，warp 里所有线程同时执行它。线程们处理不同的数据段，但走的是同一条指令，这就是“单指令、多数据”这个名字的由来。SIMD 的主要好处是效率：负责取指令和分派指令的控制硬件由多个执行单元共用，控制部分的硬件开销小，更多硬件可以用来提高算术吞吐。
+        </p>
+        <p>
+            控制分歧（control divergence）指同一个 warp 里的线程走了不同的执行路径。比如一条 <code>if</code> 语句让一部分线程执行一段代码、另一部分执行另一段，warp 就只能把这两段串行执行，一部分线程空等另一部分做完。要减少控制分歧，kernel 设计上要让同一个 warp 的线程走同一条路径。做法有：重构代码减少分支，使用能让所有线程走相似路径的数据结构，或者使用谓词执行（predication，两边都算、再按条件选结果，避免真正跳转）这类技巧。
+        </p>
+        <p>
+            到这里，原书讲完了写自定义 kernel、改进 GPU 运算性能和显存占用的几个主要考虑。在进入真实例子之前，还有一个重要概念：融合 kernel（fusing kernels），见<a href="10_融合kernel_FlashAttention与混合精度.html">下一篇</a>。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>GPU 计算侧分层：GPU 由 SM 组成，SM 内有核心。H100 有 132 个 SM，每个 SM 128 个核心，共 16,896 个核心。</li>
+            <li>存储侧分层：寄存器（线程私有）、共享内存和 L1（同一 SM 内共享）、L2（所有 SM 共享）、全局显存（最大，H100 为 80 GB，也最慢）。</li>
+            <li>kernel 用 CUDA 或 Triton 写，编译成 PTX；运行它还需要在 CPU 上执行的 host 代码负责分配显存、搬运数据和启动 kernel。</li>
+            <li>线程按 32 个一组成 warp，warp 组成 block（如 512 或 1,024 个线程），每个 block 分到一个 SM；资源不够时 block 会排队。存储容量、并发 block 数、warp 线程数等约束决定了 GPU 能用到多高效。</li>
+            <li>多数时候直接复用社区写好的 kernel。需要新 kernel 时，先试 <code>@torch.compile</code>；不够再从它生成的 Triton kernel（<code>TORCH_LOGS="output_code"</code>）入手优化。</li>
+            <li>四种工具：PyTorch 容易但慢；<code>@torch.compile</code> 容易、快、不灵活；Triton 较难、更快、更灵活；CUDA 最难、最快、最灵活（前提是写对）。Triton 只能控制到 block 及其在 SM 间的调度，碰不到共享内存和 SM 内调度。</li>
+            <li>合并访存：让同一 warp 的线程访问连续地址，硬件把请求合并成一次 DRAM 突发。朴素矩阵乘法改成一维 block、让 warp 内线程读 A 的同一行后，内存吞吐提高约 10 倍，执行时间缩短约 10 倍。</li>
+            <li>分块：把 A、B 的 tile 读进共享内存供整个 block 复用，用 <code>__syncthreads()</code> 同步。实测内存吞吐 410 Gb/s，执行时间再减约 43%，约 6.6 TFLOPS。</li>
+            <li>线程粗化：分块 kernel 的 warp 主要停在 <code>mio_throttle</code>（等共享内存访问）；把多个线程合并成一个、每线程算多个输出，可大幅减少共享内存访问。</li>
+            <li>控制分歧：warp 按 SIMD 执行，分支会让不同路径串行化；通过减少分支、调整数据结构或谓词执行，让同一 warp 走同一路径。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>The Ultra-Scale Playbook · Diving into the GPUs: A Primer on GPUs and Improving Performance with Kernels · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

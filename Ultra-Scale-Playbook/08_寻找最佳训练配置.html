@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>寻找最佳训练配置 | Ultra-Scale Playbook 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="07_5D并行总览.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Ultra-Scale Playbook 目录</a> · 08</span>
+    <span><a href="09_GPU结构与kernel优化.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>08 · 寻找最佳训练配置</h1>
+        <p class="subtitle">先让一步训练放进显存，再凑够目标 batch size，最后调吞吐；以及作者在 1 到 64 个 8×H100 节点上跑了几千组配置后得到的结论</p>
+        <div class="author-meta">
+            作者：Nouamane Tazi、Ferdinand Mom、Haojun Zhao、Phuc Nguyen、Mohamed Mekkouri、Leandro von Werra、Thomas Wolf（Hugging Face）· 2025 年 2 月发布 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook" target="_blank">The Ultra-Scale Playbook</a> 中的 “Finding the Best Training Configuration” 一章（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>上一章 <a href="07_5D并行总览.html">5D 并行总览</a> 讲了各种并行方法怎样组合、为什么能组合。剩下的问题是：具体该选哪几种，组合比例怎么定？这一章给出一个分三步的决策流程，然后拿作者自己跑的几千组基准测试结果来检验。作者提醒，最终的最优配置总要靠在自己的集群上跑几次实验才能确定，因为它取决于集群的物理特性：网络带宽、每个节点几张 GPU、每张 GPU 多少显存等。</p>
+        <p>读完能按模型大小和 GPU 数量给出一个起步配置，知道 batch size 太大或太小时该调哪个旋钮，以及怎样读原书那张最优配置热力图。章末作者还讲了跑这些基准测试时踩过的坑，并引出下一章的 GPU 架构话题。</p>
+        <ol>
+            <li><a href="#t01">第 1 步：让一步训练放进显存</a></li>
+            <li><a href="#t02">第 2 步：达到目标全局 batch size</a></li>
+            <li><a href="#t03">第 3 步：优化训练吞吐</a></li>
+            <li><a href="#t04">几千组配置的基准测试</a></li>
+            <li><a href="#t05">跑基准测试的经验教训</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 第 1 步：让一步训练放进显存</h2>
+        <p><em>原书小节：Step 1: Fitting a training step in memory</em></p>
+        <p>第一件事是想办法让一个完整的模型实例能在手头的 GPU 上跑起来。分两种情况。</p>
+        <h3>GPU 充足 🤑</h3>
+        <ul>
+            <li>10B 参数以下的模型：用一种并行技术就够了，例如在 8 张 GPU 上用张量并行，或者用 ZeRO-3/DP 加完全重计算（full recompute，反向时把激活值全部重算，不在前向时存下）。</li>
+            <li>10B 到 100B 参数、需要 8 张以上 GPU 的模型，有几种选择：
+                <ul>
+                    <li>张量并行（TP=8）加流水线并行；</li>
+                    <li>张量并行（TP=8）加数据并行（ZeRO-3）；</li>
+                    <li>只用 ZeRO-3，也就是纯数据并行。</li>
+                </ul>
+            </li>
+            <li>到 512 张 GPU 以上，纯数据并行/ZeRO-3 会因为通信开销开始变得低效，这时把 DP 和张量并行或流水线并行组合起来会更好。</li>
+            <li>到 1024 张 GPU 以上，推荐的配置可以是张量并行（TP=8）加数据并行（ZeRO-2）加流水线并行。</li>
+        </ul>
+        <p>（原书旁注：这一步只关心放下一个模型实例。虽然为了用 ZeRO 可能会开数据并行，但这里看重的只是 ZeRO-3 带来的模型参数显存节省。）</p>
+        <p>特殊情况：</p>
+        <ul>
+            <li>序列特别长时，大概要再加上跨节点的上下文并行（CP）。</li>
+            <li>MoE（混合专家）架构用跨节点的专家并行（EP）会有优势。</li>
+        </ul>
+        <h3>GPU 不足 😭</h3>
+        <ul>
+            <li>打开完全激活重计算，用一部分计算换显存，训练会慢一点。</li>
+            <li>加大梯度累积（gradient accumulation，先算几个 micro-batch 的梯度累加起来再更新一次参数），在显存有限时处理更大的 batch。</li>
+        </ul>
+        <p>模型实例能训练之后，下一步要确认 batch size 对不对。</p>
+        <p>（TPU 语境下按模型大小和芯片数选并行方式的推导，见 <a href="../How-to-Scale-Your-Model/05_训练时怎样并行Transformer.html">How to Scale Your Model 第 5 章</a>。）</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 第 2 步：达到目标全局 batch size</h2>
+        <p><em>原书小节：Step 2: Achieving the target global batch size</em></p>
+        <p>第 1 步定下了 micro-batch size 和 DP 的大小，这时的全局 batch size（global batch size，所有 GPU 加所有梯度累积步一共处理多少样本，才做一次参数更新）可能偏小也可能偏大，现在要把它调到目标值。回顾前面 <a href="01_单卡训练与显存.html">01</a>、<a href="02_数据并行与ZeRO.html">02</a> 两章的关系：全局 batch size 等于 micro-batch size 乘以梯度累积步数再乘以 DP 大小。</p>
+        <p>要增大全局 batch size：</p>
+        <ul>
+            <li>加大数据并行，或者加大梯度累积步数；</li>
+            <li>序列很长时，可以利用上下文并行。</li>
+        </ul>
+        <p>要减小全局 batch size：</p>
+        <ul>
+            <li>减小数据并行，把 GPU 让给其他并行方式；</li>
+            <li>序列很长时，可以减小上下文并行。</li>
+        </ul>
+        <p>到这里，模型已经按想要的模型大小和 batch size 跑起来了。还剩一个问题：它是不是在用最快的方式训练？最后一步是优化吞吐。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 第 3 步：优化训练吞吐</h2>
+        <p><em>原书小节：Step 3: Optimizing training throughput</em></p>
+        <p>目标是让训练尽可能快，让所有 GPU 一直被充分利用。只要显存和通信还没成为瓶颈，可以试这些做法：</p>
+        <ul>
+            <li>利用节点内的高速带宽加大张量并行，直到接近节点的大小（每节点的 GPU 数），从而减少其他形式的并行。</li>
+            <li>在保持目标 batch size 的前提下，用 ZeRO-3 加大数据并行。</li>
+            <li>当数据并行的通信开始成为瓶颈时，转向流水线并行。</li>
+            <li>把不同的并行方式逐个加大试试。</li>
+            <li>试不同的 micro-batch size（$mbs$），在最大全局 batch size、模型大小、计算和通信之间找到最好的平衡。</li>
+        </ul>
+    </section>
+
+    <section id="t04">
+        <h2>04. 几千组配置的基准测试</h2>
+        <p><em>原书小节：Benchmarking thousands of configurations</em></p>
+        <p>讲完了步骤，作者把这个搜索过程真正跑了一遍。在 <a href="https://github.com/huggingface/nanotron" target="_blank">Nanotron</a> 仓库里有几个脚本，可以复现书里讨论过的全部实验，也可以拿来测自己的模型和集群。</p>
+        <p>作者自己跑了几千组分布式配置的基准测试，覆盖书里讨论过的每一种模型大小，以及大量集群配置（1 到 64 个节点，每个节点 8 张 H100），书中前面给出的结果都来自这些测试。（原书旁注：作者借这个机会向同事道歉，因为他们占用了科学集群的大部分资源，也原谅同事们私下嘀咕的任何威胁。）</p>
+        <p>接下来作者回头整理所有测试结果，想看看在理论之外，真实数据里各种配置的表现怎样比较。</p>
+        <p>所有测试都用序列长度 4,096、全局 batch size 1M token。作者把每种模型大小和集群大小下最好的配置挑出来，画成了下面的热力图：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/what_we_learnt_heatmap.svg" alt="Best configuration heatmap"><figcaption>图：不同模型大小和节点数（每节点 8 张 GPU）下的最优训练配置。每格标出数据并行 DP、张量并行 TP、流水线并行 PP、梯度累积步数 GAS、micro-batch size MBS 和 ZeRO 阶段；颜色表示 MFU，越亮效率越高（引自原书）</figcaption></figure>
+        <p>图里的 MFU 是 Model FLOPs Utilization（模型 FLOPs 利用率）：模型实际每秒完成的有效浮点运算量，占硬件理论峰值算力的比例。</p>
+        <p>从这张图里作者得出几条结论：</p>
+        <ul>
+            <li>节点数增加（并行度变高）时，效率下降。小模型下降得尤其明显，因为它们的计算量和模型大小之比更低。平常可以靠加大 batch size 来弥补模型小的问题，但这里全局 batch size 被限制在 1M。</li>
+            <li>大模型面临另一个问题。模型越大，显存需求增长得越多。节点少的时候有两种情况：要么根本放不下，要么放得下但因为贴着 GPU 显存上限运行而效率很低（例如 80B 参数模型在 4 个节点上训练的那一格）。</li>
+            <li>性能很大程度上取决于实现的质量。作者第一次实现两种并行策略时，张量并行比流水线并行快；优化了 PP 代码之后，PP 变成了更快的那个。现在他们在改进 TP 实现里的通信重叠，预计 TP 会重新领先。</li>
+        </ul>
+    </section>
+
+    <section id="t05">
+        <h2>05. 跑基准测试的经验教训</h2>
+        <p><em>原书小节：Lessons learned on benchmarking</em></p>
+        <p>作者写这本书的目标是除了讲理论和实现，还要给出真实的数据点。计划很简单：对每个模型和若干种集群大小，把所有可能的分布式配置都跑一遍。排除掉不可能的配置之后，仍然要跑几千个实验。</p>
+        <p>纸面上这不难，在集群上批量提交一大堆任务就行。可是第一批实验一开始，麻烦就来了：</p>
+        <ul>
+            <li>PyTorch 进程有时没能正确清理退出；</li>
+            <li>Slurm（集群上常用的作业调度系统）会强制终止任务，导致节点故障；</li>
+            <li>本该几分钟跑完的简单基准测试拖到了几个小时；</li>
+            <li>有些任务会无限期卡住。</li>
+        </ul>
+        <p>为了在有限的时间里跑完所有实验，作者额外做了不少工程工作，花了大量时间在这些事情上：</p>
+        <ul>
+            <li>缩短集群重启时间，减少空闲时间；</li>
+            <li>分析详细的 NCCL（NVIDIA 的 GPU 集合通信库）调试日志；</li>
+            <li>弄清楚显存使用的规律，以及 CUDA 显存分配器（memory allocator）的行为；</li>
+            <li>改进流水线并行在多节点上的性能。</li>
+        </ul>
+        <p>作者说，这些问题让他们认识到分布式训练基础设施有多复杂，理论上看着简单的事，实践中要照顾很多环节。在真实环境里复现理论结果很难，尤其是能拿到的生产级训练代码很少。他们希望通过 <a href="https://github.com/huggingface/nanotron" target="_blank">Nanotron</a> 和 <a href="https://github.com/huggingface/picotron" target="_blank">Picotron</a> 这样的开源项目，让分布式训练技术更容易上手，并一起维护简单高效、能帮研究者和工程师用好硬件的代码库。</p>
+        <p>5D 并行的分布式方法到这里就讲完了。</p>
+        <h3>引出下一章：计算和通信并不能完美重叠</h3>
+        <p>作者回头指出，前面的讨论常常依赖一个关键假设：GPU 上的计算和通信可以高效重叠，而且不影响计算吞吐。实际情况更复杂。用 NCCL send/recv 这类常见通信原语时，计算和通信之间存在隐藏的资源争用：通信 kernel（在 GPU 上执行的一个函数）通常会用到和计算相同的 GPU 流式多处理器（streaming multiprocessor，SM，GPU 上执行计算的基本单元，下一章会讲）。所以通信和计算重叠时，计算吞吐会下降。要真正优化分布式训练，得深入 GPU 架构本身。</p>
+        <p>（原书旁注：另外，计算和通信重叠时的同步方式，对某些并行策略来说也未必最优。PyTorch 团队的一篇<a href="https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487" target="_blank">博客</a>讲了一个例子，即 TorchTitan 里的异步张量并行。）</p>
+        <p>作者用一句 “Time to turn the lights off and activate CUDA mode!” 结束这一章，转入 <a href="09_GPU结构与kernel优化.html">下一章</a> 的 GPU 和 kernel。</p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>选配置分三步：先让一步训练放进显存，再达到目标全局 batch size，最后优化吞吐；最终最优配置仍要在自己的集群上实验确定。</li>
+            <li>GPU 充足时：10B 以下用单一技术（8 卡 TP，或 ZeRO-3/DP 加完全重计算）；10B 到 100B 用 TP=8 加 PP、TP=8 加 ZeRO-3，或纯 ZeRO-3；512 卡以上纯 DP/ZeRO-3 变低效，改为 DP 加 TP 或 PP；1024 卡以上可用 TP=8 加 ZeRO-2 加 PP。</li>
+            <li>超长序列加跨节点 CP，MoE 加跨节点 EP。</li>
+            <li>GPU 不足时：打开完全激活重计算，加大梯度累积。</li>
+            <li>增大全局 batch size：加大 DP 或梯度累积步数，长序列可用 CP；减小时反过来，减小 DP 或 CP。</li>
+            <li>优化吞吐：TP 加到接近节点大小，用 ZeRO-3 加大 DP，DP 通信成瓶颈时转向 PP，逐个调各种并行，试不同的 $mbs$。</li>
+            <li>基准测试设置：1 到 64 个 8×H100 节点，序列长度 4,096，全局 batch size 1M token，几千组配置。</li>
+            <li>结论：节点越多效率越低，小模型最明显（受 1M batch 上限所限）；大模型在节点少时放不下或贴着显存上限低效运行（如 80B 在 4 个节点上）；TP 和 PP 谁快取决于实现质量。</li>
+            <li>计算和通信的重叠并不免费：NCCL 通信 kernel 和计算共用 SM，重叠时计算吞吐会下降。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>The Ultra-Scale Playbook · Finding the Best Training Configuration · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

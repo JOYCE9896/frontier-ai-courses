@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>5D 并行总览 | Ultra-Scale Playbook 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="06_专家并行.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Ultra-Scale Playbook 目录</a> · 07</span>
+    <span><a href="08_寻找最佳训练配置.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>07 · 5D 并行总览</h1>
+        <p class="subtitle">五种并行和三档 ZeRO 各切模型的哪一部分、通信什么、哪些能组合、组合时谁放在节点内谁放在节点间</p>
+        <div class="author-meta">
+            作者：Nouamane Tazi、Ferdinand Mom、Haojun Zhao、Phuc Nguyen、Mohamed Mekkouri、Leandro von Werra、Thomas Wolf（Hugging Face）· 2025 年 2 月发布 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook" target="_blank">The Ultra-Scale Playbook</a> 中的 “5D Parallelism in a Nutshell” 一章（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>前面六章把五种并行方式逐个讲完了：<a href="02_数据并行与ZeRO.html">数据并行和 ZeRO</a>、<a href="03_张量并行与序列并行.html">张量并行和序列并行</a>、<a href="04_上下文并行.html">上下文并行</a>、<a href="05_流水线并行.html">流水线并行</a>、<a href="06_专家并行.html">专家并行</a>。这一章把它们放在一起比较。它要回答的问题是：这些策略之间有什么相似和区别，哪些可以高效地组合，哪些最好分开用。</p>
+        <p>读完应该能说出每种方法省的是哪块显存、沿哪个维度切、主要瓶颈是什么，以及为什么张量并行通常留在节点内、ZeRO-3 和流水线并行放在节点之间。具体怎样一步步选出一套训练配置，放在下一章 <a href="08_寻找最佳训练配置.html">寻找最佳训练配置</a>。</p>
+        <ol>
+            <li><a href="#t01">五种并行和三档 ZeRO 回顾</a></li>
+            <li><a href="#t02">流水线并行和 ZeRO-3 的对比</a></li>
+            <li><a href="#t03">张量并行怎样和其他方法组合</a></li>
+            <li><a href="#t04">上下文并行和专家并行</a></li>
+            <li><a href="#t05">各方法作用在模型的哪一部分</a></li>
+            <li><a href="#t06">全部放进一张图</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 五种并行和三档 ZeRO 回顾</h2>
+        <p><em>原书小节：5D Parallelism in a Nutshell（开头部分）</em></p>
+        <p>到这里，扩展模型训练能用的五种并行策略都已经出现过，每一种沿一个不同的维度切分：</p>
+        <ul>
+            <li>数据并行（Data Parallelism，DP）：沿 batch 维度切，每张卡拿一部分样本，模型完整复制。</li>
+            <li>张量并行（Tensor Parallelism，TP）：沿隐藏维度（hidden dimension）切，把一个权重矩阵拆到多张卡上。</li>
+            <li>序列并行和上下文并行（Sequence / Context Parallelism，SP/CP）：沿序列维度切，每张卡处理一段 token。</li>
+            <li>流水线并行（Pipeline Parallelism，PP）：沿模型的层切，每张卡负责连续的若干层。</li>
+            <li>专家并行（Expert Parallelism，EP）：沿 MoE 的专家维度切，不同专家放在不同卡上。</li>
+        </ul>
+        <p>另外还有三档 ZeRO（Zero Redundancy Optimizer，在数据并行的各个副本之间分摊存储、去掉重复）可以和数据并行叠加，用来省显存：</p>
+        <ul>
+            <li>ZeRO-1：在 DP 副本之间切分优化器状态（optimizer states）。</li>
+            <li>ZeRO-2：切分优化器状态和梯度。</li>
+            <li>ZeRO-3：切分优化器状态、梯度和参数。</li>
+        </ul>
+        <p>（这五个维度在 TPU 语境下的对应讲法见 <a href="../How-to-Scale-Your-Model/05_训练时怎样并行Transformer.html">How to Scale Your Model 第 5 章</a>。）</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 流水线并行和 ZeRO-3 的对比</h2>
+        <p><em>原书小节：5D Parallelism in a Nutshell</em></p>
+        <p>作者先把流水线并行和 ZeRO-3 放在一起比，因为两者很像，又有几处重要的不同。</p>
+        <p>相似的地方：两者都把模型权重分到多张 GPU 上，并且沿模型深度方向（一层接一层）安排通信和计算。比如 ZeRO-3 会在算当前层的同时预取（prefetch）下一层的权重。所以在这两种方法里，每个设备上执行的都是完整的层运算。TP 和 EP 不一样，它们在每个设备上算的是一层里的一部分。</p>
+        <p>（原书旁注：这里说“一层”是为了简化。实际的切分单位取决于具体实现，可能是几层、一层，甚至一层的一部分。）</p>
+        <p>不同的地方，原书列成了下表：</p>
+        <table>
+            <thead>
+                <tr><th></th><th>ZeRO-3</th><th>流水线并行</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>每个计算单元存的是</td><td>一层的一部分</td><td>完整的一层</td></tr>
+                <tr><td>通信传输的是</td><td>权重</td><td>激活值</td></tr>
+                <tr><td>编排方式</td><td>与模型无关（model-agnostic）</td><td>与模型无关</td></tr>
+                <tr><td>实现难点</td><td>模型切分和通信的处理很复杂</td><td>高效的 PP 调度（schedule）很难写</td></tr>
+                <tr><td>扩展时的偏好</td><td>偏好大的 $mbs$ 和 $seq\_len$，用来掩盖通信</td><td>偏好大的 $grad\_acc$，用来掩盖气泡</td></tr>
+            </tbody>
+        </table>
+        <p>表里的缩写：$mbs$ 是 micro-batch size，每次前向/反向处理的小批量大小；$seq\_len$ 是序列长度；$grad\_acc$ 是梯度累积（gradient accumulation）的步数，即攒几个 micro-batch 的梯度再更新一次参数。气泡（pipeline bubble）是流水线里部分 GPU 等上游数据、处于空闲的时间。</p>
+        <p>两者解决的是同一个问题，选哪个取决于你想让通信传权重还是传激活值。它们可以组合，但实践中很少这样做：要摊薄两者叠加的通信开销，全局 batch size 得大幅增加，于是要在全局 batch size、模型大小、网络带宽和训练效率之间做取舍。如果确实要组合，ZeRO-3 应当配置成在一串 PP micro-batch 期间把权重留在显存里，尽量减少不必要的通信。</p>
+        <p>ZeRO-1 和 ZeRO-2 只切优化器状态和梯度，和流水线并行很容易组合，两者互补，也不会带来新的难题。例如 DeepSeek-V3 的训练用的就是 PP 加 ZeRO-1。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 张量并行怎样和其他方法组合</h2>
+        <p><em>原书小节：5D Parallelism in a Nutshell</em></p>
+        <p>张量并行（连同序列并行）和流水线并行、ZeRO-3 天然互补，可以组合。原因是 TP 依赖矩阵乘法的分配律：权重和激活值可以先切开各自算，最后再合并。</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/5d_nutshell_tp_sp.svg" alt="TP & SP diagram"><figcaption>图：张量并行与序列并行在一个 Transformer 层里的切分方式（引自原书）</figcaption></figure>
+        <p>为什么不只用 TP？前面章节已经讲过它的两个限制：</p>
+        <ul>
+            <li>TP 的通信在计算的关键路径（critical path）上，也就是计算必须等通信完成才能往下走。扩展到一定程度后，通信开销开始占主导，很难继续扩展。</li>
+            <li>ZeRO 和 PP 与模型无关，TP 却要仔细处理激活值的切分：在 TP 区域沿隐藏维度切，在 SP 区域沿序列维度切。这让它实现起来更麻烦，而且要懂具体模型的结构，才能保证每一处的切分方式都对。</li>
+        </ul>
+        <p>所以组合多种并行时，<strong>TP 一般留给节点内的高速通信</strong>，ZeRO-3 或 PP 用在跨节点、带宽较低的并行组上。PP 的通信模式需要的带宽更少；ZeRO-3 的通信更容易和计算重叠。组合这些技术时主要考虑的是，怎样把 GPU 高效地分到每个并行维度的组里，让吞吐最大、通信开销最小，同时记住 TP 的扩展限制。例如，做 TP 通信的那组 GPU 应当放在同一个节点内。</p>
+        <p>（节点内 NVLink 和节点间网络的带宽差别，见 <a href="../How-to-Scale-Your-Model/12_怎样理解GPU.html">How to Scale Your Model 第 12 章</a>。）</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 上下文并行和专家并行</h2>
+        <p><em>原书小节：5D Parallelism in a Nutshell</em></p>
+        <p>上下文并行和专家并行也能帮助切分激活值，可以看作 TP 的补充。CP 负责长序列，EP 让 MoE（混合专家）模型能分布式训练，两者组合也没有什么特别的问题。</p>
+        <h3>上下文并行</h3>
+        <p>CP 针对超长序列训练，把激活值沿序列维度切到多张 GPU 上。大多数模块，比如 MLP 和 LayerNorm，都能独立处理切开后的序列片段；attention 块需要通信，因为每个 token 都要看到整个序列的 key 和 value。<a href="04_上下文并行.html">CP 一章</a>讲过，这一步用 Ring Attention 的方式处理，计算和通信相互重叠，效率不错。序列长到极端（128k token 以上）时，即使用了完全激活重计算（full activation recomputation，反向时把前向的激活值全部重算一遍，换取不存它们），attention 所需的显存在单张 GPU 上也放不下，这时 CP 就很有用。</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/5d_nutshell_cp.svg" alt="CP diagram"><figcaption>图：上下文并行沿序列维度切分激活值，attention 处需要通信（引自原书）</figcaption></figure>
+        <h3>专家并行</h3>
+        <p>EP 针对 MoE 模型训练：把各个专家分到不同 GPU 上，计算时把 token 动态路由到对应的专家。EP 的主要通信是 all-to-all（每张卡都给其他每张卡发一份不同的数据）：先把 token 发到分配给它的专家，再把结果收回来。这会带来一些通信开销，但能让模型容量大幅增加，因为每个 token 在推理和训练时只经过总参数里很小的一部分。从分布式训练和推理的角度看，专家数变得很多时，把专家分到多张 GPU 上才有必要。（原书旁注：例如 DeepSeek-V3 有 256 个专家。）</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/5d_nutshell_ep.svg" alt="EP diagram"><figcaption>图：专家并行把专家放到不同 GPU 上，用 all-to-all 路由 token（引自原书）</figcaption></figure>
+        <p>📝 原书注：EP 和 DP 处理输入的方式相似，每张卡拿不同的输入，所以有些实现把专家并行看作数据并行的一个子集。区别在于 EP 用专门的专家路由，DP 则是所有 GPU 用一模一样的模型副本处理输入。</p>
+        <p>（MoE 的参数量和计算量怎么算，见 <a href="../How-to-Scale-Your-Model/04_Transformer的全部数学.html">How to Scale Your Model 第 4 章</a>。）</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 各方法作用在模型的哪一部分</h2>
+        <p><em>原书小节：Scope and focus</em></p>
+        <p>不同并行策略影响最大的是模型里不同的子模块：</p>
+        <ul>
+            <li>张量并行（和序列并行）切分权重和激活值，影响整个模型的计算。</li>
+            <li>上下文并行主要影响 attention 层，因为只有那里需要跨序列通信，其他层各自处理切开的序列。</li>
+            <li>专家并行主要影响 MoE 层（它们替换了标准的 MLP 块），attention 层和其他组件不变。</li>
+            <li>流水线并行和 ZeRO 不特别针对某个子模块。唯一的例外是流水线并行要求各阶段的模块和层负载均衡，所以第一层和最后一层常常要特殊处理，因为它们多了 embedding 层。</li>
+        </ul>
+        <table>
+            <thead>
+                <tr><th>张量并行 + 序列并行</th><th>上下文并行</th><th>专家并行</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>沿隐藏维度/序列维度切分权重和激活值</td><td>沿序列维度切分激活值</td><td>切分专家的权重和激活值</td></tr>
+                <tr><td>通信用于矩阵乘法（列切分/行切分的 linear）</td><td>通信用于 attention 的 key/value</td><td>通信用于把 token 路由到专家</td></tr>
+                <tr><td>需要针对具体模型实现</td><td>除 attention 外与模型无关</td><td>除 MoE 层外与模型无关</td></tr>
+                <tr><td>偏好节点内的高带宽通信</td><td>偏好长序列</td><td>需要模型有 MoE 层</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section id="t06">
+        <h2>06. 全部放进一张图</h2>
+        <p><em>原书小节：Summarizing it all</em></p>
+        <p>作者把前面所有技术画进了一张总图。图里画的是单个 Transformer 层（MoE 版本）的激活值和模块，并标出了各个并行方向，以及前面几章讲过的各种通信操作。</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/5d_full.svg" alt="5D parallelism full diagram"><figcaption>图：一个 MoE Transformer 层上的 5D 并行总图，标出各并行维度和对应的通信操作（引自原书）</figcaption></figure>
+        <p>作者还给出了各种策略省显存的效果总览。图里用不同的序列长度来画，上半部分用选择性重计算（selective recomputation，只重算 attention 里那些占显存大、计算便宜的激活值），下半部分用完全重计算，可以看出每种方法和激活值显存是怎样相互作用的。</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/5Dparallelism_8Bmemoryusage.svg" alt="5D parallelism 8B memory usage"><figcaption>图：8B 模型在不同并行策略、不同序列长度下的显存占用，上为选择性重计算，下为完全重计算（引自原书）</figcaption></figure>
+        <p>最后是一张高层次的对照表，列出每种技术的核心做法和主要瓶颈：</p>
+        <table>
+            <thead>
+                <tr><th>方法</th><th>省下的显存主要是</th><th>并行/切分维度</th><th>缺点</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>DP</td><td>激活值（减小每张卡的本地 batch size）</td><td>Batch</td><td>受最大 batch size 限制</td></tr>
+                <tr><td>PP</td><td>模型参数</td><td>模型的层</td><td>空闲气泡，调度复杂</td></tr>
+                <tr><td>TP+SP</td><td>模型参数和激活值</td><td>隐藏维度/序列长度</td><td>需要高带宽通信</td></tr>
+                <tr><td>CP</td><td>激活值</td><td>序列长度</td><td>attention 模块里多出通信开销</td></tr>
+                <tr><td>EP</td><td>专家参数</td><td>专家维度</td><td>需要 MoE 层，多出路由通信开销</td></tr>
+                <tr><td>ZeRO-1</td><td>优化器状态</td><td>在 DP 副本间切分</td><td>参数通信开销</td></tr>
+                <tr><td>ZeRO-2</td><td>优化器状态和梯度</td><td>在 DP 副本间切分</td><td>参数通信开销</td></tr>
+                <tr><td>ZeRO-3</td><td>优化器状态、梯度和模型参数</td><td>在 DP 副本间切分</td><td>参数通信开销</td></tr>
+            </tbody>
+        </table>
+        <p>作者的结论是，这些技术没有哪一个能单独解决扩展问题，实际中常常要把它们以某种方式组合起来。能不能总结出几条规则，帮人找到一个好的起点？这是下一章的内容。</p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>五个并行维度：DP 切 batch，TP 切隐藏维度，SP/CP 切序列，PP 切层，EP 切专家；ZeRO-1/2/3 依次在 DP 副本间切分优化器状态、梯度、参数。</li>
+            <li>PP 和 ZeRO-3 都沿模型深度切权重、每个设备算完整的层运算；ZeRO-3 传权重，偏好大的 $mbs$ 和 $seq\_len$，PP 传激活值，偏好大的 $grad\_acc$。</li>
+            <li>PP 和 ZeRO-3 能组合但很少用，因为要大幅加大全局 batch size；若组合，ZeRO-3 应在一串 PP micro-batch 期间把权重留在显存里。</li>
+            <li>ZeRO-1/2 和 PP 互补、容易组合，DeepSeek-V3 用的是 PP + ZeRO-1。</li>
+            <li>TP（+SP）靠矩阵乘法的分配律，能和 PP、ZeRO-3 组合；但它的通信在关键路径上、扩展有上限，且需要针对模型实现，所以 TP 组放在节点内，ZeRO-3 或 PP 跨节点。</li>
+            <li>CP 主要影响 attention，用 Ring Attention 重叠计算和通信，适合 128k+ token 的序列；EP 主要影响 MoE 层，通信是 all-to-all，专家很多时才需要（DeepSeek-V3 有 256 个专家）。</li>
+            <li>省显存对照：DP 省激活值，PP 省参数，TP+SP 省参数和激活值，CP 省激活值，EP 省专家参数，ZeRO-1/2/3 分别省优化器状态、加梯度、再加参数。</li>
+            <li>没有单一技术能解决扩展，通常需要组合。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>The Ultra-Scale Playbook · 5D Parallelism in a Nutshell · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>上下文并行 | Ultra-Scale Playbook 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="03_张量并行与序列并行.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Ultra-Scale Playbook 目录</a> · 04</span>
+    <span><a href="05_流水线并行.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>04 · 上下文并行</h1>
+        <p class="subtitle">序列长到 128k token 时，激活显存还是放不下；上下文并行沿序列维度把整个模型的输入切开，用 Ring Attention 交换 K/V</p>
+        <div class="author-meta">
+            作者：Nouamane Tazi、Ferdinand Mom、Haojun Zhao、Phuc Nguyen、Mohamed Mekkouri、Leandro von Werra、Thomas Wolf（Hugging Face）· 2025 年 2 月发布 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook" target="_blank">The Ultra-Scale Playbook</a> 中的 “Context Parallelism” 一章（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>上一章的张量并行加序列并行（TP+SP）已经把权重和激活都分到了多张 GPU 上。可是序列越来越长时（比如每条序列 128k token 甚至更多），单个节点的显存仍然可能不够，因为在 TP 区域里每张卡还是要处理完整的序列。这一章讲第三种切法：上下文并行（Context Parallelism，CP）。它沿序列长度把输入切到多张 GPU，对 MLP、LayerNorm 几乎没有影响，麻烦全在 attention 上。解决办法是 Ring Attention，再用 Zig-Zag 排布让各卡的计算量平衡。</p>
+        <ol>
+            <li><a href="#t01">为什么需要上下文并行</a></li>
+            <li><a href="#t02">Ring Attention</a></li>
+            <li><a href="#t03">Zig-Zag Ring Attention：让计算量平衡</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 为什么需要上下文并行</h2>
+        <p><em>原书小节：Context Parallelism（开头部分）</em></p>
+        <h3>长序列下的显存问题</h3>
+        <p>即使对激活做完全重计算（full recomputation，反向时把前向的中间结果全部重新算一遍，原书说要多付约 30% 的计算开销），层与层交界处仍有一部分激活必须留在显存里，这部分随序列长度线性增长。</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/cp_8Bmemoryusage.svg" alt="CP memory usage for 8B model"><figcaption>图：8B 模型在不同序列长度下的显存构成，对比不并行、TP=2 CP=1、TP=2 CP=4 三种设置（引自原书交互图）</figcaption></figure>
+        <p>这张交互图的数据（单位 GB）：不做并行时，参数和梯度各约 14.96，优化器状态约 59.83，激活从序列长度 1024 时的 4.25 涨到 131072 时的 544。TP=2 时参数、梯度、优化器状态都减半，激活在 131072 时是 352。再加上 CP=4（TP=2 CP=4），131072 长度下的激活降到 88。</p>
+        <h3>核心想法</h3>
+        <p>上下文并行的思路和序列并行相似，也是沿序列长度切分，区别在于它作用在已经做了张量并行的模块上。这样这些模块就在两个维度上被切开，序列长度的影响也被分摊了。用原书的说法：和 TP+SP 只在序列并行区域切序列不同，CP 在整个模型上都沿序列维度切输入。</p>
+        <p>对大多数模块，例如 MLP 和 LayerNorm，切序列没有影响，因为它们对每个 token 独立处理。CP 也不需要 TP 那样昂贵的通信，因为它只切输入，不切权重矩阵。和数据并行一样，算完梯度后要在 CP 组内做一次 all-reduce，把梯度同步。</p>
+        <h3>例外：attention</h3>
+        <p>例外是 attention 块（原书在这里开了个双关的玩笑）。在 attention 里，每个 token 要用到序列里所有其他 token 的 key/value；如果是因果注意力（causal attention，每个 token 只看它之前的 token），至少也要看到前面所有 token。CP 把输入沿序列切到了不同 GPU，attention 模块就需要 GPU 之间做全量通信来交换 key/value。</p>
+        <p>天真地做会很贵。能高效处理这种 key/value 通信的核心技术叫 Ring Attention。</p>
+        <p>原书的一条注释：上下文并行和后面会讲的 FlashAttention 在概念上有相似之处，两者都依靠在线 softmax（online softmax，分块计算 softmax 并在过程中不断修正归一化项，不需要一次拿到整行数据）来减少显存。区别是 FlashAttention 在单张 GPU 上优化 attention 计算本身，CP 则把序列分到多张 GPU 上来降低显存（FlashAttention 见 <a href="10_融合kernel_FlashAttention与混合精度.html">10 篇</a>）。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. Ring Attention</h2>
+        <p><em>原书小节：Ring Attention</em></p>
+        <p>在这种 attention 实现里，每张 GPU 先发起一个异步通信，把自己手里的 key/value 发给其他 GPU。在等待别的 GPU 的数据时，它先用已经在显存里的那部分数据算 attention 分数。理想情况下，这一轮计算结束前，下一份 key/value 已经从别的 GPU 收到了，于是可以马上开始下一轮。</p>
+        <p>原书的例子：4 张 GPU，输入 4 个 token。一开始输入沿序列维度平均切分，每张 GPU 只有 1 个 token 和它的 Q/K/V。记 Q1、K1、V1 为第一个 token 的 query、key、value，在第一张 GPU 上。整个 attention 计算要 4 个时间步，每一步每张 GPU 依次做三件事：</p>
+        <ol>
+            <li>以非阻塞方式把当前的 keys 和 values 发给下一台机器（最后一个时间步除外）。非阻塞的意思是不等发送完成就开始下一个操作。</li>
+            <li>在本地用当前的 keys 和 values 算 attention，一般就是 $Softmax(\frac{QK^T}{\sqrt{d}}) * V$。</li>
+            <li>等着从上一张 GPU 收到 keys 和 values，然后回到第 1 步，此时“当前的 keys 和 values”就是刚收到的那份。</li>
+        </ol>
+        <p>这三步做 4 遍，attention 就算完了。</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/ring-attention.gif" alt="Ring Attention animation"><figcaption>图：4 张 GPU 上 Ring Attention 的过程动画，K/V 沿环依次传递（引自原书）</figcaption></figure>
+        <p>从动画可以看出这个方法为什么叫 Ring Attention：数据沿着 GPU 组成的环转一圈。</p>
+        <h3>朴素实现的负载不均</h3>
+        <p>朴素的 Ring Attention 有个大问题：因果注意力矩阵是下三角形状，导致各 GPU 之间负载严重不均。看带因果掩码的注意力分数矩阵：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/cp_attnmask.svg" alt="causal attention mask with sequential split"><figcaption>图：按顺序把 token 分给 GPU 时的因果注意力掩码（引自原书）</figcaption></figure>
+        <p>softmax 按行计算，所以一张 GPU 只要收齐了某一行需要的所有 token，就能算这一行。GPU 1 一开始就拿着 token 1-4，不需要任何其他 GPU 的信息，可以立刻算。GPU 2 要等到第二轮收到 token 1-4，才凑齐 token 1-8 的全部数值。而且 GPU 1 的工作量看起来比其他 GPU 少得多。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. Zig-Zag Ring Attention：让计算量平衡</h2>
+        <p><em>原书小节：Zig-Zag Ring Attention – A balanced compute implementation</em></p>
+        <p>需要换一种分配输入序列的方式：把 token 分给 GPU 时打乱一点顺序，让每张 GPU 上都有一些靠前的 token 和一些靠后的 token。这叫 Zig-Zag Attention。在新的排布下数一数每张 GPU 对应的有色方块，计算量就均衡了。</p>
+        <p>（原书旁注：这里展示的 Zig-Zag Attention 和 Striped Attention 略有不同，差别见 <a href="https://github.com/zhuzilin/ring-flash-attention/issues/2#issuecomment-2236746166" target="_blank">这条 GitHub 讨论</a>。）</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/cp_zigzagmask.svg" alt="zig-zag attention mask"><figcaption>图：Zig-Zag 排布下的因果注意力掩码，各 GPU 的计算量相同（引自原书）</figcaption></figure>
+        <p>同时也能看到，要算完所有行，每张 GPU 都需要所有其他 GPU 的信息。</p>
+        <h3>两种重叠通信和计算的实现</h3>
+        <p>有两种常见做法：一种是做一次整体的 all-gather（集合通信，让每张卡都拿到所有卡的数据），同时把所有 keys 和 values 汇集到每张 GPU 上，类似 ZeRO-3 的做法；另一种是按需从各 GPU 逐份取来。</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/cp_overlap_allgather.svg" alt="all-gather implementation"><figcaption>图：all-gather 实现，通信与计算的重叠方式（引自原书）</figcaption></figure>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/cp_overlap_all2all.svg" alt="all-to-all ring implementation"><figcaption>图：all-to-all（环形）实现，通信与计算的重叠方式（引自原书）</figcaption></figure>
+        <table>
+            <thead><tr><th></th><th>All-gather 实现</th><th>All-to-all（环形）实现</th></tr></thead>
+            <tbody>
+                <tr><td>通信方式</td><td>所有 GPU 同时从其他所有 GPU 收齐完整的 K/V</td><td>GPU 之间按环形一次交换一块 K/V</td></tr>
+                <tr><td>临时显存</td><td>较多，每张 GPU 要同时存下全部 K/V</td><td>较少，每张 GPU 只需临时多存一块</td></tr>
+                <tr><td>通信特点</td><td>一步完成，显存开销大</td><td>通信分散开并与计算重叠，但多次通信带来一些额外的基础延迟</td></tr>
+            </tbody>
+        </table>
+        <p>原书的结论：all-to-all 方式通常显存效率更好，代价是通信模式稍复杂；all-gather 方式更简单，但 attention 计算期间要更多临时显存。</p>
+        <h3>接下来</h3>
+        <p>到这里，TP 能在一个节点内切开大模型，CP 能压住长序列带来的激活膨胀。但 TP 跨节点扩展效果不好，如果模型权重在一个节点里都放不下，就需要第四个并行维度：流水线并行（见 <a href="05_流水线并行.html">05 篇</a>）。</p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>序列到 128k 级别时，即使 TP+SP 加完全重计算，层边界的激活仍随序列长度线性增长，单节点可能放不下。</li>
+            <li>CP 在整个模型上沿序列维度切输入；MLP、LayerNorm 不受影响，不切权重所以通信比 TP 便宜，梯度在 CP 组内 all-reduce。</li>
+            <li>attention 需要所有 token 的 K/V，Ring Attention 让每张 GPU 一边算本地块一边异步收发下一块 K/V，$N$ 张卡转 $N$ 步完成。</li>
+            <li>按顺序分 token 会因因果掩码导致负载不均；Zig-Zag 排布让每张卡同时拿到前段和后段 token，计算量平衡。</li>
+            <li>K/V 交换可以用 all-gather（简单、临时显存大）或 all-to-all 环形（省显存、通信更复杂）。</li>
+            <li>8B 模型 131072 token：激活从不并行的 544 GB 降到 TP=2 CP=4 的 88 GB（原书交互图数据）。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>The Ultra-Scale Playbook · Context Parallelism · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

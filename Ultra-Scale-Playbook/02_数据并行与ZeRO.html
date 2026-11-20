@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>数据并行与 ZeRO | Ultra-Scale Playbook 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="01_单卡训练与显存.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Ultra-Scale Playbook 目录</a> · 02</span>
+    <span><a href="03_张量并行与序列并行.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>02 · 数据并行与 ZeRO</h1>
+        <p class="subtitle">把模型复制到多块 GPU 上并行处理不同的数据，再把优化器状态、梯度和参数沿数据并行维度切开，省掉重复存放的显存</p>
+        <div class="author-meta">
+            作者：Nouamane Tazi、Ferdinand Mom、Haojun Zhao、Phuc Nguyen、Mohamed Mekkouri、Leandro von Werra、Thomas Wolf（Hugging Face）· 2025 年 2 月发布 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook" target="_blank">The Ultra-Scale Playbook</a> 中的 “Data Parallelism (and ZeRO)” 一章（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            上一章停留在单块 GPU 上：显存里装着参数、梯度、优化器状态和激活值，靠激活重计算和梯度累积把一个大批次塞进有限的显存。这一章第一次用上多块 GPU。最直接的办法是数据并行（Data Parallelism，DP）：每块 GPU 放一份完整的模型，各自处理不同的数据，再把梯度平均起来。书里先讲怎么让 DP 的通信和计算重叠，再讲 DP 和梯度累积怎么一起决定全局批大小，然后用 benchmark 说明 DP 在几百块 GPU 以上开始掉速。
+        </p>
+        <p>
+            DP 还有一个问题：每块 GPU 都存着同样的参数、梯度和优化器状态，大模型连一份都放不下。后半章介绍 DeepSpeed ZeRO（Zero Redundancy Optimizer）的三个阶段，它们把这些重复存放的东西沿 DP 维度切分，代价是多一些通信。读完这一章，你能用 $gbs = mbs \times grad\_acc \times dp$ 配出一个数据并行训练方案，能写出 ZeRO-1/2/3 每块 GPU 的显存公式，也知道它们各自要多付多少通信。下一章的张量并行会处理 ZeRO 处理不了的激活显存。
+        </p>
+        <ol>
+            <li><a href="#t01">数据并行</a></li>
+            <li><a href="#t02">重新看全局批大小</a></li>
+            <li><a href="#t03">到目前为止的路线</a></li>
+            <li><a href="#t04">零冗余优化器（ZeRO）</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 数据并行</h2>
+        <p><em>原书小节：Data Parallelism</em></p>
+        <p>
+            数据并行的做法是把模型复制到多块 GPU 上（每一份副本叫一个“模型实例” model instance），每块 GPU 拿不同的 micro-batch 同时做前向和反向。micro-batch 指一次前向/反向里单块 GPU 处理的那一小批样本。名字里的“数据”就来自这一点：并行的维度是数据。简单的训练示例里大多见过 DP，但书里会讲得深一些。
+        </p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/dp_diagram.png" alt="Data parallelism diagram"><figcaption>图：数据并行。每块 GPU 持有同一份模型，处理不同的 micro-batch（引自原书）</figcaption></figure>
+        <p>
+            每块 GPU 的数据不同，算出来的梯度也不同。为了让各个模型实例保持一致，需要把所有实例的梯度求平均，用到的操作叫 all-reduce：每块 GPU 贡献一份张量，所有 GPU 最后都拿到这些张量的和（或平均）。这一步发生在反向传播期间、优化器更新之前。all-reduce 是本书遇到的第一个“分布式通信原语”（distributed communication primitive），负责 GPU 之间和节点之间的同步与通信。（不熟悉 broadcast、gather、all-reduce 这些通信模式的话，原书附录 A0 有一个速成讲解，见本笔记的 <a href="12_附录_集合通信与性能分析.html">第 12 篇</a>；TPU 语境下的集合通信见 <a href="../How-to-Scale-Your-Model/03_分片矩阵与矩阵乘法.html">How to Scale Your Model 第 3 章</a>。）
+        </p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/dp_overlap1.svg" alt="Naive DP: backward then all-reduce"><figcaption>图：朴素的 DP。先做完整个反向，再统一做 all-reduce，通信期间 GPU 闲着（引自原书）</figcaption></figure>
+        <p>
+            朴素的 DP 实现会等反向全部结束、拿到所有梯度之后，再对所有 DP rank 发起一次 all-reduce。rank 指参与分布式训练的一个进程，通常对应一块 GPU。这种先算完再通信的顺序执行，原书用大写字母说是“A BIG NO-NO”，因为通信期间 GPU 只能空等，如上图。应该尽量让通信和计算重叠（overlap），同时进行。下面三个优化都在朝这个方向走。
+        </p>
+
+        <h3>第一个优化：梯度同步和反向传播重叠</h3>
+        <p>
+            朴素 DP 的主要缺点是：反向（计算）做完以后，还要等梯度同步（通信）做完才能更新参数。这段通信可以和计算重叠。看上图，某一层的梯度（粉色方块）在更早那些层（它左边的粉色方块）的梯度还没算出来时，就已经可以开始收集和求和了。比如最后一层的反向一做完（最右边那个方块），它的梯度就可以开始 all-reduce，同时反向计算继续往左、往前面的层推进。
+        </p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/dp_overlap2.svg" alt="DP with overlapped gradient all-reduce"><figcaption>图：每层梯度一算好就开始 all-reduce，通信和前面各层的反向计算同时进行（引自原书）</figcaption></figure>
+        <p>
+            在 PyTorch 里，可以给每个参数挂一个 all-reduce 的 hook 函数（hook 是在某个事件发生时自动被调用的回调）。某个参数的梯度一准备好，就触发它的 all-reduce，其他参数的梯度还在计算。这样大部分 all-reduce 都和梯度计算重叠了。挂 hook 的函数很简单：
+        </p>
+<pre><code>def register_backward_hook(self, hook):
+    """
+    Registers a backward hook for all parameters of the model that
+    require gradients.
+    """
+    for p in self.module.parameters():
+        if p.requires_grad is True:
+            p.register_post_accumulate_grad_hook(hook)</code></pre>
+        <p>
+            计算和通信重叠以后，整个模型等待梯度同步的时间少了。梯度同步可以在同一个训练步里（至少部分地）和反向并行进行，DP 因此快了不少。原书给了一个带重叠的朴素 DP 完整实现：<a href="https://github.com/huggingface/picotron/blob/0035cce0e04afd6192763b11efe50010d8ad0f71/picotron/data_parallel/data_parallel.py#L10-L60" target="_blank">picotron 的 data_parallel.py 第 10–60 行</a>，实现了一个给每个参数注册梯度 hook、梯度就绪即 all-reduce 的 DP 封装。
+        </p>
+        <p>
+            这是书里第一次出现“计算与通信重叠”。这项技术对扩展效率影响很大，后面的章节会反复用到它。
+        </p>
+
+        <h3>第二个优化：梯度分桶</h3>
+        <p>
+            GPU 上的操作在大张量上通常比在很多小张量上更高效，通信操作也一样。所以可以把梯度分组放进若干个“桶”（bucket），每个桶只发起一次 all-reduce，不再给每个梯度单独做 all-reduce。这叫梯度分桶（gradient bucketing）。
+        </p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/dp_overlap3.svg" alt="DP with gradient bucketing"><figcaption>图：把梯度装进桶，每个桶做一次 all-reduce（引自原书）</figcaption></figure>
+        <p>
+            原书打了个比方：寄东西时，把物品装进几个大箱子寄出去，比寄很多小包裹效率高。每个桶一次 all-reduce，可以明显减少通信开销、加快通信。带分桶的实现见 <a href="https://github.com/huggingface/picotron/blob/0035cce0e04afd6192763b11efe50010d8ad0f71/picotron/data_parallel/data_parallel.py#L62-L171" target="_blank">picotron 的 data_parallel.py 第 62–171 行</a>，实现了按桶收集梯度、桶满后发起一次 all-reduce 的 DP 版本。
+        </p>
+
+        <h3>第三个优化：和梯度累积配合</h3>
+        <p>
+            上一章讲过，梯度累积（gradient accumulation）是在调用 <code>optimizer.step()</code> 更新参数之前，先做多次前向和反向，把梯度加在一起。梯度累积和数据并行一起用时，要注意梯度同步的时机。
+        </p>
+        <p>
+            朴素的写法会在累积过程中每次反向之后都自动触发一次 all-reduce。这样不划算：只在最后一步做一次 reduce，效果完全一样，开销却小得多。PyTorch 里一般用 <a href="https://github.com/pytorch/pytorch/blob/5ea67778619c31b13644914deef709199052ee55/torch/nn/parallel/distributed.py#L1408-L1435" target="_blank"><code>model.no_sync()</code></a> 这个装饰器来解决：在不需要 reduce 的那些反向上关掉梯度同步。
+        </p>
+        <p>
+            原书的一条 Note：做通信操作时，张量在内存里必须是连续的，否则会多出冗余的内存拷贝。为了做到最优，通常会专门为通信预先分配一块连续的 buffer，大小和激活值或模型参数相当。这样通信更快，但也会推高训练时的峰值显存。
+        </p>
+        <p>（DP 的通信量和它在 TPU 上何时被通信卡住的推导，见 <a href="../How-to-Scale-Your-Model/05_训练时怎样并行Transformer.html">How to Scale Your Model 第 5 章</a>。）</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 重新看全局批大小</h2>
+        <p><em>原书小节：Revisiting global batch size</em></p>
+        <p>
+            加上数据并行和梯度累积以后，批大小的公式更新为：
+        </p>
+        $$bs = gbs = mbs \times grad\_acc \times dp$$
+        <p>
+            其中 $mbs$ 是 micro-batch size，即单块 GPU 一次前向处理的样本数；$grad\_acc$ 是梯度累积的步数；$dp$ 是数据并行用的实例数；$gbs$ 是全局批大小（global batch size），即一次优化器更新总共用到的样本数。
+        </p>
+        <p>
+            给定目标全局批大小，可以拿梯度累积步数去换数据并行进程数，从而加快训练。实践中，大家倾向于尽量把 $dp$ 开大、把 $grad\_acc$ 压小，因为数据并行天然是并行的，梯度累积却是一步接一步顺序执行的。只有当 GPU 用完了、光靠扩大数据并行还达不到目标全局批大小时，才在数据并行之上再加梯度累积。（原书推荐的延伸阅读：<a href="https://siboehm.com/articles/22/data-parallel-training" target="_blank">siboehm.com 关于数据并行训练的文章</a>。）
+        </p>
+        <p>
+            能把训练分到不同的样本上，就有了第一个并行维度，所以这叫 1D 并行。后面还会逐步讲另外四个维度。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 到目前为止的路线</h2>
+        <p><em>原书小节：Our journey up to now</em></p>
+        <p>
+            先简单总结一下怎样搭一个 1D 并行训练，也就是一份数据并行配置的草案：
+        </p>
+        <ol>
+            <li>先确定最佳的全局批大小（以 token 计），可以查文献，也可以做实验测模型的收敛情况。</li>
+            <li>再选训练用的序列长度，同样查文献或做实验。一般来说，对今天的评测基准，2k–8k token 都很稳。（书里不展开训练配方，但各团队通常会在训练末期加大序列长度，往数据里混入一些更长的样本，以达到现在常见的长上下文长度。）</li>
+            <li>现在知道了 $gbs$。在单块 GPU 上不断加大本地批大小 $mbs$，直到显存溢出（OOM），就得到最大的 $mbs$。</li>
+            <li>最后看有多少块 GPU 可用，定下目标 $dp$。$gbs$ 和 $dp$ 的比值（再除以 $mbs$）就给出还需要的梯度累积步数。</li>
+        </ol>
+        <p>
+            比如 DeepSeek 和 Llama 的模型在主要预训练阶段都用 4k token 的序列长度（原书旁注）。2k–8k 在预训练里好用，是因为网上更长的文档很少，详细分析见 <a href="https://www.harmdevries.com/post/context-length/" target="_blank">Harm de Vries 的博客文章</a>。
+        </p>
+        <p>
+            如果算出来的梯度累积比值小于 1，也就是 GPU 太多（原书说这是 GPU-rich 🤑 的情况），可以选择不用全部 GPU，或者试一个更大的 $gbs$，或者测试更小的 $mbs$ 能不能加快训练。选最后一种，就是把总吞吐放在单卡计算效率前面：故意用比显存允许的更小的 $mbs$，换取更快的训练。
+        </p>
+        <p>
+            看一个具体例子。假设要训练一个较新的模型，$gbs$ 是 4M token，序列长度 4k，那么批大小就是 1,024 个样本（取最接近的 2 的幂）。再假设单块 GPU 显存只放得下 $mbs=2$，有 128 块 GPU 可用。那么 $2 \times 128 = 256$，用 4 步梯度累积就能达到每个训练步 1,024 个样本、即 4M token 的目标。如果突然有了 512 块 GPU，保持 $mbs=2$、把梯度累积步数设为 1，就能达到同样的 $gbs$，训练也更快。
+        </p>
+        <p>
+            原书的 Note：到 512 块 GPU 以上的规模，取决于用的网络，通信操作会开始受环延迟（ring latency）限制。环延迟是信号沿着环形拓扑传一圈所需的时间。到了这一步，DP 的通信就没法完全被重叠掉了，计算效率和吞吐都会下降。这时应该开始考虑在其他维度上并行。
+        </p>
+        <p>
+            数据并行把梯度的 all-reduce 和反向计算重叠，省下了时间，但这个好处在大规模下会失效。GPU 加到几百上千块，它们之间的协调开销明显变大，对网络的要求也大到抵消了收益。结果是每多加一块 GPU，整个系统就更低效一点。benchmark 里能直接看到：
+        </p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/dp_scaling.svg" alt="Throughput and memory scaling with data parallelism"><figcaption>图：DP 规模从 8 到 256 时，每块 GPU 的吞吐和显存。原书是交互图，这里用其静态版（引自原书）</figcaption></figure>
+        <p>
+            图里的数据（来自原书交互图）：DP=8 时每块 GPU 约 40,150 tokens/s；DP 翻倍到 16、32、64、128 时，吞吐依次下降 6.3%、6.0%、12.0%、15.0%，降到约 26,446 tokens/s；从 128 到 256 时一下掉了 40.6%，只剩约 15,700 tokens/s。每块 GPU 的显存在所有规模下都是 36.66 GB，不随 DP rank 增加而变。也就是说，过了某个界限，吞吐明显下滑，而单卡显存保持不变。
+        </p>
+        <table>
+            <thead><tr><th>DP 规模</th><th>8</th><th>16</th><th>32</th><th>64</th><th>128</th><th>256</th></tr></thead>
+            <tbody>
+                <tr><td>吞吐（tokens/s/GPU）</td><td>40,149.94</td><td>37,609.69</td><td>35,367.61</td><td>31,112.23</td><td>26,446.44</td><td>15,700.38</td></tr>
+                <tr><td>相对上一档</td><td>–</td><td>-6.3%</td><td>-6.0%</td><td>-12.0%</td><td>-15.0%</td><td>-40.6%</td></tr>
+                <tr><td>显存（GB）</td><td>36.66</td><td>36.66</td><td>36.66</td><td>36.66</td><td>36.66</td><td>36.66</td></tr>
+            </tbody>
+        </table>
+        <p>
+            数据并行是书里第一个（也是最简单的）把训练扩展到更多 GPU 的策略。它和梯度累积的效果一样，只是把各个 micro-batch 的前向和反向并行起来做，从而提高了吞吐。
+        </p>
+        <p>
+            细心的读者会发现，这里有个前提：至少一个样本的前向（$mbs=1$）要能放进 GPU 显存。这不总是成立。更大的模型即使开了激活重计算，也常常放不进单块 GPU。原书的一个小技巧：把参数量乘以 2，就能快速估出模型参数本身至少要多少显存，比如 70B 对应 140 GB（= 133 GiB）。
+        </p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/dp_ourjourney_memoryusage.svg" alt="Memory usage vs sequence length for 1B, 8B and 70B models"><figcaption>图：1B、8B、70B 模型在序列长度 1024 到 16384 下的显存构成（参数、梯度、优化器状态、激活值）。原书是交互图，这里用其静态版（引自原书）</figcaption></figure>
+        <p>
+            按原书交互图的数据：1B 模型的参数和梯度各约 2.3 GB，优化器状态约 9.2 GB，激活值从序列长度 1024 时的约 1.06 GB 涨到 16384 时的 17 GB；8B 模型参数和梯度各约 15 GB，优化器状态约 59.8 GB，激活值从 4.25 GB 涨到 68 GB；70B 模型参数和梯度各约 131.4 GB，优化器状态约 525.7 GB，激活值从 21.25 GB 涨到 340 GB。70B 模型光参数就超出一块 80 GB 的 H100。
+        </p>
+        <p>
+            此外，前面也看到 DP 扩展到一定程度后，通信开销开始成为限制。对这些更大的模型或更大的批，还有别的办法：要么把一部分张量挪到 CPU 上，要么把权重、梯度、优化器状态这些张量切开，分到多块 GPU 上。
+        </p>
+        <p>
+            切分有两大类做法：并行（张量并行、上下文并行、流水线并行）和分片（sharding，即 DeepSpeed ZeRO 或 PyTorch FSDP）。两者基本正交，可以组合使用。分片这一类和 DP 关系很近，所以先看 ZeRO。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 零冗余优化器（ZeRO）</h2>
+        <p><em>原书小节：Zero Redundancy Optimizer (ZeRO)</em></p>
+        <p>
+            这一节介绍 DeepSpeed ZeRO，一种为了减少 LLM 训练中显存冗余而设计的显存优化技术。
+        </p>
+        <p>
+            数据并行扩展训练很有效，但每个 DP rank 都原样复制一份优化器状态、梯度和参数，带来大量显存冗余。ZeRO 把优化器状态、梯度和参数沿数据并行维度分区（partition），每块 GPU 只存一部分，同时仍然允许用完整的参数做计算。这有时需要 DP rank 之间做更多通信，这些通信不一定都能被重叠掉，后面会看到。（书里只讲 ZeRO-1 到 ZeRO-3，足以看清这项技术怎样省显存、要权衡什么；更多 ZeRO 变体见 <a href="https://www.deepspeed.ai/tutorials/zero/" target="_blank">DeepSpeed 文档</a>。）
+        </p>
+        <p>ZeRO 分三个优化阶段：</p>
+        <ul>
+            <li>ZeRO-1：切分优化器状态</li>
+            <li>ZeRO-2：切分优化器状态 + 梯度</li>
+            <li>ZeRO-3：切分优化器状态 + 梯度 + 参数</li>
+        </ul>
+        <p>
+            这里的“分区”指沿 DP 轴切分，因为 ZeRO 是一种数据并行方法。后面会看到也可以沿其他轴切。
+        </p>
+        <p>
+            你可能注意到，能切分的东西里没有激活值。每个 DP 副本处理的 micro-batch 不同，所以各 DP rank 上的激活值本来就不一样，没有重复，也就无从切分。
+        </p>
+
+        <h3>重新看显存占用</h3>
+        <p>
+            上一章讨论过标准训练中优化器状态、梯度和参数占的显存。把模型参数量记作 $\Psi$（上一章用的是 $N$，这里沿用 ZeRO 原论文（Rajbhandari 等，2020）的记号）。在混合精度训练（mixed precision，书的后面章节会细讲）中用 Adam 优化器，各项需要的显存是：
+        </p>
+        <ul>
+            <li>模型参数（半精度，即 BF16/FP16）：$2\Psi$</li>
+            <li>模型梯度（半精度，即 BF16/FP16）：$2\Psi$</li>
+            <li>FP32 的模型参数和优化器状态：$4\Psi + (4\Psi + 4\Psi)$</li>
+            <li>FP32 的模型梯度：$4\Psi$（可选，只有想用 FP32 累积梯度时才需要）</li>
+        </ul>
+        <p>
+            BF16 和 FP16 是 16 位浮点格式，每个数占 2 字节；FP32 每个数占 4 字节。Adam 的两份状态（一阶动量和二阶动量）各占 $4\Psi$，再加一份 FP32 的主参数 $4\Psi$，合起来是 $12\Psi$。不用 FP32 累积梯度时，总显存是 $2\Psi + 2\Psi + 12\Psi$；用的话是 $2\Psi + 6\Psi + 12\Psi$。为简单起见，下面先只看不用 FP32 梯度累积的情况。
+        </p>
+        <p>
+            ZeRO 的思路是把这些对象切分到各个 DP rank 上，每个节点只存一片，需要时再拼回来。这样显存占用就被数据并行度 $N_d$ 除掉：
+        </p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/zero_memory.svg" alt="ZeRO memory per stage"><figcaption>图：基线 DP 和 ZeRO 三个阶段每块 GPU 的显存（引自原书）</figcaption></figure>
+        <p>
+            图中 $\Psi$ 是参数量，$k$ 是优化器状态的显存倍数（刚才算过，Adam 的 $k=12$），$N_d$ 是 DP 度。把正文给出的各阶段公式整理成表：
+        </p>
+        <table>
+            <thead><tr><th>方案</th><th>切分了什么</th><th>每块 GPU 显存</th></tr></thead>
+            <tbody>
+                <tr><td>普通 DP</td><td>不切分</td><td>$2\Psi + 2\Psi + k\Psi$</td></tr>
+                <tr><td>ZeRO-1</td><td>优化器状态</td><td>$2\Psi + 2\Psi + \frac{k\Psi}{N_d}$</td></tr>
+                <tr><td>ZeRO-2</td><td>优化器状态 + 梯度</td><td>$2\Psi + \frac{2\Psi + k\Psi}{N_d}$</td></tr>
+                <tr><td>ZeRO-3</td><td>优化器状态 + 梯度 + 参数</td><td>$\frac{2\Psi + 2\Psi + k\Psi}{N_d}$</td></tr>
+            </tbody>
+        </table>
+        <p>
+            如果在 ZeRO-2 或 ZeRO-3 中使用 FP32 梯度累积，梯度那一项还要再加 $\frac{4\Psi}{N_d}$（原书旁注）。下面逐个看每个阶段怎么工作。
+        </p>
+
+        <h3>ZeRO-1：切分优化器状态</h3>
+        <p>
+            普通 DP 里，反向之后所有 rank 收集到同样的梯度，然后同时做一模一样的优化器更新。这是大量重复劳动。ZeRO-1 想同时去掉这份重复和它占的显存。
+        </p>
+        <p>
+            ZeRO-1 把优化器状态平均切成 $N_d$ 份，$N_d$ 是 DP 度。每个 DP rank 上的模型副本只维护 $\frac{1}{N_d}$ 的优化器状态，优化器更新时也只更新 $\frac{1}{N_d}$ 的 FP32 权重。
+        </p>
+        <p>
+            可是前向时每个副本都需要全部参数。所以优化器更新之后要加一次 all-gather，让每个副本都拿到完整的、更新过的权重。all-gather 是书里遇到的第二种集合通信原语：每块 GPU 各持有一片数据，操作结束后每块 GPU 都拿到所有片拼起来的完整数据。这就是前面图里 ZeRO-1 的显存公式 $2\Psi + 2\Psi + \frac{k\Psi}{N_d}$ 的来历。一个训练步的操作顺序如下：
+        </p>
+        <ol>
+            <li>每个副本用同一份完整的 BF16 参数做前向，但各副本的 micro-batch 不同。</li>
+            <li>每个副本做反向，得到一份完整的梯度，各副本的 micro-batch 不同。</li>
+            <li>对梯度做一次 reduce-scatter。reduce-scatter 先把各 GPU 的张量求和，再把结果切片，每块 GPU 只拿到其中属于自己的那一片。</li>
+            <li>每个副本用本地的优化器状态（只有 $\frac{1}{N_d}$）做一步优化器更新，得到 $\frac{1}{N_d}$ 的更新后 FP32 参数，再转换成完整 BF16 参数中的 $\frac{1}{N_d}$。</li>
+            <li>对 BF16 参数做一次 all-gather，把每个副本缺的那些片发给它。这是 ZeRO 新增的操作，普通 DP 里没有。</li>
+        </ol>
+        <p>
+            原书旁注：reduce-scatter 比 all-reduce 快一倍。这是第三种通信原语。
+        </p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/dp_zero1.gif" alt="ZeRO-1 forward/backward cycle animation"><figcaption>图：ZeRO-1 一次前向/反向循环的全部步骤，包括 reduce-scatter 和 all-gather（动图，引自原书）</figcaption></figure>
+        <p>
+            从实际通信看，和普通 DP 相比，ZeRO-1 把梯度的 all-reduce 换成了 reduce-scatter，并在优化器更新之后对所有参数加了一次 all-gather：
+        </p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/dp_zero1_overlap.svg" alt="ZeRO-1 communication timeline"><figcaption>图：ZeRO-1 的计算与通信时间线（引自原书）</figcaption></figure>
+        <p>
+            普通 DP 可以把梯度的 all-reduce 和反向计算重叠。ZeRO-1 还可以考虑怎样把新加的 BF16 参数 all-gather 也重叠掉，主要有两种策略：
+        </p>
+        <ul>
+            <li>在优化器更新期间重叠：优化器更新完第一片参数，就立刻发起 all-gather，这样通信有可能和其余参数的更新同时进行。</li>
+            <li>在前向期间重叠：把每一层参数的 all-gather 和前向计算重叠。</li>
+        </ul>
+        <p>
+            原书的 Note：可惜这些技术实现起来不容易，需要精巧地使用 hook 和分桶。实践中，可以直接用 PyTorch 原生的 ZeRO-3/FSDP 实现，并把 <code>FSDPUnit</code> 设为整个模型（后面会细讲）。
+        </p>
+        <p>
+            ZeRO-1 里优化器状态已经切开了，每个副本只更新 $\frac{1}{N_d}$ 的状态。那么其实没必要让每个 DP rank 都持有全部梯度，优化器更新只用到其中一部分。这就引出了 ZeRO-2。
+        </p>
+
+        <h3>ZeRO-2：再切分梯度</h3>
+        <p>
+            每个副本只需要和自己那片优化器状态对应的那片梯度，所以梯度也可以像优化器状态一样切分。这样反向时就不做 all-reduce，只做 reduce-scatter。每块 GPU 只在显存里保留需要的 $\frac{1}{N_d}$ 梯度，比 ZeRO-1 又省了一些显存。
+        </p>
+        <p>
+            用 FP32 梯度累积时，只需要保留 $\frac{1}{N_d}$ 的 FP32 梯度，用来累加 reduce-scatter 传来的 BF16 梯度；优化器更新时用这 $\frac{1}{N_d}$ 的 FP32 梯度去更新本地那片优化器状态（原书旁注）。
+        </p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/dp_zero2.gif" alt="ZeRO-2 animation"><figcaption>图：ZeRO-2 的前向/反向循环，梯度也被切分（动图，引自原书）</figcaption></figure>
+        <p>
+            现在可以看出，切分梯度之后显存变成 $2\Psi + \frac{2\Psi+k\Psi}{N_d}$。随着 $N_d$ 增大，显存最多可以比基线少 8 倍：基线是 $2\Psi + 2\Psi + 12\Psi = 16\Psi$，$N_d$ 很大时只剩约 $2\Psi$。通信方面，过程和 ZeRO-1 一样，区别只是边通信边释放显存：两者都要对梯度做一次 reduce-scatter，对所有参数做一次 all-gather。所以在通信量上，ZeRO-2 也和普通 DP 训练相当。
+        </p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/dp_zero2_overlap.svg" alt="ZeRO-2 communication timeline"><figcaption>图：ZeRO-2 的计算与通信时间线（引自原书）</figcaption></figure>
+        <p>
+            原书旁注：除了实现更复杂，用 ZeRO-2 代替 ZeRO-1 并没有真正的额外开销，所以 ZeRO-2 通常是更好的选择。
+        </p>
+
+        <h3>ZeRO-3：再切分参数（FSDP）</h3>
+        <p>
+            第 3 阶段把前面对优化器状态和梯度的切分，扩展到模型参数本身。PyTorch 对这一阶段的原生实现叫 FSDP（Fully Sharded Data Parallelism，全分片数据并行）。书里统一叫它 ZeRO-3，看到 ZeRO-3 时可以理解成 FSDP。（TPU 语境下 FSDP 的通信分析见 <a href="../How-to-Scale-Your-Model/05_训练时怎样并行Transformer.html">How to Scale Your Model 第 5 章</a>。）
+        </p>
+        <p>
+            参数分散在各块 GPU 上，前向和反向怎么做？办法很简单：需要的时候按需 gather。前向时是这样的：
+        </p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/dp_zero3_fwd.svg" alt="ZeRO-3 forward pass"><figcaption>图：ZeRO-3 的前向。逐层按需 all-gather 参数，用完即丢（引自原书）</figcaption></figure>
+        <p>
+            前向一层一层往下走，每层需要的参数现取，不再需要时马上从显存里清掉。反向也一样，只是方向反过来，并在这个过程中产生梯度分片：
+        </p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/dp_zero3_bwd.svg" alt="ZeRO-3 backward pass"><figcaption>图：ZeRO-3 的反向。再次按需 all-gather 参数，梯度通过 reduce-scatter 得到分片（引自原书）</figcaption></figure>
+        <p>
+            另一个问题是，这些 all-gather 要在一个训练步的前向和反向中持续进行，比 ZeRO-2 每步多出 $2\cdot \text{num\_layers} -1$ 次 all-gather。每次都有一点基础延迟开销，如下图：
+        </p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/dp_zero3_overlap.svg" alt="ZeRO-3 communication timeline"><figcaption>图：ZeRO-3 的计算与通信时间线，每层都有参数 all-gather（引自原书）</figcaption></figure>
+        <p>
+            通信量这样算：前向时按需对参数做 all-gather，付一份 $\Psi$ 的通信“税”；前向用完参数就丢掉了，所以反向时还要再 all-gather 一次，又是 $\Psi$；最后对梯度做和 ZeRO-2 一样的 reduce-scatter，也是 $\Psi$。合计 $3\Psi$，ZeRO-2 是 $2\Psi$。
+        </p>
+        $$\text{ZeRO-3 通信量} = \underbrace{\Psi}_{\text{前向 all-gather}} + \underbrace{\Psi}_{\text{反向 all-gather}} + \underbrace{\Psi}_{\text{梯度 reduce-scatter}} = 3\Psi$$
+        <p>
+            听起来通信开销很大，但实际影响不大，因为可以把下一层参数的通信和当前层的前向重叠，这叫预取（prefetching）。有了预取，在做第 n 层前向时 all-gather 第 n+1 层的权重；做第 n 层反向时 all-gather 第 n−1 层的权重。当然，只有 DP 不扩得太大时，这种重叠才有效。<strong>经验法则是 DP 不要超过 512。</strong>（书里的“DP”既指数据并行这种技术，也指数据并行用的 GPU 数，即 DP = DP size = DP degree。）
+        </p>
+        <p>
+            显存方面，公式到这里成了最终形式 $\frac{2\Psi +2\Psi+k\Psi}{N_d}$。也就是说，只要能继续增大 DP，至少模型相关的那部分显存理论上可以无限压低。但它对中间激活值没有帮助，激活值要靠前面讲过的激活检查点（activation checkpointing）和梯度累积来处理。
+        </p>
+        <p>
+            小结一下 DP 和 ZeRO 这一段：用 DP 加模型副本，可以大幅提高训练吞吐；用 ZeRO 把参数、梯度和优化器状态切分到各 DP 副本上，即使模型本来放不进一块 GPU 也能训练，代价是一点通信。（想多了解 FSDP1、FSDP2 和它们实现上的复杂之处，原书推荐 <a href="https://christianjmills.com/posts/mastering-llms-course-notes/conference-talk-012/" target="_blank">这篇博客</a>。）
+        </p>
+        <p>
+            不过这里也有限制：DP 只在模型的一层能放进单块 GPU 时才行得通；ZeRO 只能切分参数、梯度和优化器状态，切不了激活显存。上一章讲过，激活显存随序列长度和批大小增长。可以限制这两者，但实践中谁也不想因为硬件限制只能用很短的序列训练。
+        </p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/zero3_memoryusage.svg" alt="Memory usage for 8B model with DP=8 and ZeRO-1/2/3"><figcaption>图：8B 模型在 DP=8 时，普通 DP 与 ZeRO-1/2/3 在不同序列长度下的显存。原书是交互图，这里用其静态版（引自原书）</figcaption></figure>
+        <p>按原书交互图的数据（8B 模型，DP=8，单位 GB）：</p>
+        <table>
+            <thead><tr><th>方案</th><th>参数</th><th>梯度</th><th>优化器状态</th><th>激活值（序列长 1024 / 4096 / 16384）</th></tr></thead>
+            <tbody>
+                <tr><td>DP=8</td><td>15</td><td>15</td><td>60</td><td>4.25 / 17 / 68</td></tr>
+                <tr><td>DP=8 ZeRO-1</td><td>15</td><td>15</td><td>7.5</td><td>4.25 / 17 / 68</td></tr>
+                <tr><td>DP=8 ZeRO-2</td><td>15</td><td>1.875</td><td>7.5</td><td>4.25 / 17 / 68</td></tr>
+                <tr><td>DP=8 ZeRO-3</td><td>1.875</td><td>1.875</td><td>7.5</td><td>4.25 / 17 / 68</td></tr>
+            </tbody>
+        </table>
+        <p>
+            ZeRO 的级别越高，模型相关的三项越小，激活值一列在四种方案下完全一样，序列长度到 16384 时激活值本身就有 68 GB。
+        </p>
+        <p>
+            要解决这个问题，就要看一个新的、正交的并行维度：张量并行（Tensor Parallelism，TP）。ZeRO-3 依赖大量的参数通信；TP 则把参数、梯度、优化器状态和激活值都切分到各设备上，并且 GPU 之间完全不需要传模型参数。原书最后问：这怎么可能？下一章就讲这件事。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>数据并行：每块 GPU 一份完整模型，处理不同的 micro-batch，在反向期间、优化器更新之前用 all-reduce 平均梯度。</li>
+            <li>不要先算完再通信。三个优化：给每个参数挂 hook，梯度一就绪就 all-reduce，和反向重叠；把梯度分桶，每桶一次 all-reduce；梯度累积时用 <code>model.no_sync()</code>，只在最后一次反向后同步。</li>
+            <li>通信要求张量在内存中连续，常预分配连续 buffer，这会推高峰值显存。</li>
+            <li>全局批大小：$gbs = mbs \times grad\_acc \times dp$。优先加大 $dp$，GPU 不够时再用梯度累积补足。</li>
+            <li>配方：先定全局批大小（token）和序列长度（2k–8k 很稳，DeepSeek 和 Llama 主预训练用 4k），再找单卡最大 $mbs$，最后由可用 GPU 数定 $dp$ 和梯度累积步数。例子：4M token、4k 序列长度、1,024 个样本、$mbs=2$，128 块 GPU 时累积 4 步，512 块 GPU 时累积 1 步。</li>
+            <li>512 块 GPU 以上，通信开始受环延迟限制，DP 通信无法完全重叠。benchmark 中 DP 从 128 扩到 256 时每卡吞吐下降 40.6%，单卡显存不变。</li>
+            <li>估算参数显存：参数量乘以 2，例如 70B 约 140 GB（133 GiB）。</li>
+            <li>混合精度 + Adam 的显存：BF16 参数 $2\Psi$、BF16 梯度 $2\Psi$、FP32 参数和优化器状态 $12\Psi$，可选 FP32 梯度 $4\Psi$。</li>
+            <li>ZeRO 显存：ZeRO-1 为 $2\Psi + 2\Psi + \frac{k\Psi}{N_d}$；ZeRO-2 为 $2\Psi + \frac{2\Psi+k\Psi}{N_d}$，最多比基线省 8 倍；ZeRO-3 为 $\frac{2\Psi+2\Psi+k\Psi}{N_d}$。ZeRO-2/3 用 FP32 梯度累积时梯度项再加 $\frac{4\Psi}{N_d}$。</li>
+            <li>激活值在各 DP rank 上不重复，ZeRO 不能切分它。</li>
+            <li>ZeRO-1 把梯度 all-reduce 换成 reduce-scatter，并在优化器更新后对参数 all-gather；reduce-scatter 比 all-reduce 快一倍。</li>
+            <li>ZeRO-2 相对 ZeRO-1 除实现复杂度外没有额外开销，通常更好；通信量和普通 DP 相当（$2\Psi$）。</li>
+            <li>ZeRO-3（FSDP）每步比 ZeRO-2 多 $2\cdot \text{num\_layers} -1$ 次 all-gather，总通信量 $3\Psi$；靠预取和计算重叠，经验上 DP 不超过 512。</li>
+            <li>限制：DP 要求单层放得进一块 GPU；ZeRO 管不了随序列长度和批大小增长的激活显存，这需要下一章的张量并行。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>The Ultra-Scale Playbook · Data Parallelism (and ZeRO) · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

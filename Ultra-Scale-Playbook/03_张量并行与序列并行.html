@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>张量并行与序列并行 | Ultra-Scale Playbook 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="02_数据并行与ZeRO.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Ultra-Scale Playbook 目录</a> · 03</span>
+    <span><a href="04_上下文并行.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>03 · 张量并行与序列并行</h1>
+        <p class="subtitle">ZeRO 切不动激活；张量并行把矩阵乘法按行或按列切到多张 GPU 上，连激活一起分摊，序列并行再把 LayerNorm 和 dropout 沿序列维度切开</p>
+        <div class="author-meta">
+            作者：Nouamane Tazi、Ferdinand Mom、Haojun Zhao、Phuc Nguyen、Mohamed Mekkouri、Leandro von Werra、Thomas Wolf（Hugging Face）· 2025 年 2 月发布 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook" target="_blank">The Ultra-Scale Playbook</a> 中的 “Tensor Parallelism (and Sequence Parallelism)” 一章（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>上一章用 ZeRO 把参数、梯度和优化器状态分到了数据并行的各张卡上。但 ZeRO 不切激活，一旦激活显存超过预算就没办法了。这一章讲张量并行（Tensor Parallelism，TP）：它把权重、梯度、优化器状态和激活都切开，而且计算前不需要先把它们收集完整。代价是通信落在了计算的关键路径上，很难藏起来。</p>
+        <p>章节顺序是：先用一个矩阵乘法讲清按列切和按行切；再把两种切法组合进 Transformer 的 MLP 和 attention；然后看 TP 扩展到 8、16、32 张卡时吞吐和显存怎么变；最后讲序列并行（Sequence Parallelism，SP），它把 TP 管不到的 LayerNorm、dropout 沿序列维度切开。读完应该能说清：TP 每层要做几次什么通信，为什么 TP 一般不超过一个节点的 8 张卡，TP+SP 把单卡最大激活降到多少。</p>
+        <ol>
+            <li><a href="#t01">张量并行的基本原理</a></li>
+            <li><a href="#t02">Transformer 块里的张量并行</a></li>
+            <li><a href="#t03">序列并行</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 张量并行的基本原理</h2>
+        <p><em>原书小节：Tensor Parallelism（开头部分）</em></p>
+        <h3>两条矩阵乘法性质</h3>
+        <p>张量并行利用的是矩阵乘法 $A \times B$ 的两条数学性质：</p>
+        <p>$$\begin{aligned}
+&\text{1.} \quad A\cdot B = A \cdot \begin{bmatrix} B_1 & B_2 & \cdots \end{bmatrix} = \begin{bmatrix} AB_1 & AB_2 & \cdots \end{bmatrix} \\
+&\text{2.} \quad A\cdot B =\begin{bmatrix} A_1 & A_2 & \cdots \end{bmatrix} \begin{bmatrix} B_1 \\ B_2 \\ \vdots \end{bmatrix} = \sum_{i=1}^n A_i B_i
+\end{aligned}$$</p>
+        <p>第一条说，把 $B$ 按列切成几块，分别和 $A$ 相乘，结果按列拼起来就是 $A B$。第二条说，把 $A$ 按列、$B$ 按行对应切开，各自相乘后把结果加起来，也得到 $AB$。在神经网络里，矩阵乘法通常写成 $X \times W$：$X$ 是输入或激活值，$W$ 是线性层（Linear layer）的权重。</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/tp_diagram.svg" alt="TP diagram"><figcaption>图：一个小的 $X \times W$ 矩阵乘法示例（引自原书）</figcaption></figure>
+        <p>在张量并行中，张量沿某个维度切成 $N$ 份（shard，分片），分到 $N$ 张 GPU 上。矩阵可以按列切，也可以按行切，对应列并行和行并行。两种切法需要的通信原语（communication primitive，GPU 之间交换数据的基本操作）不一样。</p>
+        <p>（同一概念在 TPU 语境下的推导见 <a href="../How-to-Scale-Your-Model/03_分片矩阵与矩阵乘法.html">How to Scale Your Model 第 3 章</a>）</p>
+
+        <h3>按列切：column-linear</h3>
+        <p>第一种是按列切（column-wise，也叫 column-linear）。把完整的输入矩阵复制到每个 worker 上，这一步叫 broadcast（广播，把一份数据从一张卡发给所有卡）；权重矩阵按列切开。每张卡用完整输入乘以自己那部分权重，最后用 all-gather（全收集，每张卡把自己的那块发给其他所有卡，最后人人都有完整结果）把结果拼起来。</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/tp_diagram2.png" alt="column-linear sharding"><figcaption>图：按列切权重，输入 broadcast 到各卡，输出用 all-gather 拼接（引自原书）</figcaption></figure>
+        <p>代码：Picotron 中列并行 TP 的实现，见 <a href="https://github.com/huggingface/picotron/blob/1004ae37b87887cde597c9060fb067faa060bafe/picotron/tensor_parallel/tensor_parallel.py#L54-L123" target="_blank">picotron/tensor_parallel/tensor_parallel.py 第 54–123 行</a>。</p>
+
+        <h3>按行切：row-linear</h3>
+        <p>第二种是按行切（row-wise，也叫 row-linear），权重矩阵按行切成几块。这时输入也得切开，所以要用 scatter（分发，把一份数据切成几块，每张卡拿一块），原书说这是全书介绍的第四个分布式通信原语，它替代了列并行里的 broadcast。每张卡上的结果形状已经对了，但只是部分和，要加起来才是最终结果，所以还需要一次 all-reduce（全归约，把各卡的张量逐元素求和，再让每张卡都拿到求和结果）。</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/tp_diagram3.png" alt="row-linear sharding"><figcaption>图：按行切权重，输入 scatter 到各卡，部分结果用 all-reduce 求和（引自原书）</figcaption></figure>
+        <p>代码：Picotron 中行并行 TP 的实现，见 <a href="https://github.com/huggingface/picotron/blob/1004ae37b87887cde597c9060fb067faa060bafe/picotron/tensor_parallel/tensor_parallel.py#L125-L189" target="_blank">picotron/tensor_parallel/tensor_parallel.py 第 125–189 行</a>。</p>
+        <p>这几种通信原语的具体做法，原书附录有专门讲解（见 <a href="12_附录_集合通信与性能分析.html">12 篇</a>）。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. Transformer 块里的张量并行</h2>
+        <p><em>原书小节：Tensor parallelism in a transformer block</em></p>
+        <p>Transformer 由两种主要模块组成：前馈多层感知机（MLP）块和多头注意力（multi-head attention，MHA）块。两者都可以做张量并行。</p>
+
+        <h3>MLP 块</h3>
+        <p>前馈部分的切法是：先一个 column-linear，再接一个 row-linear。前向时这相当于一次 broadcast 复制输入，加一次 all-reduce。实际训练中连 broadcast 都不用做，因为可以保证各 TP rank（rank 指并行组里的一张卡）上的输入本来就是同步的。反过来先 row-linear 再 column-linear 效率更低，因为两个线性层之间还得插一次 all-reduce；先列后行可以省掉这次中间通信。</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/tp_diagram4.png" alt="TP in MLP block"><figcaption>图：MLP 块里先列切、后行切，前向只需要最后一次 all-reduce（引自原书）</figcaption></figure>
+
+        <h3>多头注意力块</h3>
+        <p>attention 块的做法类似：Query（Q）、Key（K）、Value（V）三个投影矩阵按列并行切开，输出投影当作 row-linear。对多头注意力来说，列并行有很自然的含义：每张 GPU 负责一个或一组注意力头（attention head）的计算。同样的方法也适用于多查询注意力（multi-query attention，MQA，<a href="https://arxiv.org/abs/1911.02150" target="_blank">论文</a>）和分组查询注意力（grouped query attention，GQA，<a href="https://arxiv.org/abs/2305.13245" target="_blank">论文</a>），这两种结构里多个 query 头共用 key 和 value。</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/tp_full_diagram.png" alt="TP in full transformer block"><figcaption>图：attention 和 MLP 两个块的完整张量并行切法（引自原书）</figcaption></figure>
+        <p>TP 在这两个块上效果好，是因为它们都有天然相互独立的维度。attention 块可以沿 <code>num_attention_heads</code> 维切，每个头独立计算；MLP 块可以沿 <code>hidden_dim</code> 维切，前馈网络在这个维度上的运算互不依赖。</p>
+
+        <h3>TP 度数的上限</h3>
+        <p>由于 QKV 投影是沿 <code>num_attention_heads</code> 维切的，TP 度数不应超过注意力头数。用 GQA 时，有 $num\_attention\_heads$ 个 query 头，但只有 $num\_kv\_heads$ 个 key/value 头（$num\_attention\_heads >= num\_kv\_heads$）。这时仍然可以设 $TP = num\_attention\_heads$，但要保证 K/V 头在各 GPU 之间正确同步。例如 Llama-3 8B 有 32 个 query 头、8 个 key/value 头，TP 理论上可以开到 32，但实现时要小心处理各 TP worker 之间 K/V 头的同步。</p>
+
+        <h3>通信落在关键路径上</h3>
+        <p>TP 不是万能的。它把好几个分布式通信原语直接放进了模型的计算路径，这些通信很难像 ZeRO 那样完全藏到计算后面（overlap，通信和计算同时进行）。最终性能取决于两边的权衡：一边是计算和显存上的收益，一边是多出来的通信开销。</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/tp_overlap.svg" alt="Forward pass in tensor parallelism"><figcaption>图：张量并行 MLP 前向的时间线，all-reduce 处是一个无法与计算重叠的同步点（引自原书）</figcaption></figure>
+        <p>看 TP 版 MLP 的操作时间线（MHA 同理）：每个 decoder 层的前向里，all-reduce 是一个同步点，没法和计算重叠。这段暴露出来的通信是必须的，因为最后的 LayerNorm 之前要先把各 TP rank 的部分结果合起来。</p>
+        <p>原书的两条旁注：用分块矩阵乘法（block matrix multiplication）配合异步通信/计算，可以部分藏住这段通信。比如 Megatron-LM 和 Nanotron 实现了 all-gather 与 FC1（第一个全连接层）计算的部分重叠：矩阵乘法结果的一部分先发给另一张 GPU，剩下的部分还在计算中。</p>
+        <p>TP 确实减少了矩阵乘法的激活显存，因为中间激活被切到各卡上了。但 LayerNorm 这类操作还是要收集完整激活，所以显存收益没有拿全。另外，TP 的通信量很大，严重依赖网络基础设施。这次 all-reduce 无法完全藏在计算后面，会直接加到前向的关键路径（critical path，决定前向最少要花多长时间的那串操作）上。这仍是活跃的研究方向，例如 Domino（Domino: Eliminating Communication in LLM Training via Generic Tensor Slicing and Overlapping）在探索如何把这部分重叠做到最大。</p>
+
+        <h3>扩大 TP 度数：吞吐与批量的权衡</h3>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/tp_scaling.svg" alt="TP scaling throughput and max batch size"><figcaption>图：3B 模型在不同 TP 度数下的每卡吞吐（左）和最大批量（右）（引自原书交互图）</figcaption></figure>
+        <p>增大 TP 会降低每张 GPU 的吞吐（左图），但能处理更大的批量（右图），这就是分布式训练里计算效率和显存之间的权衡。交互图的数据如下（3B 模型）：</p>
+        <table>
+            <thead><tr><th>TP</th><th>Tokens/sec/GPU</th><th>相比上一档</th><th>最大批量</th></tr></thead>
+            <tbody>
+                <tr><td>2</td><td>13923</td><td></td><td>3</td></tr>
+                <tr><td>4</td><td>12421</td><td>-10.8%</td><td>8</td></tr>
+                <tr><td>8</td><td>10903</td><td>-12.2%</td><td>12</td></tr>
+                <tr><td>16</td><td>6246</td><td>-42.7%</td><td>16</td></tr>
+                <tr><td>32</td><td>2146</td><td>-65.6%</td><td>20</td></tr>
+            </tbody>
+        </table>
+        <p>超过 8 张 GPU 后，TP 的通信开销变得很明显。单节点内的 TP 可以用高速的 NVLink 互联，跨节点就只能走慢得多的网络。从 TP=8 到 TP=16 吞吐大幅下降，从 TP=16 到 TP=32 降得更陡。并行度再高，通信开销很快就压过了计算时间。（NVLink 和节点内外带宽的差别见 <a href="../How-to-Scale-Your-Model/12_怎样理解GPU.html">How to Scale Your Model 第 12 章</a>）</p>
+
+        <h3>70B 模型的显存</h3>
+        <p>话说回来，TP 把模型参数、梯度、优化器状态和（一定程度上的）激活分到各 GPU，显存上的好处很大。原书用 70B 模型展示：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/tp_memoryusage.svg" alt="TP memory usage for 70B model"><figcaption>图：70B 模型在不做并行、TP=8、TP=16 时的单卡显存构成（引自原书交互图）</figcaption></figure>
+        <p>交互图的数据（单位 GB，单卡）：</p>
+        <table>
+            <thead><tr><th>设置</th><th>参数</th><th>梯度</th><th>优化器状态</th><th>激活 seq=1024</th><th>激活 seq=4096</th><th>激活 seq=16384</th></tr></thead>
+            <tbody>
+                <tr><td>不并行（TP=1）</td><td>131.5</td><td>131.5</td><td>526</td><td>21.25</td><td>85</td><td>340</td></tr>
+                <tr><td>TP=8</td><td>16.44</td><td>16.44</td><td>65.75</td><td>8.125</td><td>32.5</td><td>130</td></tr>
+                <tr><td>TP=16</td><td>8.22</td><td>8.22</td><td>32.875</td><td>7.19</td><td>28.75</td><td>115</td></tr>
+            </tbody>
+        </table>
+        <p>参数、梯度、优化器状态随 TP 度数成比例下降，单卡占用小到可以开始把更大的模型塞进一个 8 卡节点。激活降得少得多：TP=8 时激活只到不并行时的约 38%，TP=16 也只比 TP=8 少一点，原因就是 LayerNorm 和 dropout 那部分没切。</p>
+
+        <h3>LayerNorm 和 dropout 的问题</h3>
+        <p>还能从这个技术里挖出更多收益吗？LayerNorm 和 dropout 仍要在每张卡上收集完整激活，抵掉了一部分显存节省。办法是把这些剩下的操作也并行起来。</p>
+        <p>原书的 📝 注释：在 TP 训练里，all-gather 之后各 TP rank 看到的激活是一样的，所以 LayerNorm 权重的梯度在反向后不需要 all-reduce，它们天然保持同步。dropout 则不同，要在各 TP rank 之间同步随机种子，保证行为确定。</p>
+        <p>下一步就是张量并行的一个小而自然的扩展：序列并行。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 序列并行</h2>
+        <p><em>原书小节：Sequence parallelism</em></p>
+        <p>序列并行（SP）把模型中 TP 不处理的部分（如 dropout 和 LayerNorm）的激活和计算也切开，但切的是输入的序列维度，不是隐藏维度。</p>
+        <p>原书的 📝 注释：“序列并行”这个词有点被用滥了。本节说的序列并行和张量并行紧密绑定，只作用于 dropout 和 layer normalization。序列更长时 attention 计算会成为瓶颈，需要 Ring Attention 之类的技术，这些有时也被叫作序列并行，但原书把它们称作上下文并行（context parallelism）以示区分。所以书里出现“序列并行”时，指的是和张量并行一起用的那种；上下文并行则可以单独使用（见 <a href="04_上下文并行.html">04 篇</a>）。</p>
+
+        <h3>为什么 LayerNorm 不能按隐藏维切</h3>
+        <p>这些操作要访问完整的隐藏维度才能算对。比如 LayerNorm 要在完整隐藏维度上算均值和方差：</p>
+        <p>$$\text{LayerNorm}(x) = \gamma \cdot \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta$$</p>
+        <p>其中 $\mu = \text{mean}(x)$ 和 $\sigma^2 = \text{var}(x)$ 都是沿隐藏维度 $h$ 计算的。所以这些操作虽然计算量很小，却占不少激活显存。序列并行改为沿序列维度切分，把这部分显存分摊到各 GPU 上。</p>
+
+        <h3>f、f*、g、g* 四种转换</h3>
+        <p>下图展示怎样在张量并行区域和序列并行区域之间切换，用到的集合通信操作记作 f 和 g。实际是从左往右走：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/tp_sp_diagram.png" alt="TP and SP regions with f, f*, g, g*"><figcaption>图：TP 区域与 SP 区域的转换。前向：f = no-op，f* = all-reduce，g = all-gather，g* = reduce-scatter；反向：f = all-reduce，f* = no-op，g = reduce-scatter，g* = all-gather。SP 区域需要完整的 hidden_dim（引自原书）</figcaption></figure>
+        <p>难点在于这些转换既要高效、显存低，又要保证结果正确。</p>
+        <p>纯张量并行时，前向中：</p>
+        <ul>
+            <li>f 是 no-op（空操作，什么都不做），因为激活已经在各 rank 上复制了一份。</li>
+            <li>f* 是 all-reduce，用来同步激活、保证结果正确。</li>
+        </ul>
+        <p>反向中：</p>
+        <ul>
+            <li>f* 是 no-op，因为梯度已经在各 rank 上复制了一份。</li>
+            <li>f 是 all-reduce，用来同步梯度。</li>
+        </ul>
+        <p>f 和 f* 叫共轭对（conjugate pair）：在同一个方向上，一个是 no-op 时另一个就是 all-reduce，换到另一个方向就反过来。</p>
+        <p>序列并行用的是另一对操作 g 和 g*。SP 区域里刻意不用 all-reduce，因为那要收集完整激活，会抬高峰值显存，SP 就白做了。这里会用到 reduce-scatter（归约分发，先逐元素求和，再把结果切块，每张卡只拿一块）。</p>
+
+        <h3>一步一步走一遍（以 MLP、2 张卡为例）</h3>
+        <p>原书在这里调侃了一句“像某个著名 LLM 说的，let's take it step by step”。</p>
+        <p>开头的 LayerNorm（SP 区域）</p>
+        <ul>
+            <li>输入张量 X1* 和 X2*，形状 $(b,s/2,h)$，进来时已经沿序列维度切开。</li>
+            <li>每张 GPU 在自己的那段序列上独立算 LayerNorm，得到 Y1* 和 Y2*。</li>
+        </ul>
+        <p>第一次转换（SP → TP）</p>
+        <ul>
+            <li>g 操作（all-gather）把 Y1 和 Y2 拼回完整序列长度。</li>
+            <li>恢复出 Y，形状 $(b,s,h)$，因为 column-linear 层需要完整的隐藏维度 $h$。</li>
+        </ul>
+        <p>第一个线性层（TP 区域）</p>
+        <ul>
+            <li>A1 和 A2 是 column-linear 层，所以把 Y 沿隐藏维度切开。</li>
+            <li>每张 GPU 独立做 GELU（一种激活函数）。</li>
+            <li>Z1* 和 Z2* 的形状是 $(b,s,h/2)$。</li>
+        </ul>
+        <p>第二个线性层（TP 区域）</p>
+        <ul>
+            <li>B1 和 B2 是 row-linear 层，所以恢复出隐藏维度。</li>
+            <li>W1 和 W2 形状为 $(b,s,h)$，需要相加。</li>
+        </ul>
+        <p>最后一次转换（TP → SP）</p>
+        <ul>
+            <li>g* 操作（reduce-scatter）一边做求和以保证前面 row-linear 的结果正确，一边沿序列维度分发。</li>
+            <li>W1* 和 W2* 的形状是 $(b,s/2,h)$。</li>
+        </ul>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/tp_sp_diagram_zoomed.png" alt="TP+SP MLP step by step"><figcaption>图：TP+SP 下 MLP 块各步的张量形状与通信（引自原书）</figcaption></figure>
+
+        <h3>最大激活降到 $\frac{b \cdot s \cdot h}{tp}$</h3>
+        <p>序列并行的一大好处是降低了需要存储的最大激活尺寸。只用张量并行时，好几处都要存形状为 $(b,s,h)$ 的激活；加上序列并行后，激活要么沿序列维切，要么沿隐藏维切，最大激活尺寸降到 $\frac{b \cdot s \cdot h}{tp}$。</p>
+        <p>TP 和 TP+SP 下各部分的切分方式不好记，原书作者说他们自己也觉得难对上，所以做了下面的表，总结前向中激活（也就是 <code>hidden_states</code>）在隐藏维 $h$ 和序列维 $s$ 上的形状变化：</p>
+        <table>
+            <thead><tr><th>区域</th><th>只用 TP</th><th>TP + SP</th></tr></thead>
+            <tbody>
+                <tr><td>进入 TP（column-linear）</td><td>$h$：切分（<code>weight_out</code> 被切分）<br>$s$：完整</td><td>$h$：切分（<code>weight_out</code> 被切分）<br>$s$：all-gather 成完整</td></tr>
+                <tr><td>TP 区域</td><td>$h$：切分<br>$s$：完整</td><td>$h$：切分<br>$s$：完整</td></tr>
+                <tr><td>退出 TP（row-linear）</td><td>$h$：完整（<code>weight_out</code> 完整，靠 all-reduce 保证正确）<br>$s$：完整</td><td>$h$：完整（<code>weight_out</code> 完整，靠 reduce-scatter 保证正确）<br>$s$：reduce-scatter 成切分</td></tr>
+                <tr><td>SP 区域</td><td>$h$：完整<br>$s$：完整</td><td>$h$：完整<br>$s$：切分</td></tr>
+            </tbody>
+        </table>
+        <p>embedding 层的情况：</p>
+        <table>
+            <thead><tr><th>区域</th><th>普通 TP</th><th>TP + SP</th></tr></thead>
+            <tbody>
+                <tr><td>Embedding 层（row-linear，沿词表切分）</td><td>$h$：完整（<code>weight_out</code> 完整，靠 all-reduce 保证正确）<br>$s$：完整</td><td>$h$：完整（<code>weight_out</code> 完整，靠 reduce-scatter 保证正确）<br>$s$：reduce-scatter 成切分</td></tr>
+            </tbody>
+        </table>
+
+        <h3>70B 模型再看一次显存</h3>
+        <p>用上序列并行，激活显存省得更多，批量和序列长度都能比只用 TP 时推得更远。还是前面的 70B 模型：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/tp_sp_memoryusage.svg" alt="TP+SP memory usage for 70B model"><figcaption>图：70B 模型在不做并行、TP=8+SP、TP=16+SP 时的单卡显存构成（引自原书交互图）</figcaption></figure>
+        <p>交互图的数据（单位 GB，单卡）：参数、梯度、优化器状态和前面 TP 的情况相同；激活变成下表这样。</p>
+        <table>
+            <thead><tr><th>设置</th><th>激活 seq=1024</th><th>激活 seq=4096</th><th>激活 seq=16384</th><th>seq=16384 合计</th></tr></thead>
+            <tbody>
+                <tr><td>不并行</td><td>21.25</td><td>85</td><td>340</td><td>约 1129</td></tr>
+                <tr><td>TP=8（带 SP）</td><td>2.66</td><td>10.625</td><td>42.5</td><td>约 141</td></tr>
+                <tr><td>TP=16（带 SP）</td><td>1.33</td><td>5.3125</td><td>21.25</td><td>约 70.6</td></tr>
+            </tbody>
+        </table>
+        <p>（“合计”是本笔记把图中四项相加得到的。对比：只用 TP=16 时 16384 长度下合计约 164 GB。）激活现在随 TP 度数严格按比例下降，单卡最大显存又大幅降低，TP+SP=16 时能放下 16k token 的序列长度，比普通 TP 好。原书也提醒，TP=16 仍然偏大，上一节已经看到它跨节点的代价，后面一章会讲怎么改进。</p>
+
+        <h3>TP+SP 的通信比 TP 多吗</h3>
+        <p>可以说多，也可以说不多。普通 TP 的前向里，每个 Transformer 块有两次 all-reduce；SP 里每个块有两次 all-gather 和两次 reduce-scatter，操作次数是 TP 的两倍。但一次 all-reduce 可以拆成一次 all-gather 加一次 reduce-scatter（见附录 “Ring AllReduce” 一节，<a href="12_附录_集合通信与性能分析.html">12 篇</a>），所以两者的通信开销其实相同。反向同理，只是每个操作换成它的共轭（no-op ↔ allreduce，allgather ↔ reducescatter）。</p>
+        <p>细心的读者会发现，每层其实有四次通信操作：attention 两次，MLP 两次。下面是 TP+SP 下 MLP 的 profiling（性能剖析，记录每个操作花了多少时间）：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/tp_sp_overlap.svg" alt="tp_sp_overlap.svg"><figcaption>图：TP+SP 下 MLP 前向的时间线，all-gather 和 reduce-scatter 都卡在计算路径上（引自原书）</figcaption></figure>
+        <p>和普通 TP 一样，TP+SP 的通信不容易和计算重叠，吞吐因此严重依赖通信带宽。所以 TP+SP 通常也只在节点内使用，TP 度数不超过每个节点的 GPU 数，例如 TP≤8。</p>
+
+        <h3>3B 模型的扩展测试</h3>
+        <p>原书测了 3B 模型、序列长度 4,096 时，随 TP（带 SP）扩大的吞吐和显存：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/tp_sp_scaling.svg" alt="TP+SP scaling for 3B model"><figcaption>图：3B 模型、序列长度 4096，TP+SP 不同度数下的每卡吞吐（左）和最大批量（右）（引自原书交互图）</figcaption></figure>
+        <table>
+            <thead><tr><th>TP（带 SP）</th><th>Tokens/sec/GPU</th><th>相比上一档</th><th>最大批量</th></tr></thead>
+            <tbody>
+                <tr><td>2</td><td>14167</td><td></td><td>4</td></tr>
+                <tr><td>4</td><td>13460</td><td>-5.0%</td><td>10</td></tr>
+                <tr><td>8</td><td>10889</td><td>-19.1%</td><td>20</td></tr>
+                <tr><td>16</td><td>6159</td><td>-43.4%</td><td>40</td></tr>
+                <tr><td>32</td><td>3610</td><td>-41.4%</td><td>100</td></tr>
+            </tbody>
+        </table>
+        <p>又是计算效率（左）和显存容量（右）之间的权衡。更高的并行度通过降低激活显存，能处理大得多的批量，但每卡吞吐也下降，超过“每个节点 GPU 数”这个门槛后尤其明显。</p>
+        <p>原书对两组测试的观察：</p>
+        <ul>
+            <li>两种方法的最大性能跌幅都出现在 TP=8 到 TP=16 之间，因为这时从只在节点内通信（NVLink）变成了跨节点通信（EFA，AWS 的节点间网络）。</li>
+            <li>TP 加 SP 节省的激活显存，让能放下的批量比只用 TP 大得多（对照两张表，TP=32 时最大批量 20 对 100）。</li>
+        </ul>
+        <p>原书的 📝 注释：SP 区域里各 LayerNorm 处理的是序列的不同部分，所以它们的梯度在各 TP rank 上不同。为了让权重保持同步，反向时要对这些梯度做 all-reduce，和数据并行同步权重的方式类似。不过 LayerNorm 参数很少，这点通信开销很小。（注意这和前面纯 TP 时的结论相反：纯 TP 下各 rank 看到的激活相同，LayerNorm 梯度天然同步。）</p>
+
+        <h3>TP+SP 的两个局限</h3>
+        <p>TP+SP 还有两个限制。第一，序列长度继续增长时，TP 区域里的激活显存还是会爆，因为那里每张卡处理的是完整序列。第二，如果模型大到 TP=8 都放不下，跨节点互联会带来严重的减速。</p>
+        <p>第一个问题用上下文并行解决（见 <a href="04_上下文并行.html">04 篇</a>），第二个用流水线并行解决（见 <a href="05_流水线并行.html">05 篇</a>）。原书接下来先讲上下文并行。（TPU 上 TP 的切法和通信量推导见 <a href="../How-to-Scale-Your-Model/05_训练时怎样并行Transformer.html">How to Scale Your Model 第 5 章</a>）</p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>张量并行利用矩阵乘法的两条性质：按列切 $B$ 结果按列拼接；按行切则各部分相乘后求和 $\sum_i A_i B_i$。</li>
+            <li>column-linear：输入 broadcast，权重按列切，输出 all-gather。row-linear：输入 scatter，权重按行切，输出 all-reduce。</li>
+            <li>MLP 用先 column-linear 后 row-linear，前向只需一次 all-reduce，省掉中间通信；attention 的 QKV 列切（每卡负责一部分头），输出投影行切。</li>
+            <li>TP 度数不应超过注意力头数；GQA 下可以开到 query 头数，但要处理 K/V 头的同步（Llama-3 8B：32 个 query 头，8 个 K/V 头）。</li>
+            <li>TP 的 all-reduce 在关键路径上，难以和计算重叠；超过 8 卡跨节点后吞吐骤降（3B 模型：TP=8 到 16 降 42.7%，16 到 32 降 65.6%）。</li>
+            <li>TP 让参数、梯度、优化器状态按比例缩小，但 LayerNorm、dropout 要完整激活，激活显存省得有限。纯 TP 下 LayerNorm 梯度天然同步；dropout 要同步随机种子。</li>
+            <li>序列并行把 LayerNorm、dropout 沿序列维度切开；SP→TP 用 all-gather（g），TP→SP 用 reduce-scatter（g*），反向取共轭。</li>
+            <li>TP+SP 下单卡最大激活降为 $\frac{b \cdot s \cdot h}{tp}$；70B 模型用 TP+SP=16 能放下 16k token 序列。</li>
+            <li>TP+SP 每块两次 all-gather 加两次 reduce-scatter，通信开销和 TP 的两次 all-reduce 相同；同样难以重叠，通常 TP≤8，留在节点内。</li>
+            <li>SP 下 LayerNorm 梯度在各 rank 不同，反向要 all-reduce，开销小。</li>
+            <li>TP+SP 的两个局限：序列更长时 TP 区域激活仍会爆（交给上下文并行）；模型大到 TP=8 放不下时跨节点很慢（交给流水线并行）。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>The Ultra-Scale Playbook · Tensor Parallelism (and Sequence Parallelism) · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

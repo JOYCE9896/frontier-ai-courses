@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>专家并行 | Ultra-Scale Playbook 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="05_流水线并行.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Ultra-Scale Playbook 目录</a> · 06</span>
+    <span><a href="07_5D并行总览.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>06 · 专家并行</h1>
+        <p class="subtitle">MoE 模型的每个专家是独立的 FFN，可以直接放到不同 GPU 上；这一章讲专家并行是什么，为什么总要和数据并行一起用</p>
+        <div class="author-meta">
+            作者：Nouamane Tazi、Ferdinand Mom、Haojun Zhao、Phuc Nguyen、Mohamed Mekkouri、Leandro von Werra、Thomas Wolf（Hugging Face）· 2025 年 2 月发布 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook" target="_blank">The Ultra-Scale Playbook</a> 中的 “Expert Parallelism” 一章（本文依据原书英文网页整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>这是全书讲的最后一种并行方式，篇幅很短。前面几章的数据并行、张量并行、上下文并行和流水线并行对任何 Transformer 都适用；专家并行只对混合专家模型（MoE）有意义。读完能说清楚两件事：专家并行切的是什么，以及它为什么比张量并行轻量。各种并行怎样组合，放在下一章 <a href="07_5D并行总览.html">5D 并行总览</a> 讲。</p>
+        <ol>
+            <li><a href="#t01">MoE 是什么</a></li>
+            <li><a href="#t02">专家并行：把专家放到不同 GPU 上</a></li>
+            <li><a href="#t03">和数据并行一起用</a></li>
+            <li><a href="#t04">实践中的技巧</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. MoE 是什么</h2>
+        <p><em>原书小节：Expert Parallelism（开头部分）</em></p>
+        <p>作者建议，没接触过 MoE 的读者先读 Hugging Face 之前写的一篇短得多的 <a href="https://huggingface.co/blog/moe" target="_blank">MoE 博客</a>。</p>
+        <p>混合专家（Mixture of Experts，MoE）是一种模型结构：每一层有好几个并列的前馈模块（feedforward，FFN），每个叫一个专家（expert）；一个叫路由器（router）的小网络决定每个 token 送去哪个专家处理，不同 token 走不同的专家。作者说这种结构最近因为 GPT-4、Mixtral 和 DeepSeek-V3/R1 等模型变得很受关注。</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/ep_moe.png" alt="MoE layer"><figcaption>图：一个 MoE 层的示意，原图出自 Switch Transformers 论文（引自原书）</figcaption></figure>
+        <p>（MoE 的参数量和 FLOPs 怎么算，TPU 语境下的推导见 <a href="../How-to-Scale-Your-Model/04_Transformer的全部数学.html">How to Scale Your Model 第 4 章</a>的 MoE 一节。）</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 专家并行：把专家放到不同 GPU 上</h2>
+        <p><em>原书小节：Expert Parallelism</em></p>
+        <p>MoE 层的设计让沿“专家”这个维度做并行很容易，这就叫专家并行（Expert Parallelism，EP）。因为各个专家的 FFN 完全互相独立，可以直接把每个专家的 FFN 放到不同的 worker（一张 GPU 或一个进程）上。</p>
+        <p>作者拿它和张量并行比：EP 轻量得多，因为它不需要把矩阵乘法拆开（张量并行要把一个权重矩阵切到多张卡上再合并结果，见 <a href="03_张量并行与序列并行.html">03 张量并行</a>）。EP 只需要把每个 token 的隐藏状态（hidden states）发到它该去的那个专家所在的 GPU。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 和数据并行一起用</h2>
+        <p><em>原书小节：Expert Parallelism</em></p>
+        <p>实践中 EP 一般和其他并行方式一起用，最常见的是数据并行（DP）。原因是 EP 只作用于 MoE 层，并不切分输入 token。上下文并行会沿序列长度切 token，EP 不会。如果只用 EP，那么所有非 MoE 的部分（例如 attention）在每张 GPU 上都在算同样的东西，属于重复计算。</p>
+        <p>EP 加上 DP 之后，专家和输入 batch 都能在 GPU 之间切开，下图是一个简化示意：</p>
+        <figure><img src="https://huggingface.co/spaces/nanotron/ultrascale-playbook/resolve/main/assets/images/ep_schema.png" alt="EP with DP"><figcaption>图：专家并行与数据并行结合的示意，原图出自 “A Survey on Mixture of Experts”（引自原书）</figcaption></figure>
+        <p>作者说这张图暂时看不懂也没关系，下一章会专门讲不同并行策略之间怎样配合。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 实践中的技巧</h2>
+        <p><em>原书小节：Expert Parallelism</em></p>
+        <p>让 EP 跑得高效有一些技巧，而且这些技巧和模型设计绑在一起。原书举的例子是 DeepSeek-V3：它在路由器里加了一条约束，每个 token 最多只能发往 $M$ 个节点（DeepSeek-V3 里 $M=4$），这样 token 尽量留在少数节点内，减少跨节点通信的开销。</p>
+        <p>作者还说，专家并行其实早就有了（原书引用的是 GShard 论文），只是随着 MoE 架构流行，最近才重新受到关注。他们计划之后在 Picotron/Nanotron 里补一个更完整的 EP 示例。</p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>MoE 层把单个 FFN 换成多个并列的专家，由路由器把 token 分到不同专家。</li>
+            <li>专家并行把不同专家放到不同 worker 上；不需要拆矩阵乘法，只需把 token 的隐藏状态路由到对应专家，比张量并行轻量。</li>
+            <li>EP 只切 MoE 层、不切 token，单独使用会让非 MoE 部分重复计算，所以通常和数据并行一起用。</li>
+            <li>DeepSeek-V3 限制每个 token 最多发往 $M=4$ 个节点，以控制通信开销。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>The Ultra-Scale Playbook · Expert Parallelism · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>
