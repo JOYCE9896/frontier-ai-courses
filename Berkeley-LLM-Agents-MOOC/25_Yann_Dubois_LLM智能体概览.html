@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Yann Dubois：训练智能体用的大模型，从预训练到系统 | Berkeley LLM Agents MOOC 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="24_Dawn_Song_安全可靠的智能体AI.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">Berkeley LLM Agents MOOC 目录</a> · 25</span>
+    <span><a href="26_贾扬清_AI系统设计的演变.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Yann Dubois：训练智能体用的大模型，从预训练到系统</h1>
+        <p class="subtitle">大模型训练的三个阶段（预训练、推理强化学习、经典后训练/RLHF）各要多少数据、时间和钱；n-gram 到神经语言模型，Common Crawl 到 FineWeb 的数据清洗，中期训练和长上下文扩展；缩放定律、Chinchilla 的 20:1、苦涩的教训和 LLaMA 3 405B 的成本估算；SFT 的数据来源（人工、Alpaca 式蒸馏、DeepSeek R1 的拒绝采样、Kimi K2 的工具使用合成），GRPO 和 Kimi 的 RL 基础设施，RLHF 与 AlpacaFarm；MMLU、Chatbot Arena、AlpacaEval；GPU、混合精度、算子融合、tiling、FlashAttention、ZeRO、流水线并行、张量并行和 MoE</p>
+        <div class="author-meta">
+            主讲：Yann Dubois（OpenAI）· 课程：Berkeley CS294/194-196 Agentic AI（2025 年秋季）· 上课日期：2025 年 9 月 15 日 · 时长：1 小时 58 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=r1qZpYAmqmg" target="_blank">课堂录像</a> · <a href="https://agenticai-learning.org/slides/lecture1.pdf" target="_blank">幻灯片</a>（Berkeley RDI 公开，2025 年秋季，本文依据录像字幕和幻灯片整理，是中文转述，不是逐字翻译；观点属于主讲人，内容以上课当天为准）
+        </div>
+    </header>
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>Yann Dubois 是 OpenAI 的研究员，读博期间参与了 Alpaca、AlpacaFarm、AlpacaEval 这几个开源项目（课上他用“我们”来介绍它们）。这是 2025 年秋季 Agentic AI 这门课的第一讲。现场上课时出了技术故障，中途又响了火警，幻灯片没讲完，也没有像样的录像，所以他事后单独重录了一遍，发到网上的就是这个重录版。重录版没有课程事务开场，也没有问答。</p>
+        <p>他开头声明：观点只代表他自己，讲的内容基于网上能找到的公开信息，主要是 Kimi、LLaMA、DeepSeek 这些开源模型的论文；除非明确提到 OpenAI，否则内容和 OpenAI 无关。这一讲回答一个问题：智能体背后的大模型是怎么训练出来的。他按预训练、后训练（SFT 和强化学习）、评测、系统四块讲，每块都按“方法、数据、算力”的顺序展开。架构他刻意不讲。课上提到后面 OpenAI 还会有人来专门讲推理，对应的是这门课第 30 讲 Noam Brown。字幕把 Kimi 听成 Kimmy、Kim，把 ChatGPT 听成 JGPD，把 bottleneck 听成 ball，本文按幻灯片改正。</p>
+        <ol>
+            <li><a href="#t01">训练流水线总览：三个阶段、五个要素和模型专门化</a> · <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=60s" target="_blank">0:01:00</a></li>
+            <li><a href="#t02">预训练的方法：下一个词预测，从 n-gram 到神经语言模型</a> · <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=735s" target="_blank">0:12:15</a></li>
+            <li><a href="#t03">预训练数据：从 Common Crawl 到 FineWeb</a> · <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=1559s" target="_blank">0:25:59</a></li>
+            <li><a href="#t04">中期训练和数据部分小结</a> · <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=2206s" target="_blank">0:36:46</a></li>
+            <li><a href="#t05">算力：缩放定律、Chinchilla、苦涩的教训和训练成本</a> · <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=2508s" target="_blank">0:41:48</a></li>
+            <li><a href="#t06">后训练要解决什么：对齐、推理和测试时计算</a> · <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=3207s" target="_blank">0:53:27</a></li>
+            <li><a href="#t07">监督微调 SFT：数据从哪来、学什么、要多少</a> · <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=3443s" target="_blank">0:57:23</a></li>
+            <li><a href="#t08">强化学习：奖励从哪来，GRPO 和 RL 基础设施</a> · <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=4092s" target="_blank">1:08:12</a></li>
+            <li><a href="#t09">RLHF：人类偏好、人工数据的难处和 AI 反馈</a> · <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=4664s" target="_blank">1:17:44</a></li>
+            <li><a href="#t10">评测：封闭式和开放式</a> · <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=4983s" target="_blank">1:23:03</a></li>
+            <li><a href="#t11">系统一：GPU 的特性和单卡优化</a> · <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=5340s" target="_blank">1:29:00</a></li>
+            <li><a href="#t12">系统二：数据并行、ZeRO、模型并行和 MoE</a> · <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=6340s" target="_blank">1:45:40</a></li>
+        </ol>
+    </section>
+    <section id="t01">
+        <h2>01. 训练流水线总览：三个阶段、五个要素和模型专门化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=60s" target="_blank">0:01:00</a>–0:12:15</em></p>
+        <h3>三个阶段</h3>
+        <p>他说过去几年 LLM 和聊天机器人“占领了世界”，这一讲要回答的是它们怎么训练。训练流水线有三大块。幻灯片上的数字都是量级，取自几个开源项目，主要是 LLaMA、DeepSeek 和 Kimi。</p>
+        <table>
+            <thead>
+                <tr><th></th><th>预训练</th><th>推理强化学习</th><th>经典后训练 / RLHF</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>做什么</td><td>在互联网文本上预测下一个词</td><td>在有客观答案的问题上思考</td><td>最大化用户效用和偏好</td></tr>
+                <tr><td>数据</td><td>超过 10T token</td><td>约 100 万道题</td><td>约 10 万道题</td></tr>
+                <tr><td>时间</td><td>数月</td><td>数周</td><td>数天</td></tr>
+                <tr><td>算力成本</td><td>超过 1000 万美元</td><td>超过 100 万美元</td><td>超过 10 万美元</td></tr>
+                <tr><td>瓶颈</td><td>数据和算力</td><td>RL 环境和 hack</td><td>数据和评测</td></tr>
+                <tr><td>例子</td><td>LLaMA 3</td><td>DeepSeek R1</td><td>LLaMA-instruct</td></tr>
+            </tbody>
+        </table>
+        <p>预训练：他给的心智模型是“在互联网上预测下一个词”。拿整个互联网中干净的部分，一直预测下一个词，模型就会尽可能多地学到关于互联网和世界的知识。token 可以先理解成词或子词。大的开源模型要用超过 10 万亿 token，训几个月，一次训练算力成本超过 1000 万美元。瓶颈是数据和算力，而且模型越大、数据越多、训得越久，表现越好。</p>
+        <p>经典后训练，也叫 RLHF（reinforcement learning from human feedback，基于人类反馈的强化学习，让人给模型的回答打分或排序，再用强化学习让模型往人喜欢的方向改）。预训练模型只擅长预测下一个词，不擅长回答问题、遵循指令。他的说法是：这个模型知道世界上的一切，但不知道怎么和人打交道。后训练要优化的就是模型和人的互动，让它在被要求做事时真的去做。数据量小得多，约 10 万道题，一次训练几天，算力约 10 万美元。因为钱不多，瓶颈是数据质量和评测：后训练要同时平衡很多方面，必须能在各个维度上追踪自己有没有进步。模型名字以 instruct 结尾，比如 LLaMA-instruct，通常就是经过了这一步，能遵循人的指令。</p>
+        <p>推理强化学习在时间上最新，但在流水线里通常排第二。它针对有客观答案或有标准答案的问题，比如数学、编程，编程可以用测试函数判断对错，数学可以用考试答案。只有推理模型才有这一步，例子是第一个开源推理模型 DeepSeek R1。R1 论文没有明说用了多少题，他根据字里行间和图表估计约 100 万道题，训练几周，算力约 100 万美元。</p>
+        <p>这一步的瓶颈是 RL 环境和 hack（reward hacking，模型找到一种拿高奖励的办法，但不是你想要的那种做法）。以编程为例，奖励是通过多少测试，模型可能会把测试删掉，或者把测试改成永远返回 true。他说模型很擅长优化，你写下什么目标，它就严格按写下的去优化，哪怕和你想要的不一样。第二和第三阶段他合称为后训练，R1 和 Kimi 也是这么叫的，不同人叫法不同。</p>
+        <h3>训练 LLM 要考虑的五件事</h3>
+        <ul>
+            <li>架构：用什么模型结构，比如 Transformer，或者它的变体 mixture of experts；</li>
+            <li>训练算法和损失：让这个架构去优化什么；</li>
+            <li>数据和 RL 环境；</li>
+            <li>评测：知道自己有没有进步；</li>
+            <li>系统和基础设施：让训练能扩大规模。</li>
+        </ul>
+        <p>他说到 2023 年左右，学术界大多盯着前两项，他自己读博时也是做这些，只有少数人做其余三项。实际上起作用的是后三项：放进去多少数据、数据质量如何、进展量得准不准、有没有基础设施去扩规模。大家喜欢研究新架构、新优化算法，但这些远没有那么重要。他这一讲不讲架构，理由是开源界的架构基本稳定在 Transformer 加 mixture of experts，相关资料很多，而且至少现在没那么重要。</p>
+        <h3>把模型专门化：提示和微调</h3>
+        <p>流水线之外还有两步，他归为“专门化”：大实验室发布开源或闭源模型后，使用者把它改造成适合自己用途的模型。</p>
+        <ul>
+            <li>提示（prompting）：问问题的技巧，也就是怎样向模型说清你要什么。不需要数据，几个小时就能试，几乎没有算力成本。瓶颈是评测：怎么确定这个提示真的好。</li>
+            <li>微调（finetuning）：在领域数据上再做一轮后训练。公司发布的都是通用模型，你想把它用到比如医疗领域，就拿自己的数据在开源模型上多训一点。和后训练类似，约 1 万到 10 万道题，几天，算力约 1 万到 10 万美元，瓶颈同样是数据质量和评测。这一讲不展开微调。</li>
+        </ul>
+    </section>
+    <section id="t02">
+        <h2>02. 预训练的方法：下一个词预测，从 n-gram 到神经语言模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=735s" target="_blank">0:12:15</a>–0:25:59</em></p>
+        <h3>目标和规模</h3>
+        <p>他用手机输入法预测下一个词来比方预训练：大体就是这么回事。预训练的目标是教会模型世界上的一切，手段是预测下一个词。他的理由是，如果你能在每个领域都预测出下一个词，你对那个领域一定有某种理解。数据是互联网上一切说得过去的数据，越多越好。规模上，LLaMA 4 据他所知用了 20 到 40 万亿 token，DeepSeek V3 用了 15 万亿 token。10 万亿 token 大约对应 200 亿个不同网页，这不是整个互联网，但基本是能找到的全部干净数据。2019 年的 GPT-2 让大家看到了预训练的威力：方法很简单，就是预测下一个词，但规模做大以后模型会变得很聪明。</p>
+        <h3>自回归语言模型的五步</h3>
+        <p>他用句子 “She likely prefers” 举例，要预测的下一个词是 “dogs”：</p>
+        <ol>
+            <li>分词（tokenize）：计算机不懂词，只懂数字，所以要把句子切成 token（子词或其他子单元），每个 token 对应一个编号。为了演示他按空格切，she 记为 1，likely 记为 2，prefers 记为 3。</li>
+            <li>前向计算（forward）：把编号送进模型，通常是 Transformer。</li>
+            <li>预测下一个 token 的概率：模型输出一个类别分布，例子里接着说 she 的概率很低，说 dogs 的概率很高。</li>
+            <li>采样（sample）：从这个分布里抽一个。所以同一个问题问开源模型，每次答案不一定一样。</li>
+            <li>反分词（detokenize）：抽到的是 5 号 token，再查字典知道 5 号是 dogs。</li>
+        </ol>
+        <p>后两步只在推理时发生。训练时只需要预测概率分布，然后优化交叉熵损失，不需要采样。</p>
+        <h3>最简单的语言模型：n-gram</h3>
+        <p>为了说明这为什么能行，他从最简单的语言模型讲起：n-gram 模型，2003 年就已经大规模使用，效果不错。问题是：怎么知道 “the grass is” 后面接什么？答案是统计。把 Wikipedia 上所有 “the grass is” 的出现都找出来，某个词 X 出现在后面的概率就是：</p>
+        <p>$$P(X \mid \text{the grass is}) = \frac{\text{Count}(\text{the grass is } X)}{\text{Count}(\text{the grass is})}$$</p>
+        <p>比如 “the grass is” 出现 1000 次，其中 500 次后面是 green，100 次是 red，那么 green 的概率是 0.5，red 是 0.1。对简单的句子这样做效果其实不错，但有两个问题：</p>
+        <ul>
+            <li>要为每个 n-gram 记下后面出现过的每个词的次数，内存需求大到不可行；</li>
+            <li>很多句子是独一无二的。给你 100 行代码问下一个词，训练语料里多半从没出现过这 100 行，计数为 0，模型就给出概率 0，没法泛化，而真实概率比 0 要高一点。</li>
+        </ul>
+        <p>解决办法是用神经网络：用参数化的估计器去近似这个预测，取代上面这种非参数估计。</p>
+        <h3>神经语言模型的结构</h3>
+        <p>他用 “I saw a cat on a” 走了一遍（幻灯片的图出自 Lena Voita 的 NLP 课程页面）：</p>
+        <ol>
+            <li>切成 token，每个 token 对应一个词向量（word embedding）。想象在二维平面上，每个词是一个点，相近的词聚在一起；实际维度更高，比如 768 维。</li>
+            <li>把这些向量送进神经网络。神经网络可以看成这些向量的一个非线性聚合器，输入一串向量，输出一个向量，最重要的是它可微，可以反向传播。最简单的“神经网络”甚至可以就是把这些向量取平均，得到的向量直观上代表整句 “I saw a cat on”。</li>
+            <li>这个向量的维度不对。要预测每个词的概率，需要一个维度等于词表大小的向量。所以乘一个矩阵（线性层），比如从 768 维映射到 2 万维（假设英语词表有 2 万个词），矩阵就是 768 × 20000。</li>
+            <li>过 softmax，把任意向量变成每个分量在 0 到 1 之间、总和为 1 的类别分布，作为下一个词的概率。</li>
+            <li>用交叉熵损失：把真实下一个词的概率往上推一点，其余往下压，然后反向传播。因为一切都可微，网络里所有权重，包括词向量本身，都会被调整。</li>
+        </ol>
+        <p>幻灯片附录里还有分词器的几页（BPE，字节对编码：从每个字符一个 token 开始，反复把最常见的相邻 token 对合并成新 token，直到达到想要的词表大小），录像里没有讲到。</p>
+    </section>
+    <section id="t03">
+        <h2>03. 预训练数据：从 Common Crawl 到 FineWeb</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=1559s" target="_blank">0:25:59</a>–0:36:46</em></p>
+        <p>想法是用上所有干净的互联网数据。之所以强调“干净”，是因为互联网的大部分其实很脏，也不代表你想发给用户、想让模型优化的东西。每个实验室、每个预训练团队做法不同，他给的是一个大致的流水线：</p>
+        <ol>
+            <li>下载整个互联网。开源界一般用现成的爬虫数据，比如 Common Crawl，已经抓了 2500 亿个网页，超过 1 PB，存成 WARC 文件。文件里基本就是 HTML。他随手展示了一个 Common Crawl 里的网页：有 meta、keywords，正文一段在说“最有价值的功能之一……”，接着是“免费下载问答”，看上去是广告，很难解析，大概也不值得训练。</li>
+            <li>从 HTML 里抽取文本。这一步挺难：JavaScript、模板化的样板内容、渲染方式不同的数学公式都要处理。而且计算上很贵，因为这时候拼的是数据量，要清洗和抽取的数据极多。</li>
+            <li>过滤不想要的内容：个人身份信息（PII）、不适合工作场合（NSFW）的内容、有害内容。开源界通常很早就做这一步。</li>
+            <li>去重：可以按 URL、文档、行、段落等不同粒度。目的是别在一模一样的数据上训太多次。比如论坛、Wikipedia、Stack Overflow 的页眉页脚到处重复，在同一个 Stack Overflow 页眉上训一百万次学不到什么，只是浪费算力把页眉背下来。</li>
+            <li>启发式过滤：去掉低质量文档。比如极长的文档可疑，只有 10 个词的太短不值得训，异常罕见的 token 太多可能是坏数据，还有平均词长、脏 token 之类的规则。</li>
+            <li>基于模型的过滤。他觉得很巧妙的一种做法是做分布匹配：先找一个你认为高质量的分布，比如 Wikipedia，或者“被 Wikipedia 引用过的所有网页”，因为有人专门去引用它。这批网页已经不少，但相对预训练需要的数据量还是太少。于是训练一个分类器：随机网页标为“没被引用”，被 Wikipedia 引用的网页标为“被引用”。训好以后，它能预测任意文档被 Wikipedia 引用的可能性，可能性高的留下，低的扔掉。</li>
+            <li>数据配比：把数据分成代码、书籍、娱乐等类别，再给不同领域重新加权。比如训练编程模型，网上代码不够多，原本只占 5%，你可能想提到 50%。配比用缩放定律在小规模上做实验，找出最好的方案，再预测大规模时怎么做。所有过滤步骤都可以这样先在小规模上试。</li>
+        </ol>
+        <p>做完这些，还会另外留出一批更高质量的数据，比如 Wikipedia、arXiv。高质量数据量不够做预训练，所以放到预训练之后用来继续训练，这叫中期训练（mid-training），下一节讲。幻灯片上还写了“在高质量数据上做学习率退火（lr annealing）”和“用更长上下文继续预训练”。</p>
+        <h3>FineWeb 的例子</h3>
+        <p>他推荐读 Hugging Face 的 FineWeb 论文和博客（The FineWeb Datasets: Decanting the Web for the Finest Text Data at Scale），里面详细写了做了哪些过滤。他讲了其中一张图：横轴是训练用的 token 数（以十亿计，比预训练真实规模小得多），纵轴是一组评测上的综合准确率，每条线是一种过滤方案。</p>
+        <ul>
+            <li>起点是从 Common Crawl 取的原始数据。第一轮过滤包括 NSFW 黑名单、基本只保留英语、简单的文档过滤（重复太多、长度不对的去掉），数据从 200 缩到 36（幻灯片写作 200B → 36B；他口头说成“trillion”，单位以幻灯片为准）。</li>
+            <li>去重：同一段文本重复超过 100 次的去掉，数据从 36 缩到 20，几乎砍掉一半，训练表现明显提升，因为模型不用再去学那些重复、没什么用的内容。他说 100 次重复其实不少，但网上常有十万份重复组成的大簇，要去掉的主要是这些。</li>
+            <li>再去掉 JavaScript、lorem ipsum 占位文字等，又少了一点，表现更好。</li>
+            <li>再加一些额外过滤（他记得是基于模型的），从 20 到 15，表现又提升。</li>
+        </ul>
+    </section>
+    <section id="t04">
+        <h2>04. 中期训练和数据部分小结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=2206s" target="_blank">0:36:46</a>–0:41:48</em></p>
+        <h3>中期训练做什么</h3>
+        <p>中期训练就是继续预训练，让模型具备想要的性质，或者适应更高质量的数据。数据量通常不到预训练的 10%，幻灯片写的是少于 1T token。常见的几种做法：</p>
+        <ul>
+            <li>改数据配比：最后阶段多放代码，或者让模型更擅长科学问题，或者多放多语言数据。手头的数据大多是英语，不能代表人们实际说的语言，可以把代表性不足的语言加权上去，让它更接近说这种语言的人口比例。</li>
+            <li>扩展上下文长度：预训练时不想用很长的上下文，因为计算量大得多，但又希望模型能理解问题前面很长的内容，所以在中期训练时把上下文调大。DeepSeek V3 预训练用 4K 上下文，中期训练扩到 128K，很多开源项目都这么做。</li>
+            <li>格式和指令遵循：提前教模型被问问题时去回答，或者用特定的聊天口吻写。</li>
+            <li>高质量数据：留到最后用，先让模型学会通顺地说话，再学文本里真正的干货。</li>
+            <li>推理数据：教模型怎么思考，他认为 Kimi 做过这件事。</li>
+        </ul>
+        <h3>数据部分小结</h3>
+        <p>他说收集好数据是训练 LLM 的一大块工作，甚至可以说是关键，研究还远没做完：海量数据怎么高效处理，要不要用合成数据（用模型生成更多数据），多模态数据放多少，领域怎么平衡。这方面很保密，即使发布开源模型的公司也很少说数据是怎么收集的，一是竞争原因，这是最重要的部分，说了就容易被复制；二是有的公司怕训练了不该训练的数据，承担版权责任。</p>
+        <p>常见的学术数据集：C4（1500 亿 token，800 GB）、The Pile（2800 亿 token，里面 arXiv、PubMed 等高质量数据比例很高，也有不少代码）、Dolma（3T token）、FineWeb（15T token）。闭源一侧，LLaMA 2 约 2T token，LLaMA 3 约 15T，LLaMA 4 在 20T 到 40T 之间。每一代都在用更多数据，过滤也做得更好。</p>
+    </section>
+    <section id="t05">
+        <h2>05. 算力：缩放定律、Chinchilla、苦涩的教训和训练成本</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=2508s" target="_blank">0:41:48</a>–0:53:27</em></p>
+        <h3>缩放定律</h3>
+        <p>经验上，不管什么数据、什么模型，最重要的都是训练花了多少算力，也就是放进多少数据、模型有多大（模型越大，需要的算力越多）。更好的是，至少在预训练里，加多少算力能换来多少表现，可以预测得相当准。</p>
+        <p>他讲的是 Kaplan 等人 2020 年的图：横轴是算力，对数坐标；纵轴是测试损失，也是对数坐标。蓝色细线是一次次不同的训练，把每个算力水平上能达到的最低损失连起来，得到的东西很接近一条直线。拟合这条线，就能预测算力乘以 10 或 100 时的损失。这就是缩放定律（scaling law）。他觉得这件事很出人意料，并没有很好的理由让它一定成立，有一些理论在解释它。对做研究来说这很方便：可以在小规模上做研究，再预测大规模时的表现。</p>
+        <h3>用缩放定律来调参</h3>
+        <p>问题：给你 1 万块 GPU 用一个月，你训什么模型？</p>
+        <ul>
+            <li>老办法：在大模型上调超参数，比如跑 20 或 30 个不同配置，挑最好的发布。结果是每个模型只用到了总算力的大约三十分之一，最终模型和被淘汰的模型训得一样久（幻灯片上举的是每个 1 天）。</li>
+            <li>新办法：先找缩放配方，比如学习率随模型变大怎么减小；在不同大小的小模型上短时间调超参数，可以迭代很多次（幻灯片：不到 3 天）；用缩放定律外推到大模型；最后训一个巨大的模型，把大部分算力（他说可能是 90%，幻灯片：超过 27 天）都用在这一次。</li>
+        </ul>
+        <p>另一个用途是比较方案。Transformer 还是 LSTM？在 Kaplan 的图上，Transformer 的常数更好（任何规模下损失都更低），斜率也更好（LSTM 有点趋于平缓），所以规模越大 Transformer 优势越大，这也是大家放弃 LSTM 的原因。他补充：也可能出现一种架构常数好、另一种斜率好的情况，这时一定要选斜率好的。小规模上谁表现好不重要，要问的是放大 200 倍以后怎么样。</p>
+        <h3>Chinchilla：参数和数据怎么分配</h3>
+        <p>算力有两种花法：训得更久（更多数据），或者训更大的模型。Hoffmann 等人 2022 年的 Chinchilla 论文研究了怎么最优分配。方法是 isoflop：固定总算力，同时改变 token 数和参数量，找出每个算力水平下最好的参数量和 token 数。结论是每个参数大约配 20 个 token。</p>
+        <p>他提醒：Chinchilla 只优化训练资源，不考虑推理成本。它问的是“达到某个训练损失，算力该放在哪”，却没考虑模型越大，推理时越贵。像 ChatGPT 这样的服务，模型越大，每个用户的成本越高，所以更好的做法可能是训一个更小的模型、训更久，哪怕为了达到同样表现要多花训练算力，推理时能省钱。幻灯片上写的是实践中会用远大于 20:1 的比例（超过 150:1）。</p>
+        <h3>苦涩的教训</h3>
+        <p>他推荐读强化学习领域的代表人物 Richard Sutton 2019 年的博客文章 The Bitter Lesson。核心是：长远来看，唯一重要的是利用好计算。理由是两件事放在一起：算力越多表现越好；摩尔定律及其衍生规律让我们每年都有更多算力（至少大家这么期望）。那么在现有算力水平上精雕细琢就没有意义，明年算力更多，简单方法会更好。重要的是能很好地扩展的方法。他说这篇文章在过去三四年里很大程度上影响了整个社区的思路。他的总结是：别把事情搞复杂，做简单的事，并确保它能扩展。</p>
+        <h3>训练一个 SOTA 模型要花多少</h3>
+        <p>这页幻灯片是他一两年前写的，估算当时最大的开源模型 LLaMA 3 405B 的训练成本：</p>
+        <ul>
+            <li>数据 15.6T token，参数 405B，约 40 token/参数，按 Chinchilla 标准算是接近计算最优。</li>
+            <li>浮点运算量：$6NP = 6 \times 15.6\times10^{12} \times 405\times10^{9} \approx 3.8\times10^{25}$ FLOPs。美国的行政令规定训练超过 $10^{26}$ FLOPs 的模型要更谨慎，这大约是门槛的一半。</li>
+            <li>算力：16,000 块 H100，平均吞吐 400 TFLOPS。</li>
+            <li>时间：$3.8\times10^{25} / (400\times10^{12} \times 3600) \approx$ 2600 万 GPU 小时，除以 $16\times10^{3} \times 24$，约 70 天。幻灯片注明论文里写的是约 3000 万 GPU 小时。</li>
+            <li>成本：租用算力加工资，约 2 美元/小时 × 2600 万小时 ≈ 5200 万美元。他说视他们自有集群的算力单价，大概在 5000 万到 8000 万美元之间。</li>
+            <li>碳排放：2600 万小时 × 0.7 kW × 0.24 kg/kWh ≈ 4400 吨二氧化碳当量，大约相当于 2000 张纽约 JFK 到伦敦 LHR 的往返机票。</li>
+        </ul>
+        <p>他说这和全年的航班总量比起来不算什么，但如果每一代都比上一代多 10 倍算力，再过两三四代，碳排放会成为真正的问题。下一代模型大约要多 10 倍 FLOPs。</p>
+        <p>预训练小结：在互联网上预测下一个词，目前约 10T 词，几个月，超过 1000 万美元，瓶颈是数据和算力。例子有 DeepSeek V3、LLaMA 4。</p>
+    </section>
+    <section id="t06">
+        <h2>06. 后训练要解决什么：对齐、推理和测试时计算</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=3207s" target="_blank">0:53:27</a>–0:57:23</em></p>
+        <h3>语言建模不等于帮助用户</h3>
+        <p>他举 GPT-3 的例子：提示 “Explain the moon landing to a six-year-old in a few sentences”，GPT-3 在大量互联网文本上训练过，这让它联想到网上那种成串的问题列表。于是它没有回答，而是接着写类似的问题：“Explain the theory of gravity to a six-year-old”“Explain the theory of relativity to …”。这说明预训练模型优化的只是预测下一个词，没有为“预测你想要什么”而优化。</p>
+        <h3>经典后训练</h3>
+        <p>也叫指令遵循或对齐（alignment），目标是引导模型在真实任务上有用：同样问登月那句话，希望 ChatGPT 或任何模型给出真正的回答。手段是最大化人类对答案的偏好。数据约 5000 到 50 万道题，规模远小于预训练。思路是先让模型学会世界上的一切，再在很具体的领域上优化，这里就是遵循指令、回答问题，因为模型已经什么都知道了，只需要学会怎么和人互动，所以数据很少。他说这是让 ChatGPT 成为 ChatGPT 的东西，2022 年起后训练变得重要。</p>
+        <h3>推理</h3>
+        <p>只有部分模型有这一步，比如 Kimi 和 R1。目标很简单：把问题答对。o1 的界面上会显示“思考了 24 秒”，推理训练优化的就是这个过程。数据是任何有可验证答案的难题，比如数学竞赛、带测试用例的编程题。2024 年 o1 发布以后这一步变得重要。</p>
+        <p>他把它放在测试时计算（test-time compute）的框架里：以前的缩放定律说的是训练时计算，训练时花的算力越多，表现越好；推理带来的是测试时计算，训练完以后，回答时多花算力也能提升表现。他说人也一样，让他一秒钟回答问题，答案会比给他一周时间的更草率、更容易错。推理的目标就是测试时缩放（test-time scaling）。</p>
+    </section>
+    <section id="t07">
+        <h2>07. 监督微调 SFT：数据从哪来、学什么、要多少</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=3443s" target="_blank">0:57:23</a>–1:08:12</em></p>
+        <h3>后训练的出发点</h3>
+        <p>以对齐为例：希望 LLM 遵循用户指令和设计者的意愿，比如内容审核，像“写一条推文说某某人是邪恶的”这种请求，你可能希望模型拒绝。后训练的背景是这样一个矛盾：你知道想要模型输出什么样的回答，但这种“理想行为”的数据稀缺、昂贵、收集慢，不可能让人把所有问题的正确答案都写出来；预训练数据容易扩展，几乎就是整个互联网，但不是你想要的东西。办法是拿已经学会语法和各种语言的预训练模型，用少量符合理想格式的数据再做一点优化，这就叫“后”训练。</p>
+        <h3>SFT 是什么</h3>
+        <p>监督微调（supervised finetuning，SFT）就是在理想回答上做语言建模：方法和预训练一模一样，还是预测下一个词，只是训练数据换成你希望模型给人的回答。“supervised”是因为假设你能拿到正确答案。</p>
+        <p>数据怎么收集，他讲了三种：</p>
+        <ol>
+            <li>请人来写。幻灯片说这差不多就是从 GPT-3 到 ChatGPT 的关键。开源的例子是 OpenAssistant（Köpf 等人 2023）：一个问题，下面是人写的回答。问题是人工数据收集慢、贵。</li>
+            <li>用 LLM 扩大数据收集。2023 年初他们做 Alpaca（Taori 等人 2023）时，没钱也没条件请人写答案，就用当时 OpenAI 最好的模型生成答案，拿这些答案做 SFT，共 5.2 万条。他说这大概是开源界第一个能遵循指令的 LLM，当时被看作对 ChatGPT 的学术复现。现在“合成数据生成”已经自成一个领域，因为有些模型已经比人强，人工数据的问题已经不只是慢和贵，质量还可能更低。</li>
+            <li>基于验证器的拒绝采样（rejection sampling）。用 LLM 生成答案，前提是你手里有一个比正在训的模型更强的 LLM。做 Alpaca 时是这样，但在训前沿模型的顶级闭源实验室，或者在开源界训最好的模型、又不能蒸馏闭源模型的团队，就没有这个条件。DeepSeek R1 的做法是：让一个临时的 LLM 对同一个问题生成很多答案，只保留“正确”的，比如通过测试用例，或者在比较中胜出，再对留下的样本做 SFT。这就是 R1 第一阶段 SFT 的做法（幻灯片配图出自 Jay Alammar）。</li>
+        </ol>
+        <h3>SFT 能学什么</h3>
+        <ul>
+            <li>指令遵循；</li>
+            <li>想要的格式或风格，比如更爱聊天、用 emoji；</li>
+            <li>工具使用，他推荐 Kimi K2 和 xLAM 的论文，它们大规模用 SFT 学习调用工具；</li>
+            <li>早期推理，也就是先想再答，就是上面 R1 的拒绝采样；</li>
+            <li>只要能拿到好的输入输出对，基本什么都能学。</li>
+        </ul>
+        <p>SFT 可以作为最后一个阶段直接产出模型，也可以作为强化学习的准备。因为 SFT 效果不错，先做 SFT 能加快后面的 RL。</p>
+        <h3>SFT 流水线可以很复杂：Kimi K2</h3>
+        <p>他没有细讲，只想让大家感受复杂度。Kimi K2 为了教模型使用工具，收集了大量真实工具，又合成了大量工具（幻灯片上标着超过 3000 和超过 20000），每个工具附带调用说明。然后让一个智能体 LLM 和另外两个 LLM 交互：一个模拟用户，一个模拟工具调用的返回。模拟工具是因为真实工具不够多，覆盖不了模型可能调用的所有工具。对这三个 LLM 互动产生的轨迹，再按评分细则（rubric）做拒绝采样。代码类任务另外有真实执行的环境做支撑（幻灯片标注“grounded for code”）。这些东西很复杂，但效果不错。</p>
+        <h3>要多少数据</h3>
+        <p>SFT 学得很快。学风格和指令遵循，大约 1 万条就够。2023 年的 LIMA 论文（Zhou 等人）显示 2000 条左右就能学到想要的风格和指令遵循能力。学工具使用、推理这类更复杂的能力，需要更多数据，他记得 R1 用了约 80 万条样本（幻灯片：用 R1-zero 生成的推理数据），总之不到 100 万。</p>
+        <p>他的心智模型是：预训练里已经学得很好的东西，后训练只是把它“浮出来”，比如用项目符号写、用 emoji。这更像是让模型专门扮演预训练时已经建模过的某一类用户，用不了多少数据。预训练时从没见过或很少见过的东西，就要多得多的数据。</p>
+    </section>
+    <section id="t08">
+        <h2>08. 强化学习：奖励从哪来，GRPO 和 RL 基础设施</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=4092s" target="_blank">1:08:12</a>–1:17:44</em></p>
+        <h3>为什么 SFT 不够</h3>
+        <p>SFT 是对人（或对 LLM 输出）的行为克隆（behavior cloning），有三个问题：</p>
+        <ol>
+            <li>受限于人的能力，或者受限于被模仿的那个 LLM 的能力。人未必写得出更好的答案，却能判断自己更喜欢哪一个，SFT 用不上这种判断。</li>
+            <li>会教出幻觉。即使克隆的是正确答案，如果模型本身并不知道这个答案，效果也是在教它编。比如让模型写一段引言并给出参考文献，答案里引了一篇模型没见过的文献（幻灯片举的是 [Bivens 2013]），你实际上在教模型：哪怕你不知道这篇文献存不存在，也给出一个看起来像样的引用。</li>
+            <li>收集理想答案很贵。</li>
+        </ol>
+        <h3>强化学习：最大化，而非模仿</h3>
+        <p>解决办法是强化学习（RL）：不去克隆行为，而是最大化想要的行为。他推荐读 DeepSeek R1 和 Kimi K2 的论文，说这是开源界最好的几篇。RL 的关键是奖励从哪来：</p>
+        <ul>
+            <li>基于规则的奖励：封闭式问答里，答案和标准答案字符串完全一致就算对；编程题看能不能通过测试用例；</li>
+            <li>奖励模型（reward model）：训练一个分类器去预测人类会觉得好还是坏，再针对它优化，这就是 RLHF；</li>
+            <li>LLM 作为评委（LLM as a judge）：拿最好的 LLM 来判断答案对不对；</li>
+            <li>其他。</li>
+        </ul>
+        <p>他讲的图（出自 Jay Alammar）：题目是“写一段 Python 代码……”，模型生成多个答案。基于规则的验证先看是不是 Python，有一个答案是“这是一个关于青蛙的笑话”，不是代码，判错；再看能不能通过测试用例，只留下通过的。然后告诉模型：多做那些拿到正奖励的事。</p>
+        <p>R1 的具体做法：对“推理类提示”（数学、编程、逻辑推理）用基于规则的验证器；对“一般提示”（翻译、事实问答、写作这类长文本）用一个预测人类偏好的奖励模型。起点是 SFT 之后的检查点，这时模型已经经常能生成正确答案，再用 RL 去最大化验证器说“对”的次数。</p>
+        <h3>GRPO</h3>
+        <p>开源界最常用的算法是 DeepSeek 的 GRPO（Group Relative Policy Optimization），他说思路很简单：</p>
+        <ol>
+            <li>拿策略模型（policy model），也就是正在训的 LLM，通常是 SFT 后的模型，对同一个问题回答多次，得到一组输出；</li>
+            <li>奖励模型或验证器给每个输出打分：对还是错，差多少；</li>
+            <li>在这一组内做归一化，算出每个输出的优势（advantage），知道哪个特别好、哪个特别差；</li>
+            <li>反向传播，告诉策略模型多做好的那些。</li>
+        </ol>
+        <p>作为背景补充（这条公式不是他在课上写的）：GRPO 里组内归一化的常见写法是 $A_i = \dfrac{r_i - \text{mean}(r_1,\dots,r_G)}{\text{std}(r_1,\dots,r_G)}$，$G$ 是同一题采样的输出个数。</p>
+        <p>流程里他先跳过的一块是参考模型（reference model）：训练时加一个 KL 散度项，要求策略模型的输出别离原始模型太远。他说这其实就是个 hack，因为 RL 可能把模型带到不理想的地方，比如前面说的 reward hacking，所以要说“尽量优化，但别走太远”。用 RL 的术语说，GRPO 用蒙特卡洛估计来算优势；Kimi K1.5 和 K2 用的损失类似。</p>
+        <h3>RL 里基础设施很关键</h3>
+        <p>GRPO 对每个问题都要采样多个输出，采样就成了主要瓶颈。对智能体更糟：智能体的 rollout（让模型和环境交互、跑完一整条轨迹）可能很长，你不想让训练算力都卡在这些很长的 rollout 上。他推荐读 Kimi 的论文，讲了几个优化：</p>
+        <ul>
+            <li>长 rollout：超过一定时间就暂停，先用已有的数据更新权重，下一步再接着跑这条 rollout；</li>
+            <li>环境反馈慢：智能体要调很多 API，可能 GPU 根本没在算，只是在等环境返回。Kimi 用大量并发 rollout，一条在等环境时可以去做别的；环境用专门的微服务，可以按需启动和扩展；</li>
+            <li>每个 pod 里有训练引擎、负责把权重广播出去的检查点引擎、负责采样的推理引擎，几个引擎放在同一个 pod 上，避免通信开销。权重通信不到 30 秒。</li>
+        </ul>
+    </section>
+    <section id="t09">
+        <h2>09. RLHF：人类偏好、人工数据的难处和 AI 反馈</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=4664s" target="_blank">1:17:44</a>–1:23:03</em></p>
+        <h3>流程</h3>
+        <p>前面讲的 RL 主要用于推理，有标准答案可以验证。RLHF 是没有标准答案时的强化学习，他说这是 2022 年让 ChatGPT 成功的东西。思路是：SFT 克隆人的行为，RLHF 则最大化人的偏好。原始 ChatGPT 的流程：</p>
+        <ol>
+            <li>对每条指令，让一个已经不错的模型（SFT 模型）生成两个回答；</li>
+            <li>请标注员选出更喜欢的那个；</li>
+            <li>微调模型，让它更多地生成被偏好的回答，算法有 PPO 和 DPO 等，他不展开。</li>
+        </ol>
+        <p>背景补充：PPO（Proximal Policy Optimization）是一种限制每步更新幅度的策略梯度算法，在 RLHF 里配合一个奖励模型使用；DPO（Direct Preference Optimization）不单独训练奖励模型，直接用偏好对构造损失来微调。他的概括是：这就是强化学习，奖励来自一个被训练来区分人类偏好的奖励模型。</p>
+        <h3>效果</h3>
+        <p>他展示了两组结果，说已经比较老了。一组是 Learning to Summarize（Stiennon 等人 2020）：以人写的参考摘要为基准，预训练模型做摘要的表现、SFT 更好、PPO 再好一截。另一组是他们做的 AlpacaFarm（Dubois 等人 2023）：PPO 和 DPO 两种 RL 算法表现差不多，都好于 SFT，SFT 又好于预训练模型。顺序总是预训练 &lt; SFT &lt; RL。</p>
+        <h3>人工数据的难处</h3>
+        <p>数据来自人工众包。要写极其详细的标注指南（幻灯片上有指南和示例的截图），告诉标注员什么算好、什么算差。困难包括：</p>
+        <ul>
+            <li>慢、贵；</li>
+            <li>很难让人关注内容的正确性，大多数人判断好坏时会看形式和风格，比如长度，这通常不是你想让 LLM 优化的；</li>
+            <li>标注员群体不同，得到的行为不同，比如政治观点和许多问题上的看法都会变（幻灯片引了 Santurkar 等人关于 LLM 观点的研究和 Singhal 等人 2024 的 Long way to go）；</li>
+            <li>众包的伦理问题：你请的是谁来标数据。</li>
+        </ul>
+        <h3>用 LLM 代替人</h3>
+        <p>减少对人工数据依赖的办法，和 SFT 里一样：让 LLM 代替人给出偏好。他讲了 AlpacaFarm 的图：横轴是收集数据花的钱，纵轴是和人类标注的一致率。人类标注约 300 美元每 1000 条，不同人之间的一致率约 66%。用 LLM 标注，花费能降到十分之一甚至三十分之一，那是两年前，现在会便宜得多，而且在预测人类答案上已经比人做得更好。他说效果好得出人意料，这招总可以用，但在前沿、手里没有更强的 LLM 时就难了。</p>
+    </section>
+    <section id="t10">
+        <h2>10. 评测：封闭式和开放式</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=4983s" target="_blank">1:23:03</a>–1:29:00</em></p>
+        <h3>为什么评测重要</h3>
+        <p>他说评测是机器学习和 AI 里最重要的事情之一，有三个用途：</p>
+        <ul>
+            <li>找到改进：量化进展，知道该改什么、选哪组超参数；</li>
+            <li>选模型：有一个具体应用，面前有很多模型，要知道选哪个；</li>
+            <li>判断能不能上线：就算是当前最好的模型，对你的应用够不够好。对实际使用来说，这一点很重要。</li>
+        </ul>
+        <h3>封闭式评测</h3>
+        <p>如果能把问题变成只有少数几种可能答案的形式，就能自动验证。比如做成选择题，让 LLM 回答 A、B 或 C，对照标准答案算准确率，MMLU（Hendrycks 等人 2020）就是这么做的。仍然有问题：</p>
+        <ul>
+            <li>对提示很敏感，换一种问法答案就变；</li>
+            <li>训练集和测试集污染：MMLU 现在满网都是，模型可能训练时见过，分数会比真实水平高。幻灯片注明这一点对开发阶段影响不大。</li>
+        </ul>
+        <p>但他说尽管有这些问题，封闭式评测比开放式容易得多。</p>
+        <h3>开放式评测</h3>
+        <p>ChatGPT 这类指令遵循模型怎么评？难点有二：一是用途极其多样，编程、聊天、摘要都有，评测要覆盖这些；二是任务开放，回答很长，没法逐字比对标准答案算准确率，本来也没有标准答案。</p>
+        <p>办法是让人比较：给标注员看两个回答，问哪个更好（InstructGPT，Ouyang 等人 2022 就是这样评的）。LMSYS 的 Chatbot Arena（Chiang 等人 2024）让用户在不知道是哪个模型的情况下同时和两个聊天机器人交互，选出更好的。没有标准答案时，让人排序比和标准答案对比容易得多。问题还是贵和慢。</p>
+        <p>于是又用 LLM 代替人，这就是他们两年前做的 AlpacaEval（Li 等人 2023），后来很多人跟进：</p>
+        <ol>
+            <li>对每条指令，让基线（可以是人或某个模型）和待评模型各给一个回答；</li>
+            <li>问另一个 LLM（幻灯片上是 GPT-4）哪个更好；</li>
+            <li>对胜出概率取平均，得到胜率（win rate）。</li>
+        </ol>
+        <p>它比 Chatbot Arena 便宜得多，但和 Chatbot Arena 的 Spearman 相关性很高（幻灯片：98%），当时运行一次不到 3 分钟、不到 10 美元，现在会更便宜。幻灯片上列出的挑战是虚假相关（spurious correlation），附录里的例子是 LLM 评委偏爱更长的回答，可以用回归分析或因果推断去“控制”长度，即 AlpacaEval LC（长度控制版）。附录还有困惑度（perplexity）的几页，录像里没讲。</p>
+    </section>
+    <section id="t11">
+        <h2>11. 系统一：GPU 的特性和单卡优化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=5340s" target="_blank">1:29:00</a>–1:45:40</em></p>
+        <h3>为什么要做系统</h3>
+        <p>如果接受“规模才是关键”，自然就该花时间让训练能很好地扩展。所有人都卡在算力上。为什么不多买 GPU？一是 GPU 贵，而且稀缺，有钱也未必买得到最好的；二是有物理限制，GPU 多了，GPU 之间的通信会拖慢训练。所以要做好资源分配（缩放定律），把流水线优化好，让每块 GPU 都用得尽量高效。</p>
+        <h3>GPU 101</h3>
+        <ul>
+            <li>大规模并行：同一条指令同时作用在大量线程上，每个线程的输入不同。和 CPU 的区别在于 GPU 为吞吐量优化。幻灯片上的图标出了流式多处理器（SM）。</li>
+            <li>矩阵乘法很快：GPU 是图形处理器，图形和视觉都需要极快的矩阵乘法，所以早期起就有专门的核心，矩阵乘法比其他浮点运算快 10 倍以上，近几代差距更大。</li>
+            <li>算力增长快于内存和通信：他展示了峰值硬件能力随时间变化的图，FLOPs 增长远快于内存带宽和互连带宽。所以现在 GPU 的瓶颈是给处理器喂数据，计算本身反倒不是瓶颈。他说这是优化流水线时要理解的最重要的一点。Ivanov 等人 2020 年分析 BERT 的 Transformer：张量收缩（矩阵乘法）占了绝大部分 FLOPs，但只占约三分之二的运行时间；逐元素运算、归一化这些操作 FLOPs 很少，却占了大量时间，因为数据还是要搬进搬出。</li>
+            <li>内存层级：离计算核心越近越快，但容量越小；越远容量越大，但越慢。从近到远有寄存器、共享内存和 L1 缓存、L2 缓存，再到全局内存。</li>
+            <li>衡量指标是模型浮点利用率（Model FLOP Utilization，MFU）：观测到的吞吐量除以这块 GPU 理论上的最佳吞吐量（NVIDIA 给出的峰值）。MFU 为 1 意味着处理器每时每刻都有数据在算。他说能到 50% 就很好了，即使大公司也可能还在努力从 15% 到 20% 往 50% 推。</li>
+        </ul>
+        <h3>低精度</h3>
+        <p>位数越少，通信越快，内存占用越小。既然瓶颈在内存和通信，降低精度就能提速。深度学习里小数精度除了少数运算（指数运算和参数更新）以外基本不重要，因为随机梯度下降本身噪声就很大。所以矩阵乘法可以用 bf16 代替 fp32，精度减半。训练时常用自动混合精度（Automatic Mixed Precision，AMP）：</p>
+        <ul>
+            <li>权重以 fp32 存储，计算前转成 bf16；</li>
+            <li>激活用 bf16，这是主要的内存收益；</li>
+            <li>只有矩阵乘法用 bf16，带来速度收益；</li>
+            <li>梯度用 bf16，节省内存；</li>
+            <li>主权重以 fp32 更新，保证每一步的小改动都能以高精度记到权重里。</li>
+        </ul>
+        <h3>算子融合</h3>
+        <p>通信慢，而 PyTorch 里每写一行，变量就会被搬回全局内存。比如：</p>
+        <pre><code>x1 = x.cos()   # read x from global memory, write x1 back
+x2 = x1.cos()  # read x1 from global memory again, write x2 back</code></pre>
+        <p>每一行都要在 DRAM 和计算单元之间来回一次。意识到通信是瓶颈以后，更好的做法是只通信一次：把数据搬进来，做完所有运算，再一次写回。这就是融合核（fused kernel），torch.compile 做的事情之一就是把运算融合起来。</p>
+        <h3>Tiling（分块）</h3>
+        <p>运算的分组和顺序会极大影响访问全局内存的次数。以矩阵乘法为例，学校里学的朴素算法是一个线程拿一整行和一整列相乘再求和，算完再换下一行下一列，几乎不会重复利用缓存里已读的数据。幻灯片的假设是一个线程只能在内存里保存 8 个值，那就得把所有值都重新读一遍，没有缓存命中。</p>
+        <p>分块的做法是把矩阵切成小块（tile），把一块 M 和一块 N 读进 SM，算出 P 的部分和，再读下一对块，最后把部分和加起来。这样同一个数会被用于多次运算，比如 $N_{0,0}$ 会同时和 $M_{0,0}$、$M_{1,0}$ 相乘。读一次做两次运算，原来读一次只做一次，全局内存读取次数就少了（幻灯片：减少到原来的 1/T，T 是块的大小）。他说具体算法不重要，重要的是运算的分组和顺序会显著影响读全局内存的次数。</p>
+        <h3>FlashAttention</h3>
+        <p>FlashAttention（Dao 等人 2022）是加速注意力计算的著名优化，把前面讲的算子融合、分块和另一招重计算结合起来。重计算的意思是：有时重新算一遍比从内存里读出保存的值更便宜，所以不必把所有中间结果都存下来。FlashAttention v1 由此获得了 1.7 倍的端到端加速。他强调这和机器学习本身无关，只是运算顺序的调整，却能大幅提升性能。</p>
+    </section>
+    <section id="t12">
+        <h2>12. 系统二：数据并行、ZeRO、模型并行和 MoE</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=6340s" target="_blank">1:45:40</a>–1:58:21</em></p>
+        <h3>为什么要并行</h3>
+        <p>两个问题：模型太大，一块 GPU 放不下；又想尽快出结果，所以要让尽可能多的 GPU 一起工作。办法是把内存和计算拆到多块 GPU 上。</p>
+        <p>先算一笔账：朴素地训练一个有 $P$ 个参数的模型（fp32，Adam 优化器），至少需要 $16P$ GB 的显存（$P$ 以十亿计）：</p>
+        <ul>
+            <li>模型权重 $4P$ GB（每个参数 4 字节）；</li>
+            <li>优化器 $2 \times 4P$ GB，Adam 要为每个参数存一阶矩（均值）和二阶矩（方差）；</li>
+            <li>梯度 $4P$ GB。</li>
+        </ul>
+        <p>所以一个 7B 模型要 112 GB，这很大。</p>
+        <h3>数据并行</h3>
+        <p>朴素的数据并行：</p>
+        <ol>
+            <li>每块 GPU 都复制一份模型和优化器；</li>
+            <li>把数据切开，每块 GPU 处理不同的一份；</li>
+            <li>每一步结束时通信并把梯度求和，得到的梯度和在 4 倍批量上训练得到的一样。</li>
+        </ol>
+        <p>好处是能用上多块 GPU，4 块就快 4 倍。坏处是完全没有内存收益：模型原本一块卡放不下，现在还是放不下，7B 模型每块卡仍然要 112 GB。</p>
+        <h3>ZeRO：分片</h3>
+        <p>要省内存，可以让每块 GPU 只持有和更新一部分权重，需要时再互相通信，这叫分片（sharding）。ZeRO（Rajbhandari 等人 2019）有几个层级：基线是参数 $4P$、梯度 $4P$、优化器状态 $8P$；第一级只分片优化器状态，每块 GPU 只存一部分，按需通信，内存从约 120 GB 降到 31 GB，接近 4 倍；再往上可以把梯度、参数也分片，每块 GPU 只负责一部分权重。</p>
+        <h3>模型并行</h3>
+        <p>数据并行要求批量至少和 GPU 数一样大。批量 16、4 块 GPU，每块分到 4 个样本；想用 32 块 GPU，就分不下去了。模型并行的思路是让每块 GPU 负责“应用”特定的参数，也就是执行特定的运算，而不只是负责“更新”特定参数（前面的分片做的是后者）。</p>
+        <ul>
+            <li>流水线并行（pipeline parallel，GPipe，Huang 等人 2018）：每块 GPU 放不同的层，第 1 层在 GPU 1，第 2 层在 GPU 2，数据过完第 1 层送到 GPU 2，依此类推。细节他跳过了。</li>
+            <li>张量并行（tensor parallel，Megatron-LM，Shoeybi 等人 2019）：在一层内部拆分。比如矩阵乘向量，把矩阵拆成两块、向量拆成两段，分别在两块 GPU 上算，最后把部分和聚合起来。</li>
+        </ul>
+        <h3>架构稀疏：MoE</h3>
+        <p>最后一个例子：模型很大，但并不是每个数据点都要经过每个参数，这叫稀疏（sparsity）。常见的稀疏架构是混合专家（Mixture of Experts，MoE）：用一个选择层（路由器）决定每个数据点走哪些参数，激活参数少了，FLOPs 不变而参数更多（幻灯片引的是 Fedus 等人的 Sparse Expert Models）。这也让多卡训练变得容易，不同 GPU 放不同数据点需要的参数即可。具体到 Transformer，就是把某个线性层拆成多个线性层，不同数据点经过不同的线性层，每块 GPU 持有其中一部分。</p>
+        <p>他说如果最后两页没跟上也不要紧，想强调的是系统优化和算力利用上有大量工作：调整运算顺序的分块、让模型稀疏、用并行用上更多 GPU。最后他说因为是重录，没有问答，自己也讲累了，祝大家后面的课顺利。</p>
+        <p>幻灯片的收尾页（录像里没讲）列了没涉及的主题：架构（MoE 和 SSM）、解码和推理、UI 和工具（ChatGPT）、多模态、滥用、上下文长度、数据墙、数据收集的合法性；想深入可以看 Stanford 的 CS224N（背景和历史）、CS324（更深入的阅读和讲座）、CS336（亲手搭一个 LLM，工作量很大）。</p>
+    </section>
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“Pre-training is really about predicting the next word on internet.” 预训练说到底就是在互联网上预测下一个词。（<a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=66s" target="_blank">0:01:06</a>）</li>
+            <li>“If you write something to optimize they will optimize it exactly as written.” 你写下什么目标，模型就严格按写下的去优化。（<a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=440s" target="_blank">0:07:20</a>）</li>
+            <li>“So what matters is usually data evaluation and systems to be able to scale.” 真正起作用的通常是数据、评测，以及能扩展规模的系统。（<a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=554s" target="_blank">0:09:14</a>）</li>
+            <li>“You definitely want to always go with the scaling rate, not the constant.” 一定要选斜率更好的那个，别看常数。（<a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=2762s" target="_blank">0:46:02</a>）</li>
+            <li>“Don't spend time over complicating things, do the simple thing.” 别花时间把事情搞复杂，做简单的事。（<a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=3013s" target="_blank">0:50:13</a>）</li>
+            <li>“[You're] basically teaching the model to like make up plausibly sounding references.” 你其实是在教模型编造听起来像样的参考文献。（<a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=4205s" target="_blank">1:10:05</a>）</li>
+            <li>“The bottleneck is actually feeding the data, not doing the computation.” 瓶颈其实是喂数据，计算本身不是。（<a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=5598s" target="_blank">1:33:18</a>）</li>
+            <li>“If you have 50% you're in a really really really good shape.” MFU 能到 50%，你的状况就好得不能再好了。（<a href="https://www.youtube.com/watch?v=r1qZpYAmqmg&t=5789s" target="_blank">1:36:29</a>）</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>Berkeley RDI LLM Agents MOOC · LLM Agents Overview · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

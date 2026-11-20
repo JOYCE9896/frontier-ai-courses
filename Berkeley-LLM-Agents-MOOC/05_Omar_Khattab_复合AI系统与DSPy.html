@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Omar Khattab：复合 AI 系统与 DSPy 框架 | Berkeley LLM Agents MOOC 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="04_Burak_Gokturk_企业生成式AI趋势.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">Berkeley LLM Agents MOOC 目录</a> · 05</span>
+    <span><a href="06_Graham_Neubig_软件开发智能体.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Omar Khattab：复合 AI 系统与 DSPy 框架</h1>
+        <p class="subtitle">为什么单个大模型难以控制、调试和改进，复合 AI 系统（RAG、多跳检索、STORM、AlphaCodium）带来的五个好处，一个 prompt 里混着的五种角色，DSPy 怎样用 Signature、Module、Adapter、Optimizer 把系统写成程序，以及提示优化器的三种做法：Bootstrap Few-shot、扩展 OPRO 加 grounding、MIPRO 的贝叶斯代理模型，和 LangProBe 上的对比结果</p>
+        <div class="author-meta">
+            主讲：Omar Khattab（Databricks）· 课程：Berkeley CS294/194-196 Large Language Model Agents（2024 年秋季） · 上课日期：2024 年 10 月 7 日 · 时长：1 小时 4 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=JEMYuzrKLUw" target="_blank">课堂录像</a> · <a href="https://rdi.berkeley.edu/llm-agents-mooc/slides/dspy_lec.pdf" target="_blank">幻灯片</a>（Berkeley RDI 公开，2024 年秋季，本文依据录像字幕和幻灯片整理，是中文转述，不是逐字翻译；观点属于主讲人，内容以上课当天为准）
+        </div>
+    </header>
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>Omar Khattab 当时是 Databricks 的研究科学家，幻灯片首页写着他将于 2025 年秋季去 MIT EECS 任助理教授。他读博期间做了检索模型 ColBERT 和多跳检索系统 Baleen，也是 DSPy 的作者。他开场说这项工作有 200 多位贡献者，后半部分很多幻灯片改编自 Krista Opsahl-Ong 和 Michael Ryan（MIPRO 论文的两位共同一作）。录像从他正式开讲开始，没有课程事务部分。</p>
+        <p>这一讲围绕一个问题：做一个惊艳的演示很容易，把单个大模型变成可靠的 AI 系统很难，怎么办？他的回答分两步。第一步是复合 AI 系统（compound AI system），把语言模型当成大系统里的模块。第二步是 DSPy：把复合系统写成普通 Python 程序，模块只声明“做什么”，具体的提示和权重交给优化器从数据里学。后半段他细讲了论文 “Optimizing Instructions and Demonstrations for Multi-Stage Language Model Programs” 里的三类优化方法和实验。录像里没有单独的问答环节。这一讲和第 3 讲的智能体框架是同一类问题，角度是“怎样系统地优化一条 LLM 流水线”。</p>
+        <ol>
+            <li><a href="#t01">单体模型的问题：好演示容易，可靠系统难</a> · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">复合 AI 系统的例子和五个好处</a> · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=158s" target="_blank">0:02:38</a></li>
+            <li><a href="#t03">一个 prompt 混了五种角色</a> · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=531s" target="_blank">0:08:51</a></li>
+            <li><a href="#t04">把复合系统写成程序：DSPy 的设想</a> · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=828s" target="_blank">0:13:48</a></li>
+            <li><a href="#t05">优化问题和多跳 RAG 的例子</a> · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=1160s" target="_blank">0:19:20</a></li>
+            <li><a href="#t06">Adapter、优化器和第一组结果</a> · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=1561s" target="_blank">0:26:01</a></li>
+            <li><a href="#t07">优化器的一般模式和实际应用</a> · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=1847s" target="_blank">0:30:47</a></li>
+            <li><a href="#t08">MIPRO 论文：问题设定、约束和两个难点</a> · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=2241s" target="_blank">0:37:21</a></li>
+            <li><a href="#t09">方法一、二：Bootstrap Few-shot 和扩展 OPRO</a> · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=2512s" target="_blank">0:41:52</a></li>
+            <li><a href="#t10">方法三：MIPRO 和贝叶斯代理模型</a> · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=3095s" target="_blank">0:51:35</a></li>
+            <li><a href="#t11">LangProBe 上的对比结果</a> · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=3343s" target="_blank">0:55:43</a></li>
+            <li><a href="#t12">结论：自然语言编程、自然语言优化、开放研究</a> · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=3530s" target="_blank">0:58:50</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 单体模型的问题：好演示容易，可靠系统难</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=0s" target="_blank">0:00:00</a>–0:02:38</em></p>
+        <p>他说现在做出惊艳的 AI 演示从来没这么容易过，最好的例子就是 ChatGPT：一个界面，问什么都行，系统不仅能找到答案，还能当场以对话的方式综合出来。他提醒大家别把这件事当成理所当然。更进一步的是它还能帮你做任务，他举了让 ChatGPT 把一个顺序执行的 Python 循环改成并行的例子，它照做了。</p>
+        <p>然后他讲语言模型的主要弱点，他说这在某种意义上就是它的主要长处：模型太流畅了，犯错时很难被发现。他展示的回答里说 Stanford 建于 1891 年（他说不对，但很接近）。至于那段并行代码，他本来就是为了避免数据竞争（data race，多个线程同时读写同一数据导致的错误）才问的，模型给的却是直接粗暴地并行化，带着 bug。他庆幸自己没信它，没把代码直接放进代码库。</p>
+        <p>他的判断是：每一个 AI 系统都会犯错，今天讲的所有东西也都会犯错。问题不在于犯错，在于语言模型的单体性质（monolithic，一个端到端的黑盒）让我们做系统时很难控制它，出错时很难调试，想迭代时很难改进。幻灯片第 5 页写的就是这三个词：control、debug、improve。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 复合 AI 系统的例子和五个好处</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=158s" target="_blank">0:02:38</a>–0:08:51</em></p>
+        <p>复合 AI 系统，他的定义是模块化的系统或程序，语言模型在更大的架构里扮演专门的模块角色，不再充当面向用户的端到端系统。他用四个例子各引出一个好处，再加上第五个。</p>
+        <h3>RAG：透明和效率</h3>
+        <p>最熟悉的例子是检索增强生成（RAG，retrieval-augmented generation）。与其把问题直接丢给黑盒神经网络然后指望它做对，可以把它拆开：一个检索模型拿问题当搜索词去查一个大语料库，取最相关的 top K 条，作为上下文给语言模型，再提示模型使用这些信息并在回答里引用。幻灯片第 7 页的例子问题是“什么化合物保护消化系统？”，并列出了这一线的文献：DrQA（Chen 等，2017）、ORQA（Lee 等，2019）、RAG（Lewis 等，2020）、ColBERT-QA（Khattab 等，2020）。</p>
+        <p>好处之一是透明（transparency）。系统还是可能出错，但我们总能检查它的行为轨迹：检索到了什么，为什么生成了这些内容。答对时能看到它依据的是一条真实的引用；答错时也能看出来，比如基于相关信息做了错误推断，或者检索到了无关内容然后奇怪地外推。另一个好处是效率（efficiency）：步骤多了，但语言模型不必知道所有话题的所有知识，知识交给了知识库，很多逐步的控制流交给了执行这些步骤的程序，所以可以用更小的模型。</p>
+        <h3>多跳检索：控制</h3>
+        <p>更复杂一点的是多跳推理或多跳 RAG。语言模型的一大能力是能综合信息，回答它没见过的问题。多跳系统让语言模型本身当一个模块，不把问题直接交给“笨的”搜索引擎，由这个模块把问题拆成小块，分别找信息，再交给语言模型综合作答。他说复合系统的好处是开发者有很大的控制权（control）：不必等下一个模型版本发布（不管是不是你自己在训练它），可以迭代自己的架构，所以迭代快得多，还能用工具来 ground 系统。他自己读博初期做的 Baleen 就是这样的系统，能做到当时单个模型完全做不到的事。幻灯片第 9 页的文献：GoldEn（Qi 等，2019）、DecompRC（Min 等，2019）、MDR（Xiong 等，2020）、Baleen（Khattab 等，2021）。</p>
+        <h3>STORM：质量</h3>
+        <p>再进一步，能不能让系统写带引用的长报告，比如一篇 Wikipedia 式的文章？他举的是 Stanford 的 STORM：你说“写一篇关于 ColBERT 检索模型的文章”，它有很多粒度更细的模块，会头脑风暴、生成大纲、修改大纲、针对大纲每一部分让模型生成问题、检索来源、综合信息，比简单架构更系统。他说因为能组合范围更明确的模型调用，就能持续提升质量（quality）：让模型基于给定信息综合出合理内容，比让它去解决“记住事实”这种更大的问题要容易得多。</p>
+        <h3>AlphaCodium：推理时扩展</h3>
+        <p>最后一个好处是推理时扩展（inference-time scaling）：在测试时更聪明地多花算力，比如让模型在一大片可能的路径中搜索，效果会更好。他的例子是写代码的 AlphaCodium。它没有直接让模型写一段代码，它有一系列步骤：反思题目，反思已有的公开测试，生成多个解，按测试表现排序，再从那里迭代。他说这种拆解很像你教一个实习生或朋友去做这种任务，所以有帮助并不意外。这种做法在很多应用里反复出现，也有很多与任务无关的形式，比如 Best-of-N、Chain of Thought、Program of Thought、ReAct、Reflexion、Archon（幻灯片第 11 页列出）。Chain of Thought（思维链）是让模型先写出推理过程再给答案；ReAct 是让模型交替进行推理和调用工具。</p>
+        <p>幻灯片第 12 页的总结：</p>
+        <ol>
+            <li>质量：把范围更明确的模型能力组合起来，更可靠；</li>
+            <li>控制：能迭代改进系统，并通过工具 ground 它；</li>
+            <li>透明：能调试轨迹，并给用户看出处；</li>
+            <li>效率：可以用更小的模型，把知识和控制流卸载出去；</li>
+            <li>推理时扩展：能系统地搜索更好的输出。</li>
+        </ol>
+    </section>
+
+    <section id="t03">
+        <h2>03. 一个 prompt 混了五种角色</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=531s" target="_blank">0:08:51</a>–0:13:48</em></p>
+        <h3>漂亮的框图下面是几千个 token 的英文</h3>
+        <p>他说复合系统很好，但问题在于我们用的模块能力有限：语言模型对你怎么要求它扮演这些小角色极其敏感。所以那些漂亮的框图，底下通常是用几千个 token 的英文（或其他自然语言）去哄模型扮演每个模块。他说大家都这样做，包括他自己；各种任务里都能看到人们在 JSON 文件里写几十 KB 的字符串来定义 LLM 系统。</p>
+        <p>如果这样做能在不同场景下通用、可移植，也许还能接受。问题是它不能泛化，也不能让我们系统地组合系统。</p>
+        <h3>五种角色</h3>
+        <p>他说实现每个模块的 prompt 其实把五种不同的角色绑在了一起（幻灯片第 14 页）：</p>
+        <ol>
+            <li>Signature（签名）：核心的输入到输出行为。也就是“我要一个函数来实现这个模块”，规定输入是什么、含义是什么、要怎样变换成输出。</li>
+            <li>Predictor（预测器）：把某种推理时策略特化到这个签名上的计算。比如在提示里说“请一步一步想”，或者“你是一个智能体，有这些工具，你调用时我会截下来把结果给你”，或者“我会生成 10 个结果，用奖励模型去探索”。这些都写在提示里和提示周围的代码里。</li>
+            <li>Adapter（适配器）：把签名的输入格式化，再把输出解析成正确类型的计算。包括怎样拿到多个结果、解析、转换类型，格式不对时重试。</li>
+            <li>Metrics 和 Assertions（指标和断言）：定义目标和行为约束。提示里除了描述输入输出，还塞了很多该做什么不该做什么，以及你要最大化什么：要符合事实，不要幻觉，不要引用不存在的页面。他说这和单纯声明模块做什么是两回事。</li>
+            <li>Optimizer（优化器）：让模型表现出所需行为的那些指令字符串（或调整模型的权重）。因为模型敏感、流水线复杂，人们实际上用大量自然语言做试错去哄模型做对；高级一点的应用还会围绕它微调权重。</li>
+        </ol>
+        <h3>“Stringly typed”</h3>
+        <p>他的结论是：现有的复合 AI 系统原则上是模块化的，潜力很大，能解决单靠神经网络或语言模型解决不了的问题，但它们太“stringly typed”（他套用 strongly typed 的说法，意思是什么都靠字符串）。它们把开发者想表达的系统基本架构（就是框图里那部分）和一些偶然的选择绑在了一起，这些选择只适用于你当前的流水线或你选的模型，而这些东西一直在变。</p>
+        <p>他举例：你有一条五个模块的流水线，想稍微改一下目标，或者加第六个模块，或者把模型换成刚出的更便宜、据说一样好的模型，那就祝你好运，你几千字的提示基本作废。他说这在实践中阻碍了采用和移植：工业界的人会来说“我们很喜欢那篇论文，但那些提示显然是针对某个数据集或基准调出来的，不是我们的用例，我们也不知道你们是怎么得出这些提示的，所以我们实际上用不了”。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 把复合系统写成程序：DSPy 的设想</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=828s" target="_blank">0:13:48</a>–0:19:20</em></p>
+        <h3>我们已经知道怎样模块化地构建系统：编程</h3>
+        <p>他接下来的论点是：我们其实知道怎样迭代地、可控地构建系统并模块化地改进它，这个东西叫编程。所以设想是把复合 AI 系统写成程序，就是普通的 Python 代码，但里面插着模糊的、以自然语言定义类型的函数或模块，它们能从数据中学会自己的行为。你写代码，插进代表那些框的小模块，给出一个目标，让系统围绕你对模块的自然语言规格去学习行为。这样就不用手写提示，只需写一个通用设计，可以从一个模型移植到另一个模型。</p>
+        <p>他用编译器做类比：用 C 写的代码，换一种 CPU 架构，好的编译器会把同样的高层代码编译成很不一样的底层机器码，并保证能跑。这里的目标是用尽量独立于“怎样让模型做到”这些底层细节的高层抽象写代码，再做编译器或优化器，把它变成在某个具体基础设施（这里是某个语言模型）上的具体策略。</p>
+        <h3>DSPy 名字的意思</h3>
+        <p>这个方法叫 DSPy。他说有人（他记得是 Alex）以为是“data science Python”，其实和数据科学无关，说来话长。DS 指 declarative self-improving，DSPy 就是“声明式自我改进的 Python”。</p>
+        <h3>语言模型程序</h3>
+        <p>DSPy 定义了语言模型程序（LM program）：一个 Python 类或函数，输入是自然语言（比如要回答的问题、要总结的报告、要写邮件的话题），输出也是自然语言（答案、摘要、邮件），也可以有多个输出。它特别的地方在于，执行过程中照常有循环、异常，甚至 goto 这类“不该用”的东西，同时会调用一些模糊的模块函数，比如“给我生成一个搜索词”或“把这段自然语言转成 SQL”。这些调用看起来像提示，但结构化得多、短得多，因为只声明实际行为是什么，不管模型该怎么做。每个模块就是一个声明：做什么、输入什么、输出什么，很多情况下一行就够。</p>
+        <h3>一个事实核查的例子</h3>
+        <p>他展示了课前跑的一个简单 DSPy 例子：想要一个事实核查模块，就在签名上套一个 chain of thought 策略，签名写的是“输入一组 claims，输出一组布尔值 verdicts”，表示这些说法是真是假。得到的模块就是一个函数，给它一组说法，它会先思考，再告诉你第一个是真的、第二个是假的。示例里的两条说法大意是一条为真，另一条是“Python 是编译型语言”，模型判为假（他说按标准用法 Python 不是编译型语言）。他强调这里的关键词并不特殊，模型懂英语，看到 verdicts 这个名字就能大致明白要什么。</p>
+        <p>代码形式大致如下（据他的口头描述改写成示意）：</p>
+<pre><code>import dspy
+
+# Declare what the module does: claims in, a list of boolean verdicts out
+fact_check = dspy.ChainOfThought("claims -> verdicts: list[bool]")
+
+result = fact_check(claims=["...", "Python is a compiled language."])
+print(result.verdicts)  # e.g. [True, False]
+</code></pre>
+        <h3>背后的优化问题</h3>
+        <p>这在底层定义了一个优化问题：程序里有一组模块，对每个模块，要决定怎样把这段代码真正变成对语言模型的调用，也就是生成实际送进模型的字符串，它可能比签名复杂得多，也可能完全不一样。在某些情况下还可以决定模型的权重，比如微调模型让它在任务上表现更好，不过这一讲不多讲这部分。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 优化问题和多跳 RAG 的例子</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=1160s" target="_blank">0:19:20</a>–0:26:01</em></p>
+        <h3>目标：最大化程序整体的指标</h3>
+        <p>他说：你给我一个包含很多模块的函数，再给一个训练集，里面是函数的输入，可能还有一些提示、最终标签或元数据，我就应该能找到提示和权重的设定，使得用这样配置的程序去跑时，某个指标在期望上最大。用 MIPRO 论文的记号可以写成（这里是按论文补充的形式化，他口头表达的是同一个意思）：</p>
+        $$\Phi^* = \arg\max_{V \to S} \; \frac{1}{|\mathcal{D}|} \sum_{(x, x') \in \mathcal{D}} \mu\big(\Phi_{V \to S}(x),\, x'\big)$$
+        <p>其中 $\Phi$ 是语言模型程序，$V \to S$ 表示给每个模块的变量（指令、示例）赋一个具体字符串，$\mu$ 是指标，$x$ 是输入，$x'$ 是可选的标签或元数据。</p>
+        <h3>为什么难</h3>
+        <p>他说这很难（幻灯片第 18 页：没有梯度，也没有中间标签）。系统可能生成代码再执行，可能调外部工具，可能跑计算器，所以不能直接用梯度来优化。也不能偷懒去单独优化每个模块，因为一般不会要求用户给每一步都提供标签。如果要求每一步都有标签，迭代开发和模块化的论点就塌了：我加了一个模块，你就让我去标数据。理想的开发循环是：你在搭系统，发现需要一个模块，或者想试一试，就插进去，重新编译，看系统有没有变好。所以不能假设每个模块都有标签。</p>
+        <h3>多跳 RAG 程序</h3>
+        <p>为了后面好讲，他用一个具体例子：简单的多跳检索增强生成流水线。函数输入一个问题（字符串），输出一个答案（字符串）。最后一步是把问题和上下文交给语言模型生成答案。上下文怎么来？用一个循环，这里写死跑两次（也可以更聪明，比如自己决定何时停止）。每一轮让模型根据已积累的上下文（一开始为空）生成一个搜索词，拿搜索词去检索，把结果加进上下文，再循环，这样系统会去找之前没找到的东西。</p>
+        <p>他喜欢用的例子问题是：David Gregory 继承的那座城堡有几层？第一轮可能问“David Gregory 是谁”，得知他是 1600 年代左右的苏格兰人，继承了 Kinnairdy Castle（字幕作“Kenilworth Castle”，这个例子出自 HotPotQA，原题是 Kinnairdy Castle）。第二轮再问这座城堡有几层。</p>
+        <p>DSPy 代码（幻灯片第 20 页）：</p>
+<pre><code>class MultiHop(dspy.Module):
+    def __init__(self):
+        self.generate_query = dspy.ChainOfThought("context, question -> query")
+        self.generate_answer = dspy.ChainOfThought("context, question -> answer")
+
+    def forward(self, question):
+        context = []
+        for hop in range(2):
+            query = self.generate_query(context, question).query
+            context += dspy.Retrieve(k=3)(query).passages
+        answer = self.generate_answer(context, question)
+        return answer
+</code></pre>
+        <p>他说语法借鉴了 PyTorch。<code>__init__</code> 声明复合系统里的子模块：一个 chain of thought 策略套在“输入 context 和 question，输出搜索 query”的签名上（类型默认都是字符串，所以不用写），另一个输入相同、输出 answer。<code>forward</code> 方法定义程序逻辑，就是那个循环。签名告诉系统模块该做什么，而不是跟某个模型较劲去表达怎样做（幻灯片第 23 页：“Signature: what to do, not how to prompt!”）。</p>
+        <h3>模块像神经网络的层</h3>
+        <p>模块定义了表达签名的策略，也就是给定模型时怎样花算力，这些策略在很多场景下能提升质量。他说这一点不是理解后面内容的必要条件，但可以这样想：chain of thought 这类东西原本只是概念，没法组合。原始的 chain of thought 论文其实就是为每个任务写的一堆提示，做数学题就写数学的例子，换一个任务就得重写。他问：为什么不能像神经网络的层那样？层只要给出维度，说明接受什么形状的张量、输出什么形状的张量，行为就定下来了，你可以选 attention、RNN、线性层或卷积。同理，可以把推理策略做成通用的，在元编程的意义上定义在签名之上，可以组合。</p>
+        <p>他说这个抽象写出来很优雅（“至少我觉得”），迭代也容易：加一个模块、加一个 if、抛个异常再捕获都行。问题是怎样把这些“策略加签名”真正翻译成底层的提示。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. Adapter、优化器和第一组结果</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=1561s" target="_blank">0:26:01</a>–0:30:47</em></p>
+        <h3>第一步：Adapter 生成一个基础提示</h3>
+        <p>第一步看起来简单，但要做对：通过内置的 adapter 和 predictor，把模块翻译成一个基础提示，不保证效果。Predictor 就是 ChainOfThought 这种模块，里面有逻辑，它做的基本是加一个输出字段，要求写出推理（reasoning）。Adapter 根据你用的是 chat 模型还是 instruct 模型等情况，把各个字段格式化。幻灯片第 26 页给出生成的基础提示：</p>
+<pre><code>Given the fields "context" and "question", respond with the field "query".
+Follow the following format:
+Context: &lt;context&gt;
+Question: &lt;question&gt;
+Reasoning: Let's think step by step to &lt;..&gt;
+Query: &lt;query&gt;
+</code></pre>
+        <p>他说这个提示没什么特别好用的，只是为了让过程起步，并且格式固定，方便解析输出。</p>
+        <h3>第二步：优化器调整整个程序的所有提示</h3>
+        <p>优化器是另一个组件，有很多种算法。它拿这个初始提示和整个程序（里面有很多模块、很多提示），把它们当成可以调的参数或变量，去最大化前面说的指标。比如起点是 37% 的准确率（用的是一个精确率高但召回率偏低的严格指标，实际质量可能更高一点）。然后你说“我想用 DSPy 的 MIPROv2 优化器”，就像训练神经网络时说“我用 Adam”或“我用 RMSProp”。给它数据、程序和指标，它吐出更好的提示：更讲究的指令，加上一些示例，放进一个或几个模块的提示里，分数明显提高。幻灯片第 27 页写的是从 37% 提到 55%，代码是：</p>
+<pre><code>optimizer = MIPROv2()
+optimized_program = optimizer.compile(program)
+</code></pre>
+        <p>优化后的指令开头是“Carefully read the provided `context` and `question`. Your task is to formulate a concise and relevant `query`...”，并且和程序里其他提示一起联合优化。</p>
+        <p>他对比了手写提示：幻灯片第 28 页是一段 ReAct 风格的长提示（Thought、Action、Observation 交替，动作有 Search、Lookup、Finish），在一个多跳问答任务上 GPT-3.5 得 33%。用 DSPy 写的 MultiHop 程序优化后，GPT-3.5 得 55%，Llama2-13B 得 50%，T5-770M 得 39%（幻灯片第 29 页）。他说与其去调 2000 个 token 的提示，不如去探索更大的设计空间。</p>
+        <h3>HotPotQA 上的结果表</h3>
+        <p>他用多跳问答（HotPotQA）这个贯穿全讲的例子展示结果（幻灯片第 30 页，他说是大约一年前的结果，现在的模型数字都高得多）：</p>
+        <table>
+            <thead><tr><th>程序</th><th>是否优化</th><th>GPT-3.5</th><th>Llama2-13b-Chat</th></tr></thead>
+            <tbody>
+                <tr><td>dspy.Predict("question -> answer")</td><td>否</td><td>34.3</td><td>27.5</td></tr>
+                <tr><td>dspy.RAG（带 CoT）</td><td>否</td><td>36.4</td><td>34.5</td></tr>
+                <tr><td>dspy.RAG（带 CoT）</td><td>是</td><td>42.3</td><td>38.3</td></tr>
+                <tr><td>MultiHop</td><td>否</td><td>36.9</td><td>34.7</td></tr>
+                <tr><td>MultiHop</td><td>是</td><td>54.7</td><td>50.0</td></tr>
+            </tbody>
+        </table>
+        <p>他的解读：最简单的“复合系统”其实不复合，就是输入直接预测输出，不优化，GPT-3.5 在这个水平，Llama 2 落后一些。因为是事实问答，RAG 这样的拆解有帮助；再跑一个优化器，小模型就能超过用简单架构的大模型，甚至超过未优化的复杂架构，而大模型也保留了不少优势。再迭代成多跳系统，优化后大模型和开源模型都提升很多。</p>
+        <p>他还提到，同一个程序也可以用更新权重的优化器，也就是做微调，整个强化学习的空间都打开了。可以让很小的模型模仿大模型：用一个不到 10 亿参数、2019 年发布的 T5，分数能和当时的前沿闭源模型竞争，甚至更好。幻灯片写的是用 DSPy 的 BootstrapFinetune 把 MultiHop 编译到 T5-770M，从 200 个答案出发，得到 39%。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 优化器的一般模式和实际应用</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=1847s" target="_blank">0:30:47</a>–0:37:21</em></p>
+        <h3>大多数优化器的三步</h3>
+        <p>他说 DSPy 的优化器太多讲不完，它们调提示和权重的方式不同，但大多遵循一个模式（幻灯片第 31 页）：</p>
+        <ol>
+            <li>用 Adapter 给每个模块猜一个初始提示。这一步在 DSPy 里通常发生在优化器之外，是从签名出发的确定性构造，偶尔会用语言模型。</li>
+            <li>用拒绝采样（rejection sampling，多次生成，只保留通过检查的结果）为每个模块生成示例。拿你给的输入，可能把温度调高，可能换一个大模型，也可能保持简单，用基础提示把程序跑一遍，收集那些让指标打高分的完整轨迹。指标可以是检查答案对不对，也可以是问一个语言模型，或者让一个 DSPy 程序按评分标准评估。这样就得到每个模块的输入输出例子，它们串起来时能拿高分。</li>
+            <li>用这些例子更新程序的模块，有三种主要方式：
+                <ul>
+                    <li>自动少样本提示（dspy.BootstrapFewShotWithRandomSearch）：把这些例子作为示范塞进提示里。他说这些例子不一定是对的，只是过去奏效过，所以有希望有用。然后可以探索哪些例子放进程序后能让程序在其他例子上表现更好。</li>
+                    <li>归纳指令（dspy.MIPROv2）：一个模块有很多例子时，就更清楚这个模块该做什么、什么时候行为好、什么时候不好，把这些交给语言模型，问它这个模块到底要做什么。</li>
+                    <li>多阶段微调（dspy.BootstrapFinetune）：例子够多时，直接微调模型，或者根据采样方式做强化学习、偏好微调等。</li>
+                </ul>
+            </li>
+        </ol>
+        <p>他特别强调：这些步骤都用语言模型来构建组件，但并不假设语言模型擅长这件事。模型给你 20 个东西，可能 19 个很烂，但因为能试很多、能以不同程度的智能去探索这个空间，常常能挖到金子，找到让提示变好的组合，而且这个过程和你的具体配置无关：改了程序或换了模型，重新跑一遍优化就行。</p>
+        <p>他说推荐阅读里放了两篇：一篇介绍 MIPRO，另一篇讲提示优化和微调结合的策略。这一讲后面主要讲 MIPRO 那篇。</p>
+        <h3>实际效果的几个例子</h3>
+        <ul>
+            <li>2024 年 5 月，University of Toronto 的研究者参加 MEDIQA 竞赛（字幕作“Medica”），和其他 15 个学校和业界团队比，在医疗领域问答系统上以领先第二名 20 个百分点的优势获胜。他说他们和别人最大的区别之一是用 DSPy 来表达系统，并用了 DSPy 的提示优化器（MIPRO 的早期版本），在竞赛的三个赛道上都取得了这个结果。</li>
+            <li>一个月后（2024 年 6 月），University of Maryland 的研究者做了一项直接的案例研究。第一作者主导一个有数万甚至更多用户的提示工程指南。他做的是一个从业界拿来的自杀倾向检测任务（他说说穿了就是个分类器），花了 20 小时手工尝试各种提示策略，把所有尝试都记录在论文里。按作者的说法，他用 DSPy 花了 10 分钟，就比他最好的手工系统高出 40% 到 50%。</li>
+            <li>它还支撑了很多 SoTA 系统（幻灯片第 33 页）：PATH（Jasper Xia，UWaterloo），优化合成数据的提示，用来训练小的检索模型；IReRa（Karel D'Oosterlinck，UGhent），在有上万个类别的情况下用语言模型做分类，他说自己原本觉得这对语言模型不可能；STORM（Yijia Shao，Stanford），从一个话题生成 Wikipedia 文章。幻灯片还列了 EDEN（Columbia）、Efficient Agents（Sayash Kapoor，Princeton）、ECG-Chat（Beijing Normal U）等。</li>
+        </ul>
+    </section>
+
+    <section id="t08">
+        <h2>08. MIPRO 论文：问题设定、约束和两个难点</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=2241s" target="_blank">0:37:21</a>–0:41:52</em></p>
+        <p>接下来他细讲论文 “Optimizing Instructions and Demonstrations for Multi-Stage Language Model Programs”，共同一作是 Stanford 的 Krista Opsahl-Ong 和 Michael Ryan，这部分幻灯片多半借自他们。</p>
+        <h3>问题设定</h3>
+        <p>给定一批任务的输入（比如问题），给定开发者写好的语言模型程序（一个带若干自然语言模块的函数），每个模块类似“给定问题和上下文，生成正确答案”。示例问题：“The Victorians 这部纪录片系列的作者出生于哪一年？”根据前面循环检索到的上下文（[2] 是 Jeremy Paxman 的简介，生于 1950 年 5 月 11 日）回答 1950。</p>
+        <p>还要一个指标。有些指标天然需要标签：知道答案是 1950，评估就容易，而且只需要最终答案的标签，不需要整条流水线的标签。有些指标不需要标签，比如“我不知道答案，但我希望答案以检索到的上下文为依据，我信任上下文，答案有依据又相关，大概就是对的”。他说范围很大，但必须明确定义你要最大化什么，而且要独立于程序来定义，不写在提示里，这样两条轴可以分别模块化地探索。他说这个抽象会逼着你这样做。</p>
+        <p>目标是给出优化后的程序 P′。这一讲讲的优化器冻结权重，甚至假设拿不到权重，只优化两样东西：指令（instructions，给模型的任务描述）和示范（demonstrations，提示里的少样本例子，展示过去奏效的输入和输出）。</p>
+        <h3>三条约束</h3>
+        <ol>
+            <li>拿不到 log 概率和模型权重。开发者可能要在只有 API 的模型上优化，希望在自然语言层面用高层 API 快速迭代。他说他们也有放宽这个假设、研究微调的工作，并且发现很多时候两者都要才能拿到最好结果，但如果只能选一个，提示优化往往更强。</li>
+            <li>没有中间指标或标签。</li>
+            <li>节约预算。不想要求太多任务输入，大约 150 或几百个，不是几万个。他说输入其实是最容易扩充的：做个演示给朋友用，他们一提问你就有很多输入（前提是你的隐私政策允许）。也不想调用模型太多次，因为慢或贵。</li>
+        </ol>
+        <h3>两个难点</h3>
+        <ul>
+            <li>提示提案（prompt proposal）：提示是一个很长的组合式字符串，什么都合法。没有梯度、又不想多调模型，怎么探索这个空间？看起来基本无望，所以需要提出一小批高质量的候选。</li>
+            <li>归因（credit assignment）：模块一多，到处都在改，怎么知道是哪一处带来改进、哪一处在拖后腿？你在一处局部改好了提示，可能反而有害，因为另一个模块对第一个模块的输出做了假设。他说两个问题合在一起更糟。</li>
+        </ul>
+    </section>
+
+    <section id="t09">
+        <h2>09. 方法一、二：Bootstrap Few-shot 和扩展 OPRO</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=2512s" target="_blank">0:41:52</a>–0:51:35</em></p>
+        <p>他说要讲三种方法，远不是全部，但思路各不相同。</p>
+        <h3>方法一：Bootstrap Few-shot（自举少样本示例）</h3>
+        <p>他认为就它带来的价值而言，这是最简单的办法：用一个“笨”版本的程序跑出例子，把它们放进提示，再在这个空间里搜索。还可以迭代：用更好的程序做出更好的例子，做集成，用更大的模型来生成例子，计算空间很大。</p>
+        <p>最简单的形式：拿一个训练输入，执行程序。程序里有些是普通 Python（return、循环、调代码执行器），有些是模块，模块是特殊的，系统会追踪它们的输入输出。比如两个模块分别在生成搜索词和生成答案（幻灯片第 45 到 52 页演示了 Search Query Output 1、Search Query Output 2、Answer Output 依次产生），如果最后指标认为答案好，这整条输入输出轨迹就值得留下来，成为各模块的示范候选（Task Demonstration Candidate）。</p>
+        <p>然后最简单的是随机搜索：从这些示范里取一个子集，放进对应的三四个提示，在一个小验证集上跑（评估方式也可以设计得更聪明），看分数，尽量把分数推高。这就是 BootstrapFewShotWithRandomSearch。幻灯片第 55 页的示范例子就是 Victorians 那题：上下文、问题、Rationale（“The Victorians 的作者是 Jeremy Paxman，他生于 1950 年”）、答案 1950。</p>
+        <h3>方法二：把 OPRO 扩展到多阶段程序</h3>
+        <p>另一条路是借鉴提示优化（prompt optimization）的文献。他说那些研究针对的是单次模型调用，条件更强：有输入输出标签，整个系统只有一个提示，没有程序，只想搜索其中某一小段，比如一行前缀。探索方法很多，有基于梯度的，有各种强化学习的。其中一个很高层的方法是 DeepMind 的 OPRO（Optimization through Prompting，论文 “Large Language Models as Optimizers”，Yang 等）。它想在提示里加一小段前缀让模型走上正轨，从“Think step by step”出发，最后得到类似“Take a deep breath and think step by step”这样的句子，并显示它能让一些模型好很多。</p>
+        <p>OPRO 对单个提示的做法：让模型给出原句的 10 个或 100 个变体，在小评估集上全部评估，挑最好的比如前 10 个，连同分数一起交回模型说“这是前 10 个和它们的表现，再给我一些”。思路是模型可能足够聪明，能看出成功指令和失败指令之间的规律，相当于对指令做变异，然后重复。幻灯片第 57 页的示例分数：“Think step by step” 31，“Take a deep breath and think step by step” 42。</p>
+        <h3>朴素扩展一：坐标上升（CA-OPRO）</h3>
+        <p>把 OPRO 用到语言模型程序上，最简单的是坐标上升（coordinate ascent）。比如有两个模块：让模型给第一个模块生成很多候选，每次换一个，其他模块固定在初始指令，评估全部 10 个，选最好的冻结，再去优化下一个模块，如此循环。问题是贵得吓人：每优化一个模块都要在冻结其他模块的情况下跑整个程序；而且是很强的贪心假设，假定每一步的最优选择冻结后对后面也有用，各模块没有一起优化。他说它很贵，效果也不怎么好。幻灯片第 58 页写了它的复杂度 $O(N \times D^2 \times M)$（幻灯片未说明各字母含义）。</p>
+        <h3>朴素扩展二：模块级 OPRO</h3>
+        <p>另一种是放弃显式归因：不再逐个固定变量，直接让模型一次性给所有模块各生成提示，指望这个过程收敛到好的地方。或者更难一点，把所有模块的提示序列一起交给模型，让它联合提出所有模块的新提示。他说这对模型要求更高，可能把它搞糊涂，但如果有一个“神谕”级别的模型，这种方式要强大得多。幻灯片第 60 页的例子：两条指令“Given a question generate a search query”和“Given the context answer the question”，各自被改写成更详细的版本，分数都是 30。</p>
+        <h3>关键是 grounding：让提案者了解程序和数据</h3>
+        <p>他说要在语言模型程序里做好这件事，优化不能短视。比如签名只写了“生成 query”，用户没说是搜索 query，那它是 SQL 查询？给 Google 的搜索词？还是给一个离线检索模型的查询？这些很不一样。提案的质量决定一切，所以要让提案结合程序的上下文，他把这称为 grounded proposals（有依据的提案）。</p>
+        <p>传统的提示优化里，提案模型能看到的是：之前的指令和分数历史，以及一个显式的训练集，因为整个系统只有输入和输出，没有缺失的环节。推广到程序时，他们给提案模型（proposer LM）加了几类上下文（幻灯片第 61 到 66 页）：</p>
+        <ul>
+            <li>自举出来的示范：一般没有每个模块的输入输出标签，就用前面 bootstrap 出来的示范，它们看起来是成功的。幻灯片的例子是生成搜索词那个模块的一个示范，包括模型生成搜索词时的推理和最后的搜索词，这条轨迹后来在某题上成功了。</li>
+            <li>数据集摘要：让提案模型了解整个任务。用语言模型对数据集做类似 map-reduce 的遍历，写一段摘要，例如“数据集由事实性的、问答竞赛风格的问题组成，覆盖很多话题……”。</li>
+            <li>程序摘要：让它看到整条流水线，理解每个模块的角色。做法是直接检查程序代码，交给懂语法的语言模型，生成自然语言描述，例如“这个程序看来是为回答复杂问题而设计的，从多个来源检索和处理信息，这里设置为两跳……模块 self.generate_query 负责根据上下文和问题生成搜索词”。</li>
+            <li>生成指令的小贴士：为了增加多样性，随机抽一条常见的建议放进去，比如“不要怕有创意”“指令要清楚简洁”“指令要信息量大、描述充分”。这些写一次就能反复用。</li>
+        </ul>
+    </section>
+
+    <section id="t10">
+        <h2>10. 方法三：MIPRO 和贝叶斯代理模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=3095s" target="_blank">0:51:35</a>–0:55:43</em></p>
+        <p>前两种策略分别是“造例子再搜索”和“给提案模型尽量多的依据，让它提出指令，再从过去的尝试中学习”。第三种要同时优化指令和少样本例子，并且高效地处理归因。</p>
+        <p>他的直觉是：语言模型现在还不太擅长自己做归因；但因为我们面对的是离散的候选空间（很多条指令、很多组例子），可以借鉴超参数优化（hyperparameter optimization）的思路，建一个代理模型（surrogate model），用来预测系统任意一种配置的质量，再用它挑出值得实际测试的整体配置。</p>
+        <h3>MIPRO 的三步</h3>
+        <p>MIPRO 全称 Multi-prompt Instruction PRoposal Optimizer（幻灯片第 68 页），分三步：</p>
+        <ol>
+            <li>自举任务示范（就是方法一）；</li>
+            <li>用一个语言模型程序提出候选指令，这个程序在优化器内部，包含前面讲的数据集摘要器、程序描述器等部件（这一步对应提示提案）；</li>
+            <li>用贝叶斯超参数优化器联合调参（这一步对应归因）。</li>
+        </ol>
+        <h3>第三步怎么跑</h3>
+        <p>例子是一个有两个模块的程序。每个模块有两个“大块头”参数：一是描述任务的字符串，也就是指令，起点是 adapter 给的基础指令；二是示例列表，起点为空，可以学成一组输入输出例子。因为前两步已经有依据地生成了候选，现在可以在离散空间里探索：各模块的指令和示例组用哪一种组合，质量最高。</p>
+        <p>组合太多，不能全试，就靠贝叶斯优化器给出一个采集函数（acquisition function，决定下一次试哪个组合的规则），帮助做出好的猜测。选定一个组合后，放进程序，在验证集的一个小批次上评估。比如数据集有 200 个例子，抽 30 个，得到一个分数，比如 75% 或 50%，再反馈给代理模型更新它。他说分数会受小批次随机性影响。采集函数要的性质比如“希望后续提案带来最有希望的提升”，可以有很多种选择。幻灯片第 70 到 76 页演示：Trial 1 选“Instruction 1.A、Demo Set 1.B、Instruction 2.C、Demo Set 2.A”得 75%，Trial 2 得 50%，Trial 3 得 80%；每隔 N 次试验在完整验证集上评估一次；最后返回得分最高的程序。</p>
+        <p>他说要点是这个过程会越来越聪明，它提出的组合分数会随时间上升，而随机搜索只是一直在随机试组合。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. LangProBe 上的对比结果</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=3343s" target="_blank">0:55:43</a>–0:58:50</em></p>
+        <h3>为什么需要一个程序级基准</h3>
+        <p>前面看过“优化 vs 不优化”和“人手写提示”的对比，他说把不同优化器放在一起比也很有用，但很难：需要有代表性、足够难、没有被某些模型过拟合的任务，还要能在上面搭出有意思、贴近现实的复合系统来优化。他说这里需要更多人贡献。他们的尝试是 LangProBe（Language Model Program Benchmark），包含多跳问答、分类、推理等任务，有的程序一个模块，有的两个，有的四个。幻灯片写着结果是 5 次运行的平均，加粗表示显著高于第二名（Wilcoxon 符号秩检验，p &lt; .05）。</p>
+        <h3>只优化指令</h3>
+        <p>先看只优化指令的几种方法：不带 grounding 的模块级 OPRO、带 grounding 的模块级 OPRO、以及不允许用例子只用指令的 0-shot MIPRO。他说第一眼能看到，平均而言，优化指令比用 adapter 的基础签名能提高不少，有的任务几分，有的任务一大截。有时训练集太小会过拟合，反而更差。总体上只靠指令优化在很多任务上很吃力，也看不出哪种指令提案方法明显最好（幻灯片第 81 页：指令提案还没有明显最优的做法）。</p>
+        <h3>优化示范</h3>
+        <p>优化示范的结果很不一样，可以直接涨 10 个点，好几处涨几个点，也有一处过拟合。幻灯片第 82 页的标题是“优化自举出来的示范是关键”。</p>
+        <p>他说有意思的是，看“对自举示范做随机搜索”的内部过程，不同示范组合之间的差别大得惊人：有的组合比初始的零样本还差，有的在前沿上好很多，而它们都是用同一种方式（跑程序、做拒绝采样）生成的。为什么选哪些示范影响这么大，幻灯片说这是未来的研究方向。</p>
+        <h3>两者一起：MIPRO</h3>
+        <p>用 MIPRO 同时优化少样本示例和指令，大多数时候能拿到最好结果，在不少任务上有明显提升。他说优化示例往往是赢家，但有一类模式是专注指令优化带来的改进更明显：任务里有条件性的规则，看一两个例子学不全，因为情况比例子能覆盖的多，或者规则生效的精确阈值、精确范围单靠例子看不清楚。幻灯片第 79 页把这写成假设：在有多条条件规则、无法用固定数量少样本例子完整表达的任务上，指令更重要；第 85 页说这种影响在有很多孤立条件规则的任务上更明显。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 结论：自然语言编程、自然语言优化、开放研究</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=3530s" target="_blank">0:58:50</a>–1:04:58</em></p>
+        <h3>第一组教训：自然语言编程</h3>
+        <p>他说复合 AI 系统的大教训是：程序往往比单独的神经网络、单独的模型更准确、更可控、更透明，甚至更高效。你只需要声明式的程序，不需要实现细节，不必坐下来写 1 万个 token、五个提示；写 10 行代码，表达目标，选一个优化器，在你喜欢的模型上跑。高层优化器能自举提示（或权重，或下一个范式要处理的东西）。它们单次提案平均来说很差，但大规模搜索能找到在很多情况下超过手工的结果。</p>
+        <p>他说真正的力量在于：你不用再操心每个模块怎么调，就能更直接地探索复合系统的设计空间，从迭代模块、模块之间怎么连、到底要最大化什么目标（很多时候并不明显）中获得价值。幻灯片第 88 页把 DSPy 的替换关系写成三行：手写提示换成 Signatures；提示技巧和提示链换成 Modules；手工提示工程换成优化后的程序。他也吐槽了一句：chain of thought 到底是什么，其实很模糊。幻灯片给的代码示例：</p>
+<pre><code>qa = dspy.Predict("question -> answer")
+mt = dspy.ChainOfThought("english_document -> french_translation")
+rc = dspy.ProgramOfThought("contexts, question -> answer_found: bool")
+Optimizer(metric).compile(program, dataset)
+</code></pre>
+        <h3>谁在用</h3>
+        <p>所有资料和论文链接都在 dspy.ai，可以直接 pip install。幻灯片列出的使用方有 JetBlue、Databricks、Walmart、VMware、Replit、Haize Labs、Normal Computing、Sephora、Moody's 等。他说网站上有一份愿意公开表态的使用案例清单，从中能学到 DSPy 怎么用，也能看到哪些复合 AI 系统真的在部署、谁在部署、他们怎么优化。很多人上播客讲自己怎么为律所等客户优化系统。</p>
+        <h3>第二组教训：自然语言优化</h3>
+        <p>幻灯片第 91 页：</p>
+        <ol>
+            <li>单独看，在很多任务上，没有什么比自举出好的示范更有效，他称之为“show, don't tell”（展示，而非说教）。</li>
+            <li>在此之上生成好的指令是可行的，在有条件规则、而且规则范围难以察觉的任务上尤其重要。</li>
+            <li>但需要有效的 grounding 和显式的归因。</li>
+        </ol>
+        <p>他说 DSPy 最大的一点是把签名、优化器、adapter、指标、推理时策略彼此隔离开，这四五样东西都能独立迭代，又能和其他部分组合。如果有人做了一个基于强化学习的提示优化器，或者做了一个新的推理时策略作为 predictor，所有现有程序只要改一行代码，就可能在所有用例上看到提升，前提是你做得好。</p>
+        <h3>开放研究能不能再次引领 AI 进展</h3>
+        <p>最后一张幻灯片他说他很喜欢。课前有人跟他说，这门课很多讲者来自不发论文的大型闭源实验室，已经不算学术界了，而它们似乎在引领所有进展（他说自己也许也被算在里面，并且引以为豪）。他说 DSPy 的一个元目标，是让开放研究重新引领 AI 进展。开放研究的好处不在这一讲的范围里，他只讲 DSPy 在这里能起什么作用：进展会来自模块化。</p>
+        <p>幻灯片第 92 页写着：进展不在更大、更不透明的单个模型，也不在提示或合成数据上的临时技巧（他说那种技巧两周后模型一换就不灵了）；它在于范围清楚的程序、更好的推理时策略、优化模型使用方式的新方法。他说不需要大家去筹钱跑十亿美元的训练，要研究的是怎样把程序划分好、怎样开发任何人都能套在自己签名上的通用推理时策略（predictor）、怎样设计能用于任何程序的新优化器，让系统强于各部分之和。他希望这能像神经网络那样分布式地推进：不同的人分别发明了 attention、Transformer、卷积等，这种方式很成功；而现在的大模型是在封闭方式下迭代。录像在这里结束。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“They are so fluent, in fact, that when they make mistakes, they can be incredibly hard to incredibly hard to detect.”<br>它们太流畅了，所以犯错时极难被发现。 · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=53s" target="_blank">0:00:53</a></li>
+            <li>“Fundamentally the monolithic nature of language models makes them particularly hard to control when we're building systems, to debug when they do make mistakes, and to improve when we want to iterate on the development of our systems.”<br>语言模型的单体性质，让我们在搭系统时难以控制它，出错时难以调试，想迭代时难以改进。 · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=102s" target="_blank">0:01:42</a></li>
+            <li>“We do know how to iteratively and controllably build systems and improve them in a modular way. And that sort of elusive concept is called programming.”<br>我们其实知道怎样迭代地、可控地搭建系统并模块化地改进它，这个难以捉摸的概念叫编程。 · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=766s" target="_blank">0:12:46</a></li>
+            <li>“Language models are going to give you 20 different things and, you know, 19 of them are going to suck, but because we can try so many and we can explore that space to varying level levels of intelligence, we can basically strike gold fairly often.”<br>语言模型给你 20 个东西，19 个会很烂，但因为我们能试很多次、能以不同程度的智能去探索，常常能挖到金子。 · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=2013s" target="_blank">0:33:33</a></li>
+            <li>“He applied DSPy in 10 minutes and it sort of outperformed his best system by 40 to 50%.”<br>他用 DSPy 花了 10 分钟，结果比他最好的系统高出 40% 到 50%。 · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=2187s" target="_blank">0:36:27</a></li>
+            <li>“If you had to pick one prompt optimization tends to be more powerful.”<br>如果只能选一个，提示优化往往更强。 · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=2396s" target="_blank">0:39:56</a></li>
+            <li>“You can really write 10 lines of code, just express an objective, and pick an optimizer, and run this thing on your favorite language model.”<br>你真的可以只写 10 行代码，表达一个目标，选一个优化器，在你喜欢的语言模型上跑。 · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=3530s" target="_blank">0:58:50</a></li>
+            <li>“The biggest coolest thing in DSPy is that we've isolated signatures from optimizers, from adapters, from you know, metrics, and basically and from inference time strategies.”<br>DSPy 最酷的地方，是把签名和优化器、adapter、指标以及推理时策略隔离开了。 · <a href="https://www.youtube.com/watch?v=JEMYuzrKLUw&t=3702s" target="_blank">1:01:42</a></li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>Berkeley RDI LLM Agents MOOC · Compound AI Systems &amp; the DSPy Framework · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sida Wang：大模型基准里可预测的噪声 | Berkeley LLM Agents MOOC 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="30_Noam_Brown_多智能体AI.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">Berkeley LLM Agents MOOC 目录</a> · 31</span>
+    <span><a href="33_Clay_Bavor_部署真实智能体的经验.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Sida Wang：大模型基准里可预测的噪声</h1>
+        <p class="subtitle">代码和智能体基准越做越难、题量越来越小（HumanEval 只有 164 题），难题能不能弥补题少；逐题结果的探索性数据分析；超总体视角下的标准误、配对检验、多次采样的总方差分解；Eval-Arena 在所有模型对上算出的噪声水平，SE(A) 和 SE(A−B) 差不多、单题正确率服从 Beta 分布；读表、读图、跑代码三种实用做法；用负相关题目审计数据集，以及“模型翻倍”的信噪比</p>
+        <div class="author-meta">
+            主讲：Sida Wang（Meta）· 课程：Berkeley CS294/194-196 Agentic AI（2025 年秋季）· 上课日期：2025 年 10 月 27 日 · 时长：44 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=HV8pugcFVO0" target="_blank">课堂录像</a> · <a href="https://agenticai-learning.org/slides/PredEval.pdf" target="_blank">幻灯片</a>（Berkeley RDI 公开，2025 年秋季，本文依据录像字幕和幻灯片整理，是中文转述，不是逐字翻译；观点属于主讲人，内容以上课当天为准）
+        </div>
+    </header>
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>Sida Wang 是 Meta FAIR 的研究科学家，博士导师是 Percy Liang。他 2016 年在 Berkeley 讲过用 marginal likelihood 从人类反馈中学习，这是他第二次来。近几年他做代码 LLM，参与或部分负责过不少基准，幻灯片上列出 SWE-bench M、Spider 2.0、LiveCodeBench、SAFIM、CRUXEval、DS-1000，方法工作有 AST-FIM、SWE-RL、eval-arena、LEVER、Coder-reviewer、InCoder、MBR-exec；最近在做 CWM（Code World Model），一个用于代码生成研究的开放权重模型，其中有针对 SWE-bench 的智能体 RL。幻灯片第一页的标题是 “Predictable Noise and patterns from millions of questions”，数据贡献者有 Sean O'Brien、Alex Gu、Lovish Madaan、Dieuwke Hupkes、Jiawei Liu、Yuxiang Wei、Naman Jain、Yuhang Lai、Sten Sootla。</p>
+        <p>这一讲不介绍具体基准（他说这门课前面已有专门讲基准的课），他要回头审视基准本身：现在的基准题量小，论文里报告的几个百分点的提升到底算不算数；难而长的题目能不能弥补题量小；评测噪声有多大、为什么在不同模型和数据集上可以预测；做评测的人该怎么用这些结果。录像只有 44 分钟，最后因时间不够收得很快，没有问答。字幕里不少名字被听错（CRUXEval 听成 Crocol，MBPP 听成 BPP、MVP，SWE-Fixer 听成 three fixer），本文按幻灯片改正。</p>
+        <ol>
+            <li><a href="#t01">研究背景，以及基准越来越难也越来越小</a> · <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">难题能不能弥补题少：逐题结果的探索性分析</a> · <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=261s" target="_blank">0:04:21</a></li>
+            <li><a href="#t03">不一致性和单题成功概率：小基准仍然不可靠</a> · <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=662s" target="_blank">0:11:02</a></li>
+            <li><a href="#t04">统计基础：超总体、标准误、配对检验</a> · <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=984s" target="_blank">0:16:24</a></li>
+            <li><a href="#t05">多次采样、总方差分解和其他检验方法</a> · <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=1423s" target="_blank">0:23:43</a></li>
+            <li><a href="#t06">Eval-Arena 的结果：噪声可以预测，正确率服从 Beta 分布</a> · <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=1788s" target="_blank">0:29:48</a></li>
+            <li><a href="#t07">实用建议：怎样给自己的结果估噪声</a> · <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=2244s" target="_blank">0:37:24</a></li>
+            <li><a href="#t08">审计数据集和模型，以及信噪比</a> · <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=2394s" target="_blank">0:39:54</a></li>
+        </ol>
+    </section>
+    <section id="t01">
+        <h2>01. 研究背景，以及基准越来越难也越来越小</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=0s" target="_blank">0:00:00</a>–0:04:21</em></p>
+        <h3>自我介绍</h3>
+        <p>他先从研究经历讲起。第一次在 Berkeley 讲的是用 marginal likelihood（边际似然）从人类反馈中学习，这个技术出自他的博士导师 Percy 那里。他说这是 RL 的一种替代，没有 RL 那样对探索的强调；又因为目标里取了对数，模型必须在每一个样本上都做好。当时做这件事没有预训练。后来他觉得代码 LLM 很强，可能是通向更好 AI 的路，以前做“语言到程序”，现在做代码 LLM，也部分负责了这个领域的一批基准，最近在 code world model 项目上做智能体 RL。</p>
+        <h3>为什么要反思评测</h3>
+        <p>他说做基准时大家都很忙，考虑的是基准有没有效、质量如何，很少有人回头反思。他拿深度学习早期对比：当年在 ImageNet 上好 10%，数据集那么大，没有人会怀疑这个方法有效。统计显著是这种“不再怀疑”的必要条件。现在则是在更复杂的生成式或智能体基准上，很多论文报告的提升很小（幻灯片举例：HumanEval 上 2% 到 10%，SWE-bench 上几个百分点），用传统统计显著性的标准看，很多提升明显不显著。幻灯片上的旧答案是：HumanEval 上 2.5% 的差距在统计上不显著。</p>
+        <p>他说基准在变难，也在变小。幻灯片上的测试集大小：</p>
+        <table>
+            <thead><tr><th>类别</th><th>基准和题量</th></tr></thead>
+            <tbody>
+                <tr><td>深度学习时代</td><td>MNIST 1 万，ImageNet 10 万</td></tr>
+                <tr><td>LLM 多选题</td><td>MMLU 约 1 万</td></tr>
+                <tr><td>生成式、用测试判对错（生成一个短程序）</td><td>HumanEval 164，MBPP+ 378，CRUXEval 800，DS-1000 1000，DMC 165，LiveCodeBench 约 1000，Aider 225</td></tr>
+                <tr><td>智能体评测（常需要 10 万以上 token）</td><td>SWE-bench 2.3k，Verified 500，Lite 300，Multimodal 517；Terminal-Bench 80</td></tr>
+            </tbody>
+        </table>
+        <p>HumanEval（OpenAI 发布的 Python 函数补全基准，每题给函数签名和说明，用单元测试判对错）是这个领域的标志性基准，只有 164 题。他自己参与的 CRUXEval、DS-1000，以及 LiveCodeBench，都尽量做到 1000 题左右，仍比以前小得多。SWE-bench（让模型修 GitHub 仓库里真实 issue 的基准）各个版本和 Terminal-Bench 这类智能体评测，常常要几十万 token、跑几个小时，题量也在几百这个量级。</p>
+    </section>
+    <section id="t02">
+        <h2>02. 难题能不能弥补题少：逐题结果的探索性分析</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=261s" target="_blank">0:04:21</a>–0:11:02</em></p>
+        <h3>反方观点：每道题的信息量更大</h3>
+        <p>他先替小基准说话。现在每道题要生成大量文字、代码或智能体轨迹，然后用测试来判，直觉上这比判断题、多选题或分类题信息更多。人类考试也是这样：顶级智力竞赛题很少但答案很长，IMO 6 道题，大学生的 Putnam 12 道题，难度有梯度。幻灯片上的附注是：人和人之间可能还比较相似。</p>
+        <p>再往极端走：如果解决了一个重大开放问题，只要解决一个就够了，没人会说“你只解决了一道题，统计上不显著”。日常的智能体任务，比如修 issue、找 bug、vibe coding，以及其他领域的很多任务，在经济上更重要。</p>
+        <p>于是他提出两个选项：</p>
+        <ul>
+            <li>A：小基准不可靠，即使里面有一些难的生成式或智能体题目；</li>
+            <li>B：解出一道难题本身就可能很有意义，所以可以而且应该用小而很难的基准。</li>
+        </ul>
+        <h3>逐题热力图</h3>
+        <p>很多排行榜会公开每个模型在每道题上的结果，或者可以自己跑评测套件拿到逐题数据。他画的图是这样的：每一列是一个模型，按它在该基准上的平均 pass@1 从左（最好）到右（最差）排；每一行是一道题，从上（最容易）到下（最难）排；颜色是这个模型在这道题上的 pass@1，尽可能用 10 次以上采样来估。pass@1 指模型只尝试一次就答对的概率。</p>
+        <p>第一张是 MATH-500 加 chain-of-thought（让模型先写出推理步骤再给答案）。图上能看出清楚的趋势：有容易题和难题，有好模型和差模型，中间有一条比较陡的过渡带。接着他展示了 HumanEval（分界没那么清楚）、MBPP，以及 SWE-bench Verified 和 LiveCodeBench。前两者的颜色有渐变，因为每题有多次采样，黄色大约表示五成概率答对；后两个是别人汇总的外部结果，只有一次二元预测。SWE-bench 排行榜是最全的之一，有超过 100 个模型加智能体参加；LiveCodeBench 的第一作者现在也在 Berkeley。即使只有二元结果，也能看出容易题、难题和没有任何模型解出的题。</p>
+    </section>
+    <section id="t03">
+        <h2>03. 不一致性和单题成功概率：小基准仍然不可靠</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=662s" target="_blank">0:11:02</a>–0:16:24</em></p>
+        <h3>大量不一致</h3>
+        <p>从热力图能直接看出一点：结果很不一致。在 HumanEval 上，最左边的最好模型有时会在容易题上失败；一些相当差的模型，总体只有百分之二三十的正确率，却能做对一些挺难的题。他的解读是，这些基准里的题目可能没那么特别，差模型也有机会做对，只是概率低一些。</p>
+        <p>回到问题：能不能用难而长的题来弥补统计功效的不足？他说某些情况下可以，但看到这种不一致就应该很警惕。幻灯片上画了三条线：</p>
+        <ul>
+            <li>基线模型，做对一部分题；</li>
+            <li>“严格更好”的模型，基线做对的它都做对，还多做对了一些，那多出来的也许真是很难、很有意思的题，可能意义很大；</li>
+            <li>现实更像第三条，“有时更好”：总体好一点或差不多，有些题比基线好，有些题反而更差。</li>
+        </ul>
+        <p>他的类比是：如果有人写出了一份又难又长的 P≠NP 证明，却说不出 NP 是什么、不懂一些基本概念，你会怀疑他是从哪儿抄来的。真正的开放问题无处可抄，但基准里的题目是有可能抄到的。</p>
+        <h3>单题成功概率</h3>
+        <p>另一个角度是看模型做对某一道题的概率。他放大了热力图的一角：第 134 题只有一些很好的模型能稳定做对。他们对每道题抽了大约一千个样本（幻灯片截图上显示 count=1100），一些总体最差的模型仍有不小的机会做对：截图里的例子是 qwen2-72b-instruct，总体 pass@1 约 0.48，在这道题上 pass@1 约 0.32，他说大约 30%。其他模型可能不到 1% 或 10%。</p>
+        <p>幻灯片上写：红色格子不是确定的 0，只是概率较低。如果一个弱得多的模型也有一定概率解出，这道题就不可能是很难的开放问题。他说一旦模型对一道题有一定概率做对，把它变得更可靠也许没那么了不起，第一个 1% 才最难得。对于可验证的题目，比如验证比求解容易的证明，只要有不错的成功概率，就可以反复尝试再验证，稍加辅助就能提高可靠性，并不需要多少真本事。</p>
+        <p>他的结论是：至少就现有的基准而言，小基准仍然不可靠，即使看起来包含一些很难的智能体题目。幻灯片上 B 选项被划掉了。</p>
+        <h3>水壶的例子</h3>
+        <p>他举了个生活例子：他家烧水壶坏了，拆开拍照问模型哪里出了问题，模型说这看起来是个机器人吸尘器。之后它给的建议也许仍然对，但他会信得少很多。难题往往有很多步，如果每一步都有固定的出错概率，出错概率会随步数指数增长，所以一个容易出错的模型很难解出难题。有时它能跳过去，碰巧答对，但你会更不信任它。所以统计分析现在仍然重要。</p>
+    </section>
+    <section id="t04">
+        <h2>04. 统计基础：超总体、标准误、配对检验</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=984s" target="_blank">0:16:24</a>–0:23:43</em></p>
+        <h3>从超总体中抽题</h3>
+        <p>他说这部分在统计课本里都有，Evan Miller 2024 年的论文（这门课把它列为阅读材料）在评测语境里讲得很清楚，他这里换了一套记号，方便后面讲多次采样。核心概念是“超总体”（super-population）：基准里的题被看作从一个更大的题目分布中抽出的样本，我们关心的是模型在整个分布上的表现。</p>
+        <p>设 $x_i$ 是第 $i$ 道题，共 $N$ 道。模型 $A$ 在每道题上返回 $A(x_i)$，最常见是 0（错）或 1（对）。基准报告的是平均值：</p>
+        <p>$$\bar{A} := \frac{1}{N}\sum_{i=1}^{N} A(x_i) \approx \mathbb{E}_x[A(x)]$$</p>
+        <p>从估计的角度，这组题只是同一分布的一个代表，可以用这 $N$ 个样本估计总体方差，再得到均值的标准误（standard error，SE，即如果换一批同分布的题重考，平均分会波动多少）：</p>
+        <p>$$\mathrm{Var}_x[A(x)] \approx \frac{1}{N}\sum_{i=1}^{N}\left(A(x_i)-\bar{A}\right)^2, \qquad \mathrm{SE}(A) = N^{-1/2}\cdot \mathrm{Var}[A]^{1/2}$$</p>
+        <p>标准误比总体标准差小 $1/\sqrt{N}$ 倍。总体方差可以看作大致不变：0/1 变量的方差最大是 1/4，通常更小。所以不需要任何数据，就已经有了标准误的上界。</p>
+        <h3>配对比较</h3>
+        <p>我们真正想知道的是模型 B 是否比模型 A 好。他说这部分“免费”，只是更好的分析，数据已经都有了：与其分别算 $A$ 的方差，不如直接算 $A(x)-B(x)$ 的方差。对 0/1 结果，差值取 −1、0、1。</p>
+        <p>$$\mathrm{Var}_x[A(x)-B(x)] = \mathrm{Var}_x[A] + \mathrm{Var}_x[B] - 2\,\mathrm{Cov}_x[A(x),B(x)]$$</p>
+        <p>两个模型在同一组题上作答，结果相关。如果 A 和 B 几乎完全相关，协方差项能把配对方差压到接近 0。</p>
+        <h3>z 分数和显著性</h3>
+        <p>有了标准误，把均值差除以它得到 z 分数：</p>
+        <p>$$z = \frac{\bar{A}-\bar{B}}{\mathrm{SE}(A-B)}$$</p>
+        <p>按理论 $z$ 服从标准正态分布（只要样本量足够大，现在所有评测都满足）。幻灯片给的数：$\Pr[|z|>1]=0.32$，很弱，偏离一个标准误很容易纯属偶然；$\Pr[|z|>5]<10^{-6}$，基本没有疑问；常规标准是 $\Pr[|z|>1.96]=0.05$，也就是 5% 的 p 值。</p>
+        <h3>HumanEval 的例子</h3>
+        <p>HumanEval 有 164 题。设模型准确率 $\bar{A}=0.5$，每个模型的标准误约 4%。不配对时，要达到 0.05 的 p 值需要约 $4\% \times \sqrt{2} \times 1.96 = 10.8\%$ 的差距；用配对检验，差值的标准误通常仍是 4% 左右，需要约 $4\% \times 1.96 = 7.84\%$。这两个数都比很多论文报告的提升大。</p>
+        <p>他给的直觉：不配对就像 A 考今年的卷子得 50%，B 考去年的卷子得 60%，两份卷子题目不同但出自同一分布，B 高分可能只是去年的题简单；配对则是 B 和 A 考同一份卷子，这时同样 10% 的差距就更有说服力。配对利用了“题目相同”这一信息，当然如果能达到不配对的更高标准也可以。</p>
+    </section>
+    <section id="t05">
+        <h2>05. 多次采样、总方差分解和其他检验方法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=1423s" target="_blank">0:23:43</a>–0:29:48</em></p>
+        <h3>两种噪声</h3>
+        <p>LLM 有一个人类没有的能力：能独立地多次作答，推理模型和智能体尤其如此。人解过一道题就忘不掉，没法重新尝试。他说常见的误解是以为评测噪声只来自 LLM 每次给出不同答案；按超总体理论，结果对“选了哪些题”敏感也是一种噪声，而且可能是更重要的那种。</p>
+        <p>记号上，除了题目变量 $x$，再加一个生成噪声的随机种子 $\epsilon$，与题目独立。对每道题采 $K$ 个样本，平均分和方差为：</p>
+        <p>$$\bar{A} = \frac{1}{N}\sum_{i=1}^{N}\frac{1}{K}\sum_{j=1}^{K} A(x_i,\epsilon_{ij}) \approx \mathbb{E}_{x,\epsilon}[A(x,\epsilon)]$$</p>
+        <p>$$\mathrm{Var}_{x,\epsilon}[A(x,\epsilon)] \approx \frac{1}{N}\sum_{i=1}^{N}\frac{1}{K}\sum_{j=1}^{K}\left(A(x_i,\epsilon_{ij})-\bar{A}\right)^2$$</p>
+        <p>总方差满足全方差公式（law of total variance），分成两部分相加：</p>
+        <p>$$\mathrm{Var}_{x,\epsilon}[A] = \mathrm{Var}_x\big[\mathbb{E}_\epsilon[A]\big] + \mathbb{E}_x\big[\mathrm{Var}_\epsilon[A]\big]$$</p>
+        <p>第一项是数据方差：对每题先在采样噪声上取平均，再看换题带来的波动。第二项是模型方差：同一道题多次采样带来的波动。三者都可以归一化成标准误：$\mathrm{SE}(A)=N^{-1/2}(\mathrm{Var}_{x,\epsilon}[A])^{1/2}$，$\mathrm{SE}_x(A)=N^{-1/2}(\mathrm{Var}_x[\mathbb{E}_\epsilon[A]])^{1/2}$，$\mathrm{SE}_\epsilon(A)=N^{-1/2}(\mathbb{E}_x[\mathrm{Var}_\epsilon[A]])^{1/2}$。</p>
+        <p>配对时对 $A-B$ 同样分解：</p>
+        <p>$$\mathrm{Var}_{x,\epsilon}[A-B] = \mathrm{Var}_x\big[\mathbb{E}_\epsilon[A-B]\big] + \mathbb{E}_x\big[\mathrm{Var}_\epsilon[A-B]\big]$$</p>
+        <p>幻灯片上还写了可直接从样本计算的形式 $\mathrm{Var}_{x,\epsilon}[A]+\mathrm{Var}_{x,\epsilon}[B]-2\,\mathrm{Cov}_x[\mathbb{E}_\epsilon[A],\mathbb{E}_\epsilon[B]]$：由全协方差公式，协方差里的 $\mathbb{E}_x[\mathrm{Cov}_\epsilon[A,B]]$ 一项为 0，因为不同的随机采样相互独立。之后同样算 z 分数。他说不必记住全部细节，他推导、核对过，并在大量实际数据上检验，别人可以直接用结果。</p>
+        <h3>“0.8 概率做对”带来的怪现象</h3>
+        <p>多次采样的能力也会带来奇怪的情况。他的例子有 8 道题：模型 A 总体不怎么样，每题都有 10% 的概率做对；模型 B 前四题 100% 做对，后四题 0%。用 RL 最大化期望奖励时就可能出现这种情况：期望奖励上去了，能解出的题的集合反而缩小。平均来看 B 好得多，但哪个更好并不清楚：如果有验证器在环里能纠正错误，比如搜索问题或证明，A 反复尝试后能 100% 成功，A 其实更好。幻灯片上还有前半个例子：若每题 $\mathbb{E}_\epsilon[A]=0.6$、$\mathbb{E}_\epsilon[B]=0.8$，B 的提升很容易显著，但这种提升也可能靠多数投票、验证或者让分布更尖锐就能得到。</p>
+        <h3>用简单的数组运算就能算</h3>
+        <p>这些量都只是均值和方差的估计（修正偏差会多一点复杂）。他特别说不需要用 bootstrap，bootstrap 本身没问题，但答案明明就是 $p(1-p)$ 时还说“我们用 bootstrap 算一下”，显得没想清楚，而且文献里有很多 bootstrap 用错的例子。幻灯片把公式翻译成了代码，$A$ 是 $N\times K$ 的数组，每题 $K$ 个样本：</p>
+        <pre><code># A, B: arrays of shape (N, K), N questions, K samples per question
+# unpaired
+total_var = var(A)                     # Var_{x,eps}[A];      Bernoulli: p_bar * (1 - p_bar)
+data_var  = var(mean(A, axis=1))       # Var_x[E_eps[A]];     Bernoulli: (1/N) * sum_i (p_i - p_bar)^2
+model_var = mean(var(A, axis=1))       # E_x[Var_eps[A]];     Bernoulli: (1/N) * sum_i p_i * (1 - p_i)
+# paired (with bias)
+total_var_diff = var(A) + var(B) - 2 * cov(mean(A, axis=1), mean(B, axis=1))
+data_var_diff  = var(mean(A, axis=1) - mean(B, axis=1))
+model_var_diff = mean(var(A, axis=1) + var(B, axis=1))</code></pre>
+        <h3>其他理论给出差不多的答案</h3>
+        <p>让人放心的是，几套成熟的方法结果基本一致：</p>
+        <ul>
+            <li>Bootstrap：从实际拿到的样本（经验分布）中有放回地重抽，近似于从看不见的超总体里再抽题，这样估出来的结果基本相同。</li>
+            <li>符号检验（sign test）：零假设是凡是 A 和 B 结果不同的题，各有 50% 的机会是谁更好，问这个随机模型得到和观测一样极端的结果的概率。只要 A 和 B 水平差得不太远，结果也差不多；差得远的话本来就已经统计上不同了。</li>
+        </ul>
+    </section>
+    <section id="t06">
+        <h2>06. Eval-Arena 的结果：噪声可以预测，正确率服从 Beta 分布</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=1788s" target="_blank">0:29:48</a>–0:37:24</em></p>
+        <h3>在所有模型对上算</h3>
+        <p>他说这项工作的主要贡献是：把这些分析在他手里所有基准、所有模型对上都做一遍，看数字是否相当一致，这样就不必说“我的这对模型很特别”。这就是 Eval-Arena（结果页在 crux-eval.github.io/eval-arena）：对每个基准，把所有模型两两做统计检验，并取所有有意义的标准误（配对和不配对）的平均，最后每个数据集给出一组数。幻灯片上说，只要题目没有特殊性、模型在每道题上都有一定出错概率，就可以有意义地测出每个数据集的噪声；读者可以直接读 Eval-Arena 的数，不用指望论文作者自己做了检验。</p>
+        <h3>SE(A) 和 SE(A−B) 差不多</h3>
+        <p>一个直接的观察：配对检验的结果和不配对差不多。一种解释是模型之间的相关性大约 0.5。按不配对方法，比较两个模型时要先乘以 $\sqrt{2}$，功效更低；配对后的标准误则和单个模型的差不多。而单个模型的标准误基本可以直接从数据集上的准确率算出来，这让事情简单很多。幻灯片上的表（corr 为百分数）：</p>
+        <table>
+            <thead><tr><th>benchmark</th><th>题量</th><th>模型数</th><th>SE(A)</th><th>SE(A−B)</th><th>corr(A,B)</th></tr></thead>
+            <tbody>
+                <tr><td>CRUXEval-input-T0.2</td><td>800</td><td>37</td><td>1.7</td><td>1.8</td><td>56</td></tr>
+                <tr><td>CRUXEval-input-T0.8</td><td>800</td><td>31</td><td>1.6</td><td>1.8</td><td>69</td></tr>
+                <tr><td>CRUXEval-output-T0.2</td><td>800</td><td>37</td><td>1.7</td><td>1.6</td><td>64</td></tr>
+                <tr><td>CRUXEval-output-T0.8</td><td>800</td><td>31</td><td>1.7</td><td>1.6</td><td>75</td></tr>
+                <tr><td>DS1000</td><td>1000</td><td>105</td><td>1.3</td><td>1.5</td><td>46</td></tr>
+                <tr><td>agi_english</td><td>2546</td><td>35</td><td>0.93</td><td>1.1</td><td>25</td></tr>
+                <tr><td>arc_challenge</td><td>1165</td><td>38</td><td>1.4</td><td>1.3</td><td>62</td></tr>
+                <tr><td>gsm8k</td><td>1319</td><td>37</td><td>1.1</td><td>1.3</td><td>38</td></tr>
+                <tr><td>hellaswag</td><td>10042</td><td>36</td><td>0.41</td><td>0.26</td><td>77</td></tr>
+                <tr><td>humaneval</td><td>164</td><td>78</td><td>3.5</td><td>3.7</td><td>47</td></tr>
+            </tbody>
+        </table>
+        <h3>对总体准确率有较弱的依赖</h3>
+        <p>标准误对模型的总体准确率有一点依赖：准确率接近 0 或 1 时，标准误更低。依赖不强，但想多要一点精度的话，他给出了每个数据集上“标准误随准确率变化”的图。图里横轴是 acc(A)，纵轴是 SE(A−B)，每个点是一对模型；绿色虚线是把所有题当作独立时的预测，蓝色实线是后面要讲的 Beta 理论的预测。</p>
+        <ul>
+            <li>多数情况下，模型在该数据集上表现尚可时，点落在 Beta 理论的曲线上；模型很差时更接近独立的那条线。这对几乎所有数据集都成立（幻灯片举了 math500_cot 和 cruxeval_output_cot）。</li>
+            <li>MMLU 是多选题，所有模型都很差时随机猜也有 1/4 或 1/5 的正确率，所以那一段更像独立；模型变好后就符合 Beta 预测。LiveCodeBench 类似。</li>
+            <li>SWE-bench Verified 数据点更多，结果相同，更有信心。</li>
+            <li>他只见到一对离群点：SWE-Fixer 和加了 P2P 过滤的 SWE-Fixer。后者是严格改进，标准误低得多。</li>
+        </ul>
+        <p>他说这多少让人放心，说明这不是什么普适现象，只在测 LLM 时成立：这些 LLM 由不同的人用不同数据训练、配不同的智能体，但噪声行为相似。</p>
+        <h3>为什么是这个水平：Beta 分布</h3>
+        <p>为了解释，他看每一档模型（从很差到最好）在各题上“做对概率”的经验分布，画成累积分布函数。结果是：去掉没有任何模型解出的真零题之后，可以用 Beta 分布拟合。Beta 分布是定义在 0 到 1 区间上的分布，两个参数之和为 1 时呈双峰（概率集中在 0 和 1 两端），参数之和更大时更接近单峰。模型表现足够好之后，分布的双峰性增强，参数通常大致相加为 1，也就是幻灯片上的 $\mathrm{Beta}(a, 1-a)$，这对应前面图里的蓝线预测。有了这个模型，不需要逐题结果就能预测噪声有多大。</p>
+        <p>这在多个数据集上都拟合得不错，包括 MMLU-Pro 加 chain-of-thought，以及预测更离散的 SWE-bench Verified：那里很多模型只有一次预测，经验分布呈阶梯状，但整体趋势仍然吻合。</p>
+        <h3>录像里没展开的一页：为什么没法“提升信号”</h3>
+        <p>幻灯片第 36 页（录像里没有展开）写的是一次失败：他原本想让现有基准噪声更小，但结论是不行。</p>
+        <ul>
+            <li>每道难题仍然只给 1 比特信息；模型表现噪声大、不可靠。差模型解出难题是记忆的间接证据，除非全是开放问题，否则总可能有记忆，即使声称“去重了所有 n-gram 重叠”。</li>
+            <li>对每道题的难度和错误建模拿不到多少信号，项目反应模型（Item Response Model）没比基线好；别人纠正题目错误的尝试也没带来可测的改进。</li>
+            <li>主观上质量较差的 MBPP，信噪比反而好于主观上质量更高的 HumanEval+；HumanEval+、MBPP+ 并不比原版更好。</li>
+            <li>结论：靠过滤或重新加权题目来提高信噪比希望不大，因为不一致性的更大来源是模型而非基准。建议在更多基准上报告结果；收集更大的数据集，或者至少在 SWE-bench 这类复杂昂贵的任务上，每道题收集多于 1 比特的信息。等模型没那么随机时再重新考虑。</li>
+        </ul>
+    </section>
+    <section id="t07">
+        <h2>07. 实用建议：怎样给自己的结果估噪声</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=2244s" target="_blank">0:37:24</a>–0:39:54</em></p>
+        <p>他提到其他测噪声的做法：用多个随机种子跑（幻灯片附了 arXiv 2406.10229），或者看训练曲线的方差。这些往往会低估噪声，幻灯片补充说多种子的做法仍可能得到显著结果，与这项工作兼容。</p>
+        <p>他的建议按精度递增、方便程度递减排列：</p>
+        <ol>
+            <li>只要一个大概数字：直接查表，每个数据集的标准误都列好了。</li>
+            <li>想再准一点：在“标准误随准确率变化”的图上，找到你的模型所在的准确率区间读数。</li>
+            <li>把你在每道题上的结果导出来，跑他的代码。代码会把你的这次比较放在所有其他模型对比较的背景里，如果出现奇怪的结果，你立刻就能看出来。幻灯片上加了一条：基准和排行榜的建设者应该公开完整的逐题结果。</li>
+            <li>自己做统计检验和计算也可以，但他说这相当容易出错，因为方差有好几种。</li>
+        </ol>
+    </section>
+    <section id="t08">
+        <h2>08. 审计数据集和模型，以及信噪比</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=2394s" target="_blank">0:39:54</a>–0:44:04</em></p>
+        <h3>找可疑题目</h3>
+        <p>他说噪声是他做得最深的部分，这类逐题数据还能做别的事。Eval-Arena 的其他功能（幻灯片）：噪声水平参考和信噪比；按 Elo、胜率、准确率给模型排名；找可疑题目；找可疑模型。</p>
+        <p>一种有意思的做法是看某道题的结果是否和模型总体表现负相关，也就是模型越好，这道题反而越容易错。很多数据集里都能找到这样的题，大多数并不是真的错题，但在 MBPP 上，一批负相关的题确实不一致或者答案错误。用这个方法他们在 MBPP 里找到了一些错误，后来被纳入 MBPP+。幻灯片补充说，他们在 MBPP+ 里也找到了更多错误和不一致。</p>
+        <h3>找可疑模型</h3>
+        <p>有了可疑题目，还可以找可疑模型：领先的、没作弊的模型会忽略评测集里那个错误的标准答案，但如果有个别模型在这道错题上给出的恰好是评测集里的那个答案，这类题多了，就能积累证据，判断哪些模型可能在评测数据上训练过。他说这部分更多是给基准建设者用的。</p>
+        <h3>信噪比</h3>
+        <p>前面讲的是噪声的绝对水平。更重要的问题是：用你的基准能测出多大的效应？很多模型发布时会出一个从小到大的系列，模型规模翻倍时的提升（按 scaling law 应当稳定）就是一个信号来源。幻灯片上的定义：信号是同一系列中模型大小翻倍带来的提升，噪声是统计检验隐含的标准差（和 bootstrap 一样），</p>
+        <p>$$\text{sig/noise} = \frac{|A-B|}{\mathrm{SE}(A-B)}$$</p>
+        <p>也就是 z 分数。信噪比小于 2 时，无法可靠测出模型翻倍带来的改进，幻灯片说多数代码基准都是这样，还会出现大模型反而更差的倒置。信噪比大致仍主要取决于题量，但偶有差异：MMLU 能很可靠地区分下一个更大的模型，而 HumanEval 这样的很多代码评测连模型翻倍都分不出来。简单多选基准的信噪比远好于复杂生成基准。幻灯片上的表：</p>
+        <table>
+            <thead><tr><th>benchmark</th><th>题量</th><th>sig/noise</th></tr></thead>
+            <tbody>
+                <tr><td>mmlu</td><td>14042</td><td>13.2</td></tr>
+                <tr><td>tqa</td><td>11313</td><td>12.6</td></tr>
+                <tr><td>gsm8k</td><td>1319</td><td>7.1</td></tr>
+                <tr><td>hellaswag</td><td>10042</td><td>6.4</td></tr>
+                <tr><td>nq</td><td>3610</td><td>5.9</td></tr>
+                <tr><td>agi_english</td><td>2546</td><td>5.1</td></tr>
+                <tr><td>CRUXEval-output</td><td>800</td><td>3.2</td></tr>
+                <tr><td>DS1000</td><td>1000</td><td>3.0</td></tr>
+                <tr><td>arc_challenge</td><td>1165</td><td>2.7</td></tr>
+                <tr><td>mbpp</td><td>378</td><td>1.9</td></tr>
+                <tr><td>CRUXEval-input</td><td>800</td><td>1.9</td></tr>
+                <tr><td>piqa</td><td>1838</td><td>1.7</td></tr>
+                <tr><td>lcb_codegen</td><td>400</td><td>1.6</td></tr>
+                <tr><td>mbpp+</td><td>378</td><td>1.6</td></tr>
+                <tr><td>humaneval</td><td>164</td><td>1.1</td></tr>
+                <tr><td>siqa</td><td>1954</td><td>0.93</td></tr>
+                <tr><td>humaneval+</td><td>164</td><td>0.50</td></tr>
+            </tbody>
+        </table>
+        <p>幻灯片还有一页按模型类别分的信噪比，以及一页讲 SWE-bench 的 issue #465：评测太复杂、动辄 10 万 token，大家都忙得没空看细节时就会出问题，这个问题由 @UniverseFly 发现，团队里另外几人一起排查。录像里这两页没有展开，他说时间到了，最后总结：他给出了查看所有逐题结果的方法，大部分精力放在刻画噪声有多大，也展示了从这些数据里获取其他信息的几种办法。</p>
+    </section>
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“If you look at the sizes, actually benchmarks are kind of getting harder but smaller.” 看一下题量，基准其实是越来越难，也越来越小。（<a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=130s" target="_blank">0:02:10</a>）</li>
+            <li>“This suggests to me that maybe the problems in these benchmarks are not that special.” 这让我觉得，这些基准里的题也许没那么特别。（<a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=626s" target="_blank">0:10:26</a>）</li>
+            <li>“One could argue that actually the first percent is very important.” 可以说，第一个百分点才是最重要的。（<a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=822s" target="_blank">0:13:42</a>）</li>
+            <li>“Hard problems may have many many steps and the probability of error will increase exponentially as the number of steps.” 难题可能有很多很多步，出错概率会随步数指数增长。（<a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=941s" target="_blank">0:15:41</a>）</li>
+            <li>“If you're sensitive to what exact questions are chosen, that's also a type of noise. In fact could be the more important type of noise.” 如果结果对具体选了哪些题敏感，这也是一种噪声，而且可能是更重要的那种。（<a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=1473s" target="_blank">0:24:33</a>）</li>
+            <li>“We see a lot of examples of people doing bootstrap incorrectly in the literature.” 我们在文献里看到很多 bootstrap 用错的例子。（<a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=1662s" target="_blank">0:27:42</a>）</li>
+            <li>“Many of the code evaluations like [HumanEval] cannot even distinguish doubling the model.” 很多代码评测，比如 HumanEval，连模型规模翻倍都区分不出来。（<a href="https://www.youtube.com/watch?v=HV8pugcFVO0&t=2582s" target="_blank">0:43:02</a>）</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>Berkeley RDI LLM Agents MOOC · Predictable Noise in LLM Benchmarks · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

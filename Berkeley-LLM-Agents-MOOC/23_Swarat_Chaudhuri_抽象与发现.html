@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Swarat Chaudhuri：LLM 智能体做抽象和发现 | Berkeley LLM Agents MOOC 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="22_Sean_Welleck_定理证明进阶.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">Berkeley LLM Agents MOOC 目录</a> · 23</span>
+    <span><a href="24_Dawn_Song_安全可靠的智能体AI.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Swarat Chaudhuri：LLM 智能体做抽象和发现</h1>
+        <p class="subtitle">数学发现和科学发现里 LLM 智能体能做什么：Copra 用前沿 LLM 加证明助手反馈做上下文学习式定理证明，再扩展成先写非形式解、拆子目标的分层证明（IMO 1959 第 1 题）和让 LLM 发明引理的编译器正确性验证；LaSR 在 PySR 式遗传编程里用 LLM 做变异、交叉并维护概念库，做符号回归，复现库仑定律、找出 LLM scaling law 的新形式</p>
+        <div class="author-meta">
+            主讲：Swarat Chaudhuri（UT Austin）· 课程：Berkeley CS294/194-280 Advanced Large Language Model Agents（2025 年春季）· 上课日期：2025 年 4 月 21 日 · 时长：1 小时 27 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=IHc0TEMrEdY" target="_blank">课堂录像</a> · <a href="https://rdi.berkeley.edu/adv-llm-agents/slides/swarat.pdf" target="_blank">幻灯片</a>（Berkeley RDI 公开，2025 年春季，本文依据录像字幕和幻灯片整理，是中文转述，不是逐字翻译；观点属于主讲人，内容以上课当天为准）
+        </div>
+    </header>
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>Swarat Chaudhuri 是 UT Austin 计算机系教授，做程序语言、形式方法和机器学习的交叉，他的实验室在幻灯片网址里叫 trishullab。录像从他开讲开始，没有课程事务，结尾他说可以提问，但录像里没有问答部分。字幕把他的系统 Copra 多处听成 Cobra 或 CoqProof，把 LaSR 听成 LASER，本文按幻灯片改正。</p>
+        <p>这一讲的主线是 LLM 作为数学发现和科学发现的工具，重点放在 LLM 发现抽象概念的能力上。他先提出四个思路：系统地搜索假设、猜想和证明的空间；用先验知识决定搜索方向；从经验中学怎么搜；发现抽象概念和工具，加快搜索和学习。然后分两部分讲：数学发现（Copra、分层证明、编译器验证），科学发现（符号回归、LaSR、scaling law）。前面两讲（Kaiyu Yang、Sean Welleck）讲的是形式化定理证明，这一讲的数学部分接着那条线，用的是更偏“智能体加提示”的做法。</p>
+        <ol>
+            <li><a href="#t01">数学发现和科学发现的流程，以及四个思路</a> · <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">只靠神经网络够不够</a> · <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=502s" target="_blank">0:08:22</a></li>
+            <li><a href="#t03">形式化表示、证明状态机和 AlphaProof</a> · <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=896s" target="_blank">0:14:56</a></li>
+            <li><a href="#t04">Copra：上下文学习式的定理证明智能体</a> · <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=1534s" target="_blank">0:25:34</a></li>
+            <li><a href="#t05">分层证明：先写非形式解，再拆子目标</a> · <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=2376s" target="_blank">0:39:36</a></li>
+            <li><a href="#t06">形式验证：证明一个小编译器是对的</a> · <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=2776s" target="_blank">0:46:16</a></li>
+            <li><a href="#t07">科学发现和符号回归</a> · <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=3578s" target="_blank">0:59:38</a></li>
+            <li><a href="#t08">LaSR：带概念库的符号回归</a> · <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=3963s" target="_blank">1:06:03</a></li>
+            <li><a href="#t09">LaSR 的实验、新 scaling law 和总结</a> · <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=4593s" target="_blank">1:16:33</a></li>
+        </ol>
+    </section>
+    <section id="t01">
+        <h2>01. 数学发现和科学发现的流程，以及四个思路</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=0s" target="_blank">0:00:00</a>–0:08:22</em></p>
+        <h3>数学发现是一个循环</h3>
+        <p>他说数学发现是人类最大的挑战之一，并把它描述成一个循环：</p>
+        <ul>
+            <li>建模（modeling）：受某个现实现象启发，用一组定义和概念把它描述出来；</li>
+            <li>猜想（conjecturing）：有了定义，就去猜这些定义有什么性质，得到候选定理和引理；</li>
+            <li>推理（reasoning）：严格证明这些命题。</li>
+        </ul>
+        <p>对人类数学家来说，这个过程本来就是社会性的，大家互相说服推理够不够严谨、猜想有没有价值。证明和反例又会反过来影响模型和猜想，循环一直继续，这就是数学史。AI for math 的愿景是把这个过程中相当大的部分自动化，从而加速它：既包括解决已知猜想，也可能提出新猜想。</p>
+        <h3>科学发现</h3>
+        <p>自然科学和数学的区别是要和真实世界打交道。流程是：提出关于世界的假设（理论构建），用假设设计实验，做实验验证；实验产生新数据，新数据再带来新理论，可能是修正已有假设，也可能是全新的概念和预测。AI for science 的目标是把假设生成和实验设计自动化。</p>
+        <h3>四个思路</h3>
+        <p>他认为目前 AI for math 和 AI for science 的核心思路有四条：</p>
+        <ol>
+            <li>搜索。想象出假设、猜想、证明所构成的空间，系统地搜索。这个空间显然是无限的。</li>
+            <li>用先验知识决定优先搜哪些方向。人也是这样做的：读已有论文，有时一点点往前推，有时大跨一步，但先验知识一直有用。</li>
+            <li>从经验中学习怎样搜、怎样不该搜。建理论时做的某些选择最后行不通，这就是经验，之后可以据此换全新的方向。</li>
+            <li>发现抽象概念和工具。微积分发明后大大加快了科学进展，代数也是如此，他说数学的主要分支几乎都来自抽象某种现实过程的需要。抽象的价值在于同时加快搜索和学习。</li>
+        </ol>
+        <p>他说 LLM 在每一条上都能出力。在很大的科学假设空间里搜索时，LLM 内部有大量关于“历史上什么样的假设往往管用”的知识，可以引导搜索。课上见过的 LLM 智能体以 LLM 为模块，同时和世界交互、从经验中学习，经验以数据形式收集，常常放进提示，有时也会用强化学习等方式改权重。用 LLM 做抽象则是还没被充分探索的新想法，他会给出一些证据。这一讲的智能体用的算法差别很大，但都体现了上面这些思路。</p>
+    </section>
+    <section id="t02">
+        <h2>02. 只靠神经网络够不够</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=502s" target="_blank">0:08:22</a>–0:14:56</em></p>
+        <h3>近年的进展</h3>
+        <p>他先引用 Terence Tao 2023 年的话：当年的 AI 已经能给出有启发的提示、帮助数学工作；Tao 预测到 2026 年，AI 能在数学和其他领域的研究论文中成为可信的合作者。他说 2026 年还没到，但这个预测现在看很有可能成立。</p>
+        <p>具体系统方面，OpenAI o1 发布时的亮点之一是竞赛数学，和 GPT-4o 相比，在 AIME 2024 上的准确率大幅提高。去年他在 Google DeepMind 的同事做出的系统在 IMO 达到银牌水平（即 AlphaProof），课上已经有专门一讲，他不再细讲。</p>
+        <h3>纯 LLM 路线</h3>
+        <p>他提出一个问题：是不是只靠 LLM 就能全部做到，还是需要把 LLM 和行动等额外机制结合起来？后者就是 LLM 智能体区别于基础 LLM 的地方。他说仍有人相信只用语言训练的 LLM 就能做到一切，他本人对此有点怀疑。</p>
+        <p>他也承认纯 LLM 这两年进步很大。幻灯片上是数学 LLM 的典型训练流程（引自 NuminaMath 赢得第一届 AIMO 进步奖的报告）：预训练 LLM → 在数学相关网页上继续训练得到基础数学模型 → 用带逐步解答的题目微调 → 用带工具调用解答的题目训练，最后得到会调用 Python（比如 sympy）解题的模型。他又展示了 o1 对 Putnam 2024 A2 题的回答，说它相当合理，而且这类系统能解的同等难度或更难的题越来越多。</p>
+        <h3>纯神经路线的两个弱点</h3>
+        <ul>
+            <li>数据稀缺。要做严格的数学推理，而不只是给定义良好的问题算出答案，需要大量高质量的推理轨迹，或者高质量的奖励函数。超出高中或竞赛范围，靠人产出的数据很难得到这些。</li>
+            <li>缺乏可验证性。自然语言推理很难验证。有些场景，比如对现实系统做数学推理、系统行为有真实后果时，边界情况很要紧，推理必须稳健严格，而纯语言的神经推理往往做不到。</li>
+        </ul>
+        <p>幻灯片上把“扩大规模能否解决这些问题”列为开放问题。他说完全有可能，但他有点怀疑。这一讲要展示另一条路：和 AlphaProof 很多地方相似，但更偏 LLM 智能体做法。</p>
+    </section>
+    <section id="t03">
+        <h2>03. 形式化表示、证明状态机和 AlphaProof</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=896s" target="_blank">0:14:56</a>–0:25:34</em></p>
+        <h3>两个阶段</h3>
+        <p>这条路用形式化表示，已经有一整批文献。第一阶段是自动形式化（autoformalization）：把非形式的题目陈述翻译成 Lean、Coq 或 Isabelle 这类语言里的形式陈述。AlphaProof 用的是 Lean，其他框架也有很长历史。第二阶段把形式陈述交给神经证明器，它生成一串步骤，也叫 tactic，一条条应用，最后到达 QED，没有剩下要证的东西。</p>
+        <p>形式框架的好处是证明能像代码一样一步步写出来，而且能被检查：可以确认写出的证明确实推出了开始那条定理。对前面说的验证难题，证明助手能比较容易地解决；对数据难题，训练时可以合成大量候选证明，并立即得到对错反馈，把证明这件难事变成一种博弈任务，可以用某种强化学习去做，AlphaProof 就是这么做的。他说也可以走更偏 LLM 的路：在预训练语言模型上只加很薄的一层，效果也相当不错。</p>
+        <h3>一个 Lean 例子：偶数的平方是偶数</h3>
+        <p>幻灯片上的定理（Lean 3 语法）：</p>
+        <pre><code>theorem mod_arith_2
+(x : ℕ) : x % 2 = 0 → (x * x) % 2 = 0 :=
+begin
+  intro h,
+  rw nat.mul_mod,
+  rw h,
+  rw nat.zero_mul,
+  refl,
+end</code></pre>
+        <p>意思是：$x$ 是自然数，若 $x$ 是偶数（模 2 余 0），则 $x^2$ 也是偶数。他逐步解释证明状态：</p>
+        <ul>
+            <li>开始时状态是“1 个目标”，上下文里有 $x : \mathbb{N}$，turnstile 符号 ⊢ 右边是要证的东西，也就是原定理。</li>
+            <li>应用 tactic 相当于强化学习里的一个动作，得到新状态。<code>intro h</code> 引入新假设 $h : x \% 2 = 0$，目标变成 $x \cdot x \% 2 = 0$。</li>
+            <li>这些 tactic 由人编写，编码了各种化简规则。<code>rw nat.mul_mod</code> 后目标变成 $x\%2 \cdot (x\%2) \% 2 = 0$；再改写成 $0 \cdot 0 \% 2 = 0$，然后是 $0 \% 2 = 0$，最后目标消失，Goal Accomplished。</li>
+        </ul>
+        <p>所以形式证明助手其实是状态机：有证明状态，有动作（tactic），动作导向新状态，目标是找到一串 tactic，从初始状态走到没有待证目标的 QED 状态。</p>
+        <h3>自动形式化和证明搜索</h3>
+        <p>自动形式化的例子是“存在无穷多个素数”及其自然语言证明。最简单的版本就是把语言模型用在非形式陈述上，输出 Lean 定理：对所有 $n$，存在 $p \ge n$ 且 $p$ 是素数，后面跟着证明。</p>
+        <p>有了形式陈述，证明就是一个搜索问题：每个状态有一组可用的 tactic，构成一棵搜索树，要找一条到达 QED 的路径。难处在于每个节点的分支可能极多，树也可能很深，高等数学定理的证明能有成千上万行。他说这比我们至今解决过的任何博弈问题都难得多，所以近几年在这项任务上的进展很了不起。（幻灯片图出自 Kaiyu Yang 等的 Formal Mathematical Reasoning: A New Frontier in AI。）</p>
+        <h3>AlphaProof 回顾</h3>
+        <p>AlphaProof 有一个 formalizer 网络把题目形式化，一个 solver 网络生成形式证明，solver 用强化学习训练。幻灯片列出几点：既从成功（证明）也从失败（反证）中学习；形式化错的题目对学习仍有帮助；在真正做 IMO 题时，用题目的变体做测试时强化学习，补充训练阶段的强化学习。</p>
+    </section>
+    <section id="t04">
+        <h2>04. Copra：上下文学习式的定理证明智能体</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=1534s" target="_blank">0:25:34</a>–0:39:36</em></p>
+        <p>Copra 来自论文 An In-Context Learning Agent for Formal Theorem-Proving（Amitayush Thakur、George Tsoukalas、Yeming Wen、Jimmy Xin、Swarat Chaudhuri，COLM 2024），由他在 UT Austin 的博士生 Amitayush Thakur 主导。</p>
+        <h3>整体结构</h3>
+        <p>Copra 同样是 LLM 预测证明步骤、证明器执行步骤并返回新状态的交互循环。区别在于 AlphaProof 用了高级的强化学习训练，Copra 走的是 LLM 智能体路线：把证明状态 $s_t$ 和搜索历史中的一些信息交给前沿 LLM，LLM 预测下一步动作（tactic）$a_t$，执行后得到新状态 $s_{t+1}$，以及错误信息、新目标，循环继续。外面套着一个深度优先搜索。所有东西都在上下文里，不改任何权重。他说即使算力相对很少，这个方法也做得不错，他认为它长期有很大潜力。</p>
+        <h3>为什么看好这种做法</h3>
+        <ul>
+            <li>能立刻用上 LLM 的进步，从 GPT-4 到 o1、o3，也许将来 GPT-5，换模型就能受益。</li>
+            <li>能把自然语言推理和形式推理结合起来：LLM 写的是形式语言的证明，但它也会自然语言。</li>
+            <li>没有训练题库也能用。他说竞赛之外做 AI for math，面对的是新问题，数学研究者要解的题按定义就和别人解过的不一样，很难建题库再训练强化学习智能体；上下文学习智能体可以直接用，LLM 里有大量先验知识，能带来相关问题的知识，即使它没在这些问题上专门训练过。</li>
+            <li>长远看，上下文学习和显式训练并不冲突：可以用这个智能体和证明助手交互产生大量轨迹，再拿去微调。</li>
+        </ul>
+        <p>有人可能会问：那还要 Lean 干什么，只靠 LLM 不行吗？他说和证明助手的交互提供了很强的 grounding（让输出受外部事实约束）。LLM 预测出一个无效步骤，证明助手马上给出反馈，把反馈放回提示，让模型继续，希望它从错误中学到东西。也许将来用大量交互轨迹微调后，LLM 好到不再犯这类错误，但他说离那一步还很远，至少现在 LLM 和证明助手的交互仍然很有价值。</p>
+        <h3>五个步骤</h3>
+        <ol>
+            <li>Prompt 合成：从形式定理出发构造提示，也可以加入可选的非形式提示（他们没有把自动形式化接进来）。</li>
+            <li>Tactic 解析：LLM 输出的是文本，解析成结构化格式。</li>
+            <li>在证明环境（Lean、Coq 或 Isabelle）里执行 tactic。运气好就直接 QED。</li>
+            <li>如果 tactic 无效或还有未解决的目标，拿到反馈，补充进提示，必要时回溯。</li>
+            <li>查询引理数据库，检索相关引理加进提示，他说这一步提高了性能。</li>
+        </ol>
+        <p>循环一直进行，直到原定理被证出或超时。</p>
+        <h3>提示和动作解析的例子</h3>
+        <p>提示里有序列化的证明状态：要证的目标和当前的假设，比如 $x$ 是自然数、$x$ 是偶数，目标是 $x^2 \bmod 2 = 0$。还有“上一步”的信息，存放在一个栈里随提示一起送入。幻灯片从左到右是对 LLM 的连续几次查询：</p>
+        <ul>
+            <li>已经执行了 <code>intro h</code>，这是上一步，没有错误。LLM 建议 <code>rw h</code>，执行时报错，rewrite tactic failed。</li>
+            <li>把错误反馈放回提示，让它再试。LLM 建议 <code>apply nat.mul_mod</code>，也错了，错误信息再放回提示。</li>
+            <li>这次 LLM 建议 <code>rw nat.mul_mod</code>，成功，交互结果里没有错误信息，栈里的上一步变成 <code>rw nat.mul_mod</code>。</li>
+            <li>继续生成下一步，这次 LLM 给出 <code>rw h</code>，以此类推。</li>
+        </ul>
+        <h3>实验</h3>
+        <p>评测在 2023 年底做的，他说之后世界已经变了很多。当时和 GPT-4 对比，GPT-4 经常给出错误的证明，而 Copra 用同一个底层模型，靠和 Lean 的交互反馈得到了正确证明，幻灯片上并排放了一个 Copra 的正确证明和 GPT-4 的错误“证明”。</p>
+        <ul>
+            <li>横轴是查询次数、纵轴是证出的定理数的图上，Copra 用较少的查询就证出了很多定理，其他方法没走那么远。</li>
+            <li>miniF2F 测试集（主要是高中水平竞赛数学题，形式为给定定理、写出 Lean 证明）：每次证明尝试只允许 60 次查询，成功率大约 29% 到 30%，和当时最好的方法相当。他说绝对数字不高，给的算力也很少；此后这个基准上的最好成绩已经大幅提高。把这个方法放大会到哪一步，目前没有公开结果。</li>
+        </ul>
+    </section>
+    <section id="t05">
+        <h2>05. 分层证明：先写非形式解，再拆子目标</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=2376s" target="_blank">0:39:36</a>–0:46:16</em></p>
+        <p>这部分是他们刚做出、当时尚未发表的结果，利用 LLM 做抽象和自然语言推理的能力。他认为 Copra 这种方法的长处就在这里：LLM 里存了大量世界知识，可以用在比“预测下一条 tactic”更强的角色上。</p>
+        <h3>例题：IMO 1959 第 1 题</h3>
+        <p>证明对每个自然数 $n$，分数 $\dfrac{21n+4}{14n+3}$ 不可约。思路是把问题拆成子问题，分层求解：</p>
+        <ol>
+            <li>让 LLM 写非形式解。交给推理模型（幻灯片上是 o3-mini），它给出逐步计划：先定义 GCD，相减化简，应用欧几里得算法，得出关于 GCD 的结论，最后下结论。</li>
+            <li>把非形式分解放进上下文，给出同一问题的 Lean 4 形式陈述，要求模型先别写证明，只写出证明需要的子目标，条件是刚才的非形式证明。模型给出三个子目标，例如第一个是 $\gcd(21n+4,\,14n+3) = \gcd(14n+3,\,7n+1)$，然后是第二、第三个，最后是把它们组合起来的主定理。原来复杂的问题被化成三个容易得多的子问题。</li>
+            <li>让 Copra 逐个证明子问题，它都证出来了。他说这些证明要盯着看一会儿，但其实不算复杂。</li>
+            <li>把证好的所有相关引理和非形式证明一起放进系统提示，让 Copra 证完整定理，它做到了。如果把整道题作为一整块直接交给 Copra，它证不出来。</li>
+        </ol>
+        <h3>他从这个例子得出的看法</h3>
+        <p>他说这是 LLM 智能体里很强的一种设计模式。LLM 智能体很灵活，只要改改提示方式，就能让它做很不同的事，换成不用预训练模型的做法，这需要大量训练。原本只是逐步预测低层证明的系统，现在在更抽象的层面做高层推理：子目标可以看成子问题的抽象，是 LLM 自己造出来的；有了这些抽象，证明可以分层进行，变得简单很多，而且完全不需要额外训练，只靠提示。他说这对他是一个很大的启示：把 LLM 里存的知识和更高层的算法设计结合起来，用不同方式拼接非形式和形式推理步骤、改变提示策略，就能得到能力上质的不同。</p>
+        <p>Lean 的反馈在这里也很重要。幻灯片上写着：o3-mini 拆完子问题后自己也解不出来；它写证明时编造了一条不存在的引理 <code>Nat.gcd_sub_right</code>，Copra 借助 Lean 的反馈修掉了这个幻觉。他说 Lean 提供的 grounding 对解出这道题是绝对必要的。</p>
+    </section>
+    <section id="t06">
+        <h2>06. 形式验证：证明一个小编译器是对的</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=2776s" target="_blank">0:46:16</a>–0:59:38</em></p>
+        <h3>形式验证和它的成本</h3>
+        <p>同样的思路可以用在形式系统验证上，他说这是严格数学推理最实用的应用之一。做法是：把一个现实系统用一组定义做数学建模；把系统性质写成涉及这些定义的定理；证明这些定理。</p>
+        <p>这种方法造出过极其严格、几乎无法攻破的系统。他举的例子是美国国防部组织的一个项目：把形式验证过的内核 seL4 装在无人机上，请红队攻击六周，没有成功。但历史上形式验证极其昂贵，除了最安全攸关的场景，成本都难以说得过去，所以一直没有大规模部署。他认为随着 AI，尤其 AI for math 的兴起，成本收益的算法会大幅改变，可以用这些工具不只证数学，还证现实系统的正确性、安全性、性能等。下面的例子很基础，他说用更强的模型和更多算力可以大幅放大。</p>
+        <h3>编译器验证需要什么</h3>
+        <p>他说这个编译器简单得近乎玩笑，但更高级的编译器设计基本原理不变，只是更复杂。需要：</p>
+        <ul>
+            <li>语言：语法加语义。语法是定义程序形式的文法，语义是定义程序如何执行的规则。</li>
+            <li>编译器：把程序从一种语言翻译到另一种语言的一组规则。</li>
+            <li>验证：证明这些规则保持语义。</li>
+        </ul>
+        <h3>五步</h3>
+        <p>例子用 Coq 写（字幕里语言名没听清，代码是 Coq 语法），他说它和 Lean 很像，都是依赖类型的函数式编程语言。</p>
+        <p>第 1 步，定义源语言：只有加法和乘法的算术表达式。</p>
+        <pre><code>Inductive binop : Set := Plus | Times.
+Inductive exp : Set :=
+  Const : nat -> exp
+| Binop : binop -> exp -> exp -> exp.
+
+Fixpoint expDenote (e: exp) : nat :=
+  match e with
+  | Const n => n
+  | Binop b e1 e2 => (binopDenote b) (expDenote e1) (expDenote e2)
+  end.</code></pre>
+        <p>表达式要么是常数，要么是对两个表达式做二元运算，这是递归定义；<code>expDenote</code> 规定表达式求值的结果。幻灯片上的例子：<code>Const 42</code> 求值为 42，2+2 为 4，(2+2)×7 为 28。</p>
+        <p>第 2 步，定义目标语言：程序是指令列表，指令要么把常数压栈（<code>iConst</code>），要么对栈顶两个元素做二元运算（<code>iBinop</code>）。源语言是递归定义的，目标语言用栈来解释。他说这是程序语言里的经典想法：递归表达式可以靠维护一个栈来执行，很多早期计算机就是栈机。<code>progDenote</code> 逐条执行指令，例如执行 <code>iConst 32 :: iConst 42 :: iBinop Plus :: nil</code> 得到 <code>Some (74 :: nil)</code>。</p>
+        <p>第 3 步，定义编译器：</p>
+        <pre><code>Fixpoint compile (e : exp): prog :=
+  match e with
+  | Const n => iConst n :: nil
+  | Binop b e1 e2 => compile e2 ++ compile e1 ++ iBinop b :: nil
+  end.</code></pre>
+        <p>对输入表达式做模式匹配，分常数和二元运算两种情况，生成目标程序。程序本身只是一串指令，执行时才维护栈。例如 <code>Binop Plus (Const 2) (Const 3)</code>，也就是 2+3，编译成 <code>iConst 3 :: iConst 2 :: iBinop Plus :: nil</code>。</p>
+        <p>第 4 步，写正确性定理：</p>
+        <pre><code>Theorem compile_correct:
+  forall e, progDenote (compile e) nil = Some (expDenote e :: nil).</code></pre>
+        <p>对源语言的任意表达式 $e$，编译后在目标语言语义下执行的结果，和在源语言语义下直接求值的结果相同。</p>
+        <p>第 5 步，让 Copra 证明。它一次证不出来。于是像 IMO 例子那样，让 LLM（这里是 o1）发明一条中间引理。它想了一会儿，提出不要直接证整个编译器正确，先证“编译一个子表达式是正确的”：</p>
+        <pre><code>Lemma compile_one_instr: forall e p s,
+  progDenote (compile e ++ p) s = progDenote p (expDenote e :: s).</code></pre>
+        <p>Copra 自动证出了这条引理（对 <code>e</code> 归纳，再用 <code>app_assoc</code> 改写和两个归纳假设）。然后把这条引理的证明放进提示，让 Copra 证整个定理，这次成功了：对 <code>e</code> 分情况，常数情况直接化简，二元运算情况两次改写 <code>compile_one_instr</code>。</p>
+        <h3>数学部分小结</h3>
+        <p>他总结说 LLM 智能体做数学发现很有前景。只靠上下文学习就能走很远，但需要证明助手的反馈做 grounding；还有很多更高层的智能体设计可做，比如把做形式化的智能体、做分层规划的智能体和做低层证明生成的智能体组合起来。这是很新的方向。</p>
+        <p>他回到前面的问题：能不能把这种交互全部推到训练阶段，用和证明器交互生成的大量轨迹继续训练 LLM，直到 LLM 自己足够好？幻灯片上的说法是证明器教 LLM 学生组合性、类型安全等，最后老师“退休”。他说现在还没到那一步，目前仍需要这种智能体架构。</p>
+        <p>他推荐了一篇综述 Formal Mathematical Reasoning: A New Frontier in AI（arXiv 2412.16075），第一作者是 Kaiyu Yang，整体工作由 Dawn Song 牵头，他也是作者之一。幻灯片上列了三项开放挑战，他为了节省时间跳过了：高质量证明数据短缺（策略：合成数据、多语言数据、众包，例子有 AlphaGeometry 和 Proofwala）；自动形式化缺少高质量配对数据（策略：用证明助手反馈做形式化，例子是 Process-Driven Autoformalization）；猜想和开放式探索（策略：猜想者和证明者自我对弈，例子是 Minimo）。</p>
+    </section>
+    <section id="t07">
+        <h2>07. 科学发现和符号回归</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=3578s" target="_blank">0:59:38</a>–1:06:03</em></p>
+        <h3>从演绎到经验发现</h3>
+        <p>他说 LLM 智能体不仅在演绎数学里有价值（从一组原则、公理和定义出发一步步证明命题），在大多数自然科学所做的经验发现里也有很大潜力：从数据出发，为数据拟合假设或论断。LLM 的抽象能力在这里也可能起到有意思的作用。</p>
+        <h3>科学过程的例子：天文学革命</h3>
+        <p>自然科学的流程大致是：选研究问题、生成假设、设计实验、收集数据、分析、解释、向学界报告。他举的例子是天文学：人们原以为地球是太阳系中心，但一些行星看上去在往回走（视逆行），这引出日心说假设；随后收集更多数据，Tycho Brahe 在 1582 到 1600 年观测火星，得到大量精确的行星位置；Kepler 分析这些数据，试着拟合各种几何形状，得到开普勒第三定律；最终引出牛顿万有引力定律。他说这个过程是在抽象之间推进：从数据得到用抽象原则表达的定律，再推广成解释力更强的定律。他认为 LLM 智能体有潜力把这条流水线的很多部分自动化。</p>
+        <h3>符号回归</h3>
+        <p>这一部分聚焦符号回归（symbolic regression）：根据观测数据找出方程，比如给定火星的测量值，怎样从数据里找出开普勒定律。人们可能以为 LLM 不适合这件事，因为数据就是一堆很底层的数字；但 LLM 能把先验科学知识带进来。前提是要配合别的机制：在数据上评估假设、告诉你假设表现如何。有了这种评估 LLM 生成假设的机制，就能搭一个智能体循环，假设生成交给 LLM，假设评估交给另一个组件。他说这和前一部分用 Lean 的方式没有根本区别。</p>
+        <h3>PySR 和遗传编程</h3>
+        <p>符号回归最成熟的方法之一是遗传编程（genetic programming），他展示了流行系统 PySR（Miles Cranmer 开发）的可视化：维护一个候选表达式（候选方程）的池子，对它们做变异（mutation）和交叉（crossover），再用另一个组件评估这些表达式与数据的吻合程度（损失），据此更新池子。PySR 在物理等领域已有不少应用。</p>
+        <p>他接着说遗传编程演化过程中会出现表达式的“岛”（islands），也就是聚在一起、彼此有共性的表达式簇。这些岛对应不同类别的函数，比如一个岛里是指数函数，另一个里是含余弦的三角函数。LLM 擅长写代码，也擅长把代码和自然语言联系起来，所以它看着这些表达式，也许能说出这段代码、这个表达式在做什么。这就是后面要用的抽象思路。幻灯片上的说法是：LLM 可以在搜索空间的相关部分增加探索。</p>
+    </section>
+    <section id="t08">
+        <h2>08. LaSR：带概念库的符号回归</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=3963s" target="_blank">1:06:03</a>–1:16:33</em></p>
+        <p>论文是 LaSR: Symbolic Regression with a Learned Concept Library（Arya Grayeli*、Atharva Sehgal*、Omar Costilla-Reyes、Miles Cranmer、Swarat Chaudhuri，NeurIPS 2024），由 UT 的本科生 Arya Grayeli 和博士生 Atharva Sehgal 共同主导。</p>
+        <h3>什么是“概念”</h3>
+        <p>幻灯片上给了概念的两条要求：</p>
+        <ul>
+            <li>符号抽象：Zipf 定律、Moore 定律、Arrhenius 方程来自完全不同的领域，但都应该能被认出是“幂律趋势”这一类。</li>
+            <li>符号引导：用物理学家给出的或 LLM 内部的背景知识引导搜索。例子是引力波：“波的应变随距离增加而减小”“波的应变量级极小”，变量是应变 $h$、两极之间距离 $r$、偶极矩 $Q$。要把这类常识性知识和方程联系起来。</li>
+        </ul>
+        <p>他的理由是：一个根据数据预测方程的 AI，也应当能以人类专家给出的高层知识为条件，所以要建立代码（方程）和语言之间的关联。</p>
+        <h3>问题设定：概念和程序联合学习</h3>
+        <p>给定：一个概念全集 $C$（比如“波的应变随距离增加而减小”“幂律”“正弦函数”这些高层想法），一个数据集 $D$，一个程序化假设空间（Python 或 Python 里某个受限 DSL 能表达的方程集合），其中的程序记作 $\pi$。目标是给定数据，联合推断可能的假设和可能的概念。传统符号回归只求给定数据下可能的程序；这里要同时得到程序和它们代表的概念，因为最终要向人类科学家解释这些程序，而且联合分布也可能比只在程序空间里操作给出更多信息。</p>
+        <p>他把联合分布按下面的方式分解（按他口述整理）：</p>
+        $$P(\pi, C \mid D) \;\propto\; P(D \mid \pi)\, P(\pi \mid C)\, P(C)$$
+        <ul>
+            <li>$P(D \mid \pi)$：给定程序 $\pi$ 时数据的似然，也就是程序对数据解释得多好，执行程序、看结果就能算。</li>
+            <li>$P(\pi \mid C)$：给定一个概念（比如“幂律”），这段代码有多大可能，即它在多大程度上体现了幂律。LLM 有做这件事的背景知识。</li>
+            <li>$P(C)$：概念的先验，LLM 读过到目前为止的物理文献，知道某个概念有多大可能。</li>
+        </ul>
+        <h3>算法循环</h3>
+        <p>实现上沿用演化算法的基本结构，在上面加一层由 LLM 引导的贝叶斯式概念学习。循环有三块：假设演化（Hypothesis Evolution）、概念抽象（Concept Abstraction）、概念演化（Concept Evolution），围绕一个概念库（Concept Library）。</p>
+        <p>假设演化：像所有演化算法一样维护假设（程序）种群。每一步可以选择两种演化之一：</p>
+        <ul>
+            <li>经典符号方法：在程序的抽象语法树上做随机改动，比如把一棵子树换成另一棵；</li>
+            <li>LLM 引导的演化：把当前程序交给 LLM 生成新程序，同时用概念库提供当前在考虑的概念，比如“幂律看起来很适合这个设置”或“三角函数似乎特别合适”。</li>
+        </ul>
+        <p>幻灯片把每个操作都画成二选一：初始化（LLM Initialize 或 Symbolic Initialize）、变异（LLM Mutation 或 Symbolic Mutation）、交叉（LLM Crossover 或 Symbolic Crossover），外加化简表达式树、优化常数、替换最老的程序等符号操作。流程是：初始化种群 → 评估得到最佳程序 → 变异或交叉 → 替换最老的程序，反复进行（幻灯片上标着 ×300 次）。适应度函数就是 $P(D \mid \pi)$，即假设池对数据的解释程度。LLM 交叉的做法是给 LLM 一个交叉提示和格式要求，让它生成新表达式。</p>
+        <p>他说用 LLM 实现变异和交叉的想法，DeepMind 去年的 FunSearch 也用过，而且很成功。LaSR 和 FunSearch 的根本区别在于概念库，其他很多想法相近。</p>
+        <p>概念演化分两步：</p>
+        <ol>
+            <li>概念抽象：把新程序池交给 LLM，让它抽象出自然语言的高层描述，例如“这个方程表示指数增长或衰减”。</li>
+            <li>概念交叉：和程序演化类似，但由 LLM 把不同概念混合成新概念。例如“指数增长/衰减”和“取决于温度”两个概念，LLM 凭物理知识组合出“Boltzmann 分布”，这是一个有用的概念。</li>
+        </ol>
+        <p>新概念又影响假设演化，假设演化再影响概念抽象和演化，循环继续。</p>
+        <h3>搜索空间的示意</h3>
+        <p>第一阶段假设演化之后，出现若干表达式的岛；第二阶段概念生成之后，每个岛有了自然语言描述：正弦趋势、幂律趋势、线性趋势、指数趋势等，概念还会暴露出原先不知道的岛；第三阶段，概念又引出新概念，比如出现“三角趋势”。</p>
+    </section>
+    <section id="t09">
+        <h2>09. LaSR 的实验、新 scaling law 和总结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=4593s" target="_blank">1:16:33</a>–1:27:38</em></p>
+        <h3>Feynman 方程</h3>
+        <p>评测任务是发现 Feynman 方程：给数据，以及一段说明是哪一章之类的提示。结果是 LaSR 比纯遗传编程、以及不用概念学习的版本更有效。即使不用前沿模型、只用本地语言模型，也能超过遗传编程方法，幻灯片上写的是 LaSR 用本地模型（llama-3-7b，1%）也胜过 PySR。总体结论是 LLM 生成的高层概念加速了发现。</p>
+        <h3>用户提示</h3>
+        <p>LLM 方法的一个好处是能很自然地接收用户提供的提示。前面的实验没有提示，只靠数据；加入关于方程类型的提示后，以迭代次数为横轴、解出方程的比例为纵轴，提示带来了不大的收益，至少在早期是这样。</p>
+        <h3>例子：库仑定律</h3>
+        <p>提示是平方反比、与电荷成正比、对两个电荷对称。PySR 给出一个很笨重的表达式，它和真实表达式等价，但要化简 10 步才能变成标准形式；常数拟合得越多，优化误差也越多。LaSR 借助 LLM 里的知识，4 步化简就到真实表达式。幻灯片上还写着，较小的模型合成的方程更简单。</p>
+        <p>他自己提出质疑：LLM 是不是作弊了，它本来就知道库仑定律，会不会是数据泄漏？他承认这里有这种可能，但输入只是数据，即库仑定律产生的输入输出值，是很底层的输入，能拟合出库仑定律还是有意思的。他们还在合成数据上做了实验：造一个完全古怪的方程和由它生成的数据，让系统还原，这种情况下也有明显收益。</p>
+        <h3>概念的局限</h3>
+        <p>LaSR 学到的概念里有“好的数学表达式表现出对称性或规律性”这样的，也有一些看不出意思的。幻灯片上列了不同迭代中发现的概念：第 2 轮“好的表达式……侧重幂函数和三角函数”，第 6 轮“……对称性或规律性”，第 24 轮“……有特定的乘除模式”。局限是：不能保证概念符合事实或正确；好概念依赖 LLM 的训练；概念可能误导科学家。现在一切都是自然语言，一个有意思的方向是用某种形式语言描述高层概念。</p>
+        <h3>用 LaSR 找 LLM scaling law</h3>
+        <p>为了排除标准基准（如 Feynman 方程）上的泄漏问题，他们把方法用在一个新发现问题上：LLM 的 scaling law。Chinchilla 定律出自几年前 DeepMind 的论文 Training Compute-Optimal Large Language Models（Hoffmann 等），根据超参数预测 LLM 的损失。Chinchilla 的做法是：先假设一个 scaling law 的形式，测量模型损失随超参数的变化，再把定律拟合到数据上，也就是人手设定形式、只拟合参数。</p>
+        <p>他们换成：测量损失随超参数的变化，用符号回归同时提出并拟合 scaling law，最后选拟合最好、参数最少的那个。数据来自 BIG-Bench（幻灯片上写 204 个任务、55 个 LLM）。数据集里还有一个参数：shot 数，即预测时在上下文里给多少个例子。</p>
+        <p>LaSR 找出的定律，用常识语言解释是：对能力低的模型，shot 多反而效果差；模型过了某个能力阈值之后，shot 多才有帮助。幻灯片上还写着训练超参数（步数）和测试超参数（shot 数）之间存在相互作用。他说这只是一个例子，还不全面，但说明能用这种方式做出新发现。</p>
+        <p>更进一步：如果你做 scaling law 研究，可以从原来的 Chinchilla 定律出发，把 LaSR 发现的关于 shot 数的洞见加进去，得到修改版 Chinchilla。他们发现修改版比原来的 Chinchilla 和 LaSR 自己找出的定律都好。他说这说明用 LLM 智能体做的发现能影响人类的发现，结果大于各部分之和；他也强调这确实是一个智能体，LLM 和多种其他工具组合在一起，不是一次性调用 LLM。</p>
+        <h3>视觉概念库（跳过）</h3>
+        <p>为节省时间，他跳过了下一部分，只说这些想法也能用在视觉等高维输入上，因为现在有视觉语言模型（VLM），可以搭以 VLM 为一部分的演化式智能体，他对这个方向很乐观。幻灯片上的论文是 Self-Evolving Visual Concept Library Using Vision-Language Critics（Atharva Sehgal 等，CVPR 2025），内容包括：用 LLM 生成视觉概念描述（比如“白头、大喙、黑身”识别成年白头海雕）帮 VLM 做零样本分类；用这些描述写成判断图像的代码；由 VLM 对图像和概念算对比分数，用演化方式改进视觉概念库。</p>
+        <h3>总结和开放挑战</h3>
+        <p>他总结说，LLM 引导的演化是经验科学的有力工具，FunSearch 已经说明过这点；LLM 几乎免费提供的抽象能力能让它更强；这些还能扩展到用 VLM 的视觉场景。开放挑战：假设和概念的验证；超出自然语言的概念表示；扩展到更大的搜索空间和输入维度；从假设生成走到科学发现的其他环节，比如实验设计。</p>
+        <p>最后他说自己很乐观：LLM 智能体，也就是把 LLM 查询和其他机制组合起来的智能体工作流，在科学发现中能帮人提出新假设，甚至设计实验；在数学发现中也很强。他说这个方向还在早期，应用会覆盖数学、科学和工程，比如形式验证、构建严格可靠的系统。</p>
+    </section>
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“The dream of the field of AI for math is that you want to automate substantial pieces of this process.” AI for math 这个领域的愿景，是把这个过程中相当大的部分自动化。（<a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=114s" target="_blank">0:01:54</a>）</li>
+            <li>“The use of LLMs for abstraction, this is something that's not uh well explored yet.” 用 LLM 做抽象，这件事还没有被很好地探索过。（<a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=387s" target="_blank">0:06:27</a>）</li>
+            <li>“I am personally a little bit skeptical about that possibility.” 我个人对这种可能性（只靠 LLM 做到一切）有点怀疑。（<a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=627s" target="_blank">0:10:27</a>）</li>
+            <li>“This is a far harder problem than any game playing problem that we have been able to solve so far.” 这比我们至今解决过的任何博弈问题都难得多。（<a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=1438s" target="_blank">0:23:58</a>）</li>
+            <li>“This interaction with the proof assistant is still providing, you know, a a very strong form of grounding.” 和证明助手的这种交互，仍然提供了一种很强的 grounding。（<a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=1759s" target="_blank">0:29:19</a>）</li>
+            <li>“LLM agents are extraordinarily flexible.” LLM 智能体极其灵活。（<a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=2672s" target="_blank">0:44:32</a>）</li>
+            <li>“The grounding that was provided by the Lean theorem prover was absolutely critical.” Lean 定理证明器提供的 grounding 是绝对必要的。（<a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=2776s" target="_blank">0:46:16</a>）</li>
+            <li>“A large number of shots gives poor results for low-capability models.” 对能力低的模型，给很多 shot 反而效果差。（<a href="https://www.youtube.com/watch?v=IHc0TEMrEdY&t=4979s" target="_blank">1:22:59</a>）</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>Berkeley RDI LLM Agents MOOC · Abstraction and Discovery with Large Language Model Agents · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

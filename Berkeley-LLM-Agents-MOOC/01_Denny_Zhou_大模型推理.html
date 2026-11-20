@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Denny Zhou：大模型推理的关键思路和局限 | Berkeley LLM Agents MOOC 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="index.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">Berkeley LLM Agents MOOC 目录</a> · 01</span>
+    <span><a href="02_Shunyu_Yao_LLM智能体简史.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Denny Zhou：大模型推理的关键思路和局限</h1>
+        <p class="subtitle">从“最后字母拼接”这个小问题讲起：中间步骤为什么有用（Ling 2017、GSM8K、Scratchpad、Chain-of-Thought、Least-to-Most 和一条理论结果），不用示例怎样引出推理（Let's think step by step、类比推理、CoT decoding），self-consistency 背后的概率原理，以及三条局限：无关上下文、不能自我纠正、前提顺序</p>
+        <div class="author-meta">
+            主讲：Denny Zhou（Google DeepMind）· 课程：Berkeley CS294/194-196 Large Language Model Agents（2024 年秋季）· 上课日期：2024 年 9 月 9 日 · 时长：1 小时 4 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo" target="_blank">课堂录像</a> · <a href="https://rdi.berkeley.edu/llm-agents/assets/llm-reasoning.pdf" target="_blank">幻灯片</a>（Berkeley RDI 公开，2024 年秋季，本文依据录像字幕和幻灯片整理，是中文转述，不是逐字翻译；观点属于主讲人，内容以上课当天为准）
+        </div>
+    </header>
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>这是这门课的第一讲。录像前 9 分钟是课程负责人 Dawn Song（Berkeley 计算机系教授，RDI 中心联合主任）的开场，讲这门课为什么讲 LLM 智能体、要覆盖哪些主题，下面第一节简单记一下。之后是 Google DeepMind 的 Denny Zhou 讲大模型推理。他是 Chain-of-Thought、Self-Consistency、Least-to-Most 等论文的作者之一，这一讲里提到的大部分工作出自他和合作者。幻灯片标题是“LLM Reasoning: Key Ideas and Limitations”，注明 2024 年在 Caltech、Berkeley、UPenn 讲过。</p>
+        <p>整堂课沿着一个问题走：人能从几个例子学会一件事，是因为人会推理，那大模型怎样才能做到？他的回答分几层：让模型在给答案之前先生成中间步骤；这些中间步骤可以靠训练、微调、示例提示得到，也可以不用示例，甚至不用任何提示；在此基础上用采样加投票（self-consistency）进一步提高正确率。最后他讲了三条目前的局限，并给出对下一步的看法。这门课后面的讲者主要讲智能体，这一讲讲的推理是智能体做规划和决策的基础。</p>
+        <ol>
+            <li><a href="#t01">课程开场：Dawn Song 介绍 LLM 智能体</a> · <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">从几个例子学会：最后字母拼接</a> · <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=539s" target="_blank">0:08:59</a></li>
+            <li><a href="#t03">中间步骤的来历：从 Ling 2017 到 Chain-of-Thought</a> · <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=1164s" target="_blank">0:19:24</a></li>
+            <li><a href="#t04">Least-to-Most：先分解，再逐个解决</a> · <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=1465s" target="_blank">0:24:25</a></li>
+            <li><a href="#t05">中间步骤为什么有用：一条理论结果</a> · <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=1730s" target="_blank">0:28:50</a></li>
+            <li><a href="#t06">不给示例：零样本 CoT 和类比推理</a> · <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=1962s" target="_blank">0:32:42</a></li>
+            <li><a href="#t07">连提示都不用：Chain-of-Thought Decoding</a> · <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=2261s" target="_blank">0:37:41</a></li>
+            <li><a href="#t08">Self-Consistency：对推理路径求和</a> · <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=2606s" target="_blank">0:43:26</a></li>
+            <li><a href="#t09">局限一和二：无关上下文，不能自我纠正</a> · <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=3074s" target="_blank">0:51:14</a></li>
+            <li><a href="#t10">局限三：前提顺序</a> · <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=3488s" target="_blank">0:58:08</a></li>
+            <li><a href="#t11">总结和下一步</a> · <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=3727s" target="_blank">1:02:07</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 课程开场：Dawn Song 介绍 LLM 智能体</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=0s" target="_blank">0:00:00</a>–0:08:59</em></p>
+        <p>Dawn Song 先介绍教学团队：她本人是主讲，客座联合讲师是 Google 的 Xinyun Chen（陈昕昀，她以前在 Berkeley 的学生），另有两位助教和两位阅卷人。</p>
+        <h3>什么是 LLM 智能体</h3>
+        <p>她说，大模型本身的工作方式很简单：输入文本，输出文本。这门课讲的下一步是 LLM 智能体：把大模型当作“大脑”，负责推理和规划，让智能体和外部环境交互，观察环境、采取行动。智能体会用外部工具，也会从外部数据库、知识库里检索信息来完成任务。大模型能力强，所以这种智能体不需要太多专门训练就能在不同环境里工作，比如通过各种 API 上网，也可以装进机器人，在物理世界里行动；它可以接收多模态的输入，在交互中更新记忆、学会用工具、和人交互、获得 grounding（让模型的输出和真实环境对应上）。智能体之间也可以协作，人也可以是协作的一方，多智能体协作能解决更复杂的任务。</p>
+        <h3>为什么需要智能体框架</h3>
+        <ul>
+            <li>真实任务很少能一次性“文本进、文本出”解决，往往要反复试错。</li>
+            <li>外部工具和外部知识检索能扩展模型的能力。</li>
+            <li>智能体工作流便于拆解任务、把子任务分给专门的模块、分工协作；多智能体生成也能启发更好的回答。</li>
+        </ul>
+        <p>她说智能体已经在教育、法律、金融、医疗、网络安全等领域开始应用，各类智能体基准的排行榜进步很快。</p>
+        <h3>要解决的挑战和课程安排</h3>
+        <p>她列了几类挑战：提高推理和规划能力（智能体端到端做复杂任务时容易出错）；从环境反馈中学习、提高 embodiment，长任务里智能体从错误中恢复的效率还很低；持续学习和自我改进；多模态理解、grounding 和世界模型；多智能体协作和 theory of mind（推测其他主体的意图和信念）；安全和隐私，模型容易受对抗攻击，可能输出有害内容或泄露隐私数据；人和智能体的交互、伦理，怎样控制智能体的行为。</p>
+        <p>课程内容按层次安排：模型能力（推理、规划、多模态理解）；主流的智能体框架，包括工作流设计、RAG（检索增强生成，先从外部资料里检索相关内容，再交给模型生成回答）和多智能体系统；应用领域，包括软件开发、工作流自动化、多模态应用、企业应用；最后是安全和伦理。每一讲请一位客座讲者。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 从几个例子学会：最后字母拼接</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=539s" target="_blank">0:08:59</a>–0:19:24</em></p>
+        <h3>他对 AI 的“小期待”</h3>
+        <p>Denny Zhou 先请大家想几秒：你对 AI 有什么期待？可能的答案有解决人类解决不了的数学难题、发现新的科学理论、实现 AGI。他说自己是做机器学习出身的，他的期待很小：AI 应该能像人一样，只从几个例子里学会东西。</p>
+        <p>过去几十年，机器学习界花了很大力气做数据高效的方法，幻灯片上列了半监督学习、贝叶斯非参数、核方法、稀疏、低秩、主动学习等。他说自己在实践里从没见到真正数据高效的方法，这促使他去想机器学习到底缺了什么。想了好几年，他的答案是推理：人能从几个例子学会，是因为人会推理，而不是靠数据统计。</p>
+        <h3>一个玩具问题</h3>
+        <p>他做研究喜欢选很简单、但包含全部难点的问题。这里选的是“最后字母拼接”（last letter concatenation）：输入一个人名，输出名和姓各自最后一个字母拼起来的结果。例子：“Elon Musk”输出“nk”，“Bill Gates”输出“ls”，问“Barack Obama”应该输出什么。</p>
+        <p>几年前要解决它，你可能会训练一个编码器-解码器的 Transformer，需要大量标注数据，最后准确率大概到 85% 或 90%。他问：对人来说这么简单的任务，一个方法要用海量标注数据才能学会，还能叫人工智能吗？他认为真正智能的模型应该一两个例子就能学会。</p>
+        <h3>大模型是什么</h3>
+        <p>他应主办方要求简单解释了大模型：LLM 是一个被训练来预测下一个词的 Transformer 模型。比如给定“AI is the”，让模型预测下一个词；如果预测的不是“future”，就通过反向传播调整参数让预测变对。训练用大量句子，比如互联网上的全部文本。幻灯片上写：可以把训练 LLM 理解成训练鹦鹉模仿人类语言。他说这句话让一位朋友很不满。</p>
+        <p>生成时，模型每次产出一个 token（模型处理文本的最小单位），把它接到输入后面，再预测下一个。于是对这个问题，可以把已有的例子拼起来作为输入，后面接上测试样例“Barack Obama”，看模型输出什么。这叫 few-shot prompting（少样本提示：在提示里放几个示范例子，让模型照着做）。他说这只是模仿机器学习的流程，区别是不训练模型，只把例子放进输入。结果模型输出“ck”，是错的，正确答案是“ka”。</p>
+        <h3>在答案前加上推理过程</h3>
+        <p>修正方法是在每个示例的答案前写出推理过程：“Elon 的最后一个字母是 n，Musk 的最后一个字母是 k，把 n 和 k 拼起来得到 nk，所以输出 nk。”Bill Gates 也这样写。用这样的输入，模型对 Barack Obama 给出了完整推理和正确答案“ka”。</p>
+        <p>他接着说，和人一样，一个示范就够了：只保留一个带推理过程的例子，准确率也是 100%。他说这就是他想要的，想象不出任何机器学习方法能做到这样。他也提醒不要误解他对机器学习的态度：机器学习对做研究很有用，他在社交媒体、新闻甚至会议论文里看到的很多低级错误，大都来自不懂机器学习、随便尝试各种想法的人。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 中间步骤的来历：从 Ling 2017 到 Chain-of-Thought</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=1164s" target="_blank">0:19:24</a>–0:24:25</em></p>
+        <p>他说，加中间步骤这个想法在文献里早就有了，按时间顺序讲了几篇：</p>
+        <ul>
+            <li>Ling et al., 2017（DeepMind，ACL 2017，Program Induction by Rationale Generation）：用自然语言写出的解题过程（rationale）来解数学应用题，论文里就写了“通过一系列小步骤推出最终答案”。他们从零训练了一个序列到序列模型。他说如果你了解后来的工作，会觉得这几位作者像时间旅行者。</li>
+            <li>Cobbe et al., 2021（OpenAI，Training Verifiers to Solve Math Word Problems）：沿着 Ling 2017 的思路，构建了大得多的数学应用题数据集 GSM8K，每道题都附有自然语言的中间步骤和最终答案，并用它微调 GPT-3。幻灯片上的例子是一道关于两所学校容量的题，解答一步步算出 120/8 = 15、15×2 = 30、120+30 = 150。</li>
+            <li>Nye et al., 2021（Google Brain，Show Your Work: Scratchpads for Intermediate Computation with Language Models）：同一年独立发现了类似想法，但在程序合成领域，所以中间步骤用的是抽象符号而不是自然语言。</li>
+            <li>Wei et al., 2022（Chain-of-Thought Prompting Elicits Reasoning in Large Language Models，NeurIPS 2022，Denny Zhou 是作者之一）：在提示里给出带中间步骤的示例，并在几乎所有 NLP 任务上做了大量评测，效果很好。他特别说明，chain of thought 不是他们发明的术语，只是一个普通的英语短语，意思就是多步推理。</li>
+        </ul>
+        <p>把这些放在一起：2017 年是用中间步骤训练，2021 年是用中间步骤微调，2021 到 2022 年是用中间步骤提示。他问哪个更重要，然后自己回答：训练、微调还是提示并不重要，重要的是中间步骤本身。他的总结是：不管是训练、微调还是提示，只要给模型的例子里包含中间步骤，模型生成的回答也会包含中间步骤。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. Least-to-Most：先分解，再逐个解决</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=1465s" target="_blank">0:24:25</a>–0:28:50</em></p>
+        <p>有了中间步骤，下一个问题是：在示例里加入解题策略有没有帮助？人解题时往往有策略。他介绍了团队的 Least-to-Most Prompting（ICLR 2023），目标是通过分解实现从易到难的泛化（easy-to-hard generalization）。他提到 Pólya 的经典数学教育书《How to Solve It》里有一章专门讲分解，大意是一头扎进细节就容易迷失。</p>
+        <p>例子是一道小学题：Elsa 有 3 个苹果，Anna 比 Elsa 多 2 个，她们一共有几个？他说他读五年级的女儿也做过这种题。Least-to-Most 的做法是先教模型把问题拆成子问题：“1. Anna 有几个苹果？2. 两人一共有几个？”然后依次解决：Anna 有 2+3=5 个；两人一共 3+5=8 个。他说这个想法很简单，但效果出奇地好。</p>
+        <h3>组合泛化任务上的结果</h3>
+        <p>组合泛化（compositional generalization）大致是指：测试样例比训练样例或提示里的示例更难，需要把学过的部分组合成新的、更长的东西。</p>
+        <ul>
+            <li>SCAN：把自然语言指令翻译成一串动作序列（比如可以让机器人执行的动作）。用 Least-to-Most 准确率达到 99.7%，只用了 0.1% 的示例。他说是从 Xinyun Chen 那里知道这个任务的，她多年前提出过一个漂亮的方法来解它；他当时很惊讶，人觉得这么直白的任务，机器为什么这么难。</li>
+            <li>CFQ（文本转代码，Drozdov et al., Compositional Semantic Parsing with Large Language Models，ICLR 2023）：测试题需要更长的代码片段。他们把提示方法稍作改动（他称为 dynamic least-to-most prompting），只用 1% 的数据就得到完美结果，远好于文献里的已有结果；那些已有方法用了专门设计的架构和训练，并且用了全部训练数据。</li>
+        </ul>
+    </section>
+
+    <section id="t05">
+        <h2>05. 中间步骤为什么有用：一条理论结果</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=1730s" target="_blank">0:28:50</a>–0:32:42</em></p>
+        <p>他先讲了一段家事。他有两个孩子，女儿 10 岁，儿子 7 岁。Chain-of-Thought 论文出来时，他听到女儿问弟弟：17 乘 3 是多少？弟弟说不知道。她又问：10 乘 3 呢？30。7 乘 3 呢？21。那 17 乘 3 呢？弟弟说：哦，我知道了，51（字幕里记成 31，按算式应为 51）。女儿冲他喊：“爸爸，chain of thought 在我弟弟脑子里也管用！”</p>
+        <p>他说，对人来说中间步骤有用很自然，但做研究要想得更深，大模型终究是机器学习模型，要弄清楚发生了什么。他和 Stanford 的 Tengyu Ma 等人合作的论文（Zhiyuan Li, Hong Liu, Denny Zhou, Tengyu Ma, Chain of Thought Empowers Transformers to Solve Inherently Serial Problems，ICLR 2024）给出了严格的数学分析。结论有两条：</p>
+        <ul>
+            <li>只要能生成足够长的中间推理步骤，常数深度的 Transformer 就能解决任何固有串行（inherently serial）的问题。他强调“常数”的意思是深度和输入规模无关。</li>
+            <li>直接生成最终答案的 Transformer，要么需要很大的深度，要么根本解决不了。</li>
+        </ul>
+        <p>幻灯片上列了这条理论的几个实际含义：生成更多中间步骤（想得更久）；生成太长时，可以调用外部工具，比如 MCTS（蒙特卡洛树搜索）；如果想把测试时搜索蒸馏进模型、让模型直接给答案，就需要很大的深度；以及在 Transformer 和 RNN/SSM 之间怎样选。课上他提到了前两点，还说他的一大乐趣是找那些他女儿几秒钟就能解、但大模型会失败的问题。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 不给示例：零样本 CoT 和类比推理</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=1962s" target="_blank">0:32:42</a>–0:37:41</em></p>
+        <h3>Let's think step by step</h3>
+        <p>前面都是用示例来引出逐步推理。能不能不用示例？他介绍了 Kojima et al.（Large Language Models are Zero-Shot Reasoners，NeurIPS 2022）：不给任何示例，只在问题后面加一句“Let's think step by step”，模型就会生成推理步骤。他说论文刚出来时他以为是个玩笑，结果不是，而且他从中得到很多启发。但零样本（zero-shot，不给示例）的方法通常比少样本差很多。</p>
+        <h3>LLMs as Analogical Reasoners</h3>
+        <p>于是他们想要一个同样不用人工写示例、但效果好得多的方法，这就是 Yasunaga et al.（Large Language Models as Analogical Reasoners，ICLR 2024）。思路还是来自《How to Solve It》：碰到新问题，先问自己是否知道一个相关的问题，或者相关的方法和策略。他引了 Banach 的一段话：数学家能找到定理之间的类比，更好的数学家能看到证明之间的类比，最好的数学家能注意到理论之间的类比，终极的数学家能看到类比之间的类比。他说放这段话是想让大家知道我们离 AGI 还有多远。</p>
+        <p>做法：在问题后面加一句“回忆一个相关的问题，然后解这个问题”。幻灯片上的例子是求四个顶点为 (-2, 2)、(2, -2)、(-2, -6)、(-6, -2) 的正方形面积。模型先回忆“求平面上两点距离”这个相关问题和距离公式 $d = \sqrt{(x_2-x_1)^2 + (y_2-y_1)^2}$，再算出相邻两点距离 $\sqrt{32}$，面积为 $(\sqrt{32})^2 = 32$。他说模型回忆出来的例子和知识并不是同一道题，但很有用。</p>
+        <p>幻灯片上的结果（自生成示例 vs 零样本、零样本 CoT、5-shot CoT）：</p>
+        <table>
+            <thead>
+                <tr><th>方法</th><th>GSM8K GPT3.5-turbo</th><th>GSM8K text-davinci-003</th><th>GSM8K PaLM2</th><th>MATH GPT3.5-turbo</th><th>MATH PaLM2</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>0-shot</td><td>75.0%</td><td>14.8%</td><td>60.8%</td><td>33.0%</td><td>27.1%</td></tr>
+                <tr><td>0-shot CoT</td><td>75.8%</td><td>50.3%</td><td>78.2%</td><td>33.9%</td><td>29.8%</td></tr>
+                <tr><td>5-shot CoT</td><td>76.7%</td><td>54.0%</td><td>80.7%</td><td>34.9%</td><td>34.3%</td></tr>
+                <tr><td>自生成示例（类比推理）</td><td>77.8%</td><td>61.0%</td><td>81.7%</td><td>37.3%</td><td>34.8%</td></tr>
+            </tbody>
+        </table>
+        <p>他说最重要的一点是它比零样本 CoT 好得多，甚至超过了人工写示例的 CoT，主要原因是模型会针对每个问题自动生成相关的问题。他们还在 BIG-Bench 和竞赛编程上做了实验，效果也很好。他们没做的是规模化：你甚至可以上网搜索和当前问题相关的所有问题和知识。他总结：类比推理是为每个问题自适应地生成相关示例和知识，而不是用一组固定的示例。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 连提示都不用：Chain-of-Thought Decoding</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=2261s" target="_blank">0:37:41</a>–0:43:26</em></p>
+        <p>再往前一步：能不能连“Let's think step by step”这种提示都不用，就引出逐步推理？有人会说现在的模型本来就会，他同意，但那是因为它们在训练或调优的数据里已经见过很多这类例子。他们的论文是 Xuezhi Wang 和 Denny Zhou 的 Chain-of-Thought Reasoning Without Prompting（2024），只把问题交给模型，什么都不加。</p>
+        <h3>做法</h3>
+        <p>例子：“我有 3 个苹果，我爸爸比我多 2 个，我们一共有几个？”解码的第一步，不只取概率最高的那个 token，而是看排名前几的候选 token（这里取前 5 个），从每个候选出发，后面都用贪心解码（greedy decoding，每一步只取概率最高的 token）继续生成。</p>
+        <ul>
+            <li>从“5”开始：输出“5 apples.”，错。</li>
+            <li>从“I”开始：“I have 3 apples, my dad has 2 more apples than me, so he has 5 apples. 3+5=8.”，对。</li>
+            <li>从“We”开始：“We have 8 apples in total.”</li>
+            <li>从“You”开始：也写出了完整的推理过程，得到 8。</li>
+            <li>从“The”开始：“The answer is 5.”，错。</li>
+        </ul>
+        <p>他说，提示里完全没提推理，但从不同的第一个 token 出发，模型自己就会做推理。</p>
+        <h3>答案 token 的置信度</h3>
+        <p>第二个例子：“Nicolas Cage 出生在偶数年还是奇数年？”前 6 个候选分别生成了“Nicolas Cage was born in an odd year.”“Even.”“Odd.”“1964, an even year.”“He was born in an even year.”“Cage was born in 1964, an even year.”。如果只看结果，长句子可能带推理也可能不带，问题就在于怎么挑出好的那条。他们发现可以看模型在“答案 token”上的概率。幻灯片上的数字：直接说“odd year”的那条是 0.117，“Even.”是 0.207，“Odd.”是 0.198，“He was born in an even year.”是 0.000，而带推理过程的“1964, an even year.”是 0.949，“Cage was born in 1964, an even year.”是 0.978。他说有推理过程时，答案 token 的概率一下跳到接近 1，模型的校准程度让他很吃惊。</p>
+        <p>他的两条结论：</p>
+        <ol>
+            <li>预训练模型不用再微调，就已经具备逐步推理的能力，只是需要非贪心的解码方式把它引出来。</li>
+            <li>当生成路径里有逐步推理时，模型对最终答案的置信度比直接回答高得多。</li>
+        </ol>
+        <p>幻灯片上的贪心解码与 CoT decoding 对比（PaLM-2）：</p>
+        <table>
+            <thead>
+                <tr><th>任务</th><th>解码</th><th>X-Small</th><th>Small</th><th>Medium</th><th>Large</th><th>Large（指令微调）</th></tr>
+            </thead>
+            <tbody>
+                <tr><td rowspan="2">GSM8K</td><td>greedy</td><td>9.0</td><td>14.3</td><td>21.0</td><td>34.8</td><td>67.8</td></tr>
+                <tr><td>CoT-decoding</td><td>17.7</td><td>35.1</td><td>39.7</td><td>61.5</td><td>81.3</td></tr>
+                <tr><td rowspan="2">MultiArith</td><td>greedy</td><td>7.5</td><td>15.8</td><td>36.8</td><td>75.0</td><td>93.7</td></tr>
+                <tr><td>CoT-decoding</td><td>34.8</td><td>43.5</td><td>52.5</td><td>86.7</td><td>98.7</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section id="t08">
+        <h2>08. Self-Consistency：对推理路径求和</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=2606s" target="_blank">0:43:26</a>–0:51:14</em></p>
+        <h3>生成中间步骤有什么问题</h3>
+        <p>他问：生成中间步骤而不是直接给答案，有什么值得担心的？有学生回答后，他给出自己的看法：要时刻记住，大模型是生成下一个 token 的概率模型，它们不是人。</p>
+        <p>模型解码时做的是：在给定问题的条件下，让“推理路径加最终答案”的联合概率最大，</p>
+        $$\arg\max_{\text{reasoning path},\ \text{answer}} P(\text{reasoning path}, \text{answer} \mid \text{problem})$$
+        <p>而我们真正想要的是最可能正确的最终答案，</p>
+        $$\arg\max_{\text{answer}} P(\text{answer} \mid \text{problem})$$
+        <p>他说推理路径当然重要，但首先要保证最终答案正确，再去看推理过程。两个目标并不一致。</p>
+        <h3>怎么算这个概率：采样</h3>
+        <p>再往前一步：$P(\text{answer} \mid \text{problem})$ 要对所有可能的推理路径求和，</p>
+        $$P(\text{answer} \mid \text{problem}) = \sum_{\text{reasoning path}} P(\text{reasoning path}, \text{answer} \mid \text{problem})$$
+        <p>这是概率论里的基本运算。同一道数学题可以有不同的解法得到同一个答案。这个和怎么算？学过机器学习的人都知道答案：采样。这就引出了他们的 Self-Consistency（Wang et al., Self-Consistency Improves Chain of Thought Reasoning in Language Models，ICLR 2023）。他说很多人知道 self-consistency，但这一讲他想让大家看到背后的动机，以及怎样从机器学习的第一性原理出发想到它。</p>
+        <p>例子是 GSM8K 里的鸭蛋题：Janet 的鸭子每天下 16 个蛋，她早餐吃 3 个，每天用 4 个给朋友烤松饼，剩下的每个卖 2 美元，她每天赚多少？采样多次得到不同回答：一条算出 16-3-4=9，9×2=18 美元；一条错算成 26 美元；还有一条分两步算出 9 个蛋、18 美元。出现最多的答案是 18。他强调，选的是出现最多的答案，不是出现最多的推理路径，这差别很大，推理路径在这里是隐变量（latent variable，模型里存在但不直接观察、计算时要求和掉的量）。</p>
+        <h3>结果</h3>
+        <p>幻灯片标题是“只用 8 个示例就刷新了 GSM8K 最好成绩”。图上的准确率：微调的 GPT-3 为 33%，微调的 GPT-3 加验证器为 55%，PaLM + CoT 为 58%，PaLM + CoT + SC（self-consistency）为 75%，PaLM-2 + CoT + SC 为 92%。</p>
+        <p>他还给出了一个和概率有关的解释：越一致的答案越可能正确。图上显示，一致性（多次采样里最多答案所占比例）超过 80% 时，准确率接近 100%。</p>
+        <h3>两个课堂问题</h3>
+        <ul>
+            <li>问题 1：模型直接输出答案、没有中间步骤时，还要采样多次再选最常见的答案吗？一位学生回答：不用，答案只有一个 token，直接取概率最大的那个就已经是最大概率了。他说回答得好。</li>
+            <li>问题 2：把 self-consistency 改成让模型一次生成多个回答，而不是采样多次，再选最常见的答案，这样合理吗？学生回答不合理，他表示同意。</li>
+        </ul>
+        <p>他说这两个问题都只要遵循同一条原则：找给定问题下概率最大的最终答案。这就是理解 self-consistency 所需要的全部，在机器学习里它叫 maximum marginal inference（最大边际推断）。</p>
+        <h3>Universal Self-Consistency</h3>
+        <p>如果答案是自由文本，没法直接数票，怎么办？他介绍了 Universal Self-Consistency（Xinyun Chen et al., 2023）：让模型自己从多个回答里选出最一致的那个。例子是“哪些地方的人喝咖啡比墨西哥少？”三个回答各不相同，分别列了日本、中国、英国，日本、中国、印度，以及日本、中国、沙特阿拉伯、印度等，模型选出最一致的是第 2 个。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 局限一和二：无关上下文，不能自我纠正</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=3074s" target="_blank">0:51:14</a>–0:58:08</em></p>
+        <h3>容易被无关上下文干扰</h3>
+        <p>论文是 Freda Shi et al.（Large Language Models Can Be Easily Distracted by Irrelevant Context，ICML 2023）。心理学研究表明，无关信息会显著降低一些儿童甚至成年人的解题准确率（幻灯片引了 Marzocchi et al. 2002 关于注意力不集中儿童做算术题的研究）。他们想看这个现象在大模型上是否成立。</p>
+        <p>例子：“Lucy 银行里有 65 美元，她存了 15 美元，又取了 4 美元。Maria 的月租是 10 美元。Lucy 的余额是多少？”其中 Maria 月租那句是人工加进去的，和问题无关。模型却算成 65+15-4-10 = 66。幻灯片上写，在 GSM8K 里加入无关上下文，准确率下降 20 多个百分点。</p>
+        <p>有意思的是，如果在提示里加一句“忽略无关上下文”，模型马上就能注意到，算出 76 美元，并说明 Maria 的月租与问题无关。这能挽回一部分表现。但如果把无关内容加得很多，比如反复插入“The sky is blue.”“The grass is green.”这类废话把输入撑得很长，所有大模型的表现都会显著下降。</p>
+        <h3>还不能自我纠正推理</h3>
+        <p>论文是 Jie Huang et al.（Large Language Models Cannot Self-Correct Reasoning Yet，ICLR 2024）。</p>
+        <p>先看一个看起来很成功的例子：Christina 办生日派对，每位受邀客人需要 0.75 个礼品袋，因为 1/4 的人不会来；她邀请了 16 位朋友，礼品袋每个 2 美元，她要花多少钱？模型第一次算错。然后提示“检查你之前的答案，找出问题”，模型说发现了错误；再提示“根据找到的问题改进答案”，模型改成 16×3/4 = 12 个，花 24 美元，正确。听起来很棒。</p>
+        <p>问题在于，如果原来的答案是对的，用同样的提示，模型也可能把它改错。例子：Terry 每天吃 2 个酸奶，现在 4 个卖 5 美元，30 天花多少钱？模型第一次答 75 美元，正确；经过“检查”和“改进”，它改成了 37.5 美元，错了。所以让模型审查自己的回答，既能改正错误答案，也可能把正确答案改错。</p>
+        <p>他们在 GSM8K、CommonSenseQA、HotpotQA 上做了大量实验，没看到自我纠正带来提升，结果只会更差。幻灯片上的表：</p>
+        <table>
+            <thead>
+                <tr><th>模型</th><th>方法</th><th>调用次数</th><th>GSM8K</th><th>CommonSenseQA</th><th>HotpotQA</th></tr>
+            </thead>
+            <tbody>
+                <tr><td rowspan="3">GPT-3.5</td><td>Standard Prompting</td><td>1</td><td>75.9</td><td>75.8</td><td>26.0</td></tr>
+                <tr><td>Self-Correct（第 1 轮）</td><td>3</td><td>75.1</td><td>38.1</td><td>25.0</td></tr>
+                <tr><td>Self-Correct（第 2 轮）</td><td>5</td><td>74.7</td><td>41.8</td><td>25.0</td></tr>
+                <tr><td rowspan="3">GPT-4</td><td>Standard Prompting</td><td>1</td><td>95.5</td><td>82.0</td><td>49.0</td></tr>
+                <tr><td>Self-Correct（第 1 轮）</td><td>3</td><td>91.5</td><td>79.5</td><td>49.0</td></tr>
+                <tr><td>Self-Correct（第 2 轮）</td><td>5</td><td>89.0</td><td>80.0</td><td>43.0</td></tr>
+            </tbody>
+        </table>
+        <p>文献里报告的自我纠正提升，用的是 oracle 答案：只在答案错的时候才让模型去纠正。问题是模型自己并不知道答案是对是错。</p>
+        <h3>多模型辩论也不如 self-consistency</h3>
+        <p>另一类方法是多智能体辩论：让多个模型互相辩论，直到达成一致。他说关键要数清楚一共生成了多少个回答：比如 3 个模型各生成一个是 3 个回答，辩论一轮后就是 6 个，两轮是 9 个。那就拿同样数量的回答直接做 self-consistency 来比。幻灯片上的 GSM8K 结果：</p>
+        <table>
+            <thead>
+                <tr><th>方法</th><th>回答数</th><th>GSM8K</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Standard Prompting</td><td>1</td><td>76.7</td></tr>
+                <tr><td>Self-Consistency</td><td>3</td><td>82.5</td></tr>
+                <tr><td>Multi-Agent Debate（第 1 轮）</td><td>6</td><td>83.2</td></tr>
+                <tr><td>Self-Consistency</td><td>6</td><td>85.3</td></tr>
+                <tr><td>Multi-Agent Debate（第 2 轮）</td><td>9</td><td>83.0</td></tr>
+                <tr><td>Self-Consistency</td><td>9</td><td>88.2</td></tr>
+            </tbody>
+        </table>
+        <p>回答数相同时，辩论都比不过只是多次采样、取最常见答案的 self-consistency。他得出的教训是：大模型要自我纠正，需要 oracle 反馈。由此引出他们的 Self-Debug 工作（Xinyun Chen et al., Teaching Large Language Models to Self-Debug，ICLR 2024）：很多编程题自带单元测试，单元测试天然就是 oracle，可以告诉模型代码对不对。他说这项工作开始得很早，一开始没做成，后来才做出来（字幕不清，大意如此）。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 局限三：前提顺序</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=3488s" target="_blank">0:58:08</a>–1:02:07</em></p>
+        <p>论文是 Xinyun Chen et al.（Premise Order Matters in Reasoning with Large Language Models，ICML 2024）。他说现在每次有新模型发布，技术报告里都是很漂亮的数字，他对这些数字有疑问，因为模型用互联网上的全部数据训练，可能已经见过这些题。他团队的一项工作就是自己生成不同的任务来测试模型。</p>
+        <h3>数学题：调一句话的位置</h3>
+        <p>原题（GSM8K）：Thomas 从银行取出 1000 美元，都是 20 美元面额；回家路上丢了 10 张；之后用剩下的一半付了一张账单；然后他的钱翻了三倍；最后全部换成 5 美元面额，他有多少张？改写版只是把“回家路上丢了 10 张”这句挪到最后。</p>
+        <p>他们对一部分 GSM8K 题做了这种改动，所有前沿模型的解题率都下降了约 10 个百分点。对比两份回答：原题的回答按顺序算，50 张，丢 10 张剩 40，付掉一半剩 20 张，即 400 美元，翻三倍 1200 美元，换成 240 张 5 美元；改写版的回答也按句子顺序算，50 张付掉一半剩 25 张，500 美元，翻三倍 1500 美元，换成 300 张，最后才减去丢的 10 张，得到 290。他说模型只会按顺序解题，没法前后来回看。</p>
+        <h3>逻辑推理：打乱规则顺序</h3>
+        <p>有人可能说这和语义理解有关，所以他们又设计了一个更“纯”的逻辑推理任务，连真实的词都不用，只用随机造的词。比如规则：“If duve, then dax. If kere and riff, then tess. ……”事实：“Alice is cote. Alice is kone. ……”问题：“Alice 是 wozz 吗？每一步说明用的是事实还是规则。”</p>
+        <p>原始版本里，规则按推理时用到的顺序排列，但并非所有规则都和问题有关。打乱版本只把和问题相关的规则随机排序，无关规则留在原位。结果所有前沿大模型的表现下降 30 多个百分点。他说，根据他的个人经验，做研究时设计实验很重要，这就像调试程序。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 总结和下一步</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=3727s" target="_blank">1:02:07</a>–1:04:02</em></p>
+        <p>他的总结：</p>
+        <ul>
+            <li>生成中间步骤能大幅提升模型表现。可以用中间步骤做训练、微调、提示，也可以用零样本、类比推理，或者 CoT decoding 这样特殊的解码方法。</li>
+            <li>Self-consistency 能大幅提升逐步推理的效果，不管模型是微调过的还是只用提示。</li>
+            <li>局限：无关上下文、自我纠正、前提顺序，这些都影响推理表现。</li>
+        </ul>
+        <p>有人问他下一步做什么问题。他引了一句据传是爱因斯坦的话：如果给我一小时拯救地球，我会花 59 分钟定义问题，1 分钟解决它。他最重要的建议是：很多人说要做 AGI，但那不是一个问题；关键是定义一个对的问题，然后从第一性原理出发去解决，而机器学习的原理在这里仍然很重要。</p>
+        <p>幻灯片上还有两页课上没有展开：一页问“我讲的东西有没有让你觉得奇怪？你问别人问题时，会先给他看几道相关题和解法吗？会跟一句‘让我们一步一步想’吗？”；另一页写的是方向：开发一个能自主学会这一讲介绍的所有推理技巧、同时克服这里指出的所有局限的模型，配一句 Feynman 的话“真相总是比你想的更简单”。</p>
+        <p>最后他提到自己正在和一些人一起组织 Conference on Language Modeling（COLM），说这是第一个专门讨论语言模型的会议，欢迎大家参加。</p>
+    </section>
+
+    <section>
+        <h2>问答</h2>
+        <p>这一讲没有单独的问答环节，问答穿插在讲课中，已经写进对应小节：生成中间步骤有什么隐患（第 08 节，他的回答是记住模型是概率模型）；self-consistency 的两道课堂题（第 08 节）。其余几次“有没有问题”都没有人提问。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“Humans can learn from just few examples because humans can reason, not because of data statistics.”<br>人能从几个例子学会，是因为人会推理，不是因为数据统计。· <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=707s" target="_blank">0:11:47</a></li>
+            <li>“So even like a humans, one demonstration is enough to get an accuracy 100%.”<br>就像人一样，一个示范就够了，准确率 100%。· <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=1110s" target="_blank">0:18:30</a></li>
+            <li>“Regardless of training, fine tuning or prompting, when provided with examples that include intermediate steps, [LLMs] will generate responses that also include intermediate steps.”<br>不管是训练、微调还是提示，只要给的例子里有中间步骤，模型生成的回答也会有中间步骤。· <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=1405s" target="_blank">0:23:25</a></li>
+            <li>“[LLMs] are [probabilistic] models of generating next tokens. They are not humans.”<br>大模型是生成下一个 token 的概率模型，它们不是人。· <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=2606s" target="_blank">0:43:26</a></li>
+            <li>“It may also risk changing correct answers into incorrect ones.”<br>（让模型审查自己的回答）也可能把正确答案改错。· <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=3302s" target="_blank">0:55:02</a></li>
+            <li>“So the lesson we learned here is Oracle feedback is needed for [LLM] to self-correct.”<br>我们得到的教训是：大模型要自我纠正，需要 oracle 反馈。· <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=3419s" target="_blank">0:56:59</a></li>
+            <li>“The problem is define a right problem work on and solve it from the first principles.”<br>问题在于定义一个对的问题去做，并从第一性原理出发去解决它。· <a href="https://www.youtube.com/watch?v=QL-FS_Zcmyo&t=3788s" target="_blank">1:03:08</a></li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>Berkeley RDI LLM Agents MOOC · LLM Reasoning · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

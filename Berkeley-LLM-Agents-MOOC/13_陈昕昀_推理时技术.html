@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Xinyun Chen：大模型推理的推理时技术 | Berkeley LLM Agents MOOC 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="12_Dawn_Song_安全可信的智能体与AI政策.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">Berkeley LLM Agents MOOC 目录</a> · 13</span>
+    <span><a href="14_Jason_Weston_学会推理.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Xinyun Chen：大模型推理的推理时技术</h1>
+        <p class="subtitle">怎样在推理时多花 token 换更好的推理：思维链、零样本思维链、类比提示、APE 和 OPRO 自动写提示、Least-to-Most 和 Self-Discover；多候选里怎么选：Self-Consistency、AlphaCode 聚类、Universal Self-Consistency、ORM/PRM 验证器、Tree of Thoughts；以及 Reflexion、Self-Refine、Self-Debug 和“大模型还不能自我纠错”的反面结果，最后是并行和串行之间怎么分预算</p>
+        <div class="author-meta">
+            主讲：Xinyun Chen（Google DeepMind）· 课程：Berkeley CS294/194-280 Advanced Large Language Model Agents（2025 年春季）· 上课日期：2025 年 1 月 27 日 · 时长：1 小时 21 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0" target="_blank">课堂录像</a> · <a href="https://rdi.berkeley.edu/adv-llm-agents/slides/inference_time_techniques_lecture_sp25.pdf" target="_blank">幻灯片</a>（Berkeley RDI 公开，2025 年春季，本文依据录像字幕和幻灯片整理，是中文转述，不是逐字翻译；观点属于主讲人，内容以上课当天为准）
+        </div>
+    </header>
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>Xinyun Chen（陈昕昀）是 Google DeepMind 的研究科学家，和 Dawn Song、Kaiyu Yang（Meta）一起开这门 2025 年春季的进阶课。这是新学期第一讲，前半段她介绍了 LLM 智能体的基本框架、过去几个月推理模型的进展和这学期的课程安排，助教 Alex 讲了作业和项目安排（这部分本文只用一句带过）。正课是推理时技术（inference-time techniques）：模型训练好之后，在回答问题时用哪些办法多花算力、换来更好的推理结果。</p>
+        <p>她把这些办法分成三部分。第一部分是基础提示技术，让模型为一个答案多写一些 token；第二部分是从多个候选里搜索和挑选，相当于把解空间探索得更宽；第三部分是迭代自我改进，让模型一轮轮修改自己的答案，相当于探索得更深。最后她讨论了怎样在这几种做法之间分配推理预算，并用 Richard Sutton 的 The Bitter Lesson 收尾。讲到的论文有不少是她自己和 Google DeepMind 同事的工作。这一讲没有问答环节。</p>
+        <ol>
+            <li><a href="#t01">开场：LLM 智能体和推理模型的进展</a> · <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=78s" target="_blank">0:01:18</a></li>
+            <li><a href="#t02">推理时多花算力：o3、o1 和 Gemini 的演示</a> · <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=503s" target="_blank">0:08:23</a></li>
+            <li><a href="#t03">思维链提示和零样本思维链</a> · <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=911s" target="_blank">0:15:11</a></li>
+            <li><a href="#t04">类比提示：让模型自己生成例题</a> · <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=1233s" target="_blank">0:20:33</a></li>
+            <li><a href="#t05">让 LLM 自己写提示：APE 和 OPRO</a> · <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=1610s" target="_blank">0:26:50</a></li>
+            <li><a href="#t06">思维链带来了什么：Least-to-Most 和 Self-Discover</a> · <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=2085s" target="_blank">0:34:45</a></li>
+            <li><a href="#t07">从多个候选里选：Self-Consistency</a> · <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=2710s" target="_blank">0:45:10</a></li>
+            <li><a href="#t08">AlphaCode 的执行聚类和 Universal Self-Consistency</a> · <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=3136s" target="_blank">0:52:16</a></li>
+            <li><a href="#t09">训练出来的验证器和 Tree of Thoughts</a> · <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=3515s" target="_blank">0:58:35</a></li>
+            <li><a href="#t10">迭代自我改进：Reflexion、Self-Refine 和 Self-Debug</a> · <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=3962s" target="_blank">1:06:02</a></li>
+            <li><a href="#t11">没有外部反馈时，自我纠错会变差</a> · <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=4280s" target="_blank">1:11:20</a></li>
+            <li><a href="#t12">并行还是串行：怎样分配 token 预算</a> · <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=4549s" target="_blank">1:15:49</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场：LLM 智能体和推理模型的进展</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=78s" target="_blank">0:01:18</a>–0:08:23</em></p>
+        <h3>上学期的回顾</h3>
+        <p>她先回顾 2024 年秋季那一版课程：请了很多嘉宾讲推理技术、智能体工作流和各种应用，MOOC 上大约 15,000 人注册；同时办的黑客松有大约 3,000 人参加，行业伙伴提供了约 20 万美元的奖金和资源。</p>
+        <h3>智能体框架</h3>
+        <p>她给的定义是：LLM 智能体的“大脑”是一个大语言模型，它在每个时间步做推理和规划、选择行动；行动作用到环境上之后，智能体收到反馈，更新自己的内部记忆，以便更好地规划下一步。这个框架让 LLM 能用上外部反馈和工具，常见组件有工具调用（tool use，让模型调用搜索、计算器、代码执行器等外部程序）和检索（retrieval，从外部知识库里查资料）。</p>
+        <p>为什么要给 LLM 套上智能体框架，她给了三个理由。一是真实任务往往要试错，部署到新环境时，智能体要通过交互搞清楚哪些行动会成功、哪些会失败，再修正记忆。二是外部工具和外部知识扩展了模型本身的能力。三是工作流设计成熟之后，可以处理复杂任务：任务分解、子任务分配、不同专门模块之间分工协作，以及多智能体。</p>
+        <p>她提到很多人说 2025 年会是“智能体之年”。已经比较成功的应用有代码生成、电脑操作（computer use）、个人助理和机器人，教育、金融等领域也出现了不错的 LLM 智能体。</p>
+        <h3>推理模型的进展</h3>
+        <p>另一个推动力是推理模型。她列的时间线：2024 年 9 月 OpenAI o1 发布；上个月（2024 年 12 月）有 Gemini 2.0 Flash Thinking 和 OpenAI o3；这个月（2025 年 1 月）有 DeepSeek R1 和 Kimi k1.5（字幕作 “Qwen Q1.5”，后文她又提到 Kimi 团队）。同一系列内部的进步也很快，o1 到 o3，Gemini 思考模型从第一版到现在都有明显提升。</p>
+        <p>进展最显著的是数学和编程的难题：Google DeepMind 的 AlphaProof 和 AlphaGeometry 在 2024 年 IMO 拿到银牌水平、接近金牌；o3 在 Codeforces 编程竞赛上能排进人类参赛者前 200 名左右。她说这些里程碑在发生之前几个月都很难想象。</p>
+        <h3>这学期的内容</h3>
+        <p>这学期会深入方法，尤其是推理技术：推理时扩展、训练技术、搜索和规划。应用侧集中在软件工程和数学，包括代码生成与验证、自动形式化（autoformalization，把自然语言的数学题和证明翻译成机器可检查的形式语言）和定理证明。之后再讲企业应用、更高级的智能体工作流设计，以及部署时的安全和伦理问题。接下来助教 Alex 讲了课程安排：实验作业推迟发布、内容更多；项目分应用和研究两条线，研究线由 Dawn Song 组里的博士后和研究生指导，目标是投 workshop 论文。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 推理时多花算力：o3、o1 和 Gemini 的演示</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=503s" target="_blank">0:08:23</a>–0:15:11</em></p>
+        <h3>算力越多，成绩越好</h3>
+        <p>她引用 o1 博客里的结果：o1 在 IMO 级别的竞赛数学和 Codeforces 编程题上，表现远超之前的模型。o3 的结果进一步说明，推理时算力越多，成绩越高。</p>
+        <p>例子是 ARC-AGI。这个基准由一批谜题组成，给几个示范例子，看人或模型能不能学会其中的规律。o1 之前的模型如果不用特别的推理时技术、只做常规推理，准确率都低于 25%；o1 也只有约 30%。o3 把每题推理预算设在约 20 美元时，成绩大致追平众包标注员（Mechanical Turk 工人）的平均水平；把每题成本推到 1,000 美元以上，准确率达到 87.5%。她说这显然是很贵的解法，但它展示了不计推理成本时模型能做到什么程度。</p>
+        <h3>o1 的隐藏思考</h3>
+        <p>她现场展示了一个让 o1 解规划问题的例子。以前的 LLM 收到问题直接生成回答；o1 的界面里多了一段思考过程，耗时随题目难度变化，这道题用了一分多钟。o1 不展示原始思考，只给一个摘要。从摘要能看到几个阶段：先列出初步方案，按模型自己的判断评估它，再修改方案，让它满足约束、更优。</p>
+        <h3>Gemini 2.0 Flash Thinking 的演示</h3>
+        <p>Gemini 2.0 Flash Thinking 把思考 token 直接展示给用户。她展示的题目带图：图里有四个写着数字的球，要求从中选三个数，使它们的和等于 30。数学本身很简单，思考过程却很长。最有意思的一步是，模型在某个时刻想到要把写着 9 的球倒过来当 6 用，否则凑不出 30。她说这一步数学上不难，算是一个小技巧，但如果不允许模型先写很长的思考，这一步很难被想到。</p>
+        <h3>共同的核心：让模型先写长思维链</h3>
+        <p>这些推理模型（OpenAI、Google DeepMind、DeepSeek、Kimi 团队）共享一个核心想法：想办法让 LLM 在给出最终答案前，先生成很长的思维链（chain-of-thought，CoT，即把中间推理步骤一步步写出来）。触发思维链的方法有四类：</p>
+        <ul>
+            <li>少样本思维链提示：在提示里放带推理过程的示例，这是原始 CoT 论文的做法；</li>
+            <li>指令提示：比如加一句 “Let's think step by step”；</li>
+            <li>指令微调：把思维链数据放进监督微调（SFT）的数据混合里，现在的对话模型即使不加特别指令也会先写一段思考；</li>
+            <li>强化学习：近期推理模型的做法。</li>
+        </ul>
+        <p>她说这一讲只讲推理时扩展 token 预算的技术，训练侧的方法留给后面的嘉宾讲。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 思维链提示和零样本思维链</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=911s" target="_blank">0:15:11</a>–0:20:33</em></p>
+        <h3>三部分的提纲</h3>
+        <p>她先给出全讲结构：第一部分，基础提示技术，共同点是让模型为一个答案用更多 token；第二部分，多候选的搜索和选择，增加探索解空间的宽度；第三部分，迭代自我改进，增加深度。最后讲怎样组合这些技术、最好地利用推理时算力。</p>
+        <h3>标准提示的问题</h3>
+        <p>在思维链之前，常见做法是标准提示（standard prompting）：提示里放几组“问题加最终答案”的例子，再接上要解的题。在后训练技术成熟之前，这种做法在推理基准上表现很差。她说根本原因是这些示例只告诉模型答案的格式，没告诉它答案是怎么推出来的。她打了个比方：老师上课只给标准答案、不讲来龙去脉，如果你自己没有背景知识，就很难学会。</p>
+        <h3>思维链提示</h3>
+        <p>思维链提示（Wei et al., NeurIPS 2022；同期还有 Nye et al. 2021 的 scratchpad 工作）在示例里写出计算步骤，示范怎么一步步得到答案。给了这样的示例，模型就能把题做对。</p>
+        <p>模型能从思维链里获益多少，取决于它本身的能力。她展示了原论文和 Emergent Abilities of Large Language Models 里的规模曲线：在不同模型家族里，思维链的效果随模型变大提升得更明显；更强的模型从思维链获益更多；模型规模到某个点之后，推理表现会大幅跳升。她提醒，这些曲线来自 2022 年的论文，用的是只做过预训练的模型，所以必须靠提示才能让它们写出推理过程。现在的后训练模型曲线可能不同，比如出现了一些又小又强的模型，但大结论仍然成立：模型越好，越能从“允许写思维链”中获益。</p>
+        <h3>零样本思维链</h3>
+        <p>后续论文 Large Language Models are Zero-Shot Reasoners（Kojima et al., NeurIPS 2022）发现，即使是只做过预训练的模型，也不一定需要示例：在让模型回答之前加一句 “Let's think step by step”，它就会先写出推理过程。这种零样本思维链（zero-shot CoT）在较难的数学和符号推理任务上明显好于普通零样本。它比少样本思维链方便，因为不用人工写推理示例；缺点是效果仍然明显不如少样本思维链。于是自然的问题是：能不能两头都要，不人工标注示例，也拿到少样本思维链的效果？</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 类比提示：让模型自己生成例题</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=1233s" target="_blank">0:20:33</a>–0:26:50</em></p>
+        <h3>方法</h3>
+        <p>这是她们组的论文 Large Language Models as Analogical Reasoners（Yasunaga, Chen 等，ICLR 2024）。做法是：不给模型现成的示例，只指示模型先回忆与这道题相关的例题，再解原题。模型把自己生成的例题当成外部提供的思维链示例来用。</p>
+        <p>幻灯片上的例子：原题是“四个顶点分别为 (-2, 2)、(2, -2)、(-2, -6)、(-6, -2) 的正方形面积是多少”。提示里只有两条指令：“回忆相关例题”“解原题”。模型先写了一道例题“边长为 5 的正方形面积是多少”，答案是边长的平方 25；然后回到原题，用两点距离公式算出边长为 √32，面积为 32。</p>
+        <p>她说好处有两点。一是例题由模型自己生成，不需要人工标注。二是指令对每道测试题单独执行，不同的题会生成不同的、和题目具体内容更相关的例题，示例是为每道题量身定做的。</p>
+        <h3>动机：人怎么类比</h3>
+        <p>方法名来自人的类比推理。她说，少样本提示从人的角度看其实不太自然，人不会每遇到一个新问题都被明确给一套示范，通常是自己从过去的相关经验里回忆。Pólya 的经典书 How to Solve It（1945）里有一条方法叫“你知道一个相关的问题吗”：解题时找一个以前解过、通过推广、特殊化或类比与当前问题相联系的问题，借用它的结果或方法。</p>
+        <h3>除了例题，还可以生成知识</h3>
+        <p>沿着人类推理的思路，还可以让模型生成更高层的知识，作为对问题的更概括的补充。她用 Codeforces 编程题举例：给一道新题，先让模型识别解题需要的核心算法，生成一段关于这个算法的教程式知识，再生成相关的例题和对应代码，最后回到原题写代码。</p>
+        <h3>结果</h3>
+        <p>类比提示不仅好于零样本思维链，也好于人工写示例的少样本思维链。幻灯片上的数字：</p>
+        <table>
+            <tr><th>任务（模型）</th><th>0-shot</th><th>0-shot CoT</th><th>Few-shot CoT</th><th>类比提示</th></tr>
+            <tr><td>GSM8K 数学（text-davinci-003）</td><td>14.8%</td><td>50.3%</td><td>54.0%</td><td>61.0%</td></tr>
+            <tr><td>Codeforces 代码生成（GPT-3.5 Turbo）</td><td>8%</td><td>9%</td><td>无</td><td>15%</td></tr>
+            <tr><td>BIG-Bench 时间推理（GPT-3.5 Turbo）</td><td>40.4%</td><td>44.8%</td><td>无</td><td>57.6%</td></tr>
+        </table>
+        <p>她说第一次看到可能会意外，因为模型生成的例题和知识按理会比人写的错误多。实际也确实有错：数学题上大约 70% 的自生成例题既正确又相关，其余有的完全不相关，有的计算步骤是错的。即便示例里有噪声，模型仍然获益很多。</p>
+        <h3>更强的模型更会类比</h3>
+        <p>这意味着模型至少得能生成大致合理的例题，否则学不到东西。她们在 GPT 的 text 系列模型上做了一个比较粗的规模研究（她说这些模型现在都已下线，但趋势仍然成立）：较弱的模型从类比提示获益较少，不过表现与零样本思维链持平或略好，不会变差；从 text-davinci-002 开始，类比提示超过了人工设计示例的思维链，甚至超过了检索示例的做法。检索基线是对每道测试题从 GSM8K 训练集中找最相关的题当示例。她的一个解释是，模型自己生成的思维链更贴合这个模型本身的推理风格。她把这个发现和近期训练推理模型的趋势联系起来：与其往训练里塞人写的思考过程，不如设计训练方法，让模型自己找到最好的推理策略。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 让 LLM 自己写提示：APE 和 OPRO</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=1610s" target="_blank">0:26:50</a>–0:34:45</em></p>
+        <h3>提示对措辞很敏感</h3>
+        <p>回到 “Let's think step by step”：为什么偏偏是这句话？零样本思维链论文对这句指令的各种变体做了消融实验（MultiArith 数据集，text-davinci-002）。有些变体本来就没什么道理，效果差不奇怪；但在“指导性”那一类里，如果把准确率遮住，很难凭直觉判断哪句会更好，改几个词准确率就可能大幅变化。她的结论是，当前 LLM 对提示设计很敏感，而且写出最优提示没有清晰的原则，所以至今还有很多人在写提示工程指南。下一个问题是：怎样减少手写提示的工作量？她们的想法是，既然 LLM 能解难题，那也可以让它来做提示设计。</p>
+        <h3>APE：LLM 当提示工程师</h3>
+        <p>ICLR 2023 的论文 Large Language Models are Human-Level Prompt Engineers（Zhou et al.）有两个阶段。第一是生成候选：给出任务描述，让 LLM 生成一批初始指令。第二是打分：在一个小验证集上，按每条指令带来的预测正确率给它打分。她说这有点像传统机器学习的训练/测试划分，但验证集不需要很大，通常几十道到 100 道左右就够了。</p>
+        <h3>OPRO：LLM 当优化器</h3>
+        <p>她们自己在 ICLR 2024 发表的 Large Language Models as Optimizers（Yang, Wang, Lu, Liu, Le, Zhou, Chen）更进一步：除了让 LLM 提出指令、做搜索和变异，还让它当优化器，一轮轮改进提示。核心想法是把过去的优化轨迹写成按分数排序的“（解，分数）”对给 LLM 看，让它据此提出更好的解。论文把这当作在自然语言空间里做优化的通用框架；用在提示优化上，就需要两个 LLM：</p>
+        <ul>
+            <li>优化器（optimizer）：根据旧指令和任务示例，提出新的指令；</li>
+            <li>评估器（evaluator，她称为 scorer）：评估一条指令的准确率。</li>
+        </ul>
+        <p>她展示了 GSM8K 上用的元提示（meta-prompt）。它看起来很长，主要由两部分组成。第一部分是轨迹：过去试过的指令和对应准确率，按升序排列，比如 “Let's figure it out!” 得 61 分、“Let's solve the problem.” 得 63 分；上下文放不下时可以去掉较旧的。第二部分是任务示例，说明在每道题的 <code>&lt;INS&gt;</code> 位置填入指令，模型输出与给定答案一致就算对。数学题只需要题目和最终答案，不需要标注任何思维链。最后一句要求模型写出一条与旧指令不同、分数尽量高的新指令，放在方括号里。</p>
+        <h3>结果</h3>
+        <p>实验用的是只做过预训练的模型，评分模型是 PaLM 2，优化器试过 PaLM 和 GPT 系列。初始指令 “Let's solve the problem.” 在 GSM8K 上准确率约 61%（幻灯片上是 60.8%），这是很通用的指令，比 “step by step” 那句低约 10 个点。优化出的最好指令是 “Take a deep breath and work on this problem step-by-step”，比 “Let's think step by step” 高约 8 个点，和 PaLM 2 技术报告中人工写示例的少样本思维链准确率（80.7%）持平。</p>
+        <p>她说这里有两点可想。一是又多了一条不手写示例就能接近少样本思维链的路。二是 LLM 优化除了省掉人工调提示的时间，还会给出意想不到的角度：如果是她自己改提示，不会想到 “take a deep breath” 会有用，但在优化循环里模型找到了这条很适合它自己的指令。</p>
+        <p>她也强调，这不是真正意义上的优化，没有任何训练，全是提示，所以不保证提示会越来越好。但实际上不同模型的优化曲线形状相似：随着迭代步数增加，准确率上升，然后进入平台期，很像传统优化的曲线。幻灯片上给了两组配置：评分模型 PaLM 2-L 加优化器 PaLM 2-L-IT，以及评分模型 text-bison 加优化器 PaLM 2-L-IT。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 思维链带来了什么：Least-to-Most 和 Self-Discover</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=2085s" target="_blank">0:34:45</a>–0:45:10</em></p>
+        <h3>可变的计算量</h3>
+        <p>她从方法角度解释思维链为什么有效：它让推理过程的计算量可变，用在一道题上的 token 数能随难度调整。标准提示直接输出答案，如果答案长度相同，就等于强迫模型对每道题花同样的推理预算，不管难易。有了思维链，难题可以写更多步骤，比如数学题多几步计算，模型就在 token 空间里多做了推理。原论文还发现，即使示例里都是简单的数学题，同一个提示也能推广到需要多得多步骤的测试题。</p>
+        <p>此外，思维链里包含了人在解难题时用的推理策略，比如分解和规划。如果知道某类任务适合什么策略，就可以在提示里明确告诉模型。</p>
+        <h3>Least-to-Most 提示</h3>
+        <p>Least-to-Most Prompting（Zhou et al., ICLR 2023，她 Google DeepMind 同事的工作）把“分解”这个策略推到明处，目标是从易到难的泛化。它有两个阶段：先做问题化简，把原题拆成更简单的子问题，每个子问题需要的计算步骤更少；再依次解这些子问题，把子问题的解组合起来回答原题。</p>
+        <p>她说这篇工作最惊人的结果是：第一次证明不需要设计神经符号（neuro-symbolic）框架、也不需要执行程序，就能在组合泛化基准上做到接近满分。基准是 SCAN：把程序生成的合成自然语言命令翻译成动作序列。最难的是长度划分（length split），测试集里的动作序列都比训练样本长。直接在训练集上做序列到序列学习，测试准确率不超过 25%，除非用神经符号技术。Least-to-Most 用当时最新的 code-davinci-002（字幕作 “Code Ocean 002”）达到接近满分，而且只用了 0.1% 的训练样本作示例，数据效率高，效果也有竞争力。</p>
+        <h3>动态 Least-to-Most：翻译成 SPARQL</h3>
+        <p>她们的后续工作 Compositional Semantic Parsing with Large Language Models（Drozdov, Schärli 等，ICLR 2023）把这个想法用到更真实的文本到代码任务：把自然语言问题翻译成 SPARQL 查询。基准是 CFQ（Compositional Freebase Questions）。幻灯片上的例子是 “Did M1 star M2, star M3, and star a art director and editor of M0?”，对应一条带多个三元组条件的 <code>SELECT count(*)</code> 查询。</p>
+        <p>难点是真实语言的语法规则更复杂、词表更大，如果模型上下文不够长，一个提示装不下所需的全部语法规则。分解的好处在这里显现：不同推理阶段可以用不同的提示，每个子问题有为它定制的提示，在智能体开发里就是每个子任务有自己的提示。她说具体怎么分解不太重要，新加的关键一步是为每个子问题动态选择示例：对句子的每个部分，检索出包含最相关语法规则的例题，保证模型手上有解这一部分所需的上下文。在 CFQ 上，动态 Least-to-Most 超过了所有在完整训练集上训练模型的基线；和思维链等提示方法相比也更好，示例池变大时它的提升也更明显。</p>
+        <h3>Self-Discover：让模型自己组合推理结构</h3>
+        <p>不同任务需要不同的推理结构，也就是不同的分解方式和每一阶段的规划方式。但她们不想为每类任务人工标注最佳做法。Self-Discover（Zhou 等，NeurIPS 2024）的做法是：列出几十种推理策略的“最佳实践”，包括思维链、分解、自我反思等；遇到新任务时，让模型思考哪些策略最适合这个任务，组合成一个任务专用的推理结构，再按这个结构解题。评测显示它在 BIG-Bench Hard、MATH 和一些社会推理类基准上好于思维链和其他基线。</p>
+        <h3>第一部分小结</h3>
+        <p>她总结第一部分：思维链的基本思想是可变计算，推理过程能随任务难度伸缩；提升思维链效果的推理时手段有带推理标注的少样本提示、触发思维链的指令，以及让 LLM 自动设计提示。她特别说，和 LLM 交互的最佳做法会随时间变化。现在的后训练模型不用每个任务都给示例；有些模型更适合直接给清晰的指令，有些喜欢来回讨论，有些更适合一次性给一份很长很细的说明。但寻找好提示策略的原则仍然成立：对复杂任务要鼓励更长的思维链，能随难度伸缩；提示要能支持这个任务需要的推理策略。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 从多个候选里选：Self-Consistency</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=2710s" target="_blank">0:45:10</a>–0:52:16</em></p>
+        <h3>一个答案不够</h3>
+        <p>第二部分的出发点：不该限制模型每题只生成一个解，因为单次生成可能出错；让模型探索多个分支，就有机会从单次生成的错误里恢复。增加宽度有两种方式：每道题生成多个完整候选解；或在每一步，根据当前的部分推理生成多个可能的下一步。</p>
+        <p>多采样之后性能上限一定更高，因为有机会选到另一个更好的解。根本难点是怎么从多个候选里选出最好的，因为实际使用时推理阶段没有 oracle 打分器（oracle，指能直接告诉你哪个答案对的理想裁判）。在聊天界面里可以让模型给几个答案由用户挑，相当于人工 best-of 选择；但更理想的是模型自己在内部完成挑选，用户不用看几十个解。</p>
+        <h3>Self-Consistency 的做法</h3>
+        <p>Self-Consistency（Wang et al., ICLR 2023，她 Google DeepMind 同事的工作）是一个她称为“现在看简单到不可思议、但很有效”的方法。对一道数学题采样多个回答，比如三个回答中两个的最终答案是 18、一个是 26，那么 18 是最一致的答案，就选它对应的回答。她强调，选择只看最终答案，不看推理路径；不同回答可以走完全不同的推理路径，只要最终答案相同就都算数。用今天的话说，这就是多数投票。它在当时所有能拿到的模型和多个基准上都带来提升，数学题上尤其明显。</p>
+        <h3>它比按概率排序扩展得好</h3>
+        <p>论文的对照基线是 Sample-and-Rank：选对数概率最高的回答，假设模型给正确答案更高的概率。曲线显示 Self-Consistency 扩展得好得多：采样数一直加到 40 个，它仍在提升；Sample-and-Rank 在大约 10 个回答时就不再提升了。例外是专门把模型训练成这个任务上的好验证器，这时可能超过 Self-Consistency 的曲线，后面会讲。</p>
+        <h3>多样性是前提</h3>
+        <p>另一个关键因素是回答要足够多样。论文对比了几种基线：束搜索（beam search，NLP 里的经典解码算法，每步保留概率最高的 k 条路径，最后取整体概率最高的句子）；集成基线（ensemble），对同一题的不同提示写法分别做贪心解码，因为 LLM 对提示敏感，还包括对示例顺序做不同排列。结果是基于采样的 Self-Consistency 随样本数扩展得更好。采样方法必须保证多样性，比如用较高的温度（temperature，控制采样随机性的参数），或者把核采样（nucleus sampling）的参数设对。</p>
+        <h3>一致性和准确率高度相关</h3>
+        <p>她觉得论文里一个和模型校准（calibration，模型的自信程度和实际正确率是否匹配）有关的分析很有意思。曲线显示，采样的回答中得出同一最终答案的比例越高（一致性越高），说明模型对结论越确定，即使它们是通过不同路径得到的；同时聚合出来的答案也越可能正确。这解释了为什么一致性这个简单标准能这么有效。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. AlphaCode 的执行聚类和 Universal Self-Consistency</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=3136s" target="_blank">0:52:16</a>–0:58:35</em></p>
+        <h3>竞赛编程的设定</h3>
+        <p>一致性选择对代码生成同样有效。AlphaCode（Li et al., Science 2022）是 Google DeepMind 的竞赛编程系统，包括模型训练和推理时技术，她只讲推理阶段的过滤（filtering）和聚类（clustering）。竞赛题的描述是一段很长很复杂的背景故事，再加几组输入输出作为示例测试。代码要算对，既要通过题面给的示例测试，也要通过隐藏的测试，后者通常规模更大、更难，覆盖各种边界情况。</p>
+        <h3>过滤加聚类</h3>
+        <p>先用题面给的测试过滤掉不通过的程序。但剩下的程序仍可能在隐藏测试上失败；她说参加过编程比赛的人都有这种感受，觉得代码没问题，却挂在了神秘的隐藏测试上。AlphaCode 的做法：</p>
+        <ul>
+            <li>另训练一个模型，为每道题生成新的测试输入；</li>
+            <li>把采样出的所有程序在这些生成的输入上执行；</li>
+            <li>输出完全相同的程序归为一簇；</li>
+            <li>从最大的 10 个簇里各取一个程序提交。</li>
+        </ul>
+        <p>假设是：如果生成的输入足够多样、质量够高，同一簇里的程序在语义上等价，因为执行结果相同。结果（Codeforces，幻灯片上有 1B 参数的 encoder-decoder 模型的曲线）显示聚类比只过滤有额外提升，但与 oracle 选择仍有差距，因为最一致的程序不保证是候选池里最好的那个。</p>
+        <h3>Universal Self-Consistency</h3>
+        <p>原始 Self-Consistency 有个限制：需要从回答里抽取答案才能聚合。对自由形式的生成，比如摘要，就没有自然的答案抽取和聚合方式。她们的 Universal Self-Consistency（USC，Chen*, Aksitov* 等，2023）不再抽取答案，改由 LLM 自己做一致性选择：给模型一条指令，让它看完所有候选回答，按多数共识选出最一致的那个。她的直觉是，模型自己判断答案对错很难，但判断“哪个最一致”应该是更简单的标准。</p>
+        <p>结果：在摘要和长事实性回答的问答这类开放式生成任务上，原始 Self-Consistency 用不了，USC 仍能超过基线；在数学推理和编程上，USC 与原始 Self-Consistency 持平，而且不需要答案抽取和代码执行。她也指出 USC 的上限受长上下文能力限制。当时用的模型长上下文推理不太强，候选放得越多，USC 不像原始方法那样持续提升。她认为长上下文模型的发展会让这类基于模型的选择方法随候选数扩展得更好，而且实际上多数任务在 10 个候选以内就能解决，所以这个方法仍然实用。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 训练出来的验证器和 Tree of Thoughts</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=3515s" target="_blank">0:58:35</a>–1:06:02</em></p>
+        <h3>ORM 和 PRM</h3>
+        <p>前面说过，用原模型的对数概率来排序，扩展性不如一致性选择。要在一致性之上再进一步，可以训练一个 LLM 做排序器，希望它对哪个回答更可能正确有判断力。她展示了 OpenAI 提出 GSM8K 数据集的论文（Training Verifiers to Solve Math Word Problems, Cobbe et al. 2021）里训练验证器（verifier，判断一个解是否正确的模型）的示意图，以及后续论文 Let's Verify Step by Step（Lightman et al. 2023）。这类方法有两种设计，都可以叫奖励模型（reward model，给输出打分的模型）：</p>
+        <ul>
+            <li>结果监督奖励模型（Outcome-supervised Reward Model，ORM）：在整个解的层面判断，给一道题和一个解，告诉你对不对。这是最早、最标准的做法。</li>
+            <li>过程监督奖励模型（Process-supervised Reward Model，PRM）：在每一步的层面判断，看每一步是否正确。</li>
+        </ul>
+        <p>Let's Verify Step by Step 显示，随着样本数增加，PRM 扩展得比 ORM 和多数投票都好。她提醒，效果高度依赖验证器的质量，而且同一个验证器不一定能跨任务泛化。一致性标准很简单，能直接用在很多任务上；训练验证器则要设计好训练策略和训练数据，才能在你关心的各个领域都有效。</p>
+        <h3>从选完整答案到搜索部分解</h3>
+        <p>到目前为止，选择都发生在完整回答生成之后。她说如果手上有一个好的逐步打分器，只在最后选完整答案就浪费了它。可以把 LLM 和树搜索结合：不等解写完，在搜索过程中就按步骤评估部分解，优先展开更有希望的分支。她用 Tree of Thoughts 论文（Yao et al., NeurIPS 2023）的示意图对比：思维链是一条链，Self-Consistency 是多条并行的链，Tree of Thoughts 在每一步都可以分出多个分支，不需要把每条路径都走到底。</p>
+        <h3>24 点的例子</h3>
+        <p>24 点（Game of 24）：给四个数，用加减乘除算出 24。每一步有两个环节：</p>
+        <ul>
+            <li>思考生成（thought generation）：提示 LLM 提出可能的下一步，在 24 点里格式很简单，就是选两个数做一次运算；</li>
+            <li>思考评估（thought evaluation）：提示 LLM 评估当前状态有多大希望，在 24 点里就是判断剩下的数还能不能凑出 24。</li>
+        </ul>
+        <p>评估可以给每个状态单独打分，也可以借用一致性选择的思路做投票：让 LLM 从所有候选的下一步里选出最好的状态，因为选择本身是采样出来的，可以重复投票多次，取多数票作为最终选择。</p>
+        <h3>结果和延伸</h3>
+        <p>在 24 点上，用广度优先搜索（BFS）的 Tree of Thoughts 随 token 预算扩展得比标准提示和思维链都好，原论文还有其他基准。原论文只用了最基础的 BFS 和 DFS；后来有论文用蒙特卡洛树搜索（MCTS，一种通过大量模拟来估计每个分支价值、逐步扩展搜索树的算法），也有工作单独训练评估函数而不是靠提示。她说关键是要有足够好的 LLM 和提示设计，让自我评估真的有效。</p>
+        <h3>第二部分小结</h3>
+        <p>通过在解空间里采样多个分支，可以进一步扩展推理时算力。一致性选择简单、有效、通用：Self-Consistency 把推理路径边缘化（marginalize out），只按最终答案选；代码生成可以按执行结果的一致性重排序。当 LLM 的自我评估足够好、能判断部分解或单步的质量时，可以在部分解空间里搜索，这时有时扩展性更好，也能省 token，因为没希望的路径中途就被剪掉了。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 迭代自我改进：Reflexion、Self-Refine 和 Self-Debug</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=3962s" target="_blank">1:06:02</a>–1:11:20</em></p>
+        <h3>为什么要串行改进</h3>
+        <p>即使是最新的推理模型，在难的数学和编程基准上成绩惊人，有时也会犯很明显的错误，人们一直在抱怨。她说人第一反应时也常犯低级错误。多采样能减少单次预测的错误，但它不是好的纠错方式：所有回答是并行生成的，彼此不会从对方的错误里学到东西，模型可能一遍遍生成同样的错答案。第三部分讲让 LLM 迭代改进自己回答的技术，这也更接近人纠错的过程。</p>
+        <h3>Reflexion 和 Self-Refine</h3>
+        <p>代表工作是 Reflexion（Shinn et al., NeurIPS 2023）和 Self-Refine（Madaan et al., NeurIPS 2023）。每生成一个解之后有两步：先让模型根据观察到的情况对自己的输出生成反馈，有外部评估时就用上；再让模型结合内部反馈和外部评估修改输出。Reflexion 更偏智能体设定：LLM 作为智能体向环境提出行动，环境返回观察的变化，这就是外部信号，告诉模型当前状态有没有希望。</p>
+        <p>Reflexion 显示，当模型能用上高质量评估、外部信号可靠时，自我反思和自我改进效果很好。例子是 ALFWorld，一个文本环境里的导航和操作任务，每一步都有清晰的观察信号。他们也在 HotPotQA 上评测，但把问答任务改造成了智能体环境：模型给出答案后，假设环境会告诉它答案对不对，所以随着尝试次数增加能看到持续提升。她说后面会再回头看这个假设。</p>
+        <h3>Self-Debug：代码是天然的场景</h3>
+        <p>代码生成是自我改进的天然应用。人写代码也是在 IDE 里调试得更好，不会写完就停，要靠交互循环，查看执行结果、判断哪里该改。她说这也是近期编程智能体的基本思路之一。她们的论文 Teaching Large Language Models to Self-Debug（Chen, Lin, Schärli, Zhou, ICLR 2024）研究了什么样的反馈格式最能帮模型改正自己的错误：</p>
+        <ul>
+            <li>Simple：对所有错误代码给一句通用反馈，只说当前代码对不对；</li>
+            <li>Unit test：附上执行结果，比如哪些单元测试通过、有没有运行时错误；</li>
+            <li>Code explanation：让模型自己用自然语言逐行解释实现，灵感来自程序员的“小黄鸭调试法”（rubber duck debugging，向别人或一只玩具鸭逐行讲解代码来发现问题；字幕作 “robot dog”）；</li>
+            <li>Trace：让模型自己逐行模拟执行轨迹，这也是人类程序员的调试方式。</li>
+        </ul>
+        <p>她们在论文发表时最新的几个 LLM 上评测：自我调试循环在不同能力的模型上都稳定带来提升，反馈信息越丰富，调试效果越好。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 没有外部反馈时，自我纠错会变差</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=4280s" target="_blank">1:11:20</a>–1:15:49</em></p>
+        <h3>先前的提升依赖 oracle</h3>
+        <p>回到问答类推理任务。HotPotQA 上的结果，以及其他工作里数学题上的自我纠错提升，都建立在有 oracle 验证器的假设上。但多数场景里没有这样的验证器。她举的例子是数学考试：你手上不会有标准答案，否则考试就没有意义了。问题是，如果不给模型明确准确的外部对错反馈，它的表现会怎样？</p>
+        <h3>Large Language Models Cannot Self-Correct Reasoning Yet</h3>
+        <p>她们在 ICLR 2024 发表的这篇论文（Huang, Chen, Mishra, Zheng, Yu, Song, Zhou）给出了反面结果。在 oracle 设定下，也就是用标准答案来决定是否需要纠正，和以前的工作一样能看到很大提升。在真正的自我纠错设定下，模型不能用任何 oracle 反馈，要自己判断回答对不对。结果是 LLM 会误判自己的预测，常常把原本正确的答案改错，所以每多一轮自我纠错，成绩反而更差。</p>
+        <h3>换反馈提示也没用</h3>
+        <p>一个自然的质疑是反馈提示没调好。为此她们设计了几种反馈提示的变体，都是通用的，没有针对某个任务调。结果显示，在不额外训练模型的前提下，改反馈提示确实会影响自我纠错的行为，但影响的主要是模型保留初始答案的倾向。有些变体下推理成绩没有明显下降，可也没有超过初始成绩。</p>
+        <h3>多智能体辩论比不过 Self-Consistency</h3>
+        <p>前面是对单个初始回答做自我纠错，她们还比较了对多个回答一起纠错的方法：多智能体辩论（multi-agent debate，Du et al. 2023）。做法是先并行生成几个回答，再提示 LLM 审阅这些回答、给出更新后的回答。对照组是 Self-Consistency，即只并行生成、按最常见的最终答案选。之前的辩论论文报告过比 Self-Consistency 好，但她说主要问题是没有在相同 token 预算下严格比较。这个实验里辩论每轮有 3 个回答；在 GSM8K 上把回答总数对齐后，Self-Consistency 扩展得更好：辩论的成绩到某一点就不再提升，Self-Consistency 随回答数增加还在涨。幻灯片的结论是，没有好的评估器，多智能体辩论不能有效利用 token 预算。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 并行还是串行：怎样分配 token 预算</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=4549s" target="_blank">1:15:49</a>–1:21:32</em></p>
+        <h3>并行采样和串行修改的配比</h3>
+        <p>最后的问题是，怎样把这些方法组合起来最好地用掉 token 预算，也就是推理预算该多少用于并行生成多个样本、多少用于串行地一轮轮修改。她说这个问题很难，主要取决于任务和模型，归根结底看模型在你的具体任务上是否擅长自我反思和纠错，是一个依赖模型和任务的经验问题。</p>
+        <p>她举了 Google 同事的研究 Scaling LLM Test-Time Compute Optimally can be More Effective than Scaling Model Parameters（Snell et al. 2024）。他们训练了一个更擅长修改数学解答的模型，按题目难度分别研究并行生成和串行修改的最优比例。她说具体数字会因模型不同差别很大，但总体结论是：简单题上模型更多受益于自我修改，因为它更清楚当前解错在哪、该怎么改；难题上，并行和串行之间存在一个中间的最优配比。按难度选择算力最优的配比，扩展曲线比纯并行生成更好。</p>
+        <h3>模型大小也是变量</h3>
+        <p>另一个因素是模型大小。同样的 FLOPs 预算，用小模型可以采样多得多的解；如果贵的模型并不比便宜的好多少，调用贵模型就不划算。Inference Scaling Laws（Wu et al. 2024）的实证研究显示，不同推理预算下的最优模型不同：预算小时更该依赖小模型；预算多时可以用更贵的模型，它可能在最难的题上带来提升，而这些题小模型无论如何都很难做出来。</p>
+        <h3>结语：The Bitter Lesson</h3>
+        <p>她回顾全讲的三部分：基础提示技术、增加宽度的搜索和选择、增加深度的迭代自我改进，并强调和 LLM 交互的最佳做法要根据模型能力调整，要结合模型能力和手上的任务来决定怎么组合这些技术。</p>
+        <p>最后她推荐大家读 Richard Sutton 的 The Bitter Lesson，说它对推理时和训练时的推理技术设计都是重要指导，并在幻灯片上引用了两段：一段说应该从苦涩教训中学到通用方法的力量，即那些随着算力增加、甚至在算力变得极大时仍能继续扩展的方法；另一段说我们想要的 AI 智能体是能像我们一样去发现的，而不是装着我们已经发现的东西，把我们的发现内置进去，只会让人更难看清发现的过程是怎样进行的。她的解读是，重点在于找到能触发模型自己不断改进、自己找到正确推理方式的方法。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“If we further scale out this inference time cost to a crazy number like $1,000 to solve one problem, then actually the model can achieve 87.5% accuracy.”<br>（谈 o3 在 ARC-AGI 上）如果把推理成本推到每题 1,000 美元这种夸张的数字，模型能达到 87.5% 的准确率。· <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=561s" target="_blank">0:09:21</a></li>
+            <li>“One core shared idea is that we need some way to trigger the large language model to generate long chain of thought before it actually concludes with the final solution.”<br>这些推理模型共享的一个核心想法是，要想办法让大模型在给出最终答案之前先生成很长的思维链。· <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=805s" target="_blank">0:13:25</a></li>
+            <li>“They only provide information on the final solution format, but it doesn't tell the model about the rationale to derive the solution.”<br>（谈标准少样本示例）它们只告诉模型最终答案的格式，没告诉模型答案是怎么推出来的。· <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=969s" target="_blank">0:16:09</a></li>
+            <li>“This shows that current large language models are pretty sensitive to prompt design.”<br>这说明当前的大模型对提示设计相当敏感。· <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=1652s" target="_blank">0:27:32</a></li>
+            <li>“It will be hard for the model to judge the answer correctness by itself, but consistency should be a simpler criterion to measure.”<br>（谈 Universal Self-Consistency）让模型自己判断答案对错很难，但一致性应该是更容易衡量的标准。· <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=3354s" target="_blank">0:55:54</a></li>
+            <li>“All these responses are generated in parallel, so we do not really learn from the past mistakes.”<br>（谈多采样的不足）这些回答都是并行生成的，所以并没有从之前的错误里学到东西。· <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=4011s" target="_blank">1:06:51</a></li>
+            <li>“The best practice to interact with a large language model should be adapted according to its capabilities.”<br>和大模型交互的最佳做法，应该根据它的能力来调整。· <a href="https://www.youtube.com/watch?v=g0Dwtf3BH-0&t=4740s" target="_blank">1:19:00</a></li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>Berkeley RDI LLM Agents MOOC · Inference-Time Techniques for LLM Reasoning · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

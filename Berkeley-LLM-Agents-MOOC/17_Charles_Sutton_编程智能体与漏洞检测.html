@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Charles Sutton：编程智能体与漏洞检测 | Berkeley LLM Agents MOOC 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="16_Hanna_Hajishirzi_开放的推理训练配方.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">Berkeley LLM Agents MOOC 目录</a> · 17</span>
+    <span><a href="18_Ruslan_Salakhutdinov_多模态自主智能体.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Charles Sutton：编程智能体与漏洞检测</h1>
+        <p class="subtitle">从 pass@k 和 SWE-bench 讲评测怎样决定智能体设计，比较 SWE-agent、Agentless、AutoCodeRover、RepairAgent 和 Google 内部的 Passerine，再讲 CTF 智能体 EnIGMA、漏洞数据集为什么难用，以及 Google 的 Big Sleep 怎样用代码浏览器、Python 和调试器找内存安全漏洞</p>
+        <div class="author-meta">
+            主讲：Charles Sutton（Google DeepMind）· 课程：Berkeley CS294/194-280 Advanced Large Language Model Agents（2025 年春季） · 上课日期：2025 年 3 月 3 日 · 时长：1 小时 27 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=JCk6qJtaCSU" target="_blank">课堂录像</a> · <a href="https://rdi.berkeley.edu/adv-llm-agents/slides/Code%20Agents%20and%20AI%20for%20Vulnerability%20Detection.pdf" target="_blank">幻灯片</a>（Berkeley RDI 公开，2025 年春季，本文依据录像字幕和幻灯片整理，是中文转述，不是逐字翻译；观点属于主讲人，内容以上课当天为准）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>Charles Sutton 是 Google DeepMind 的研究科学家。读博和 2007–2009 年在 Berkeley 跟 Mike Jordan 做博士后期间，他做的是自然语言处理的机器学习，那时还没有深度学习。之后去 Edinburgh 当教授，从 2012 年开始做程序合成、代码生成和软件工程的机器学习，2018 年加入 Google。从 2024 年起，他开始做 AI 用于计算机安全。</p>
+        <p>这一讲分三部分：一般的编程智能体（SWE-bench、SWE-agent 这一类）；AI 和智能体用于计算机安全；最后讲他参与的 Big Sleep 项目，用 LLM 智能体找安全漏洞。他在讲智能体之前先花了不少时间讲评测，理由是评测的质量直接决定你最后造出来的系统。录像开头主持人介绍他的部分已略过，录像结尾他说可以回答问题，但问答没有录进视频。</p>
+        <ol>
+            <li><a href="#t01">个人经历，以及他怎样定义 LLM 智能体</a> · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">代码评测的前史：MBPP、HumanEval 和 pass@k</a> · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=467s" target="_blank">0:07:47</a></li>
+            <li><a href="#t03">SWE-bench，以及评测怎样驱动智能体设计</a> · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=888s" target="_blank">0:14:48</a></li>
+            <li><a href="#t04">SWE-agent：ReAct 循环和智能体-计算机接口</a> · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=1354s" target="_blank">0:22:34</a></li>
+            <li><a href="#t05">Agentless：把控制流写进代码</a> · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=2186s" target="_blank">0:36:26</a></li>
+            <li><a href="#t06">AutoCodeRover、RepairAgent 和 Google 的 Passerine</a> · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=2614s" target="_blank">0:43:34</a></li>
+            <li><a href="#t07">编程智能体的设计空间</a> · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=3161s" target="_blank">0:52:41</a></li>
+            <li><a href="#t08">AI 用于安全：CTF 竞赛和 EnIGMA</a> · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=3286s" target="_blank">0:54:46</a></li>
+            <li><a href="#t09">漏洞检测为什么难，现有数据集的问题</a> · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=3730s" target="_blank">1:02:10</a></li>
+            <li><a href="#t10">Big Sleep：像安全研究员一样找漏洞的智能体</a> · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=4419s" target="_blank">1:13:39</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 个人经历，以及他怎样定义 LLM 智能体</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=0s" target="_blank">0:00:00</a>–0:07:47</em></p>
+        <h3>为什么先讲经历</h3>
+        <p>他说讲经历有三个原因。第一，先承认自己不懂什么：他的背景主要在深度学习，不在计算机安全，所以安全问题欢迎提问，Dawn Song 和她组里的人就坐在前排，可以给专家回答。第二，他喜欢给职业建议（他有个博客写这些）。职业生涯很长，这几年每三个月就变一次，现在最火的技术五年后不一定还在顶上，可能五周后就不在了，变化是常态，要学会跟着变。第三是这一讲的一个主题：跨学科思考。做应用研究或产品时，一边是机器学习技术，一边是你要解决的问题。只懂机器学习、不深入理解问题，就会漏掉东西。做 AI for security，越懂安全越好；做产品，越懂客户越好。</p>
+        <h3>LLM 智能体的定义</h3>
+        <p>他说 LLM agent 有点像流行词，他想给出自己的看法，别人可能说得不一样。他的定义是：LLM 智能体就是带工具使用的多轮 LLM，核心是 ReAct 循环。这个形式有四个好处：</p>
+        <ul>
+            <li>动态计算时间。直接提问时，LLM 必须立刻开始生成答案，前面几个 token 可能就把它锁定在某个答案上，之后不愿意自相矛盾。让模型先生成思考（无论是推理模型还是靠提示），难题就有更多计算时间。</li>
+            <li>来自外部工具的信息。编程智能体可以真的运行代码，看结果，再根据输出改代码。他说这对复杂代码生成任务极其有效。</li>
+            <li>检验假设的能力。这是从认知角度看工具使用最有意思的地方：智能体可以在思考里说“我觉得用这个输入运行，会在第 13 行崩溃”，然后真的跑一下，看对不对，错了就在后面的轮次修正。简单任务可能用不到这种实验，复杂任务会需要。</li>
+            <li>采取行动的能力。要让 LLM 真正做事，就得和外部世界交互，工具提供的就是这个。</li>
+        </ul>
+        <p>这个定义淡化了几样东西。规划和思维链可以看成动态计算的特例，是利用思考 token 带来的额外计算的方式。多智能体他也淡化了：也许以后会证明，让不同提示的多个智能体互动很重要，但他觉得这个方向还在形成中，还没有定论。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 代码评测的前史：MBPP、HumanEval 和 pass@k</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=467s" target="_blank">0:07:47</a>–0:14:48</em></p>
+        <h3>MBPP 和 HumanEval</h3>
+        <p>他说自己要“继续用不讲智能体的方式开始讲智能体”，先讲评测。大约四年前，OpenAI Codex 模型出现，LLM 写代码的能力有了跃升。当时有两个评测：Google 做的 MBPP（Austin et al. 2021，Program Synthesis with Large Language Models）和 OpenAI 的 HumanEval（Chen et al. 2021，Codex 论文）。两者差不多，都是从自然语言生成代码：每个数据集几百个例子，给一两句描述代码要做什么的话，再给一组断言（assertion），让模型写一个五到十行的 Python 小程序。题目和描述都由人工标注员写。</p>
+        <p>他不再推荐用这两个评测，说它们现在更像 MNIST（手写数字识别数据集，已经被做烂的入门基准）。当年一个语言模型能写出十行的完整函数很惊人，现在不惊人了。但其中有些原则在设计新评测时仍然要用。</p>
+        <h3>pass@k</h3>
+        <p>pass@k：给定自然语言提示，从模型采样 $k$ 个程序，全部拿去跑断言（有些断言模型看得到，有些是隐藏的），只要有一个通过，这个例子就记 1 分。他讲的几条原则：</p>
+        <ul>
+            <li>它需要自动的正确性检查。设计评测时只要可能，就应该有这个。</li>
+            <li>它能衡量探索和利用。智能体评测里少见，因为太贵。如果模型总是对或总是错、输出没有多样性，pass@1 和 pass@k 一样；如果 pass@k 随 $k$ 迅速上升，说明第一个解不一定对，但模型给出了多样的解，这本身有信息量。</li>
+            <li>pass@k 是否符合部署场景，要看情况。代码补全时你不会每按一次补全就看 10 个候选再挑对的，所以 pass@k 不太合适；更偏智能体的场景，生产中生成 $k$ 个样本、保留通过测试的、只给用户看排名靠前的一个，这时 pass@k 是合理的。每次评测编程工具，都要想想评测方式和实际使用方式是否一致。</li>
+        </ul>
+        <h3>一个统计小插曲：pass@k 怎样估计</h3>
+        <p>他说机器学习以前建立在统计上，现在这类工作少了，他觉得这个例子很有意思。假设关心 pass@10。朴素做法是采 100 个样本，算出通过比例，比如 20%，再代入“10 次至少一次成功”的概率公式。结果这是一个噪声很大的估计。更好的做法是：从这 100 个样本里无放回地抽 10 个，算至少一个成功的概率。这是 Codex 论文在 HumanEval 上首先使用的估计量。幻灯片上的公式在提取的文本里没有保留，Codex 论文中的形式是（采 $n$ 个样本，其中 $c$ 个正确）：</p>
+        $$\text{pass@}k=\mathbb{E}\left[1-\frac{\binom{n-c}{k}}{\binom{n}{k}}\right]$$
+        <h3>这些评测好不好</h3>
+        <p>2021 年是好的：难度“刚刚好”（Goldilocks hard），既不在地板也不在天花板，基础模型变好时分数会有变化；没有泄露到网上；因此能驱动模型开发。2025 年大概不好了：太简单；每题测试用例太少，可能对断言过拟合；肯定已经泄露；天花板效应让它们无法驱动模型和智能体的设计决策。他说讲这些，是为了用同样的问题去审视其他评测。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. SWE-bench，以及评测怎样驱动智能体设计</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=888s" target="_blank">0:14:48</a>–0:22:34</em></p>
+        <h3>SWE-bench 是什么</h3>
+        <p>智能体评测里影响最大的是 SWE-bench。它是从 GitHub 上 Python 仓库收集的真实编程问题集合。每个例子有：来自 GitHub issue 的问题描述（issue 里常常会指向要改的代码位置）、对测试的修改、以及真实的补丁。测试满足 fail-to-pass 条件：打补丁前失败，打补丁后通过。任务是根据描述生成补丁。构建过程有几步过滤，比如 fail-to-pass 过滤，以及项目能否安装和运行。</p>
+        <p>它影响大，是因为推出时难度正好：基础 LLM 只解决 2% 到 3%，一换成智能体就有明显提升。它是真实任务里有意思的一个子集，出现的时机正好能驱动模型开发。幻灯片左下的饼图显示题目来自 12 个项目，领域比较窄，主要是数学、数据分析、Web 类 Python 包，覆盖不了软件工程的全部。但从修改的文件数、函数数看，比之前的评测进了一大步。</p>
+        <p>SWE-bench Verified 是 OpenAI 人工筛过的 500 题子集，去掉了描述不充分（underspecified）的题和测试用例不相关的题。issue 来自 GitHub，有时描述不清；有时提交是“纠缠的”（tangled），作者改代码时顺手加了别的测试，并没有测到这个问题。</p>
+        <h3>SWE-bench 好不好</h3>
+        <p>他的回答是既好又不好。好的方面：真实性上了一大台阶，难度合适，推动了整个领域。他说这和智能体同时兴起不是巧合。Verified 版本噪声更小。</p>
+        <p>不好的方面（他说每样东西都有问题，这很正常）：</p>
+        <ul>
+            <li>测试不是精确的验证器，可以对测试过拟合，生成能让测试通过但其实不对的补丁。</li>
+            <li>更让他担心的是自然语言不在分布内。你在 IDE 里让智能体改代码，用的语言和写 GitHub issue 不一样：要给别人看的 issue 往往已经诊断过一些问题；有的 issue 还写了解法或该改哪部分代码。</li>
+            <li>编程语言、项目、API 的覆盖面有限。</li>
+            <li>数据泄露：数据来自 GitHub，肯定在大模型训练集里。他说系统只拿 2% 的时候不用担心，到 50% 的时候就该担心了。</li>
+            <li>可能对排行榜过拟合。</li>
+            <li>纠缠的提交：开源仓库里一个 commit 常常不止修它声称修的那个 issue，还会修别的、做清理。这影响测试用例的质量，拿这些补丁做监督微调也会有问题。</li>
+        </ul>
+        <h3>评测决定系统</h3>
+        <p>他之所以讲这么久，是因为他认为不管是基础 LLM 还是智能体，质量很大程度上由评测质量驱动。他用统计机器学习打比方：任何做 LLM 或 LLM 应用的组织，都在做一个巨大的组合优化（幻灯片上叫“组织层面的贝叶斯优化”）。你有一个设计空间和一堆旋钮：加个工具、改系统指令、清理后训练数据的某部分，然后看数字怎么变。数字不好，就是在错误的目标上爬山。</p>
+        <p>设计评测要考虑：难度在合适的区间；真实，测的是你关心的东西；测通用的模型能力；没有泄露。还有一点：所有评测都有保质期。MBPP 和 HumanEval 刚出来时又难又没泄露，几年后就又简单又泄露了，所以要不断造新的。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. SWE-agent：ReAct 循环和智能体-计算机接口</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=1354s" target="_blank">0:22:34</a>–0:36:26</em></p>
+        <h3>大家都在用同样的几个想法</h3>
+        <p>他说这一讲会很重复，因为大家都在用同样的三四个想法，不管是在基础模型层还是应用层。比如你要做一个修 AV 问题的智能体或改仓库补丁的智能体，工程上做的事差不多：先定义评测，再造一个像 SWE-agent 的东西。SWE-agent（Yang et al. 2024，SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering）是早期专门为 SWE-bench 设计的智能体，他认为是一个里程碑。它组合了几样前人做过的东西：规划和思维链（通过指令让模型在行动前解释要做什么）、软件开发专用的工具、执行反馈。</p>
+        <h3>ReAct 循环</h3>
+        <p>主循环就是他说的 ReAct 循环，来自 Yao et al. 2022 的 ReAct 论文（ReAct: Synergizing Reasoning and Acting，让模型交替写推理和调用工具）。他认为这篇论文讲智能体的核心就是“思维链加工具使用”。循环很简单：</p>
+<pre><code># The ReAct loop, as described on the slide
+trajectory = system_instruction + task
+while not (timeout or error or success):
+    text = llm.generate(trajectory)      # ends with a tool call
+    output = run_tool(text)              # a tool is roughly a Python function returning text
+    trajectory += text + output
+</code></pre>
+        <p>轨迹（trajectory）就是 LLM 到目前为止生成的全部文本。每个工具粗略地说就是一个输出文本的 Python 函数。他不讲多模态智能体，因为代码方向这方面的工作还少。原则上 LLM 可以生成任何文本，系统指令要求它解释自己在做什么，希望这些文本能帮它决定下一步调用什么工具。</p>
+        <h3>给什么工具</h3>
+        <p>一个选项是直接给智能体 Linux shell 和 IDE，人能在机器上做的它都能做。他说现在这还有点超前（“两周后谁知道呢”）。这里有一个他忘了写在幻灯片上的主题：智能体框架和工具要和模型能力协同设计。你做提示优化、决定怎样总结工具输出时，有意无意都是在迁就模型在后训练数据里见过的东西，格式越接近模型熟悉的越好。</p>
+        <p>所以 SWE-agent 选了第二个选项：设计少量适合这个任务、输入输出对智能体友好的工具。论文里有个好记的说法叫智能体-计算机接口（ACI, agent-computer interface），对应用户界面。他说“也许可以有一门 ACI 的科学，这可能说过头了，但确实有设计原则”：</p>
+        <ul>
+            <li>容易向智能体描述。设计软件时可以发明词汇，这里不要。他听 Copilot 的开发者讲过一个“小红帽原则”：做提示工程时，要把模型引向它在后训练数据里熟悉的路。网上有大量讲“跳到这行代码”的页面，这种描述就很自然。</li>
+            <li>动作要紧凑，不要让智能体调四五个工具才完成一件逻辑上的事。</li>
+            <li>环境反馈要有信息量又简洁。工具输出的格式也要设计，比如末尾换行怎么处理，代码搜索结果很多时怎么总结。</li>
+            <li>护栏防止错误传播。比如代码编辑这种有状态的工具，如果智能体第一步就往文件里加了一个语法错误而没发现，之后整条轨迹都会被拖坏。要有错误检查，避免智能体进入难以脱身的坏状态。</li>
+        </ul>
+        <h3>SWE-agent 的工具</h3>
+        <p>SWE-agent 也有 Linux shell，但他说用处有限。他把工具分三类：</p>
+        <ul>
+            <li>信息收集：代码搜索和查看文件，比如“在这个文件里找这个词”“在这个目录所有文件里找这个词”。这是捷径，比让智能体在 shell 里先 ls 再逐个搜方便。文件太长放不进上下文，就用 open 看一部分，再用专门的滚动命令。</li>
+            <li>行动：编辑或新建文件。护栏是如果编辑引入语法错误或 linter 错误，自动回滚。</li>
+            <li>反馈：完成后提交补丁。</li>
+        </ul>
+        <p>他说更复杂的工具大多也能归进这几类。幻灯片上有思考和工具调用的例子：“现在我知道该做什么了，我们需要加一个检查，确保这些东西相同，来改代码”，然后用替换某几行的命令编辑。搜索结果会带行号，方便后续命令使用，工具可以这样互相配合。典型轨迹里工具的调用顺序符合直觉：issue 里出现了某些标识符，就先用代码浏览工具找相关代码，然后某个思考说“我来改这里”，接着是几次编辑和提交。但智能体并不被限制这样做，在模型看来只是一个不断追加的字符串。</p>
+        <h3>结果和一个批评</h3>
+        <p>SWE-bench 刚出来时，当时最好的 LLM 只能解决一两千个 issue 里的 1% 到 3%。他讲了一个自己的故事：SWE-bench 刚出来时，他觉得这个评测没意义，太难了，1% 到 3% 怎么爬山？结果他错了，因为智能体真的很好用：在基础模型上加一个智能体循环，从约 1% 涨到约 12%。现在完整 SWE-bench 的最好成绩高得多。SWE-bench 和智能体的发展是相互推动的。</p>
+        <p>他对论文实验提了一个批评（他说论文本身很好）：智能体要生成更多 token 才能达到这个性能，表格第二列是每条成功轨迹的平均美元成本。他希望看到按计算量归一化的结果。整体上智能体有效没问题，但比较智能体的其他改动时就要小心。比如加了一个 grep 工具，往环境里塞了大量 token，效果变好了；可能只是因为平均轨迹里 token 多了，不加这个工具、多生成几条轨迹，也能达到成本-性能曲线上的同一点。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. Agentless：把控制流写进代码</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=2186s" target="_blank">0:36:26</a>–0:43:34</em></p>
+        <h3>控制流从哪来</h3>
+        <p>他把 SWE-agent 叫动态（dynamic）控制：只是往字符串上追加，其他都由 LLM 决定，原则上 LLM 可以在这些工具上实现任何算法。另一个极端是过程式（procedural）控制：自己写 Python 代码实现一个适合程序修复的流程，比如“先遍历项目里每个文件，判断它和 issue 是否相关”，到了需要“魔法发生”的地方就调用 LLM。逻辑在代码里，LLM 只在控制流中间做某些决定。Agentless（Xia et al. 2024，Agentless: Demystifying LLM-based Software Engineering Agents）就是这样做的。</p>
+        <h3>Agentless 的三步</h3>
+        <p>他说“硬编码”在这里不是贬义。三步是：</p>
+        <ol>
+            <li>定位（localization）：把仓库结构转成文本，问模型应该看哪些文件，得到前 N 个文件；对每个文件给出方法和类的骨架，再问模型可能要改哪里，定位到类、函数、变量；再来一次，定位到具体代码行。每一步都保留一个 N-best 候选列表。</li>
+            <li>修复：对每个候选位置独立调用 LLM，给它 issue 描述，生成补丁。</li>
+            <li>验证：应用补丁，看哪个通过。智能体并不知道真正的测试用例是什么。已有测试大概率测不到这个 bug，否则测试早就失败、bug 也不会存在。所以智能体要自己写能复现 issue 的测试，在候选补丁上运行，得到一组“plausible”（这里是专业术语，指通过了智能体自己生成的测试）的补丁，排序后提交一个。</li>
+        </ol>
+        <p>幻灯片上有一张 SWE-bench 排行榜的截取表。论文发表时 Agentless 是最好的开源方案之一，现在排名变了，但仍然靠前。</p>
+        <h3>两种设计各自的好处</h3>
+        <p>动态设计（SWE-agent）让 LLM 自己选解题策略。比如补丁差一点就对、某个测试失败了，可以延长这条轨迹，模型可以决定再做一些代码搜索搞清楚为什么失败，或者只对补丁做个小改动。幻灯片上的例子是遇到奇怪的编译错误后多做一些代码搜索。</p>
+        <p>过程式设计（Agentless）：如果问题用简单流程就能解决，为什么要让 LLM 自己想流程？让模型把时间花在解题上。工具调用发生在 LLM 外面，避免了工具使用错误；也避免了 LLM 一开始犯错、整条轨迹跑偏。</p>
+        <p>很多区别归结到怎样分配测试时计算：一个补丁部分失败了，是延长轨迹去修，还是扔掉重新生成？Agentless 更像是重新生成，动态设计可以自己选。哪种更好可能取决于问题类型。他推测，简单的小补丁重新生成可能更好；以后转向更长、更复杂的改动时，解题方式的灵活性可能会显出优势。</p>
+        <h3>一个连续谱</h3>
+        <p>到这里讲了三种：只给 Linux 提示符，几乎所有控制都在模型里；SWE-agent 这样的智能体-计算机接口；Agentless，几乎所有控制流都在代码里。这是一个连续谱，最佳设计点不是固定的，会随基础模型能力和任务复杂度变化。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. AutoCodeRover、RepairAgent 和 Google 的 Passerine</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=2614s" target="_blank">0:43:34</a>–0:52:41</em></p>
+        <p>他说后面几个讲得越来越快，因为彼此越来越像。他顺带提到，上次他查的时候 OpenHands 在 SWE-bench 排行榜上最高，上学期有一讲讲过，这里不展开。</p>
+        <h3>AutoCodeRover</h3>
+        <p>AutoCodeRover（Zhang et al. 2024，来自新加坡国立大学）是当时表现最好的开源智能体之一。他讲了两点：</p>
+        <ul>
+            <li>搜索工具不同。它没有用“在一组文件里找这个字符串”这种工具，它像 IDE 那样给文件里的方法和类建索引，工具是“找叫这个名字的类”“在这个类里找叫这个名字的方法”。代码浏览行为因此改变，更像在 IDE 里按 Command 点击跳转。</li>
+            <li>控制循环是几个动态智能体串起来：第一阶段做信息收集和代码检索，第二阶段生成补丁。每个阶段是单独的轨迹，有不同的系统指令和工具集，依次运行。这是 Agentless 和 SWE-agent 之间的一个中间点：有一点过程式控制，探索空间比 SWE-agent 小、比 Agentless 大。</li>
+        </ul>
+        <p>两个智能体循环还带来信息隐藏：你可能希望一个循环得出答案后，丢掉中间推理，只把答案交给下一个智能体，因为担心上下文里留着无关内容会干扰。他说代码搜索里这点可能不太要紧，但别的智能体设计里可能很重要。幻灯片还提到 AutoCodeRover 报告了一个有意思的“正确率”指标，区分正确补丁和 plausible 补丁。</p>
+        <h3>RepairAgent</h3>
+        <p>把过程式控制推得更远，可以用状态机。RepairAgent（Bouzenia et al. 2024）做程序修复，用的是 SWE-bench 以外的四个程序修复数据集。智能体的设计由一个状态机给出：设计者先想好调查和修复 bug 的步骤，每个状态有专门的系统指令，比如“请尝试理解这个 bug”。模型在当前系统指令下思考、输出工具调用，选了哪个工具决定转到哪个状态。比如在“收集信息”状态做代码搜索，会留在这个状态继续搜；调用“写修复”工具，就转到另一个状态并换系统指令。这是另一种既有动态控制、又有更多信息隐藏的方式。</p>
+        <h3>Passerine：Google 内部的编程智能体</h3>
+        <p>前面讲的多是学术智能体。工业界的编程智能体很多，但公开的技术细节少。Passerine（Rondon et al. 2024，Evaluating Agent-based Program Repair at Google）是 Google 开发者工具部门他的几位朋友做的研究型智能体（他没参与），目标是解决 Google 开发者内部的编程问题。</p>
+        <p>Google 代码库的特点是所有代码都在一个巨大的 monorepo 里，大到不能放在笔记本上，构建系统也是专门为此设计的。按他前面的说法，先要造评测：仿照 SWE-bench，但数据来自内部问题跟踪系统里已经修复的 bug，用启发式规则筛选（测试有改动、补丁大小合适等），得到两类 bug：</p>
+        <ul>
+            <li>人写的 bug 报告，补丁规模不太大。</li>
+            <li>自动生成的 bug 报告，来自 sanitizer。sanitizer 是运行在代码下面的动态分析器，检查某些坏事没有发生。比如 AddressSanitizer（大家在家也能用）在运行时检测程序是否越界读写，一旦越界就让程序崩溃。Google 内部出现这类 bug 时，问题跟踪系统会自动生成报告。</li>
+        </ul>
+        <p>智能体本身是 ReAct 式动态智能体，和 SWE-agent 一样，区别是工具是 Google 真实的开发工具：代码搜索、构建系统 Bazel、查看文件、编辑文件、完成。没有直接的命令行。</p>
+        <p>他特别讲了这个评测集和 SWE-bench 的差别。幻灯片上三张累积分布图分别是补丁里的标识符数、文件数、行数。人写的那部分补丁更大，涉及更多文件、更多标识符；SWE-bench 反而更像 sanitizer 自动报告的那部分。智能体的具体表现他没展开，让大家看论文。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 编程智能体的设计空间</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=3161s" target="_blank">0:52:41</a>–0:54:46</em></p>
+        <p>他对编程智能体部分的总结：评测驱动系统设计；这些智能体相同之处多于不同，大家都在做同样的三个想法，幻灯片上说存在一本各应用领域通用的“LLM 智能体菜谱”。这些智能体背后的想法都比较简单（他说不是贬义），只是设计空间很大，所以有大量爬山要做。设计也和模型能力相互影响。幻灯片列出的设计空间：</p>
+        <table>
+            <thead><tr><th>维度</th><th>选项</th></tr></thead>
+            <tbody>
+                <tr><td>工具</td><td>信息收集、行动、代码生成、命令行工具</td></tr>
+                <tr><td>控制流</td><td>写在代码里、状态机、动态、树搜索、递归调用或多智能体</td></tr>
+                <tr><td>提示</td><td>系统指令（通用提示调优，指定解题策略：语气强弱、希望按什么顺序调用工具）、工具描述、工具输出（比如怎样总结很长的输出）</td></tr>
+                <tr><td>行动</td><td>沙箱、和外部服务通信、人类是否参与（批准计划，还是批准每个动作）</td></tr>
+            </tbody>
+        </table>
+        <p>他补充：运行模型生成的代码就必须有沙箱。这里讲的智能体都是封闭的（hermetic）。如果要做渗透测试这样的智能体，或者帮你管邮件的智能体，就要和外部服务通信，连怎样做原型都要想清楚。研究型智能体还没怎么考虑人类参与：什么时候问澄清问题，什么时候请求批准。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. AI 用于安全：CTF 竞赛和 EnIGMA</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=3286s" target="_blank">0:54:46</a>–1:02:10</em></p>
+        <h3>CTF 是什么</h3>
+        <p>他说 AI for security 比 AI 代码生成更新。想做这个方向，先要问解决什么问题。他喜欢从 CTF（Capture the Flag，夺旗赛）入手，因为它展示了安全领域真实问题的广度。这类竞赛在学校和安全会议上很常见，他说自己的描述可能不够准确，欢迎在场的安全专家纠正。Jeopardy 类型的 CTF 里，每道题藏着一个特殊字符串叫 flag，做到一定程度你会看到它，提交就算解出。题目是安全研究员日常工作的玩具版：</p>
+        <ul>
+            <li>取证（forensics）：在文件系统里找隐藏信息，要会巧妙搜索，难的可能要用隐写术或找二维码，用到文件系统和网络工具、grep、xxd 等。模拟的是数字调查。</li>
+            <li>密码学：解密一条消息，工具如 SageMath。</li>
+            <li>二进制利用（pwn）：利用内存漏洞拿到访问权限，用调试器。</li>
+            <li>逆向工程：编译和反汇编二进制文件，找漏洞。</li>
+            <li>Web：注入攻击、跨站脚本攻击，要连接网站、处理网页。</li>
+        </ul>
+        <p>他喜欢这个列表有两个原因：虽然是游戏，能看出它们和真实任务的对应关系；而且上过这门课的人，随便拿一个给你，你都知道怎么为它设计一个 LLM 智能体，为什么要用智能体也很明显。他说玩具基准没有真实任务复杂，但如果这些都做不了，真实任务大概也做不了。现阶段 CTF 对智能体仍然有挑战。</p>
+        <h3>CTF 基准</h3>
+        <ul>
+            <li>NYU CTF Bench（Shao et al. 2025）：来自 NYU 年度竞赛的 200 道题，最新。</li>
+            <li>Tann et al.（2023）。</li>
+            <li>InterCode-CTF（Yang et al. 2023）：来自 PicoCTF 的 100 道高中水平题目。</li>
+        </ul>
+        <p>每个数据集包含题目描述、沙箱环境和自动判断是否找到 flag 的评分器。</p>
+        <h3>EnIGMA</h3>
+        <p>EnIGMA（Abramovich et al. 2024）把编程智能体改造成解 CTF 的智能体，仍然是 ReAct 式循环。工具包括：</p>
+        <ul>
+            <li>任意命令行（他强调要用沙箱）、反编译器和反汇编器，预装 CTF 选手常用的 Python 库，以及 SWE-agent 那套文件搜索和代码编辑工具。</li>
+            <li>交互式工具，他很喜欢这部分，安全场景大概都需要：GDB 调试器（启动、停止、断点、单步、继续），服务器连接（基于 pwntools：启动、停止、发送一行）。这些实现为改变轨迹状态的有状态工具，每个操作是一个顶层命令。</li>
+        </ul>
+        <p>提示设计上有两点。一是用单独的 LLM 步骤总结长工具输出，比如取证时查看二进制文件很快会撑满上下文。他说这个想法很自然，但不常见。二是从失败的轨迹里总结出准则。他借此强调一个通用技巧：一定要看轨迹，就像做监督学习一定要看数据。看智能体犯了什么错，用来设计框架。系统指令里有一些条目就是“我发现智能体在这里搞砸了，加一条请不要这样”，这样那类错误就少了。</p>
+        <p>结果：有智能体和没智能体相比，提升幅度和当初 SWE-agent 差不多，从三四个百分点到两位数。他说这像是 SWE-bench 排行榜的同一个故事，只是处在曲线的另一个位置。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 漏洞检测为什么难，现有数据集的问题</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=3730s" target="_blank">1:02:10</a>–1:13:39</em></p>
+        <h3>什么是漏洞</h3>
+        <p>想利用系统拿到未授权访问，一种方式是瞄准软件、硬件、网络层面的 bug。漏洞就是有安全后果的 bug。他只讲软件漏洞，因为和编程智能体相关，大部分工作也在这里。幻灯片引用 MITRE 2024 年 CWE Top 25 里的例子：跨站脚本（XSS）、越界写、越界读、SQL 注入、释放后使用（use after free）、授权缺失或不当。一个很小的 bug 就可能被攻击者利用。</p>
+        <h3>两个越界写的例子</h3>
+        <p>CWE 分类里越界写的示例代码：一个函数出错时返回 -1，调用方把返回值减 1 直接用作 memcpy 的长度。-1 可能被转换成无符号数，指向很远的地方，写到不该写的内存。看这种例子，会觉得检测漏洞挺容易：追踪数据流，找越界的东西就行。</p>
+<pre><code>int chunkSize(void *) {
+  /* Return the size of usable memory,
+   * else, return -1 to indicate an error
+   */
+   ...
+}
+int main() {
+  ...
+  memcpy(destBuf, srcBuf, (chunkSize(destBuf)-1));
+  ...
+}
+</code></pre>
+        <p>第二个例子来自 Linux 内核，他开玩笑问大家看不看得出 bug。这个函数从网络包里复制数据，两个参数一个是包、一个是头部。它按头部里读出的 size 做 malloc，然后在第 44 行左右从包里 memcpy 到这块内存。两者都来自网络，size 没有校验，实际负载可能和头部的 size 不一致，分配的缓冲区可能太小，不知道会写进去多少。这是内核里一个真实漏洞（幻灯片上的 CVE-2021-43267 描述的就是 Linux 内核 5.14.16 之前 net/tipc/crypto.c 中，TIPC 功能对用户提供的 MSG_CRYPTO 消息大小校验不足，允许远程攻击者利用）。</p>
+        <p>他说难点有两个。一是大海捞针：内核里类似的函数很多，构造能到达它们的输入很难，要知道它处理的是哪种网络协议；找出出问题的数据流本身不难，难的是从大量看起来相似但其实安全的代码里把它挑出来。二是单看这个函数，“它有没有漏洞”不是一个定义良好的问题：如果调用方已经做了边界检查，这个函数就没问题。不了解全局，没法判断。</p>
+        <h3>CVE 数据集的问题</h3>
+        <p>他说这一页基本是在批评下一页。公开软件发现漏洞后可以在 CVE 数据库登记，拿到唯一编号，写描述，附上补丁和公告链接，已经积累了成千上万条。看起来很适合机器学习：把漏洞和补丁下载下来，训练一个判断代码是否有漏洞的分类器。他说这是很自然的做法，他自己一开始也会这么做。很多作者这样做出了数据集：BigVul（Fan et al. 2020）、CVEfixes（Bhandari et al. 2021）、CrossVul（Nikitopoulos et al. 2021）、DiverseVul（Chen et al. 2023）、PrimeVul（Ding et al. 2024）。</p>
+        <p>问题在于：</p>
+        <ul>
+            <li>输入放多少代码？只看被打补丁的那个函数，可能看不出问题。“一行代码有漏洞”是什么意思？发生非法内存访问的那行可能本身是对的，错在上游某处，补丁可能离崩溃的那行很远。他认为“某行或某个函数有漏洞”不是一个有意义的概念。</li>
+            <li>怎样处理纠缠的提交？补丁常常不只修漏洞，拿来做补丁数据集学起来很难。</li>
+            <li>怎样判断正确？能运行代码就可能判断；静态判断很难，因为修补一个漏洞的方式很多。</li>
+            <li>描述含糊：有时是人忙出错，有时是故意不透露太多漏洞信息。</li>
+        </ul>
+        <p>他认为这些问题是根本性的。很多人做了大量工作让数据集更干净，但他觉得这类静态评测很难用。他的建议是做动态评测，像 SWE-bench 那样能在一个暴露漏洞的输入上真正运行代码。</p>
+        <h3>可用的挑战和数据集</h3>
+        <ul>
+            <li>AI Cyber Challenge：DARPA 资助、正在进行的 AI 漏洞检测竞赛，决赛在今年晚些时候。</li>
+            <li>DARPA Cyber Grand Challenge（2016）：可以拿到程序，背后的故事他也推荐去查（相关文献是 Mayhem 系统）。</li>
+            <li>Meta 的 CyberSecEval 2（Bhatt et al. 2024）：测 AI 安全和 AI 用于安全的多个方面，其中有内存漏洞部分。</li>
+            <li>ARVO：他说忘了放到幻灯片上，收录过去由 fuzzer 发现的漏洞并做了容器化，可以运行，自动检查是否找到或修复。</li>
+        </ul>
+        <h3>已有的自动化技术</h3>
+        <ul>
+            <li>模糊测试（fuzzing）：最常用的自动找漏洞技术，在大量随机输入上运行程序，可以像遗传算法那样翻转比特、混合输入，寻找能触发漏洞（比如越界写）的输入。安全关键软件通常被大量 fuzz。但它会饱和：fuzz 久了就不再找到新 bug，即使 bug 存在。有一些著名的在野利用漏洞，所在软件包经常被 fuzz，只是那部分代码 fuzzer 很难到达。他认为 AI 有机会去找需要复杂不变量、fuzzer 够不着的更深的 bug。</li>
+            <li>静态分析：有很多有意思的工作，缺点是组合爆炸和误报率，他说这是一门很难做的生意。</li>
+            <li>在前面那些 CVE 数据集上微调 LLM：很多论文报告了结果。</li>
+        </ul>
+    </section>
+
+    <section id="t10">
+        <h2>10. Big Sleep：像安全研究员一样找漏洞的智能体</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=4419s" target="_blank">1:13:39</a>–1:27:02</em></p>
+        <h3>项目和动机</h3>
+        <p>Big Sleep 是 Google DeepMind 和 Google Project Zero 安全专家的合作项目（前身叫 Naptime，幻灯片上列了两篇 Project Zero 博客）。他说取名后发现大多数人不像他那样熟悉经典电影：The Big Sleep 是 1940 年代 Humphrey Bogart 主演的名片，取名的原因他没讲。Project Zero 是 Google 里专门找漏洞的安全团队，也找开源项目的漏洞，他们博客上的漏洞有多硬核可以去看。</p>
+        <p>动机来自 Project Zero 同事的工作方式。人审计代码找漏洞，不会像分类器那样读完代码说“是”或“否”。他们读代码、理解代码、对可能出错的地方提出假设，然后运行代码或做别的事来获得关于假设对不对的信息。团队认为 AI 要成功也该这样做，这就自然指向智能体方法：代码浏览器加调试器。他用静态和动态分析来对照：只训练一个 LLM（也许加推理 token）读代码、推理、报出漏洞，相当于静态分析，代码没运行过；智能体方法更像跑 fuzzer，属于动态分析。</p>
+        <p>幻灯片把要点概括为：用 LLM 智能体做白盒测试用例生成，实现自动的内存安全漏洞检测；能访问源代码，把执行当作工具；用自然语言生成假设；通过工具和执行反馈，学到强大的启发式来引导搜索；靠执行验证，答案是精确的。</p>
+        <h3>比代码编辑更简单的地方：有 oracle</h3>
+        <p>Big Sleep 聚焦内存安全漏洞。给定代码库，智能体的目标像 fuzzer 一样：生成一个输入，让被测程序出现越界读之类的坏内存行为。和静态分析相比，甚至和代码编辑相比，这个问题在某些方面更简单，因为有 oracle（能给出确定对错判断的检查器）。程序在 sanitizer 下运行，智能体生成的输入让程序崩溃，就说明找到了安全 bug。代码生成时你不知道真正的测试是什么，最后还得想办法选补丁；这里找到 bug 就是找到了。</p>
+        <h3>智能体设计</h3>
+        <p>ReAct 式智能体，目标是找到触发 sanitizer 崩溃的输入。每一轮 LLM 生成自然语言推理，调用一个工具，工具输出加进上下文。三类工具：</p>
+        <ul>
+            <li>代码浏览器：和 AutoCodeRover 类似，给程序建索引，知道所有标识符，提供 IDE 式导航，比如根据方法名跳到定义、跟踪交叉引用。</li>
+            <li>Python 解释器：不让智能体直接生成输入文本，而是让它写一个生成输入的 Python 程序。做缓冲区溢出时不想让智能体敲 2048 个 A，写一行 'A' * 2048 简单得多。智能体写一个把字符串写进某个变量的 Python 程序，团队把这个字符串送到标准输入。能用 Python 库也有帮助：生成二进制串可以调用 to_bytes；如果程序吃 JSON 或图片，Python 也能生成。</li>
+            <li>调试器：和 EnIGMA 的调试器设计不一样。现在的版本不是交互式调用。智能体先用 Python 准备好输入，再调用调试器把整个程序跑一遍，可以选填一组“断点”，每个断点是文件、行号和一个可选表达式。对智能体说是断点，其实是观察点（watchpoint）：程序不停地跑完，最后告诉智能体哪些断点被命中、那些表达式的值是多少。智能体借此检查输入有没有让控制流按它预期的路径走。</li>
+        </ul>
+        <h3>一条轨迹</h3>
+        <p>例子来自 Meta CyberSecEval 2 基准里的一个程序。系统指令向智能体解释任务、描述工具、给出解题策略和一些准则。控制流完全动态。</p>
+        <ol>
+            <li>智能体先调用 code_browser_source(name='main') 看 main 函数，看到它根据 argc 决定从标准输入还是文件读入。它通常会总结看到的代码，然后决定下一步看 Reader 类和 parse_content 函数。</li>
+            <li>几轮代码浏览后，它看到 test_case 函数：循环 100 次分配 new char[0x20]，再分配两个 0x20 字节的缓冲区 buffer1 和 buffer2，往 buffer2 写 "BBBB"，用 strcpy 把输入内容复制到 buffer1，再检查 buffer2 是否还是 "BBBB"。</li>
+            <li>它“看够了代码”，按指令写一份报告：第 70 行用了 strcpy 却没有边界检查，内容超过 32 个字符就会溢出 buffer1、覆盖相邻的 buffer2。他说智能体特别爱说“典型的缓冲区溢出”。报告还写了利用步骤。</li>
+            <li>它调用 python_eval，构造 4 字节小端长度 40 加上 40 个 'A' 的输入，再调用 debugger_run，在 task065.cpp 第 70 行观察 buffer1 和 buffer2。程序没崩溃、也没命中断点，退出码 0。他说平时这是好事，做安全审计时就不是了。</li>
+            <li>智能体分析原因：程序比预期更早报错 “couldn't read string”，因为第二次 read_u32() 把溢出字符串的一部分当成了长度，字节没对齐。它在输入前面加上一个 4 字节的初始数字（3184292191），再跑一次。</li>
+            <li>程序崩溃，AddressSanitizer 报 heap-buffer-overflow，智能体成功。</li>
+        </ol>
+        <h3>目前进展</h3>
+        <ul>
+            <li>在一些 CTF 题上相当有效，还需要大量工作来扩大规模。</li>
+            <li>在 Meta CyberSecEval 2 上达到当时最好成绩（幻灯片数字）：缓冲区溢出从 0.05 到 1.00，高级内存破坏从 0.24 到 0.76。</li>
+            <li>在 SQLite 里发现了一个真实漏洞并已披露。</li>
+        </ul>
+        <p>SQLite 这个漏洞是做变体分析（variant analysis）找到的。在一个项目里发现一个漏洞后，同一项目别处往往有很多相似漏洞，叫变体，在野被利用的漏洞里很大一部分是已修复 bug 的变体。智能体的好处是你有什么信息都能放进上下文。团队拿 SQLite 最近修复的一个 bug，把相关信息放进上下文，让智能体找类似的，最后找到了。</p>
+        <p>他也说明这在某种意义上是最好情况：按小红帽原则，模型在预训练里见过大量 SQL 查询，看到一个曾经搞崩系统的查询后，生成类似查询是合理的。另一方面，团队回头用当时最好的通用 fuzzer，在已经知道 bug 在哪的情况下去找，跑了 150 小时也没找到。幻灯片的说法是这个 bug 不容易看出来，通用 fuzzer 很难找到。</p>
+        <h3>安全部分的总结</h3>
+        <p>他认为这是一个刚刚起步、很开放的领域。智能体方法在这里很自然：要和服务器交互、要跑调试器。它也是检验代码理解方法的好测试场：要确认一个软件漏洞，就得仔细考虑开发者没想到的边角情况，沿着程序很长的一段追踪数据流；做网络或系统安全时，还要跨多个相互作用的程序这样做，要求在很深的层次上理解程序在做什么。网络安全、红队测试等很多方向才刚开始探索，正在从 CTF 走向真实任务，开始扩大规模。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“If you ask me to define what an LM agent is without the kind of buzzword or whatever, um, I would say: look, it's a multi-turn LLM with tool.”<br>不用流行词来定义的话，LLM 智能体就是带工具的多轮 LLM。 · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=250s" target="_blank">0:04:10</a></li>
+            <li>“If your numbers aren't good, you're hill climbing on the wrong thing.”<br>如果你的评测数字不对，你就是在错误的目标上爬山。 · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=1265s" target="_blank">0:21:05</a></li>
+            <li>“All evaluations have a shelf life.”<br>所有评测都有保质期。 · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=1265s" target="_blank">0:21:05</a></li>
+            <li>“When you put an agent loop on top of the [base] models you go from like 1% to 12%.”<br>在基础模型上加一个智能体循环，SWE-bench 从约 1% 涨到约 12%。 · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=2018s" target="_blank">0:33:38</a></li>
+            <li>“Always look at the trajectories, right? You want to see what mistakes the agent's making and use that to design the harness.”<br>一定要看轨迹，看智能体犯了什么错，用来设计框架。 · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=3668s" target="_blank">1:01:08</a></li>
+            <li>“The ideas behind all of these agents are are fairly simple, it's just the design space is large.”<br>这些智能体背后的想法都比较简单，只是设计空间很大。 · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=3161s" target="_blank">0:52:41</a></li>
+            <li>“They don't think of it like a classifier, right? You don't just read some code as a person then say yes no.”<br>安全研究员不会把审计当成分类，人不会读完代码就说是或否。 · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=4482s" target="_blank">1:14:42</a></li>
+            <li>“After 150 hours we weren't able to find it.”<br>（用通用 fuzzer 找那个 SQLite 漏洞）跑了 150 小时也没找到。 · <a href="https://www.youtube.com/watch?v=JCk6qJtaCSU&t=5114s" target="_blank">1:25:14</a></li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>Berkeley RDI LLM Agents MOOC · Coding Agents and AI for Vulnerability Detection · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

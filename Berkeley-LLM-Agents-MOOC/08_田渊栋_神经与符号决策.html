@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Yuandong Tian：走向神经与符号决策的统一框架 | Berkeley LLM Agents MOOC 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="07_Nicolas_Chapados_企业工作流智能体.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">Berkeley LLM Agents MOOC 目录</a> · 08</span>
+    <span><a href="09_Jim_Fan_GR00T通用机器人.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Yuandong Tian：走向神经与符号决策的统一框架</h1>
+        <p class="subtitle">田渊栋讲大模型规划能力的短板和三条出路：让 LLM 把旅行请求翻成 MILP 交给求解器（TTG、APEC 多轮对话智能体），用 A* 搜索轨迹训练 Transformer（Searchformer、Beyond A* 自举、Dualformer 快慢思考），用可微的线性代理把求解器放进端到端训练（SurCo），以及模加法任务里梯度下降自发学出的傅里叶表示和可以用半环代数直接构造的全局最优解</p>
+        <div class="author-meta">
+            主讲：Yuandong Tian（Meta AI (FAIR)）· 课程：Berkeley CS294/194-196 Large Language Model Agents（2024 年秋季）· 上课日期：2024 年 10 月 28 日 · 时长：1 小时 9 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=wm9-7VBpdEo" target="_blank">课堂录像</a> · <a href="https://rdi.berkeley.edu/llm-agents/assets/102824-yuandongtian.pdf" target="_blank">幻灯片</a>（Berkeley RDI 公开，2024 年秋季，本文依据录像字幕和幻灯片整理，是中文转述，不是逐字翻译；观点属于主讲人，内容以上课当天为准）
+        </div>
+    </header>
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>主讲是田渊栋 Yuandong Tian，Meta AI（FAIR）的研究科学家总监（Research Scientist Director）。他说这一讲是他和 Meta 一批同事在 LLM 推理、规划和智能体方向上近期工作的汇总。录像从他本人开讲开始，没有课程事务和介绍环节，也没有问答。</p>
+        <p>整讲围绕一个问题：LLM 在规划任务上为什么做不好，怎么办。他先用旅行规划等基准说明，就算是 o1，问题规模一大，成功率还是掉到零。然后给出三类方案：第一类是扩大规模（他不评价好坏，只列为一个选项）；第二类是神经网络和符号求解器的混合系统，又分三种结合方式，分别是 LLM 调用求解器、求解器给模型提供训练数据、两者端到端一起训练；第三类是看神经网络本身会不会在训练中自发收敛到符号结构，他用模加法给了一个具体例子。这一讲和第 1 讲（Denny Zhou 的推理）、第 2 讲（Shunyu Yao 的智能体）都谈规划，他的角度更偏组合优化和理论。</p>
+        <ol>
+            <li><a href="#t01">LLM 还做不好规划：TravelPlanner、Natural Plan 和 o1</a> · <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">三条出路：规模、混合系统、涌现的符号结构</a> · <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=543s" target="_blank">0:09:03</a></li>
+            <li><a href="#t03">LLM 调用求解器：TTG 旅行规划和 APEC 多轮对话智能体</a> · <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=714s" target="_blank">0:11:54</a></li>
+            <li><a href="#t04">求解器提供数据：Searchformer 把 A* 搜索变成 token 预测</a> · <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=1223s" target="_blank">0:20:23</a></li>
+            <li><a href="#t05">Beyond A*：用专家迭代缩短搜索轨迹</a> · <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=1655s" target="_blank">0:27:35</a></li>
+            <li><a href="#t06">Dualformer：随机丢弃推理轨迹，学会自动切换快慢思考</a> · <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=1970s" target="_blank">0:32:50</a></li>
+            <li><a href="#t07">端到端训练：SurCo 和非线性组合优化</a> · <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=2486s" target="_blank">0:41:26</a></li>
+            <li><a href="#t08">方案三：LLM 在检索还是在推理</a> · <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=3242s" target="_blank">0:54:02</a></li>
+            <li><a href="#t09">模加法：梯度下降学出的傅里叶表示</a> · <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=3396s" target="_blank">0:56:36</a></li>
+            <li><a href="#t10">用半环结构直接构造全局最优解，以及它意味着什么</a> · <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=3823s" target="_blank">1:03:43</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. LLM 还做不好规划：TravelPlanner、Natural Plan 和 o1</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=0s" target="_blank">0:00:00</a>–0:09:03</em></p>
+        <h3>LLM 用在哪里，卡在哪里</h3>
+        <p>他先列了 LLM 已经证明有用的场景：对话式 AI、内容生成、角色扮演和 AI 智能体，以及最近的推理和规划。他说用了思维链（chain-of-thought，让模型先写出中间推理步骤再给答案）之后，LLM 的推理能力好了很多；同时，把它用在各种规划任务上也暴露了问题。要提升推理和规划，先要弄清弱点在哪。</p>
+        <h3>旅行规划这个例子</h3>
+        <p>他说自己在很多场合用过这个例子。任务很简单：告诉模型我想某个日期、带着某个预算去 Hawaii（或 Seattle、California），要求给出清楚、可执行、可行甚至最优的行程。这自然会引出智能体行为：先让模型从外部查信息，比如搜索目的地、查航班、查酒店，拿到多条候选；然后让模型规划，把这些实体信息连成一条能执行的行程。</p>
+        <p>结果并不好。他引用了 ICML 2024 的 spotlight 论文 TravelPlanner（J. Xie et al.）。表格上半部分是“先用工具查信息，再规划”的设定，当时最强的 GPT-4 Turbo 整条行程的最终通过率只有 0.6%；就算直接把正确的工具调用结果给模型，让它只负责规划，最终通过率也只有 4.4%。</p>
+        <p>通过率的定义很直接：检查行程每一段是否满足所有约束，比如不想住吸烟房、总花费不能超过预算。可以写代码自动检查。最终计划质量不行，还是得有人介入才能找到真正能执行的方案。</p>
+        <h3>o1 也一样</h3>
+        <p>他预料有人会说这是年初的论文，在大模型时代每个月、每周都很重要，半年前就算老了。所以他们找 TravelPlanner 的第一作者要了 o1 的数字：o1-mini 和 o1-preview 的整体通过率仍然不高，甚至比专门针对这个任务微调过的模型还差。其他规划场景也一样。</p>
+        <p>左边的图来自 Google DeepMind Gemini 团队的 Natural Plan（H. S. Zheng et al., 2024）：在旅行规划和会议规划上，随着城市数、人数增加，问题变复杂，性能大幅下降，一路降到零。这是 o1 发布之前的情况。</p>
+        <p>右边是 o1 发布之后。他说 o1 做得很好，小规模问题上性能很高，和已有模型差距很大；但计划长度从 2 增加到 14、16 时，曲线还是突然掉到零。（字幕里说这张图来自一篇叫“LLMs cannot plan”之类的研究，出处字幕不清。）他的解读是，曲线的截距明显往上移了，整体下降的趋势没有变，最好的模型也还没解决这类问题，他觉得这条曲线让人担心。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 三条出路：规模、混合系统、涌现的符号结构</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=543s" target="_blank">0:09:03</a>–0:11:54</em></p>
+        <h3>方案一：缩放定律</h3>
+        <p>更多数据、更多算力、更大的模型，希望有一天更大的模型能解决这些问题（幻灯片引用了 Chinchilla 论文，问题是“这对推理/规划管用吗？”）。他说这很贵，有很多工程挑战，但不一定需要关于怎么解决问题的新思路。他说不想评论这条路好不好，只是一个选项。</p>
+        <h3>方案二：混合系统</h3>
+        <p>他说有两条互补的路。基础模型这类深度模型很擅长理解自然语言指令，但规划做得不好，给出的方案质量不高。另一边是组合求解器（combinatorial solver），也叫符号求解器：在很多场景能给出最优解，有理论保证，通常比神经网络快得多，很多时候不需要 GPU，是解复杂规划问题的好工具；但它们不懂自然语言，不懂用户的请求，也处理不了各种灵活的场景。把两者放进同一个系统，可能比任何一边都强。</p>
+        <p>幻灯片上画了三种结合方式，后面依次讲：</p>
+        <ul>
+            <li>工具使用：深度模型调用求解器；</li>
+            <li>提供数据：求解器为深度模型提供训练数据；</li>
+            <li>端到端：深度模型和求解器一起训练。</li>
+        </ul>
+        <p>幻灯片上还有第四种：求解器调用深度模型（作为策略或价值函数），这一讲没有展开。</p>
+        <h3>方案三：从神经网络里涌现的符号结构</h3>
+        <p>理解神经网络，发现梯度下降优化会自动产生符号表示。他说这是他们最近的研究发现，放到最后讲。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. LLM 调用求解器：TTG 旅行规划和 APEC 多轮对话智能体</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=714s" target="_blank">0:11:54</a>–0:20:23</em></p>
+        <h3>绕道符号求解器</h3>
+        <p>这是 TravelPlanner 的后续工作 To the Globe（TTG，Ju et al., EMNLP 2024 Demo）。幻灯片的口号是：LLM 处理不了太多约束，组合求解器可以。做法：</p>
+        <ol>
+            <li>从真实世界收集数据集。</li>
+            <li>用一个微调过的 LLM 做“用户指令翻译器”，把自然语言请求转成 JSON，也就是请求的符号描述，再用数据库里的航班、酒店信息补全。</li>
+            <li>加上约束，把旅行规划写成混合整数线性规划（MILP，mixed integer linear programming：目标和约束都是线性的，部分变量只能取整数的优化问题）。</li>
+            <li>调用 MILP 求解器，得到最优行程的符号描述，再转回自然语言句子，作为智能体的回复。</li>
+        </ol>
+        <p>他的说法是，不让 LLM 一步直接给出行程，而是绕道经过符号求解器，这条弯路给出的方案有保证、更好。</p>
+        <p>这个系统做成了实时演示，在 Miami 的 EMNLP demo 环节展示。速度分解：微调过的指令翻译器把自然语言转成 JSON 约 2.5 秒；MILP 求解很快，字幕里报的数字不清（“0.3.5 seconds 7 seconds”），总之整个演示可以实时跑。</p>
+        <p>人类评测用的是净推荐值（NPS）及三个维度：满意度（是否满足请求、是否有用）、性价比、效率。他说大多数被试对他们的系统评价比基线更正面。</p>
+        <h3>多轮对话收集隐藏约束</h3>
+        <p>单轮设定里，智能体把用户请求当作一轮输入，转成 JSON。现实中人不这样说话：一开始只有个大概，“我想去 Hawaii，别的还没想好”，智能体需要追问预算多少、你更在乎钱还是体验。这是一个天然的多轮对话场景。幻灯片的标题是：用户有隐藏约束，怎么弄清楚？主动问（论文是 Jiang et al., Towards Full Delegation: Designing Ideal Agentic Behaviors for Travel Planning）。</p>
+        <p>他们训练了一个会主动向旅行者提问的智能体，旅行者据实回答。智能体的目标是用尽量少的对话轮数拿到全部信息，转成 JSON，再和数据生成时私下创建的真实 JSON 比对。</p>
+        <p>为了让智能体按这个要求行事，他们设计了一份“智能体宪法”，叫 APEC（字幕里听成 APAC，幻灯片写作 APEC-Travel Agent）。他逐条解释：</p>
+        <ul>
+            <li>Accurate：准确。</li>
+            <li>Proactive：主动提问拿答案，问题要有意义，不能乱问。</li>
+            <li>Efficient：不在无关问题上浪费时间，问最重要的问题。</li>
+            <li>Credible：可信，少幻觉、少前后不一致。</li>
+        </ul>
+        <p>他还提到智能体要能适应不同类型的旅行者。他们设定了 50 种旅行者人设，每种人设行为不同，每个旅行者有一张隐藏的表格，记着他最在意、必须弄对的信息，看智能体能不能在短时间里全部问到。</p>
+        <p>用这份宪法做数据，用 DPO（direct preference optimization，直接偏好优化：用“更好/更差”的成对回答直接调整模型，不需要单独训练奖励模型）微调几轮之后，模型在两类指标上都更好：overall（所有条目）和 critical（该人设最关键的条目），同时也优化了“智能体行为”分数。他说用这样一份宪法和很简单的技术，就能同时沿多个方向提升智能体，而且比现有方法好；直接用未经这类微调的 Llama 模型，表现不好。（字幕里基线模型的名字不清。）</p>
+        <h3>Agent-as-a-Judge</h3>
+        <p>他顺带提了另一篇也有多位 Meta 作者的论文。传统做法是用 LLM 当评委，通常只看智能体的最终结果；这篇用智能体当评委，检查目标智能体的每一步做得好不好，可以给主智能体更细、更丰富的反馈，帮助它改进。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 求解器提供数据：Searchformer 把 A* 搜索变成 token 预测</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=1223s" target="_blank">0:20:23</a>–0:27:35</em></p>
+        <h3>用 A* 的搜索过程当训练数据</h3>
+        <p>第二种结合方式：用求解器给深度模型提供数据，让它训练得更好。论文是 Beyond A*: Better Planning with Transformers via Search Dynamics Bootstrapping（L. Lehnert et al., COLM 2024），模型叫 Searchformer。</p>
+        <p>例子是迷宫：有墙，要找起点到终点的最短路。3×3 的迷宫里最短路很简单。要得到最优路线，可以跑一个符号求解器，这里是 A* 搜索：用一个启发函数（估计当前位置到终点还有多远）引导搜索，找到从初始状态到终止状态的最优路径，应用很广。A* 在给出最终计划之前，会产生一系列中间步骤：创建新节点、探索迷宫的不同部分，看哪条路能到终点。图里紫色和青色的格子就是这些内部步骤（幻灯片图例：frontier state 是待扩展的边界状态，closed state 是已扩展过的状态）。</p>
+        <p>幻灯片把整个过程写成 token 序列。提示（prompt）描述问题：</p>
+        <pre><code>bos
+start 0 2
+goal  1 0
+wall  1 2
+wall  2 0
+eos</code></pre>
+        <p>A* 的轨迹（trace）和计划（plan）：</p>
+        <pre><code>bos
+create 0 2 c0 c3 close 0 2 c0 c3
+create 0 1 c1 c2 close 0 1 c1 c2
+create 0 0 c2 c1 create 1 1 c2 c1 close 0 0 c2 c1
+create 1 0 c3 c0 close 1 0 c3 c0
+plan 0 2
+plan 0 1
+plan 0 0
+plan 1 0
+eos</code></pre>
+        <p>每个 create/close 后面是格子坐标和两个代价（c 后面的数字，对应 A* 里已走的代价和启发式估计）。</p>
+        <h3>两种模型</h3>
+        <p>常见做法是训练一个模型，输入问题描述，直接预测最优计划，叫 solution-only 模型。他们的做法是先从提示预测搜索轨迹，再根据轨迹预测最终计划，叫 search-augmented 模型。两者都用编码器-解码器 Transformer，通过 teacher forcing 训练下一个 token 预测（teacher forcing：训练时把真实的前缀喂给模型，让它预测下一个 token）。幻灯片标注 solution-only 的输出是 100 到 400 个 token，search-augmented 是 100 到 6500 个 token。</p>
+        <h3>绕远路反而更高效</h3>
+        <p>有人会问，预测问题时还要先绕一段路，这是好主意吗？他说是，search-augmented 模型有很好的缩放曲线。</p>
+        <p>在 30×30 迷宫导航上，solution-only 模型用 1.75 亿参数，需要上百万条训练序列才能在测试集上达到很高的性能。search-augmented 模型只用 1500 万参数，小了 10 倍，训练曲线却好得多：只用 5 万条样本，最终分数已经在 80% 左右，solution-only 模型这时约 20%；样本越多越好。他的总结是 search-augmented 模型在参数和数据上都高效得多：大约用十分之一的样本（10 万对 100 万）和十分之一的参数就能达到差不多的性能。（这里他口头说了“50 million versus 175 million”，和前面说的 1500 万对不上，按前文应是 1500 万。）</p>
+        <p>推箱子（Sokoban）上趋势类似。规则：智能体只能往前推箱子，不能拉；箱子推进角落或贴墙就再也拉不回来，只能重开。所以这个游戏需要大量规划，不能乱推。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. Beyond A*：用专家迭代缩短搜索轨迹</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=1655s" target="_blank">0:27:35</a>–0:32:50</em></p>
+        <h3>从模仿到超越</h3>
+        <p>到目前为止做的是模仿学习：用求解器的搜索轨迹训练 Transformer，得到 search-augmented 模型，已经很省数据。怎么更进一步？search-augmented 模型是一个端到端可微的模型，可以再微调它，让它产生更短的轨迹，同时仍然得到最优计划。他说这在某种意义上是一个典型的强化学习任务，结果就是 Searchformer。</p>
+        <p>他们没有真的上强化学习，用的是很简单的专家迭代（expert iteration）：</p>
+        <ol>
+            <li>对当前模型带一定多样性地采样很多次，得到很多不同的轨迹和计划；</li>
+            <li>只保留计划是最优的那些；</li>
+            <li>在最优计划里，挑搜索轨迹最短的；</li>
+            <li>把这批“最短轨迹 + 最优计划”作为下一轮的训练集，重新训练（微调）模型；</li>
+            <li>反复迭代。</li>
+        </ol>
+        <h3>轨迹越来越短，最优率不降</h3>
+        <p>一开始 search-augmented 模型和 A* 的每任务平均序列长度分布差不多，这不奇怪，因为它是模仿 A* 轨迹学出来的。经过几轮这样的自举（bootstrapping），分布逐渐往左移，序列越来越短。论文名“Beyond A*”就是这个意思：找到比 A* 更短的搜索轨迹，同时保持最终解的最优性。</p>
+        <p>他们定义了 ILR（improved length ratio，改进长度比）：</p>
+        <p>$$\text{ILR} = \frac{\text{A* 搜索轨迹的长度}}{\text{神经网络找到的搜索轨迹长度}}$$</p>
+        <p>每一轮自举，ILR 都在升高，说明网络输出的轨迹越来越短。</p>
+        <p>有人会担心轨迹短了，最优率会不会降。他说没有，每轮迭代最优率反而还升了一点，他觉得有点神秘，但很有意思。他还说，经过这一过程，参数量小得多的 Searchformer（他口头说的是 2400 万参数）在最优率上和参数大得多（他说约 7 亿）的 solution-only 模型相当。幻灯片的结论是“Searchformer 超过了最大的 solution-only 模型”。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. Dualformer：随机丢弃推理轨迹，学会自动切换快慢思考</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=1970s" target="_blank">0:32:50</a>–0:41:26</em></p>
+        <h3>随机丢弃轨迹的一部分</h3>
+        <p>后续论文是 Dualformer: Controllable Fast and Slow Thinking by Learning with Randomized Reasoning Traces（D. Su et al., 2024），他称为 Searchformer v2。Searchformer 的弱点是轨迹很长，迷宫里可能要一千甚至一万个 token 才给出结果。</p>
+        <p>Dualformer 的做法很简单：训练时随机丢掉搜索轨迹的一部分。他们定义了几个丢弃等级：可以认为 A* 里 close 步骤的代价不重要，丢掉；create 步骤里的代价 token 不重要，丢掉；也可以把整段 create 步骤都丢掉；最高一级（第 4 级）是丢掉整条轨迹，只用 solution-only 数据训练。用这些等级的各种组合混在一起训练，性能比只用解训练、只用完整轨迹训练都好。他们在不同大小的迷宫和推箱子上测试，都是这样。</p>
+        <p>输出的多样性也更高。多样性的定义是：从模型生成 64 条路线，看能聚成多少簇。他说多样性对测试时计算很重要：生成时多样性高，增加测试时计算（多采样几次）就能把性能推得更高。这个简单方法因为输入数据本身就很多样，自动带来了高多样性。</p>
+        <h3>自动切换系统一和系统二</h3>
+        <p>他说更意外的发现是，Dualformer 会根据问题自己在快模式和慢模式之间切换。大家常说的系统一是不思考、直接给答案；系统二是先想一想、有一个搜索过程，再给答案。通常认为这是两种分立的运行模式，要用两个模型分别处理，再在上面控制用哪个。Dualformer 在混合数据上训练之后，会自己切换：有时第一个输出 create token，进入慢思考，直到给出计划；有时第一个就输出 plan token，直接给答案。这种行为是训练中自动出现的，没有人给显式信号。</p>
+        <p>表里的“Dualformer (auto)”是自动模式，任它输出哪种 token。它的表现比只在系统一数据上训练的模型、只在系统二数据上训练的模型都好。而且只要控制第一个 token 就能控制它的模式：强制第一个 token 是 create，就进入慢模式；强制是 plan，就给出系统一式的输出。强制快模式的 Dualformer 比专门做快模式的 solution-only 模型好；强制慢模式的 Dualformer 也比在完整轨迹上训练、专门做慢模式的基线好。幻灯片的总结是：Dualformer 自动在快模式和慢模式之间切换，在任一模式下都比专用模型好。</p>
+        <h3>用在数学题上</h3>
+        <p>他们也在更真实的数学题上试了。起点是 Aug-MATH 数据集，里面有很长的解题说明（他说前人的工作已经发现，用更强的模型扩充思维链得到的 Aug-MATH，比原始 MATH 数据集效果好，这里作为基线）。他们随机删掉思维链里的一些句子再训练。得到的模型解题步骤更短、更简洁，性能还略好；在不同的丢弃比例下都比基线好，同时轨迹更短。</p>
+        <h3>和 o1 的对比</h3>
+        <p>他展示了一个迷宫上 Dualformer 和 o1-preview 的对比：Dualformer 给出一条通向终点的正确路线，探索过的状态用红色标出；没有经过训练的 o1 看不懂这个迷宫设定，给出的路线直接穿墙。他补充说这个比较不公平，理想情况下应该拿在同一数据集上微调过的 o1-preview 来比。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 端到端训练：SurCo 和非线性组合优化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=2486s" target="_blank">0:41:26</a>–0:54:02</em></p>
+        <h3>目标非线性，约束是组合的</h3>
+        <p>第三种结合方式是模型和求解器端到端一起训练。场景换成需要优化的真实问题：目标函数可微但高度非线性，同时有组合约束（变量只能取离散值）。幻灯片列的领域有计算机系统规划、光子器件设计、吞吐量优化、天线设计、电网。这类问题一般没法写成线性形式，所以不能直接调用组合求解器。</p>
+        <h3>例子：嵌入表放置</h3>
+        <p>这是他们在 Meta 生产中遇到的问题。推荐模型有 K 张嵌入表（embedding table），要放到 N 块相同的设备（GPU）上，每块设备放若干张表，但不能超过显存容量，目标是让延迟最小，延迟由一个神经网络估计。写成数学形式：</p>
+        <p>$$\min_{x}\ f(x;\,y)\quad \text{s.t.}\quad \sum_{j} x_{ij} = 1\ \ \forall i,\qquad \sum_{i} x_{ij}\, m_i \le M\ \ \forall j,\qquad x_{ij}\in\{0,1\}$$</p>
+        <p>$x_{ij}$ 是二值变量，表示第 $i$ 张表放在第 $j$ 块设备上；第一个约束是每张表恰好放到一块设备上；第二个约束是每块设备上表的内存 $m_i$ 加起来不超过预算 $M$。因为 $x_{ij}$ 是二值的，整个问题是组合问题；而通信延迟等系统因素让损失函数 $f$ 高度非线性，很难处理。比如用遗传算法去解，可能永远找不到可行解。</p>
+        <h3>在隐空间里把问题变线性</h3>
+        <p>思路是不在原空间解这个非线性问题，而是找一个隐空间，让问题在隐空间里变成线性的，这样就能用现成的组合求解器。论文是 SurCo: Learning Linear Surrogates For Combinatorial Nonlinear Optimization Problems（A. Ferber et al., ICML 2023，幻灯片注明获 SODS workshop 杰出论文）。</p>
+        <ol>
+            <li>学一个代理代价（surrogate cost）$c = c(y)$，它是问题描述 $y$ 的函数。$y$ 描述问题本身，比如有几块 GPU、各自显存多少。</li>
+            <li>用这个代价解一个线性问题，得到解 $x^*(y) = \arg\min_{x \in \Omega} c(y)^\top x$，其中 $\Omega$ 是组合可行域，交给现成的线性/整数规划求解器。</li>
+            <li>希望这个线性问题的解在原来的非线性目标上尽量好，也就是最小化 $f(x^*(y);\,y)$。</li>
+        </ol>
+        <p>怎么学 $c(y)$？用梯度下降。计算图是：问题描述 $y$ 进入 $c = c(y)$ 得到代理系数，系数送进求解器得到解，解送进目标函数得到损失。他说我不关心中间状态，只想让整条管线的损失最小，那就一路反向传播回去，找到 $c(y)$ 参数化的最优权重。前提是求解器可微，幻灯片列了可微优化方面的工作：黑箱优化器的求导、CVXPYLayers、MIPaaL 等。</p>
+        <h3>三个变体和嵌入表分片结果</h3>
+        <ul>
+            <li>SurCo-zero：在测试时对每个问题做反向传播，慢，但解好。</li>
+            <li>SurCo-prior：直接学一个 $y \mapsto c$ 的映射，测试时预测一次 $c$，调用一次求解器，快得多。</li>
+            <li>SurCo-hybrid：先用 prior 模块给出 $c$ 的初值，再继续优化 $c$。</li>
+        </ul>
+        <p>实验用公开的 DLRM（Deep Learning Recommendation Model）数据集，把 10 到 60 张表放到 4 块 GPU 上。基线是贪心启发式，以及当时最好的强化学习方法 DreamShard（Zha et al., NeurIPS 2022）。SurCo 的代理模型通过 CVXPYLayers（可微的线性规划求解器）来学。结果图左边是解的损失（越低越好，最好是 0），右边是部署运行时间。三个变体在损失和部署时间之间都给出了很好的权衡：损失明显低于已有方法；运行时间也不错，SurCo-prior 只需预测一次系数，快得多，性能也还可以。</p>
+        <h3>逆向光子器件设计</h3>
+        <p>另一个工业设计问题是逆向光子设计（inverse photonic design）。设计区域是一个很小的网格（他说的是 80×80，尺度在纳米级）。光从上方射入，希望设计能改变光的路径，让不同波长的光落到底部的不同位置。能做到是因为在纳米尺度上，光表现为波，会在不同位置干涉、衍射，不同频率的光就走向不同地方。之所以不用镜子，是因为地方太小，放不下镜子，只能靠衍射和干涉引导光走不同的路。</p>
+        <p>优化目标很复杂：先根据当前设计做物理仿真，算频率响应，再算截止频率等一系列量，得到总损失，高度非线性。设计空间是组合的，网格每个位置放 1 或 0。还有可制造性约束：制造时是用一个“刷子”在板上刻出图案，所以刷子的大小成了约束，不能凭空出现一个孤立的点，那造不出来；这个约束可以写成线性约束。</p>
+        <p>数据集是 Ceviche Challenges（Schubert et al., ACS Photonics 2022），幻灯片列了几个基准任务：波导弯曲（把光从上方弯到左边）、分束器（beam splitter，把光分成两束）、模式转换器、波分复用器（wavelength division multiplexer）。大多数基线因为组合约束在这里用不了；当时最好的方法是基于刷子的算法。SurCo 的代理通过对刷子求解器做黑箱求导（Vlastelica et al., ICLR 2019）来学。收敛曲线显示 SurCo-zero 和 SurCo-hybrid 的收敛平滑得多；已有方法（字幕里叫 pass through）也是不错的方法，但没有神经网络参与，曲线很不稳定，收敛很慢。幻灯片的要点：SurCo-zero 很快找到损失为 0 的解；SurCo-hybrid 利用离线训练数据抢跑。</p>
+        <h3>局限</h3>
+        <p>他列了三条：目标函数 $f$ 不可微怎么办；训练时每一步都要调用求解器，慢；要求求解器可微。他们有后续工作处理这些问题，幻灯片上是 Landscape Surrogate（A. Zharmagambetov et al., NeurIPS 2023）和 GenCO（A. Ferber et al., ICML 2024），时间关系没讲细节，代码已经公开。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 方案三：LLM 在检索还是在推理</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=3242s" target="_blank">0:54:02</a>–0:56:36</em></p>
+        <p>最后一部分问：深度模型会不会收敛到某种符号的东西？</p>
+        <p>他说 Twitter（X）上有两种互相冲突的叙事。一种说 LLM 什么都能做，参数越大涌现行为越多，我们坐等就行，模型会把 AGI 做出来。另一种从很多实验出发，认为 LLM 也许没做什么真正智能的事，只是在检索，表现好是因为训练集里见过类似例子。</p>
+        <p>他举了 Apple 最近的论文 GSM-Symbolic：往 GSM8K 数学题里加入无关的句子，所有模型在数据集上的表现都大幅下降。这很让人意外，因为插入这些句子之后正确答案本不该变。</p>
+        <p>他说怎么理解 LLM 用什么样的表示做推理和规划，是一个值得用整个职业生涯去琢磨的核心问题。接下来他给一个例子，分析训练学到的表示。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 模加法：梯度下降学出的傅里叶表示</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=3396s" target="_blank">0:56:36</a>–1:03:43</em></p>
+        <h3>任务和直觉</h3>
+        <p>模加法（modular addition）是个很简单的单元任务：给定 $a$ 和 $b$，预测</p>
+        <p>$$c = (a + b) \bmod d$$</p>
+        <p>结果太大就绕回 $0$ 到 $d-1$ 之间。可能的输入只有 $d^2$ 种，你可能以为网络训练之后就是内部存了一张表做检索。幻灯片的问题就是“神经网络是不是有一张隐式的表在做检索？”</p>
+        <p>他说实际上不是。已有很多论文发现，在这个任务上训练出来的表示是傅里叶基：不同的数被表示成漂亮的正弦、余弦曲线（幻灯片引用 T. Zhou et al., Pre-trained Large Language Models Use Fourier Features to Compute Addition）。问题是为什么。</p>
+        <h3>两层网络的设定</h3>
+        <p>他在最近的论文（Y. Tian, Composing Global Optimizers to Reasoning Tasks via Algebraic Objects in Neural Nets, 2024）里用两层网络来研究：底层输入 $a$ 和 $b$ 的 one-hot 表示，分别乘以两个权重矩阵后相加，送进隐藏节点，激活函数是二次函数；顶层输出，和 $c$ 的 one-hot 表示比较（MSE 损失）。这么简单的设定，训练后也会出现傅里叶基。</p>
+        <p>为了分析，把一切都转到傅里叶域，分析会容易得多。对权重 $W_a, W_b, W_c$ 做（缩放的）傅里叶变换，得到复数系数 $z_a, z_b, z_c$。因为原始权重是实数，这些复数系数要满足 Hermitian 条件（共轭对称）。</p>
+        <h3>梯度下降的解长什么样</h3>
+        <p>他展示了 $d = 7$、隐藏神经元数 $q = 20$ 时梯度下降得到的解。横轴是隐藏节点编号（0 到 19），纵轴是傅里叶频率。解很规整：每个频率上，只有少数几个隐藏神经元有强响应。数一数每个频率 $k$ 有多少个神经元强响应：$k=1$ 有 6 个，$k=2$ 也有 6 个，他称为“6 阶解”（order-6）；也有频率上是 4 个，即 4 阶解，其他神经元上有一些偏置项。幻灯片上标注了由 Hermitian 条件带来的对称性。</p>
+        <p>更多统计（$d = 23$）：阶数分布在 4 和 6 两处有尖峰，幻灯片写“4 阶和 6 阶解确实会出现”。换更大的设定（$d = 23, 71, 127$）和不同的权重衰减，大多数情况仍是 6 阶和 4 阶两个峰；只有权重衰减很强时，所有解都塌缩到 0 阶，也就是全为零、没有解。</p>
+        <h3>损失函数的结构</h3>
+        <p>为什么是这样？他把 MSE 损失改写成一个看起来很丑的形式：一个“1 减某项”的项，加上三个平方和项。这个形式的好处是能直接给出全局最优的充分条件：让那个 $r$ 项（字幕里是 “R to K”）等于 1，三个平方和项都等于 0，就得到全局最优解。问题是怎么做到，目标高度非线性。幻灯片的说法是：目标高度非线性，但存在很好的代数结构。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 用半环结构直接构造全局最优解，以及它意味着什么</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=3823s" target="_blank">1:03:43</a>–1:09:44</em></p>
+        <h3>半环和环同态</h3>
+        <p>考虑所有隐藏节点数不同的两层网络构成的空间 $\mathcal{Z}$。他说这个空间有半环（semiring）结构：把“加法”定义为把两个网络的隐藏神经元拼接起来，“乘法”定义为沿隐藏维度做 Kronecker 积，整个结构就是一个半环。（半环是一种代数结构：有加法和乘法，满足结合律、分配律等，但不要求有加法逆元。）</p>
+        <p>有意思的是，前面损失函数里的那些项都是环同态（ring homomorphism）。他的解释：一个函数如果把环上的加法、乘法对应成普通的加法、乘法，即</p>
+        <p>$$r(z_1 + z_2) = r(z_1) + r(z_2), \qquad r(z_1 * z_2) = r(z_1)\, r(z_2),$$</p>
+        <p>它就是环同态。</p>
+        <h3>从部分解拼出全局解</h3>
+        <p>这意味着可以从部分解出发。假设 $z_1$ 只满足损失函数里的某一项条件，$z_2$ 只满足另一项条件，它们都不是完整的解；因为有环结构，把它们乘起来，得到的 $z$ 会同时满足两项。于是可以从很不完整的部分解开始，用乘法和加法逐步构造越来越复杂的解，最终得到原损失函数的全局最优解。整个过程不需要梯度下降，纯粹是代数构造。</p>
+        <p>构造的例子（幻灯片）：把 3 阶解和 2 阶解相乘得到 6 阶解，再对所有频率求和；也能构造 4 阶解（$2 \times 2$，可与 6 阶混合）；还能构造对应完全记忆（perfect memorization）的解，幻灯片写的是每个频率 $d$ 阶。</p>
+        <h3>梯度下降的解和构造吻合</h3>
+        <p>有人会说这是数学家造的抽象世界，可能和现实无关。他说把梯度下降的解和构造的解对比，能看到很好的吻合：</p>
+        <ul>
+            <li>每个频率上的解 100% 是 4 阶或 6 阶（幻灯片）；</li>
+            <li>把这些 4 阶、6 阶解按前面定义的环乘法做分解，95% 可以分解成“2×3”或“2×2”，和理论构造一致；</li>
+            <li>分解误差很小；</li>
+            <li>逐项检查分解结果，98% 的解落在构造出的形式里。</li>
+        </ul>
+        <p>他说这说明梯度下降的解和理论构造吻合得很好。解里参数的分布也有很规则的结构，在一些角度上有尖峰，对应更高阶的对称性，这一点还没被研究过，可以做后续论文。</p>
+        <h3>可能的含义</h3>
+        <p>幻灯片列了三个问题，他逐个讲：</p>
+        <ul>
+            <li>神经网络会不会最终学到我们还不知道的、更高效的符号表示？他说梯度下降在这里得到的解和符号表示很相似，也许一般的神经网络或大模型也会收敛到某种符号解，只是我们还没把它构造出来。这里至少给了一个推理任务训练后得到符号解的例子。</li>
+            <li>梯度下降能到达的解，能不能用高级代数运算到达？这给出了梯度下降之外的另一条路。</li>
+            <li>梯度下降最终会不会被淘汰？他说也许将来不再需要梯度下降，只需要代数构造把小解组合成大解。</li>
+        </ul>
+        <p>他最后说，这可能指向和现有路径不同的一条路：将来不用再祈祷分布式训练系统别出问题，可以打开黑箱，用有原则的方法来做。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“Even with the GPT-4 Turbo, which is the model that is the strongest at that time, we actually see that the final pass rate of the entire travel itinerary is only 0.6%.” 就算是当时最强的 GPT-4 Turbo，整条旅行行程的最终通过率也只有 0.6%。（<a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=242s" target="_blank">0:04:02</a>）</li>
+            <li>“If the scale of the planning problem goes goes up, right? So, the plan length from going from two all the way to like 14 or 16, then all of a sudden you see that the curve also drops to zero.” 规划问题规模一大，计划长度从 2 涨到 14、16，曲线就突然掉到零。（<a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=470s" target="_blank">0:07:50</a>）</li>
+            <li>“You can take a detour through the symbolic solver. And that detour will give you some solution that is guaranteed to work better.” 可以绕道经过符号求解器，这条弯路给出的解有保证、更好。（<a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=768s" target="_blank">0:12:48</a>）</li>
+            <li>“This search augmented model become much more parameter efficient and much more data efficient.” 加了搜索轨迹的模型在参数和数据上都高效得多。（<a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=1531s" target="_blank">0:25:31</a>）</li>
+            <li>“It will automatically switch between fast mode and a slow mode by itself.” 它会自己在快模式和慢模式之间切换。（<a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=2118s" target="_blank">0:35:18</a>）</li>
+            <li>“The final answer is not supposed to be changed after these random sentences being inserted.” 插入这些随机句子之后，最终答案本不该改变。（<a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=3360s" target="_blank">0:56:00</a>）</li>
+            <li>“The gradient descent solution match very well with the construction from the theoretical side.” 梯度下降的解和理论上的构造吻合得很好。（<a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=4051s" target="_blank">1:07:31</a>）</li>
+            <li>“So maybe in the future we don't need gradient descent anymore. We just need algebraic constructions to combine small solution to the larger solutions.” 也许将来不再需要梯度下降，只需要代数构造把小解组合成大解。（<a href="https://www.youtube.com/watch?v=wm9-7VBpdEo&t=4154s" target="_blank">1:09:14</a>）</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>Berkeley RDI LLM Agents MOOC · Towards a unified framework of Neural and Symbolic Decision Making · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

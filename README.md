@@ -1,6 +1,6 @@
 # 前沿 AI 名校课
 
-Stanford、CMU、Harvard 和 MIT 2025-2026 学年 AI 课程的中文笔记，附一套给零基础读者的入门教程。
+Stanford、CMU、Harvard、MIT、Berkeley 和 ETH Zürich 2025-2026 学年 AI 课程的中文笔记，加上 AI 前沿的书、博客、论文和播客整理，附一套给零基础读者的入门教程。
 
 **[在线阅读 →](https://joyce9896.github.io/frontier-ai-courses/)**
 
@@ -66,6 +66,7 @@ Stanford、CMU、Harvard 和 MIT 2025-2026 学年 AI 课程的中文笔记，附
 | [可解释性与对齐](https://joyce9896.github.io/frontier-ai-courses/Interpretability-and-Alignment/) | 零基础导读 + Anthropic Transformer Circuits 12 篇代表论文（2021–2026：电路、归纳头、叠加、SAE、归因图、模型生物学、内省、情绪、全局工作空间）+ ARENA 四章练习梳理 |
 | [Stanford CS231N](https://joyce9896.github.io/frontier-ai-courses/CS231N-Computer-Vision/) | 计算机视觉，2025 年春季 18 讲：CNN、Transformer、检测分割、视频、自监督、生成模型、视觉语言模型、三维视觉、机器人学习 |
 | [Stanford CS224R](https://joyce9896.github.io/frontier-ai-courses/CS224R-Deep-Reinforcement-Learning/) | 深度强化学习，2025 年春季 18 讲 + 辅导课：模仿学习、策略梯度、PPO、SAC、Q 学习、离线 RL、基于模型、RLHF/DPO、推理 RL、仿真到真实，附 2026 版幻灯片新增内容 |
+| [Berkeley LLM Agents MOOC](https://joyce9896.github.io/frontier-ai-courses/Berkeley-LLM-Agents-MOOC/) | 三季智能体公开课（2024 秋、2025 春、2025 秋）35 讲：推理、Agent 框架、编程与电脑操作 Agent、形式化数学、RL 后训练、评测与安全 |
 
 ### 产业与系统
 

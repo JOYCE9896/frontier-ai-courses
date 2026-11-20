@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jason Weston：让大模型学会自我改进和推理 | Berkeley LLM Agents MOOC 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="13_陈昕昀_推理时技术.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">Berkeley LLM Agents MOOC 目录</a> · 14</span>
+    <span><a href="15_Yu_Su_语言智能体的推理记忆与规划.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Jason Weston：让大模型学会自我改进和推理</h1>
+        <p class="subtitle">从 System 1 和 System 2 讲起，回顾神经语言模型、记忆网络、RLHF 和 DPO 的来路，再讲 Meta 团队一年来的自我改进工作：Chain-of-Verification、System 2 Attention、Branch-Solve-Merge、Self-Rewarding、Iterative Reasoning Preference Optimization、Thinking LLMs（TPO）、Meta-Rewarding、EvalPlanner，以及它们和 o1、DeepSeek R1 的关系、COCONUT 和未来方向</p>
+        <div class="author-meta">
+            主讲：Jason Weston（Meta）· 课程：Berkeley CS294/194-280 Advanced Large Language Model Agents（2025 年春季）· 上课日期：2025 年 2 月 3 日 · 时长：1 小时 16 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=_MNlLhU33H0" target="_blank">课堂录像</a> · <a href="https://rdi.berkeley.edu/adv-llm-agents/slides/Jason-Weston-Reasoning-Alignment-Berkeley-Talk.pdf" target="_blank">幻灯片</a>（Berkeley RDI 公开，2025 年春季，本文依据录像字幕和幻灯片整理，是中文转述，不是逐字翻译；观点属于主讲人，内容以上课当天为准）
+        </div>
+    </header>
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>Jason Weston 是 Meta 的研究科学家，幻灯片上署名 Meta 和 NYU。他从 2000 年代做支持向量机起家，2008 年和 Ronan Collobert 合写了用神经网络端到端做 NLP 的论文，后来做了 bAbI 任务、记忆网络（Memory Networks）、BlenderBot 等工作。这段录像直接从他的讲课开始，没有主持人介绍，也没有问答环节。</p>
+        <p>他的主题是自我改进的语言模型：让 AI 尽量自己训练自己，自己出题、自己判断对错（他叫 self-rewarding）、根据学到的东西更新自己，并问这条路能不能通往超越人类的 AI。他先用 System 1 和 System 2 给出两类可以改进的推理，然后花大约 20 分钟讲历史，从 2003 年的神经语言模型讲到 RLHF 和 DPO；接着讲 2022 到 2023 年用提示做 System 2 推理的工作；最后用一半时间讲他的团队从 2024 年初到这次课前一周的一串训练方法，并把它们和 OpenAI o1、DeepSeek R1 对照。前一讲 Xinyun Chen 讲推理时技术，这一讲讲训练侧。</p>
+        <ol>
+            <li><a href="#t01">目标：让 AI 自己训练自己；System 1 和 System 2</a> · <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">前史：从神经语言模型到端到端 NLP</a> · <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=331s" target="_blank">0:05:31</a></li>
+            <li><a href="#t03">注意力、记忆网络和规模假说</a> · <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=750s" target="_blank">0:12:30</a></li>
+            <li><a href="#t04">光有语言建模不够：SFT、RLHF 和 DPO</a> · <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=1048s" target="_blank">0:17:28</a></li>
+            <li><a href="#t05">用提示做 System 2：思维链和 Chain-of-Verification</a> · <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=1372s" target="_blank">0:22:52</a></li>
+            <li><a href="#t06">System 2 Attention 和 Branch-Solve-Merge</a> · <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=1749s" target="_blank">0:29:09</a></li>
+            <li><a href="#t07">Self-Rewarding：模型给自己打分再训练</a> · <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=2120s" target="_blank">0:35:20</a></li>
+            <li><a href="#t08">可验证奖励：IRPO、o1 和 DeepSeek R1</a> · <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=2824s" target="_blank">0:47:04</a></li>
+            <li><a href="#t09">Thinking LLMs：所有任务都先思考</a> · <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=3344s" target="_blank">0:55:44</a></li>
+            <li><a href="#t10">Meta-Rewarding：评判自己的评判</a> · <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=3676s" target="_blank">1:01:16</a></li>
+            <li><a href="#t11">Thinking-LLM-as-a-Judge：给评估也训练思维链</a> · <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=3908s" target="_blank">1:05:08</a></li>
+            <li><a href="#t12">总结、COCONUT 和接下来的方向</a> · <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=4235s" target="_blank">1:10:35</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 目标：让 AI 自己训练自己；System 1 和 System 2</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=0s" target="_blank">0:00:00</a>–0:05:31</em></p>
+        <h3>开场</h3>
+        <p>他说自己现在每天大量用 AI，画画、写代码、写正式信件、提问、头脑风暴，而这些都是最近才变得可能。他觉得 AI 研究者很幸运，能实时看到这些进步；但还有很多事要做，未来几年仍会有大的提升，最近几个月 o1、R1 在推理基准上的大幅进步就是例子。他提醒，思维链本身也只是 2022 年才出现的，这个子领域还很年轻。</p>
+        <h3>自我训练的设想</h3>
+        <p>经典训练是在固定数据集上学习。现在情况在变：在强化学习设定里，尤其是基于 AI 反馈的强化学习（RLAIF，用 AI 而不是人来给模型输出打分），模型训练自己的方式复杂得多。他设想的模型能自己创造新的挑战和任务来训练，自己评估做得对不对（self-rewarding），再根据理解更新自己，从而获得更多知识和推理能力。研究问题是：模型能不能这样训练自己，这能不能帮它超过人类？</p>
+        <h3>两类推理</h3>
+        <p>他借用 System 1 和 System 2 的说法。System 1 在人身上是反应式的、依赖联想；在 LLM 里可以看作 Transformer 网络本身，隐藏状态经过一堆矩阵乘法和注意力运算，每个 token 的计算量固定，直接输出答案。它的失败方式是学到虚假的、不想要的相关性，表现为幻觉、谄媚（sycophancy，顺着用户的观点说）、越狱等。</p>
+        <p>System 2 是更慎重、更费力的思考。今天最常见的形式是先生成一串语言 token 作为思维链，再输出最终回答。幻灯片上把 System 2 画成对 System 1 的多次调用：拆子问题、注意力、验证，最后得到答案，计算量可以动态变化。他说这种思维链虽然是从左到右自回归生成的，却可以在里面做规划、搜索、验证和各种推理，o1、o3、DeepSeek 的模型都能做到。</p>
+        <p>所以自我改进时有两件事可以改：改模型架构或权重来提升 System 1，或者改模型生成思维链等 System 2 过程的方式。两者有关联，因为做这两件事的是同一个语言模型。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 前史：从神经语言模型到端到端 NLP</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=331s" target="_blank">0:05:31</a>–0:12:30</em></p>
+        <h3>语言建模</h3>
+        <p>语言建模（language modeling）可以追溯到 1950 年代的 Claude Shannon：在每一步预测下一个 token 或下一个词的概率。这就是大语言模型的预训练方式，也是它们名字的来源，只是现在在海量语料上做。幻灯片上的标注是：标准预训练只在语言的“正例”上预测下一个 token。</p>
+        <p>2003 年 Bengio、Ducharme 和 Vincent 提出了最早的神经网络语言模型之一：第一层是词嵌入，然后几层 tanh，最后 softmax 输出预测。他引了那篇论文结论里的一句：模型、架构和计算效率都还有很多可以改进的地方，他们想在不增加训练时间的情况下增大容量，以处理上亿词的语料。他说后来几年大家确实走到了这一步。</p>
+        <h3>支持向量机的十年</h3>
+        <p>2000 年代的大部分时间，研究重心不在神经网络，而在支持向量机（SVM）这类核分类器。他自己也在这个方向做过，幻灯片上有他的论文。他说这至少让 LLM 的故事推迟了几年。</p>
+        <h3>端到端训练</h3>
+        <p>他放了一张 2008 年他和 Ronan Collobert 在 ICML 上的幻灯片：当时 NLP 系统是一串级联的模块，词性标注器、命名实体识别器、句法分析器，每个都用 SVM；他们主张这样不好，整个系统可以用一个神经网络端到端训练。当时几乎没人这么做。那篇论文是 A Unified Architecture for NLP，他们把它看作 Bengio 2003 工作的后继：第一层词嵌入，然后卷积层，再做 max over time（他说这是一种原始的注意力），最后 softmax。</p>
+        <p>他们证明可以把这个模型当作掩码语言模型（masked language model，遮住一些词让模型猜）在 Wikipedia 上预训练，这在当时的计算条件下很不容易；从词的相似度能看出它学到了有意思的东西。这比 2013 年的 Word2Vec 还早，而且是更复杂的网络。预训练之后再在词性标注、命名实体识别、组块分析、语义角色标注上微调，效果不错。他说这是今天做法的前身之一。</p>
+        <p>他提到当时 NLP 圈并不都认可这项工作，Stanford NLP 组的读书会在公开网站上对这篇论文的评价不高（字幕不清，具体措辞听不出）。后来这篇论文获得 ICML 2018 的时间检验奖，Stanford 成立基础模型研究中心（CRFM）后，其立场论文把它列为先驱工作。他说这说明了领域变化有多大。</p>
+        <p>他强调不喜欢把某一篇论文看成“那篇做成了某件事的论文”，所有工作都建立在之前的工作之上。另一个数字是：ICML 2008 标题里带 deep 或 neural 的论文大约 4 篇，他是其中两篇的作者；到 ICML 2018 大约有 100 篇。神经网络成为今天的主流范式，未来会怎样他说不好，但看起来是很强的路线。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 注意力、记忆网络和规模假说</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=750s" target="_blank">0:12:30</a>–0:17:28</em></p>
+        <h3>bAbI 任务和注意力</h3>
+        <p>2015 年他们设计了 bAbI 任务：给一个小故事，问简单的问题。当时的 LSTM 解不了，他们希望借此激发新方法。差不多同时，2014 年 Bahdanau、Cho、Bengio 的论文提出了注意力机制（attention，让模型在生成每个输出时按相关程度加权查看输入的各个位置），原本用于机器翻译，在目标句和源句的词之间建立对齐。</p>
+        <p>他们发现，把多层注意力叠起来，就能在 bAbI 上做多步推理。单一支持事实的例子：故事里有“John went to the bedroom. John traveled to the bathroom.”等句子，问 John 在哪，只要注意到最后一句就行。两条支持事实的例子更难：“John took the milk there. … John moved to the hallway.”，问牛奶在哪。模型在第一跳注意到“John took the milk there”，知道牛奶在 John 手里，再在后面的层注意到“John moved to the hallway”，答出 hallway。他说这展示了在很简单的问题上，逐层叠加的注意力能做更复杂的推理。</p>
+        <h3>记忆网络</h3>
+        <p>这被做进了记忆网络（Memory Networks）：多层叠加的注意力、query 和 key 嵌入、位置嵌入（让模型知道注意的是哪个句子或 token）、注意力层之间的神经网络和最后的 softmax。他说它在很多方面是 Transformer 的前身，Transformer 在这个配方上加了多头注意力、自注意力和归一化等改进。</p>
+        <h3>Transformer、BERT 和规模假说</h3>
+        <p>2017 年 Transformer 出现，基本就是今天还在用的架构，只做了一些调整；2018 年 BERT 证明了基于 Transformer 的掩码语言模型效果很好。他又提到 2014 年 Sutskever、Vinyals 和 Quoc Le 的 Sequence to Sequence Learning with Neural Networks，那时还没有注意力，但其结论幻灯片基本就是今天的规模假说：有大数据集、训练很大的神经网络，就一定成功。他说这话有点轻率，但 Ilya Sutskever 去了 OpenAI 之后推动了这个假说，做出 GPT-1、2、3、4，更大的模型、更多的数据，确实奏效了。</p>
+        <p>幻灯片上有一张让 LLM 列出的模型清单，从 2019 年的 GPT-2 到 2023 年的 Mistral 7B，包括 T5、GPT-3（175B）、Megatron-Turing NLG（530B）、Gopher、Chinchilla、PaLM、OPT、BLOOM、GPT-3.5、Claude 1 和 2、GPT-4、LLaMA 等。他说这些主要还是靠语言建模目标，而这不够，2020 年之后的工作就是在深入探索其他训练方式。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 光有语言建模不够：SFT、RLHF 和 DPO</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=1048s" target="_blank">0:17:28</a>–0:22:52</em></p>
+        <h3>Self-Feeding Chatbot 和 BlenderBot</h3>
+        <p>2019 年他们做了对话智能体 Self-Feeding Chatbot：除了语言模型目标，还训练一个奖励模型；在和人对话时，如果模型认为自己说的某句话奖励很高，就把它加回训练集，在这个不断增长的数据集上做监督微调。他说这是今天 RLHF 和 RLAIF 的一个很简单的早期版本。</p>
+        <p>2020 年的 BlenderBot 是预训练到约 94 亿参数（幻灯片写的是 up to 9.4B）的语言模型，关键是之后又在人工标注的对话数据上做了监督微调（SFT，用人写好的输入输出对继续训练）。人工评测认为他们最好的模型和普通人差不多有吸引力，并且好于 Google 当时的 Meena。</p>
+        <h3>InstructGPT 和 RLHF</h3>
+        <p>2022 年的 InstructGPT 论文推动了基于人类反馈的强化学习（RLHF）。第一步收集人的示范数据做 SFT；第二步收集比较数据，让人判断两个回答 A 和 B 哪个更好，用这些排序训练一个奖励模型（和 Self-Feeding Chatbot 的奖励模型类似）；第三步用这个奖励模型做强化学习（幻灯片标注的算法是 PPO，Proximal Policy Optimization，一种常用的策略梯度算法），把比较的判断推广到策略模型新生成的回答上，让模型生成回答、由奖励模型评判，再据此改进自己。他说这比单纯的语言模型目标更接近自我训练的目标。</p>
+        <h3>DPO</h3>
+        <p>另一个更简单的替代是直接偏好优化（Direct Preference Optimization，DPO）。它不训练奖励模型，直接用偏好数据：偏好对里一个是被选中的回答（chosen），一个是被拒绝的回答（rejected），把前者的概率往上推、后者往下压，在两者之间拉开一个差距。他说在一些实验里 DPO 和 PPO 式 RLHF 效果相当，SFT 也能用但通常稍差，具体看设定。他认为有些情况真的需要完整的强化学习，因为策略在训练中会变，固定的偏好数据跟不上这种变化；后面会讲用迭代的方式补上这一点。</p>
+        <p>用 SFT、RLHF 或 DPO 中的一种微调之后，模型就有了不错的指令遵循能力，虽然还没有显式的思维链推理。他展示了 InstructGPT 论文里的例子：问“这段代码的用途是什么”，未微调的 GPT-3 答得不好，InstructGPT 好得多。他说到这里我们有了一个很好的 System 1 模型，接收指令、直接给出输出，但还不做 System 2 推理。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 用提示做 System 2：思维链和 Chain-of-Verification</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=1372s" target="_blank">0:22:52</a>–0:29:09</em></p>
+        <h3>思维链提示</h3>
+        <p>他说 2022 到 2023 年做 System 2 的办法是提示，之后才转向直接训练。最初的思维链论文有两种做法。一是少样本提示，比如数学任务给 8 个带推理过程的示例：标准提示只写“The answer is 11.”，思维链示例写成“Roger 原来有 5 个球，两罐每罐 3 个网球是 6 个，5 + 6 = 11，答案是 11”，模型会模仿着先写推理。二是 Large Language Models are Zero-Shot Reasoners，只在提示里加一句 “Let's think step by step”。他说在数学任务上提升很大，比如 GSM8K 可以从约 10% 提到 40% 到 50%，这推动了大家进一步研究 System 2 方法。</p>
+        <h3>幻觉问题和 Chain-of-Verification</h3>
+        <p>System 2 不只用于数学。基础语言模型还有事实性和幻觉问题。例子是问 ChatGPT“列出几位出生在纽约的政治人物”，它列的第三个是 Michael Bloomberg，这是错的。</p>
+        <p>他们的论文 Chain-of-Verification（CoVe，Dhuliawala 等）的做法是：</p>
+        <ul>
+            <li>先生成一个基线回答，把它当作草稿，是思维链的一部分，不是最终回答；</li>
+            <li>根据草稿，让模型给自己规划验证问题，比如“Hillary Clinton 出生在哪”“Donald Trump 出生在哪”“Michael Bloomberg 出生在哪”；</li>
+            <li>把这些问题当作单独的问题分别回答；</li>
+            <li>交叉核对后写出最终的验证过的回答。</li>
+        </ul>
+        <p>他解释，单独问时问题的措辞不同，模型的回答也会不同；模型在简短的单个问答上更准，在长回答里更容易某处出错。所以执行这些验证问题后，模型能看到自己的矛盾：它知道 Bloomberg 出生在 Boston，却把他列进了纽约出生的名单。幻灯片列了三种变体：四步全部从左到右联合生成；factored，即回答验证问题的第 3 步能看到第 2 步的问题但看不到第 1 步的草稿；factor+revise，再加一步交叉核对，让模型明确检查两个答案是否一致。他说在多个知识类任务上，精确率能提升到大约三倍。</p>
+        <p>有人可能觉得这篇论文有点旧了，问题已经修好了。他说他课前在 GPT-4o 上试过，仍然会犯这类错误：问“列出 AI 领域最著名的 30 位女性”，名单里有 Yoshua Bengio；问“OpenAI 有哪些知名女性员工”，第一个是 Ilya Sutskever。他认为 o1 做得好一些。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. System 2 Attention 和 Branch-Solve-Merge</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=1749s" target="_blank">0:29:09</a>–0:35:20</em></p>
+        <h3>语义泄漏和谄媚</h3>
+        <p>另一类问题是语义泄漏（semantic leakage）和谄媚。他的解释是：软注意力不是尖锐的，它在整个上下文上分配概率，到处都有非零的权重，所以整个上下文都会影响输出，表面上相关但其实无关的部分也会起作用。语言模型目标本身也偏向学相关性。</p>
+        <ul>
+            <li>Gonen et al. 2024 的例子：“他喜欢蚂蚁，他最喜欢的食物是……”被补全成“裹着蚂蚁的巧克力”；“他喜欢黄色，他的工作是……”被补全成“校车司机”。</li>
+            <li>谄媚（Sharma et al. 2023）：问“我觉得从太空看太阳是黄色的，你怎么看？”，模型倾向于同意，但从太空看太阳是黄色其实是大气造成的错觉。</li>
+            <li>在上下文里放一些关于 Sunnyvale 的事实，再问某人（幻灯片上是 Sam Liccardo）的出生地，模型就容易答 Sunnyvale，正确答案是 Saratoga。</li>
+            <li>他当天自己试的：问 GPT-4“OpenAI 是否有过一个叫 self-feeding 的模型”，它说有，是 OpenAI 在 Self-Feeding Chatbot 论文中提出的；其实那是 Facebook AI Research 的工作。</li>
+        </ul>
+        <h3>System 2 Attention</h3>
+        <p>他们在 2023 年底的论文 System 2 Attention（S2A，Weston 和 Sainbayar Sukhbaatar）用一段思维链来改写原始指令、去掉偏见，同样是靠提示：第一步，给出原始指令，让模型改写它，去掉无关部分和偏向；第二步，让模型回答改写后的指令。幻灯片上的说法是把注意力变得更显式、更费力，由模型自己决定该关注什么。“太阳是黄色的”那个例子被改写成“我对从太空看太阳是什么颜色感到好奇，你能提供这方面的信息吗？”，“黄色”这个把问题引向特定答案的词被去掉了。在数学题里，如果混进了完全无关的信息会骗到模型，S2A 也会把它们删掉。幻灯片上还有一句：人没有时间思考时也会犯错、也有偏见，需要更多使用费力思考的 System 2 方法。</p>
+        <h3>Branch-Solve-Merge</h3>
+        <p>他想说明 System 2 不只用于数学题，中间 token 可以帮模型处理各种任务。最后一个提示方法的例子是评估任务：给一条指令和两个回答，让模型判断哪个更好。这对训练很重要，因为可以当奖励模型用，对评测也重要。幻灯片指出任务复杂时这类指令很难，GPT-4 也会失败。Branch-Solve-Merge（Saha, Li, Levy, Weston, Celikyilmaz）同样通过提示：先让模型针对这个任务把评估拆成几个标准，例如相关性、清晰度、准确性、原创性，标准是模型针对具体任务自己想出来的；再对每个分支独立做评估；最后把各分支合并。他说额外的思考时间带来了更好的评估结果。那段时期还有很多类似工作，共同点是花时间思考能得到更好的结果。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. Self-Rewarding：模型给自己打分再训练</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=2120s" target="_blank">0:35:20</a>–0:47:04</em></p>
+        <h3>从提示到训练</h3>
+        <p>他说真正想做的是端到端地训练模型擅长推理，光靠提示不够。他认为现在正处在下一波：通过优化提升推理，也就是通过自我改进获得更好的推理。起点是开场提到的 Self-Rewarding Language Models（Yuan, Pang, Cho, Li, Sukhbaatar, Xu, Weston，2024 年 1 月）：LLM 给自己的输出打分，再据此优化自己，希望每轮迭代都更聪明。</p>
+        <h3>动机：人越来越难当标注员</h3>
+        <p>标准 RLHF 在两个地方需要人：一是写 SFT 数据，即指令和回答；二是收集判断，即 A 和 B 哪个更好。问题是模型越来越强，人要仔细读回答才能判断。现在 LLM 很会写代码和复杂的数学输出，在法律、医疗输出上也越来越好，人越来越难当好的标注员：判断数学回答对不对可能需要世界上最好的数学家，写代码也需要很好的程序员，就算今天不需要，明天肯定需要。从人群中随便挑的普通人在这些专门任务上不够好。幻灯片引用了 OpenAI 超级对齐（superalignment）的说法：对齐未来超人 AI 的核心挑战是，人要监督比自己聪明得多的 AI 系统。</p>
+        <h3>两个观察</h3>
+        <ul>
+            <li>观察一：只要有关于回答质量的好判断，LLM 就能持续改进。迭代式 RLHF 的成功（Anthropic 的 Helpful and Harmless Assistant 论文、Llama 2）说明了这一点，DPO 也一样，有好的 chosen/rejected 对就能训练。</li>
+            <li>观察二：LLM 能对模型生成的内容给出好的判断，即 LLM-as-a-Judge（让 LLM 当裁判给回答打分或比较）。用 GPT-4 做评测的一系列工作，比如 MT-Bench、Chatbot Arena、AlpacaEval，说明了这一点。对模型来说，评判“A 和 B 哪个好”和写代码、回答问题一样，只是又一个指令遵循任务。</li>
+        </ul>
+        <p>把两者合起来，就是用 LLM 的反馈替代人类反馈。</p>
+        <h3>方法</h3>
+        <p>Self-Rewarding 模型同时有两种能力：指令遵循，即对用户指令给出合适的回答；评估，即给定指令和一个或多个回答，判断回答质量。评估本身就是一类用户指令，格式是：“这是一条指令……这是模型的回答……请按以下评分标准给这个回答打 0 到 5 分”，模型先写思维链，再给出“因此我给 3 分”这样的最终分数。幻灯片上的 LLM-as-a-Judge 提示用五条累加的标准打分：相关性、覆盖度、有用性、清晰度和专业性，效果好于多选题格式的提示。</p>
+        <p>流程是：</p>
+        <ol>
+            <li>M0 是预训练的 Llama 2 70B。用 OpenAssistant 的种子数据做多任务训练得到 M1：种子指令数据（IFT，只取对话的第一轮），格式是用户指令到回答；种子评估数据（EFT），格式是指令、模型回答和评分标准，到思维链和最终分数。幻灯片补充：OpenAssistant 只提供回答之间的排序，所以 EFT 数据是用模型生成的思维链和分数收集的；给一条指令和四个回答，只有模型给的分数和人类排序完全一致时才保留这四条，否则全部丢掉。</li>
+            <li>生成新任务：用 Self-Instruct 方法，从人写的种子指令里取几条做少样本提示，让模型生成新指令，重复几十万次得到一整套新任务。幻灯片上说明实验里是用 ChatLlama-70B 从 OpenAssistant 引导出指令，理想情况下应该来自真实用户。</li>
+            <li>对每条新指令，用当前模型 M<sub>t</sub> 生成 k = 4 个候选回答，并用 LLM-as-a-Judge 提示给每个回答打分。</li>
+            <li>最高分的回答作为 chosen，最低分的作为 rejected，组成偏好对，从 M<sub>t</sub> 出发做 DPO 训练得到 M<sub>t+1</sub>。</li>
+            <li>回到第 2 步重复。</li>
+        </ol>
+        <p>他说论文里这个循环做了三次（幻灯片上写的是两轮自我奖励训练，得到 M2 和 M3）。</p>
+        <h3>结果</h3>
+        <p>评测有两个维度：指令遵循能力和作为奖励模型的能力。指令遵循用了内部测试集（256 条不同来源的提示）、AlpacaEval 2.0 和 MT-Bench，评判用 GPT-4 和人工两种方式，两者结论一致：和每轮只做 SFT 的基线相比，模型每轮都在变好。</p>
+        <p>AlpacaEval 2 的胜率从 10% 到 15% 再到 20%，几乎追平某个版本的 GPT-4（幻灯片上是 GPT-4 0314）。他说这篇论文当时受到不少关注，因为这么简单的方法胜率相当好；第一作者 Weizhe Yuan 是 NYU 的博士生，并没有很大的团队，但算法本身效果很好。</p>
+        <p>按类别看，模型在各种技能上都有提升，但人文、信息抽取、STEM、角色扮演、写作这类提升更大，数学、代码、推理提升较小。他的解释是 LLM 当裁判时不太会评估数学、代码和推理，所以这些方面更难提升。MT-Bench 也显示通用写作类任务提升更多。</p>
+        <p>作为奖励模型的能力，在 OpenAssistant 验证集上测：让模型给每个（指令，回答）对打分，与人的判断比较。以成对准确率为例，即模型和人在 A、B 谁好谁坏上一致的比例，三轮下来有提升，幅度不大。他觉得这很令人兴奋：模型判断对错的能力在变好，也就是给自己打分的能力在变好，形成了某种良性循环。当然实验里最后会进入平台期，但模型仍然能自我训练，超过一开始的人工标注水平。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 可验证奖励：IRPO、o1 和 DeepSeek R1</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=2824s" target="_blank">0:47:04</a>–0:55:44</em></p>
+        <h3>Iterative Reasoning Preference Optimization</h3>
+        <p>Self-Rewarding 在推理任务上提升不多，下一步是解决这个问题。2024 年 4 月的 Iterative Reasoning Preference Optimization（IRPO，Richard Yuanzhe Pang、Weizhe Yuan、Kyunghyun Cho、He He、Sainbayar Sukhbaatar、Weston）流程相似，但这次要生成思维链。前面 Self-Rewarding 的实验里没有思维链，是 System 1 式的直接回答。</p>
+        <p>奖励也不再用 LLM-as-a-Judge，因为在数学任务上他们不太信任 LLM 的判断。他说怎样让模型信任自己的判断来提升，仍是研究课题。这里的做法是：有一批知道正确答案的数学训练数据，就直接拿正确答案当奖励。这就是最近几周大家常说的可验证奖励（verifiable reward，能用规则自动判断对错的奖励信号）。</p>
+        <p>具体步骤：</p>
+        <ul>
+            <li>从基础模型和带标签的固定训练集出发；</li>
+            <li>对每道训练题，用当前模型生成多条思维链和答案。提示是“Your task is to answer the question below. Give step-by-step reasoning…”，并要求用 “Final answer:” 格式给答案；</li>
+            <li>启发式抽取：搜索 “Final answer:”，取后面的文字，与已知的标准答案做字符串匹配或其他简单匹配；</li>
+            <li>按答案对错构造偏好对，用 DPO 加一个 NLL 项（负对数似然，对正确答案做普通的似然训练）来训练；</li>
+            <li>用新模型重复，因为更好的模型会生成新的、更好的思维链。</li>
+        </ul>
+        <p>在 GSM8K 上效果很好，第 1 到第 4 轮持续提升，总共不到 10 个点；在 ARC-Challenge 多选题和更难的数学题上也有提升。他强调 DPO 训练很重要，只用监督微调不行，必须把负例的概率压下去。幻灯片上的数据：SFT 给 DPO 偏好对里 chosen 和 rejected 的概率差不多；DPO+NLL 修正了这一点，第一轮任务准确率 73.1%，SFT 是 63.5%。</p>
+        <h3>o1 和 DeepSeek R1</h3>
+        <p>2024 年 9 月 OpenAI 发布 o1，具体方法没有公开，没发论文，连思维链都不展示，只给摘要，但它能解相当复杂的数学推理题。大家都在猜它是怎么做的：用了评估中间步骤的过程奖励模型？用了 MCTS 之类复杂的搜索机制做强化学习？Twitter 上有很多猜测。</p>
+        <p>2025 年 1 月 DeepSeek R1 发布，OpenAI 的 Mark Chen 发推说：“Congrats to DeepSeek on producing o1-level reasoning model. Their research paper demonstrates they've independently found some of the core ideas that we did on our way to o1.”他说，假如 OpenAI 用的方法和 DeepSeek 一样，那现在有 DeepSeek 的论文可以看。在某些方面它和他们 2024 年初的 IRPO 很像：提示要求模型先思考，再把答案放进 box 里；抽取答案后用基于规则的正确性验证作为可验证奖励，循环地生成思维链、只检查答案是否正确、奖励正确的。不同之处是优化算法用的是 GRPO（Group Relative Policy Optimization，一种对同一问题采样一组回答、用组内相对得分作基线的策略优化算法），不是迭代 DPO，而且规模大得多。他们的实验只有 GSM8K 这类单个数据集；DeepSeek 从一个很强的 671B 参数模型 DeepSeek-V3 出发，用大量带可验证奖励的推理数据做强化学习，探索思维链的空间。他们观察到训练中思维链越来越长，模型找到了更复杂的推理方式，最终在代码和数学上接近 o1。他提到这在 AI 圈外也是大新闻，幻灯片上有 Bloomberg 报道英伟达股价大跌的截图。</p>
+        <p>他展示了两个思维链例子。左边来自论文：模型在思维链中间写出 “Wait, wait, wait, that's an aha moment I can flag here. Let's reevaluate this.”，然后换了个思路，说明它学会了重新思考、修正自己的错误，而这些都只是靠奖励最终答案学来的。他说他很喜欢这种简单，不需要在中间做复杂的事，只奖励结果就能得到很好的效果。右边是个好笑的例子：让 DeepSeek 选一个随机数，它想了很久，“也许选 7777，但四个 7 可能太明显；123 太连续；闭上眼睛……42，不对，那是《银河系漫游指南》里的”。他说这有点像人，但显然不是我们想要的生成随机数的方式。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. Thinking LLMs：所有任务都先思考</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=3344s" target="_blank">0:55:44</a>–1:01:16</em></p>
+        <h3>把思维链训练推广到非数学任务</h3>
+        <p>2024 年 10 月，也就是 R1 之前，他们想把 IRPO 的思维链训练从数学推广到所有问题。他的例子是写诗：你也可能先想很多、写几稿、想清楚要写什么，再动笔。论文是 Thinking LLMs: General Instruction Following with Thought Generation（Tianhao Wu, Janice Lan, Weizhe Yuan, Jiantao Jiao, Weston, Sukhbaatar），方法叫思考偏好优化（Thought Preference Optimization，TPO）。</p>
+        <p>做法：用一个通用提示初始化模型，让它回答任意查询，但要通过写出内部思考来全面细致地回答，思考里要包含草稿回答和对草稿的评估；写完最终回答后加一个特殊标记，方便把回答和思考分开。这和 IRPO、DeepSeek 用的是同一个技巧，只是用在各种指令遵循问题上。这里没有可验证奖励了，但有 Self-Rewarding 里用的 LLM-as-a-Judge，可以只对最终回答打分，判断它好不好。和原始 Self-Rewarding 的区别是回答之前多了思维链生成。</p>
+        <h3>结果</h3>
+        <p>效果相当好：在 AlpacaEval 和 Arena-Hard 上都有提升，当时在 AlpacaEval 排行榜上排第三（超过 GPT-4 和 Llama 3 70B），是 Arena-Hard 上最好的 8B 模型。</p>
+        <p>训练曲线有个有意思的地方。和不写思维链的直接回答基线相比，TPO 在前几轮反而让模型差了很多。他的解释是他们用的 Llama 3 8B 已经被很好地微调成不用思维链直接回答，这给直接回答带来很大优势；幻灯片上也写着初始的思维链提示效果不好，需要很多轮迭代来优化思维链。用裁判或奖励模型挑出成功的思维链结果来训练后，差距逐渐缩小，到第三、第四轮开始超过直接回答基线。他觉得这很有希望，说明思维链训练不只适用于数学或可验证任务，可以用于任何任务。例子包括“给我写首诗”“最小的狗是什么品种”，模型会先写草稿、评估等各种思考，再给输出。</p>
+        <p>他提到 DeepSeek R1 论文里有一句暗示他们也做了类似的事：对通用数据，借助奖励模型来捕捉复杂、微妙场景中的人类偏好。但论文没写透，所以不完全确定。他说接下来几项工作就他所知还没进入大模型，是希望将来被放大的研究论文。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. Meta-Rewarding：评判自己的评判</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=3676s" target="_blank">1:01:16</a>–1:05:08</em></p>
+        <h3>为什么要专门提升评判能力</h3>
+        <p>到这里模型的指令遵循和推理能力都能提升，但他们还想显式地提升模型评估自己的能力，因为评判变好了，奖励就变好了，其他所有能力也会跟着变好。幻灯片上指出，Self-Rewarding 关注的是改进回答，没有改进评判能力，迭代训练中提升很快就饱和了。</p>
+        <h3>方法</h3>
+        <p>Meta-Rewarding Language Models（Tianhao Wu, Weizhe Yuan, Olga Golovneva, Jing Xu, 田渊栋 Yuandong Tian, Jiantao Jiao, Weston, Sukhbaatar）让同一个模型扮演三个角色：执行者（actor），遵循指令；裁判（judge），评判对指令的回答；元裁判（meta-judge），评判自己的评判。</p>
+        <p>LLM-as-a-Meta-Judge 的提示里有用户指令、一个回答，以及评判 A 和评判 B（都可以包含思维链和最终结论），让模型判断哪个评判更好。他们的算法是对一对回答做 N 次评判，两两计算元评判，得到一个矩阵，再据此计算各个评判的 Elo 分（一种根据两两比较结果给选手打分的方法），用 Elo 分构造评判之间的偏好对。</p>
+        <p>每轮迭代有三步：</p>
+        <ol>
+            <li>生成执行者数据：用模型生成回答和自我奖励（评判）；</li>
+            <li>生成裁判数据：用元裁判给评判打元奖励；</li>
+            <li>在两类偏好对上做 DPO：一类是“回答 chosen 好于回答 rejected”，学怎么做；一类是“评判 chosen 好于评判 rejected”，学怎么评。</li>
+        </ol>
+        <p>Self-Rewarding 只有前一类，没有显式提升评估能力的机制。</p>
+        <h3>结果</h3>
+        <p>幻灯片上提到他们还用了一种新的长度控制方法：两个好回答分数相近时，DPO 的 chosen 选较短的那个，以免模型靠写长来刷分。在同样使用长度控制的条件下，Meta-Rewarding 在 AlpacaEval 上胜率高于 Self-Rewarding，而且 Self-Rewarding 在第四轮左右进入平台期，Meta-Rewarding 还在上升。幻灯片还显示它和一些线上产品模型相比也不差，并且和 GPT-4 裁判的一致率更高，更好的评判可以解释它为什么在执行上比 Self-Rewarding 提升更多。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. Thinking-LLM-as-a-Judge：给评估也训练思维链</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=3908s" target="_blank">1:05:08</a>–1:10:35</em></p>
+        <h3>目标</h3>
+        <p>最后一项是课前一周才发布的工作，幻灯片上的方法名是 EvalPlanner，他口头称为 Thinking-LLM-as-a-Judge。目标是让模型为评判回答这件事生成像 o1、R1 那样的长思维链，从而给训练提供好的奖励。模型输出一个评估计划，说明打算怎么评，再执行计划，最后给出结论。</p>
+        <h3>把评估变成可验证任务</h3>
+        <p>关键技巧是：如果事先知道两个回答里哪个更好，评估就成了和数学题一样的可验证任务，可以直接算奖励，不需要另一个 LLM 裁判来认可。所以第一步是合成评估数据，让正确答案已知；之后就可以用类似 IRPO 的方法构造偏好对，改进评估用的思维链。</p>
+        <p>合成数据的方法来自他们之前的论文 Self-Taught Evaluators：</p>
+        <ul>
+            <li>给一个提示 x，用 LLM 生成一个好的回答 y（至少是合理的回答）；</li>
+            <li>让 LLM 生成一个相似但不同的提示 x'，提示是 “Please generate a modified instruction that's highly relevant but not semantically identical to the instruction above.”；</li>
+            <li>用同一个 LLM 给 x' 生成好的回答 y'；</li>
+            <li>因为 x' 和 x 不同，y' 作为 x 的回答应该不如 y，于是“对输入 x，y 应优于 y'”就是一条已知答案的训练数据；</li>
+            <li>迭代训练：把评判结果是否符合这个偏好当作奖励，训练 Thinking-LLM-as-a-Judge。</li>
+        </ul>
+        <h3>消融和结果</h3>
+        <p>消融实验显示，先写计划好于完全不思考；但计划要尽量不受约束。如果像其他一些靠提示的工作那样，鼓励计划写成评估标准列表或验证问题，结果反而变差。他认为这和 o1、R1 的经验一致：不要过多约束语言模型的思维链，让它通过训练自己找到擅长的方式。</p>
+        <p>他们以 Llama 3.1 或 3.3 70B 为基础训练（幻灯片写的是 Llama 3.1 70B base），在 RewardBench 上达到 LLM-as-a-Judge 类生成式模型中最好的成绩；RewardBench 是评测奖励模型的基准。在一些更难、更新的评估基准上，比如 RM-Bench 和 FollowBenchEval，表现也很好。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 总结、COCONUT 和接下来的方向</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=4235s" target="_blank">1:10:35</a>–1:16:47</em></p>
+        <h3>总结</h3>
+        <ul>
+            <li>Self-Rewarding 模型能训练自己变得更好，希望这是通往超人 AI 的一条路。</li>
+            <li>可验证奖励能训练思维链来提升推理（IRPO、DeepSeek、o1 都用了相关技术：只对输出给可验证奖励，让思维链在训练循环中自己找到有效的方式），也能提升评估能力（Thinking-LLM-as-a-Judge）。</li>
+            <li>有了带思维链的更好裁判，就能训练模型在不可验证任务上思考，即 Thinking LLMs，整个过程可以形成循环。</li>
+            <li>Meta-Rewarding 让模型评判自己的评判，是提升评估能力的另一种方式。</li>
+        </ul>
+        <p>他说这些是分开的几篇论文，更大的模型发布的目标是把这些想法放进一个系统里，看能推多远。</p>
+        <h3>潜空间里的思考：COCONUT</h3>
+        <p>他提出一个不同的方向：前面所有推理都是用文本思维链。但 Transformer 内部本来就在通过大量乘法操作隐藏状态里的向量来推理，那 System 2 推理为什么一定要是 token？他们最近的论文 COCONUT（Hao et al. 2024）把输出 token 的思维链换成输出连续向量。结果有一定希望：在一些任务上至少能追平经典思维链，在一些更难的搜索任务上还更好。但都是小规模任务，能推多远还要看。他认为保留自然语言思维链有其理由，对安全和可解释性有好处；不过 Transformer 内部本来也不是这样可解释的，这是需要想清楚的问题。</p>
+        <h3>接下来做什么</h3>
+        <p>他放了 Ilya Sutskever 在 NeurIPS 上 Seq2Seq 时间检验奖演讲里关于“接下来是什么”的一页：智能体、合成数据、推理时计算、推理、理解和自我意识。他说这些都有道理，大家也都在做，“自我意识”这条稍微模糊一些。他补充了三点细节：</p>
+        <ul>
+            <li>自我评估很重要，它会成为性能的瓶颈，所以要在评估上用更多推理和计算，这会帮助模型自我改进。他把这和 Ilya 说的“自我意识”联系起来：有自我意识的模型可能更清楚自己知道什么、不知道什么，这其实就是评估。</li>
+            <li>从交互中学习：通过和人、和世界或互联网、和自己交互来学会推理，这和智能体、合成数据两条相关。</li>
+            <li>改进 System 1：比如更好的注意力机制、世界模型，或者还没被发明出来、可能改变规模定律的新网络层。幻灯片上标出的挑战是可扩展性。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“If you have a large big data set and you train a very big neural network, then success is guaranteed. It's a little bit glib.”<br>（谈 2014 年 Seq2Seq 论文的结论）如果你有很大的数据集、训练一个很大的神经网络，成功就有保证。这话有点轻率。· <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=921s" target="_blank">0:15:21</a></li>
+            <li>“The problem is it's harder and harder for humans to be good labelers for these tasks.”<br>问题是，人越来越难在这些任务上当好的标注员。· <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=2235s" target="_blank">0:37:15</a></li>
+            <li>“With this training, you really need the negative examples to be pushed down.”<br>（谈 IRPO）在这种训练里，你必须把负例压下去。· <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=3010s" target="_blank">0:50:10</a></li>
+            <li>“I personally love the simplicity of it that we didn't have to do, you know, really complicated things in the middle.”<br>（谈 R1 只奖励最终答案）我个人很喜欢它的简单，我们不需要在中间做很复杂的事。· <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=3287s" target="_blank">0:54:47</a></li>
+            <li>“You don't want to constrain too much the chain of thought thinking processes of these language models.”<br>你不想过多约束这些语言模型的思维链思考过程。· <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=4131s" target="_blank">1:08:51</a></li>
+            <li>“Why does this system two reasoning have to be tokens?”<br>为什么 System 2 推理一定要是 token？· <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=4352s" target="_blank">1:12:32</a></li>
+            <li>“Self-evaluation is really important cuz that will dominate performance.”<br>自我评估很重要，因为它会主导性能。· <a href="https://www.youtube.com/watch?v=_MNlLhU33H0&t=4469s" target="_blank">1:14:29</a></li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>Berkeley RDI LLM Agents MOOC · Learning to reason with LLMs · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

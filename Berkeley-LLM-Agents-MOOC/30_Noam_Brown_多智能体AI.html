@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Noam Brown：多智能体 AI | Berkeley LLM Agents MOOC 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="29_陈伟柱_训练智能体模型的挑战与经验.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">Berkeley LLM Agents MOOC 目录</a> · 30</span>
+    <span><a href="31_Sida_Wang_评测中可预测的噪声.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Noam Brown：多智能体 AI</h1>
+        <p class="subtitle">为什么 AlphaGo 式的自我对弈没有在 LLM 上复现：最小最大均衡和群体最优反应的区别，两人零和完美信息博弈里自我对弈为什么好用，不完美信息博弈里 PPO 为什么不收敛，fictitious play、regret matching 和 Libratus；零和博弈里沟通无用的证明；最后通牒博弈和 Diplomacy 的 DORA 实验说明和人合作离不开人类数据，Diplodocus、CICERO、Hanabi 的做法；以及 LLM 智能体之间合作的两个动机（延迟和多样性）和现状</p>
+        <div class="author-meta">
+            主讲：Noam Brown（OpenAI）· 课程：Berkeley CS294/194-196 Agentic AI（2025 年秋季）· 上课日期：2025 年 10 月 20 日 · 时长：54 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=SrLcGdVOb9w" target="_blank">课堂录像</a> · <a href="https://agenticai-learning.org/slides/multiagent_berkeley_2025.pptx.pdf" target="_blank">幻灯片</a>（Berkeley RDI 公开，2025 年秋季，本文依据录像字幕和幻灯片整理，是中文转述，不是逐字翻译；观点属于主讲人，内容以上课当天为准）
+        </div>
+    </header>
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>Noam Brown 在 OpenAI 做推理模型，课上他提到 o1 到 o3 的进展。他的博士工作是扑克 AI，2017 年和 Tuomas Sandholm 做的 Libratus 打败了四位顶尖的单挑无限注德州扑克职业选手；之后他和同事做了 Diplomacy 的一系列 AI，包括能用自然语言和人谈判的 CICERO。</p>
+        <p>这一讲从一个问题开始：自我对弈（self-play）是 AlphaGo、Dota、星际争霸和扑克 AI 突破的关键，LLM 的发展轨迹和 AlphaGo 很像，为什么 LLM 上没有出现自我对弈这一步？他的回答是，大家对自我对弈的直觉过度拟合了围棋、国际象棋这类两人零和完美信息博弈，走出这类博弈，很多好的性质就消失了。他按这个顺序讲：最小最大均衡和群体最优反应；两人零和博弈里的自我对弈，以及不完美信息为什么难；为什么零和博弈里沟通没用；非零和博弈里和人合作为什么必须用人类数据（最后通牒博弈、Diplomacy）；最后讲 LLM 智能体之间的合作。录像开头没有课程事务，结尾没有问答，在讲 Cognition 的博客时结束。</p>
+        <ol>
+            <li><a href="#t01">AlphaGo 类比，最小最大均衡和群体最优反应</a> · <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">两人零和博弈里的自我对弈</a> · <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=576s" target="_blank">0:09:36</a></li>
+            <li><a href="#t03">不完美信息博弈为什么难</a> · <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=762s" target="_blank">0:12:42</a></li>
+            <li><a href="#t04">fictitious play、regret matching 和扑克</a> · <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=1042s" target="_blank">0:17:22</a></li>
+            <li><a href="#t05">为什么还没提 LLM：零和博弈里沟通无用</a> · <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=1424s" target="_blank">0:23:44</a></li>
+            <li><a href="#t06">和人合作离不开人类数据：最后通牒博弈</a> · <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=1533s" target="_blank">0:25:33</a></li>
+            <li><a href="#t07">Diplomacy 和 DORA 实验</a> · <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=1975s" target="_blank">0:32:55</a></li>
+            <li><a href="#t08">把人当作环境的一部分：Diplodocus、CICERO、Hanabi</a> · <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=2378s" target="_blank">0:39:38</a></li>
+            <li><a href="#t09">LLM 智能体之间的合作：延迟和多样性</a> · <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=2567s" target="_blank">0:42:47</a></li>
+            <li><a href="#t10">多智能体 AI 的现状</a> · <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=3014s" target="_blank">0:50:14</a></li>
+        </ol>
+    </section>
+    <section id="t01">
+        <h2>01. AlphaGo 类比，最小最大均衡和群体最优反应</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=0s" target="_blank">0:00:00</a>–0:09:36</em></p>
+        <h3>AlphaGo 的三步和 LLM 缺的那一步</h3>
+        <p>他说 LLM 的轨迹和 AlphaGo 很像，都分三步：</p>
+        <ol>
+            <li>在高质量人类数据上预训练。AlphaGo 用大量人类棋谱训练；语言模型在大量互联网文本上做下一个 token 预测。</li>
+            <li>启用大规模推理算力。AlphaGo 用蒙特卡洛树搜索（MCTS，通过大量模拟对局评估每步棋），不同游戏各有办法；LLM 用的是思维链（chain of thought）。</li>
+            <li>递归式自我改进。AlphaGo 用自我对弈：AI 和自己下几百万、几十亿盘，越下越强。LLM 没有这一步，幻灯片上这一格打的是问号。</li>
+        </ol>
+        <p>他的结论先放出来：很多人对自我对弈的直觉过度拟合了围棋、国际象棋这类两人零和完美信息博弈，离开这类博弈，很多好性质消失，自我对弈难得多。</p>
+        <h3>谁是更好的扑克选手</h3>
+        <p>他问全场：选项一，在足够大的样本量下，和任何其他选手单挑都能赢的人；选项二，一年里靠打扑克赚钱最多的人。哪个是更好的扑克选手？举手结果差不多一半一半，他觉得多数人倾向选项二。</p>
+        <p>他说在扑克里这两个可能是不同的人。有人很会从强手身上一点点赢钱，但碰到弱手不会把对方的弱点榨干；有人很会找弱手的弱点、最大限度地利用，但碰到弱点不多的顶尖职业选手就会稍差一些。在国际象棋、围棋里，大家不会想到这是两个人，两个选项的答案都是 Magnus Carlsen。</p>
+        <p>选项一对应最小最大均衡（minimax equilibrium），选项二对应群体最优反应（population best response，对一群实际对手的策略分布做出的最优应对）。他说平时讲 AI “解出”一个游戏，指的是算出最小最大均衡，这是一个很强的假设，未必是我们想要的。在象棋、围棋里两者一致，没有问题；在扑克和很多其他场景，尤其是超出两人零和博弈以后，两者不一样，我们真正想要的可能是群体最优反应。他说先假设要的是最小最大均衡，沿着这条路往下走。</p>
+        <h3>最小最大均衡和可剥削度</h3>
+        <p>最小最大均衡是一组策略，任何玩家单方面换策略都不能变得更好。在两人零和博弈里，打最小最大均衡能保证期望上不输。可剥削度（exploitability）衡量面对最优反应（best response，知道你策略后对方的最优应对）时会输多少，也就是离均衡有多远，在均衡上时为 0。</p>
+        <p>石头剪刀布的例子：每次都出石头，最优反应是每次出布，可剥削度为 1，因为每一局都输。更复杂一点的策略：前两局出石头，第三局如果对方出了布就出剪刀。最优反应是前两局出布、第三局出石头，可剥削度还是 1。</p>
+        <p>有人会说这不公平，假设对手知道你的策略。他说对，这就是均衡概念的核心假设：我们的策略是公共知识，但随机过程的结果（比如随机种子）不是。他承认这个假设很强，值得质疑。做这个假设的理由是：如果一个 AI 上线给几十亿用户用，系统里有弱点，最后总会被人找到并利用。所以算可剥削度时，假设别人完全能拿到你的权重、知道动作的概率分布，看你还能不能保持稳健。</p>
+        <p>石头剪刀布的答案是随机化：三种动作各以 1/3 概率出，对手不知道你这次出什么，最好也只能打平，可剥削度为 0，这就是它的最小最大均衡。</p>
+        <h3>打均衡怎么能赢</h3>
+        <p>按均衡均匀出拳保证不输，但也赢不了。他说扑克的策略复杂得多：打均衡时，对手很难知道怎么应对，因为有些动作根本不该出。在石头剪刀布里对手做什么都是平局；扑克里不是，对手的很多动作是负期望值的，即使你只是在打均衡，这些动作也会让他亏钱。两人零和，对手亏的就是你赚的。职业选手也是这么想的，幻灯片引了 Ryan Fee 扑克策略指南里的一句：“扑克很简单，对手犯错，你就赚钱。”惯常做法是先打均衡，让对手犯错，长期观察到对手的弱点后，再偏离均衡去利用。</p>
+    </section>
+    <section id="t02">
+        <h2>02. 两人零和博弈里的自我对弈</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=576s" target="_blank">0:09:36</a>–0:12:42</em></p>
+        <p>自我对弈是智能体通过和自己的副本对打逐步变强，初始策略可以完全随机。在平衡的两人零和博弈里，可靠（sound）的自我对弈算法可证明收敛到最小最大均衡。所以只要内存和算力足够，任何有限的两人零和博弈都可以靠自我对弈“解出”。</p>
+        <p>他把这一点说了两遍，认为这很了不起：不需要任何人类数据，有足够内存和算力，自我对弈就能收敛到最小最大均衡，保证期望上不输给任何人类或其他玩家。他说大家习以为常，其实能有这个性质算是幸运。围棋、国际象棋、扑克和即时战略游戏的很多胜利都靠它。</p>
+        <h3>完美信息博弈</h3>
+        <p>两人零和完美信息博弈里，自我对弈基本就是独立的单智能体强化学习。拿 PPO（Proximal Policy Optimization，一种常用的策略梯度强化学习算法）这样的算法来，只要探索不为零，理论上很容易收敛到最小最大均衡。</p>
+        <p>但这只是理论性质，实践中通常到不了均衡：</p>
+        <ul>
+            <li>仍可能被对抗攻击击败。</li>
+            <li>神经网络逼近最小最大均衡的能力有限，围棋这种复杂游戏尤其如此。有无限容量和算力最终会到均衡，现实中没有。</li>
+            <li>找漏洞通常比防漏洞容易，在不完美信息博弈里尤其如此。</li>
+        </ul>
+        <p>他提到 2023 年的一篇论文（幻灯片标注 Wang et al. ICML-23）发现，很多顶尖围棋 AI 都存在对抗策略，甚至人照着执行就能击败棋力很强的 AI。</p>
+    </section>
+    <section id="t03">
+        <h2>03. 不完美信息博弈为什么难</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=762s" target="_blank">0:12:42</a>–0:17:22</em></p>
+        <h3>PPO 在石头剪刀布上不收敛</h3>
+        <p>把石头剪刀布改一下，剪刀和布对局的输赢改成 +2 和 −2（原来是 +1 和 −1），打破对称。他说这时 PPO 不收敛到最小最大均衡，很多有经验的 RL 研究者都不知道这一点。原因是这个游戏要以特定概率在多个动作之间平衡，而 PPO 里没有任何东西迫使它收敛到某个特定的概率分布。这说明不完美信息博弈有它特别难的地方。</p>
+        <h3>Rock-Paper-Scissors+ 的例子</h3>
+        <p>他画了一棵博弈树：玩家 1 先选，玩家 2 后选，但看不到玩家 1 选了什么，所以和同时出拳没有区别；玩家 2 的几个节点之间用虚线连着，表示他不知道自己在哪个节点上。收益也改得不对称，比如玩家 1 出石头、玩家 2 出剪刀，玩家 1 得 2 分、玩家 2 失 2 分。这个版本的均衡是石头、布各 40%，剪刀 20%。</p>
+        <p>如果像下象棋那样做深度为 1 的前瞻搜索：玩家 1 看每个动作之后的期望值。在均衡下，出石头、布、剪刀的期望值都是 0，对玩家 1 来说出什么都一样，都拿到均衡收益。于是信息不够，他没法得出“石头 40%、布 40%、剪刀 20%”这个均衡。</p>
+        <p>问题在于这个计算假设玩家 2 打均衡。在象棋、围棋里可以这样假设，在不完美信息博弈里不行。如果玩家 1 以 80% 的概率出石头，玩家 2 会察觉并偏离均衡，多出布，于是玩家 1 出石头的价值从 0 降到 −1。</p>
+        <h3>动作的价值取决于出它的概率</h3>
+        <p>他说这是不完美信息博弈难的主要原因：一个动作的价值取决于它被选中的概率。完美信息博弈里不是这样，下国际象棋开局走西西里防御，10% 的时候走还是 90% 的时候走，不改变它的期望值。扑克里诈唬的频率很要紧：一直诈唬，对手会察觉，更常跟注，诈唬的价值就下降。所以需要的算法要找出每个动作的正确概率，光知道该出什么动作不够。</p>
+        <p>他补充说，现在的国际象棋某种意义上也像不完美信息博弈，因为棋手会准备不同的开局，并猜对手准备了什么。不过那是把象棋当作重复博弈来看，不是把单盘棋当作独立的游戏。</p>
+    </section>
+    <section id="t04">
+        <h2>04. fictitious play、regret matching 和扑克</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=1042s" target="_blank">0:17:22</a>–0:23:44</em></p>
+        <h3>fictitious play</h3>
+        <p>最简单的办法是 fictitious play（虚拟对局，G. W. Brown 1951）：先任意初始化所有玩家的策略；之后每一轮，每个玩家对对手到目前为止的平均策略打最优反应。所有玩家都这样做，所有轮次的平均策略收敛到最小最大均衡。</p>
+        <p>石头剪刀布的过程：</p>
+        <ul>
+            <li>第 1 轮：都出石头，平均策略是 100% 石头。</li>
+            <li>第 2 轮：对“总是石头”的最优反应是布，平均策略变成 50% 石头、50% 布。</li>
+            <li>第 3 轮：对 50% 石头、50% 布的最优反应是布，平均策略变成 1/3 石头、2/3 布。</li>
+            <li>第 4 轮：对 1/3 石头、2/3 布的最优反应是剪刀，平均策略变成 25% 石头、50% 布、25% 剪刀。</li>
+        </ul>
+        <p>这样下去，平均策略慢慢收敛到 1/3、1/3、1/3。他说这个算法很老，收敛很慢。</p>
+        <h3>regret matching 和 Hedge</h3>
+        <p>现代算法收敛快得多，做的是正则化的最优反应。最流行的两个是 regret matching 和 Hedge。fictitious play 总是取精确的最优反应，它们取的是正则化的最优反应。他用图解释 regret matching：先有一个基准值（图上的虚线），看每个动作的期望值比这条线高出多少；剪刀在线下面，概率给 0；石头和布按高出部分的大小成比例地选。用公式写，若动作 $a$ 的累计遗憾（regret，没选它比选它少拿了多少）为 $R(a)$，则</p>
+        $$\sigma(a) = \frac{\max(R(a), 0)}{\sum_{b} \max(R(b), 0)}$$
+        <p>（公式是背景补充，课上用的是图示。）他说这类算法和梯度下降有很多相似之处，有很深的文献，他不展开。图上横轴是迭代次数，纵轴是各动作的平均概率，regret matching 慢慢收敛到 1/3、1/3、1/3；改进版比如 linear regret matching 快几个数量级。</p>
+        <h3>扑克上的结果</h3>
+        <p>这类迭代算法慢慢收敛到每个动作的正确概率，最终在扑克上打败顶尖人类的就是它们，这是他的博士工作。幻灯片上的 2017 年 Brains vs AI（Brown 和 Sandholm，Science 2017）：</p>
+        <ul>
+            <li>Libratus 对四位最好的单挑无限注德州扑克职业选手。</li>
+            <li>2017 年 1 月，20 天打了 12 万手牌；20 万美元奖金按表现分给选手。</li>
+            <li>以 99.98% 的统计显著性获胜，每位选手单独都输给了 Libratus。</li>
+            <li>选手组队，试图找出机器人的漏洞。</li>
+            <li>靠自我对弈训练，没有用人类数据，也没有用深度神经网络。</li>
+        </ul>
+        <p>他说扑克的两大难点，一是怎样在不完美信息博弈里做搜索，二是怎样在有隐藏信息的游戏里收敛到均衡，regret matching 是关键的一部分。</p>
+        <h3>这些算法的局限和新进展</h3>
+        <p>fictitious play、regret matching 和 Hedge 在单智能体 RL 上表现不好：第一轮总是随机的，策略改进更慢，可能需要极多轮迭代。他说这一直很恼人：很多好的单智能体 RL 算法在不完美信息博弈里不管用，而能在不完美信息博弈里收敛的算法在单智能体 RL 上又表现差，长期没有一个能通用的算法。最近有几组人做出了在两种设置下都表现好、收敛也快的算法，他认为这可能是未来的方向，但还在快速发展中。幻灯片列了两个“last-iterate”算法：Regularized Nash Dynamics（Perolat 等，Science 2022）和 Magnetic Mirror Descent（Sokota 等，ICLR 2023），后者类似 Hedge，但额外向一个“磁铁”策略做正则化。</p>
+    </section>
+    <section id="t05">
+        <h2>05. 为什么还没提 LLM：零和博弈里沟通无用</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=1424s" target="_blank">0:23:44</a>–0:25:33</em></p>
+        <p>他说讲到这里还没提 LLM，是有原因的：在两人零和博弈里，如果算的是最小最大均衡，沟通永远没用，这可以证明。有人问过他和对手说话有没有用，答案就是没有。</p>
+        <p>幻灯片上的定理：在两人零和的最小最大均衡里，“cheap talk”（不花成本、也没有约束力的空口交流）是无用的。证明直觉是这样的：两人零和博弈可以有多个最小最大均衡，但它们给两个玩家的价值是唯一的，记作 $(v_1, -v_1)$，玩家 2 的价值是玩家 1 的相反数，这就是零和的定义。玩家 1 的一个 cheap talk 动作只有三种可能：</p>
+        <ul>
+            <li>提高 $v_1$：会损害玩家 2，玩家 2 不理它就行。</li>
+            <li>降低 $v_1$：玩家 1 就不该说。</li>
+            <li>没有影响。</li>
+        </ul>
+        <p>所以只剩“没有影响”，在最小最大均衡里双方没有理由交谈。</p>
+    </section>
+    <section id="t06">
+        <h2>06. 和人合作离不开人类数据：最后通牒博弈</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=1533s" target="_blank">0:25:33</a>–0:32:55</em></p>
+        <p>接下来是他认为更有意思的部分：非两人零和博弈。两人零和博弈里那些好性质（最小最大均衡、唯一价值等）大多不能延续过来。</p>
+        <p>这一节的中心论点是：如果目标是学会和人合作，不用人类数据是死路。他说在他看来，学会和人合作唯一可扩展的办法就是用人类数据。他承认这有争议，因为多智能体 RL 里有很多研究专门在不用人类数据的前提下学习和人合作，他的“辛辣观点”是那条路走不通。他也说这挺可惜：两人零和博弈里有那么漂亮的性质，自我对弈就能收敛到无法被击败的最优策略，在非零和博弈里就没有了。</p>
+        <h3>最后通牒博弈</h3>
+        <p>他说这可能是整场最重要的一页。规则：Alice 拿到 100 美元，先向 Bob 提出分给他 0 到 100 美元之间的某个数；Bob 决定接受或拒绝。接受就按 Alice 的分法各拿各的；拒绝则两人都拿 0。比如 Alice 给 Bob 30 美元，Bob 接受，Bob 得 30、Alice 得 70；Bob 拒绝，两人都是 0。</p>
+        <p>他请大家想两件事：作为 Bob 你最少接受多少；如果从零开始做自我对弈 RL、不用任何人类数据，会收敛到什么。现场举手：接受 40 美元以下的人出乎意料地少，30 美元以下的不少，20 美元以下还有一些，还有人表示 1 美元也接受。他说一般来说人愿意接受 20% 到 30%，给得太少人会拒绝，这是人性。</p>
+        <p>有学生说纳什均衡是五五分。他追问：如果 Alice 只想自己多拿，能不能比五五分更好？直观的最优策略是 Alice 给最少的钱，1 美元、1 美分甚至更少，Bob 面对的选择是拿一笔很小但为正的钱，还是拿 0。从纯博弈论角度看，如果 Bob 只是最大化自己的效用（RL 智能体就是在最大化奖励），他应该接受，Alice 拿走几乎全部。但部署到真实世界，这是很糟的策略，愿意接受 1 美元的人并不多。</p>
+        <h3>两种回应</h3>
+        <p>一种回应是说人没按数学来，是人有问题，算法没问题，忽略这个现象。他认为不对。他的看法是，如果你最终关心的是在这个游戏里和人打得好，那就是优化方法出了问题，纯自我对弈有缺陷。</p>
+        <p>另一种诱惑是说没给对先验，比如没把它做成重复博弈；如果是重复博弈，会有声誉动态，智能体会学着多给一点让 Bob 更愿意接受。他说整条“改造游戏来得到和人玩时一样的行为”的文献就是这么来的，他见过很多研究者掉进这个坑。也许在最后通牒博弈上能做出点能用的东西，但到更复杂的场景就行不通。一个例子是最后通牒博弈有很强的文化差异：有的文化里人很容易接受 20%，有的文化里低于五五分就拒绝。没有人类数据，你怎么知道这种文化差异？</p>
+        <p>他说最简单有效的办法就是收集大量人类数据，弄清人怎么玩这个游戏，再算出针对人的最优策略。</p>
+    </section>
+    <section id="t07">
+        <h2>07. Diplomacy 和 DORA 实验</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=1975s" target="_blank">0:32:55</a>–0:39:38</em></p>
+        <h3>Diplomacy 是什么</h3>
+        <p>他说真正证明上面观点的，是他和同事在 Diplomacy 上的工作。Diplomacy 是 20 世纪 50 年代推出的策略桌游，至今仍有很多人玩：7 名玩家在一战背景下争夺欧洲地图的多数领土，据说是肯尼迪和基辛格最喜欢的桌游。每回合先私下用自然语言谈判（大约 15 分钟），然后所有人同时写下行动，同时执行。他说这个游戏的战术本身不复杂，复杂度几乎都来自和其他玩家的谈判。因为行动同时进行，结盟和建立信任很关键，背叛也常见：你和人谈好“这回合一起做这件事”，他嘴上答应，实际写下的行动可能是在背后捅你一刀。它长期被视为 AI 的挑战问题，研究可追溯到 20 世纪 80 年代，2019 年随着大语言模型兴起又热起来（幻灯片引了 Dafoe 等 2021 年发在 Nature 上的评论 “Cooperative AI”）。</p>
+        <p>游戏里“支援”很关键：两方各派一支部队进同一块领土，双方都会被弹回；红方可以让自己另一支部队支援进攻，变成二对一，红方进入、紫方退回。重要的是支援可以来自其他玩家：红方可以找绿方说“请支援我进这块地，下回合我帮你，或者这回合在别处帮你”，绿方答应并写下支援命令，红方就能进去。</p>
+        <h3>DORA：从零开始的自我对弈</h3>
+        <p>为了先专注于非两人零和这一面，他们先研究无语言版本 no-press Diplomacy：只写行动，所有沟通都通过行动隐式完成。他们开发了 DORA（Bakhtin、Wu、Lerer、Brown，NeurIPS 2021），完全靠自我对弈从零学会 no-press Diplomacy，方式和 AlphaZero 很像。</p>
+        <p>在两人版 Diplomacy 里，DORA 明显超过人类，幻灯片上的胜率是对人类专家 86.5% ± 6.1%。然后他们把它放进 7 人局，有时和别的 DORA 一起，有时和用人类数据训练的智能体一起。SearchBot 是另一个用大量人类数据训练的 Diplomacy AI。结果：</p>
+        <ul>
+            <li>1 个 SearchBot 加 6 个 DORA：SearchBot 只赢约 1% 的局。7 人局里赢 1/7（约 14%）才算打平，所以 SearchBot 输得很惨。</li>
+            <li>1 个 DORA 加 6 个 SearchBot：DORA 只赢 11%，同样低于 1/7。</li>
+        </ul>
+        <p>也就是说，用人类数据训练的 SearchBot 在 6 个 DORA 中间会输，但 1 个 DORA 在 6 个 SearchBot 中间也会输。他说这说明游戏里有不同的均衡。DORA 碰到了一个和自己的副本一起玩时很合理的均衡，放进一群用别的方式训练的机器人（比如在人类均衡或接近人类均衡上训练的）中间，它就不知道该怎么办，表现很差。</p>
+        <p>他说这就是非两人零和博弈的根本问题。在两人零和博弈里，不管用什么方法训，只要收敛到均衡，面对用完全不同方法训练的机器人也会表现很好；非两人零和博弈没有这个性质。</p>
+        <h3>回到开头的问题</h3>
+        <p>开头问的是要最小最大均衡还是群体最优反应。在两人博弈里两者差别通常不大，象棋里一般是同一个人或同一个智能体。到了非两人零和博弈，最小最大均衡在一般博弈里没有意义了，剩下唯一有意义的是群体最优反应。问题变成：群体是谁？是你自己的副本，还是人类？取决于群体是谁，就需要关于这个群体的数据。所以如果最终关心的是和人一起时的表现，就需要人类数据。</p>
+    </section>
+    <section id="t08">
+        <h2>08. 把人当作环境的一部分：Diplodocus、CICERO、Hanabi</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=2378s" target="_blank">0:39:38</a>–0:42:47</em></p>
+        <p>他们在 Diplomacy 上采用、也是他推荐给一般和博弈（非两人零和）的方案，分三步：</p>
+        <ol>
+            <li>收集大量人类数据，训练一个模仿人类的模型。</li>
+            <li>扩大推理时算力，用来更好地建模人类玩家。目的不一定是让模仿模型打得更好，而是更准地预测人实际会怎么做。</li>
+            <li>把这些人类模仿模型当作环境的一部分，在上面扩大 RL。</li>
+        </ol>
+        <h3>结果</h3>
+        <ul>
+            <li>No-press Diplomacy：用这种方法训练的 Diplodocus（Bakhtin 等，ICLR 2023 最佳论文荣誉提名）参加了一场 200 局的真人锦标赛，他们报了四个机器人，每个打 50 局。Diplodocus 拿了第一。DORA 表现相当差，低于人类平均水平；另外几个机器人表现不错，但不如这种方法。</li>
+            <li>完整的自然语言版：他们用同样方法训练了 CICERO，它和真人完全用自然语言谈判。CICERO 匿名参加了一个在线自然语言 Diplomacy 联赛，排进前 10%，在打了 5 局及以上的 19 名玩家中排第二，平均得分是人类平均分的两倍多。他认为没拿第一的主要原因是 LLM 质量的瓶颈：那是 2022 年底，语言模型不错，但远不如今天。他觉得今天用类似方法认真做，可以打得极好。</li>
+            <li>Hanabi：这是一个合作卡牌游戏，有很多论文研究怎样在 Hanabi 里和人合作。他们 2022 年的一篇论文（幻灯片标注 Hu et al. arXiv-22）在和各种水平的人类玩家合作时，表现超过了人类专家，用的也是这个方法：模仿人类，扩大推理算力来建模人类行为，再以人类模仿模型为环境做 RL。</li>
+        </ul>
+        <p>幻灯片上这一部分的结束语是：两人零和博弈是特例；一般情况下，AlphaGo 式的自我对弈不会收敛到“最优”策略；但他对替代方案的研究很乐观。</p>
+    </section>
+    <section id="t09">
+        <h2>09. LLM 智能体之间的合作：延迟和多样性</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=2567s" target="_blank">0:42:47</a>–0:50:14</em></p>
+        <p>前面讲的是和人竞争、和人合作。如果只要 AI 之间合作，就不需要人类数据。为什么要让 AI 之间合作？他从 o1 讲起。</p>
+        <h3>推理模型的进展</h3>
+        <p>o1 是擅长扩展测试时算力的推理模型，想得越久表现越好，他们也能让模型想得越来越久。更好的是，随着模型版本更新，整条“推理算力对性能”曲线在左移，同样的性能所需的推理算力少得多。他说这是最近很多成功和惊人基准成绩的来源，并展示了 Codeforces 成绩的变化：</p>
+        <ul>
+            <li>GPT-3.5（他说 2022 年初）几乎不会写代码，低于竞赛程序员的第 5 百分位。</li>
+            <li>GPT-4（2023 年初）大概还在第 5 百分位附近。</li>
+            <li>GPT-4o（2024 年年中）约第 10 百分位。</li>
+            <li>o1-preview（2024 年 9 月）已超过中位数的竞赛程序员。</li>
+            <li>o1（2024 年 12 月，约三个月后）超过第 90 百分位。</li>
+            <li>o3（2025 年 4 月）超过第 99 百分位。</li>
+            <li>最近 OpenAI 宣布在 ICPC（国际大学生程序设计竞赛，最主要的编程竞赛之一）中排在所有人类之上，拿了第一。</li>
+        </ul>
+        <h3>动机一：延迟</h3>
+        <p>模型可以想得越来越久，但他说 GPT-5 Thinking 或者 Pro 根据问题大概能想 15 到 20 分钟。能不能推到几小时、几天、几周？到某个程度延迟就成了问题，没人愿意等三周才拿到 GPT-5 Pro 的回复。问题在于思维链天生是串行的，延迟终究会成为瓶颈。另外一些测试时扩展技术是并行的：</p>
+        <ul>
+            <li>共识（consensus）：从智能体采样十几次到上百次，取最常见的答案。比如数学考试问模型十几次，提交出现最多的答案。他说这样能有相当大的提升，o1 发布时的图里阴影部分就是 64 个样本做共识的效果，在竞赛数学基准上提升明显。问题是只适用于很短的答案，写文章没法做共识，因为不会写出两篇一样的文章。</li>
+            <li>best-of-N：采样多次，再用某种方法判断哪个最好。答案容易验证时很好用，比如数独可以解一万次，很容易检查有没有解对，有对的就用。他说 best-of-N 在很多方面比共识好，但需要问题的解很容易验证。</li>
+        </ul>
+        <p>这些技术各有取舍，总体是延迟更低，但算力效率更低。</p>
+        <h3>动机二：多样性</h3>
+        <p>o3 出来时，很多人抱怨它不能可靠地乘两个 20 位数。他觉得这很有意思，因为没几个人能可靠地手算 20 位数乘法，也没人这么要求人，因为人可以用计算器。语言模型也能用工具。他说他没试过，但猜 GPT-5 Thinking 乘两个 15 位数大概能算对，只是要花很长时间，而这样做没有意义，就像人没必要手算一样，用计算器更可靠、更高效。</p>
+        <p>同理，模型有很多，有些模型更适合某些问题。最强最大的模型也许能完成你的任务，但让它做可能不划算，或者它做得不如另一个模型好。所以像调用计算器一样，有时一个智能体把任务交给另一个智能体是合理的。他说多样性是一种优势，可以针对具体查询用最合适的模型。他认为路由（routing）已经是一种多智能体 AI：一个模型看了查询，决定哪个模型最适合回答，把问题转过去，再把回答返回。</p>
+    </section>
+    <section id="t10">
+        <h2>10. 多智能体 AI 的现状</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=3014s" target="_blank">0:50:14</a>–0:54:49</em></p>
+        <p>他说就 LLM 之间的合作而言，今天的多智能体 AI 还不如它可以达到的程度。现在有很多脚手架（scaffold，围绕模型搭的调度代码和流程），通常工程量很大、很脆弱。有一些明确的成功案例，但显然还缺东西。</p>
+        <p>他认为现在是做多智能体 AI 的好时机，有两个理由。一是 AI 在很多领域都很成功，多智能体还没有一个像其他智能指标那样清晰的成功，而模型似乎快要到能胜任这件事的程度了。二是多智能体领域已经存在几十年，一直有个问题：怎样让 AI 彼此交流、怎样让它们一开始就能协调。有了 LLM，答案很清楚，让它们用自然语言互相交谈，就能用。他说只入行几年的人可能觉得理所当然，但过去有整条研究线、整篇博士论文都在研究怎样让智能体发展出一种语言来互相交流，现在这个问题已经解决了。</p>
+        <h3>Cognition 和 Anthropic 的博客</h3>
+        <p>他提到过去几个月有两篇关于多智能体的博客，一篇来自 Cognition，一篇来自 Anthropic，他认为都很值得读，它们讲了搭建多智能体脚手架的经验，哪里行、哪里不行、还缺什么。Cognition 那篇基本是在说“别做多智能体”，他觉得写得很好。Cognition 在多智能体系统上走了一大圈，系统某种程度上能用，但很脆弱，他们的主要结论是技术还没到位。他念了其中一段：如果真想从系统里得到并行性，你可能会让各个决策者互相交谈、把问题谈清楚，人有分歧时就是这么做的，工程师 A 的代码和工程师 B 的冲突了，正确做法是谈清差异、达成共识；然而今天的智能体还没法进行这种长上下文、主动的讨论，可靠性并不比单个智能体高多少。</p>
+        <p>他说那篇文章接着写道，眼下智能体还做不到，但技术进展很快，感觉已经快要能做到了。他的结论是，现在是做多智能体 AI 的好时候。录像在这里结束。</p>
+    </section>
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“A lot of people's intuitions about um self-play is basically overfit to go and chess and these kinds of two-player zero sum perfect information games.”<br>很多人对自我对弈的直觉，基本上是过度拟合了围棋、国际象棋这类两人零和完美信息博弈。（<a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=113s" target="_blank">0:01:53</a>）</li>
+            <li>“Finding exploits is generally easier than defending against exploits.”<br>找漏洞通常比防漏洞容易。（<a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=697s" target="_blank">0:11:37</a>）</li>
+            <li>“The value of an action depends on the probability that it is played.”<br>一个动作的价值取决于它被选中的概率。（<a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=992s" target="_blank">0:16:32</a>）</li>
+            <li>“There's simply no way around the fact that you need human data if you want to do well when playing with humans.”<br>想在和人一起玩时表现好，就绕不开需要人类数据这个事实。（<a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=1589s" target="_blank">0:26:29</a>）</li>
+            <li>“The problem here is that chain of thought is inherently serial.”<br>问题在于思维链天生是串行的。（<a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=2763s" target="_blank">0:46:03</a>）</li>
+            <li>“I would argue that routing is already a form of multi-[agent] AI.”<br>我认为路由已经是一种多智能体 AI。（<a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=3014s" target="_blank">0:50:14</a>）</li>
+            <li>“Now the answer is you just get them to talk in natural language to each other and it just it just works.”<br>现在的答案是，让它们用自然语言互相交谈，就能用。（<a href="https://www.youtube.com/watch?v=SrLcGdVOb9w&t=3129s" target="_blank">0:52:09</a>）</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>Berkeley RDI LLM Agents MOOC · Multi-Agent AI · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Oriol Vinyals：大模型时代的多智能体系统 | Berkeley LLM Agents MOOC 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="33_Clay_Bavor_部署真实智能体的经验.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">Berkeley LLM Agents MOOC 目录</a> · 34</span>
+    <span><a href="35_Peter_Stone_自主智能体.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Oriol Vinyals：大模型时代的多智能体系统</h1>
+        <p class="subtitle">用 AlphaStar 回看今天的 LLM 智能体：自回归动作头和工具调用，百万局人类录像的模仿学习和 z 条件提示，带监督 KL 惩罚的强化学习后训练，非传递性和石头剪刀布循环，AlphaStar League 里的主智能体、主剥削者和联赛剥削者，匹配策略和可控剥削，以及多智能体强化学习对 LLM 的意义</p>
+        <div class="author-meta">
+            主讲：Oriol Vinyals（Google DeepMind）· 课程：Berkeley CS294/194-196 Agentic AI（2025 年秋季）· 上课日期：2025 年 11 月 17 日 · 时长：59 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=ntjOxjZMaac" target="_blank">课堂录像</a>（Berkeley RDI 公开，2025 年秋季，本文依据录像字幕整理，是中文转述，不是逐字翻译；观点属于主讲人，内容以上课当天为准）
+        </div>
+    </header>
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>Oriol Vinyals 是 Google DeepMind 的研究者，课上他自己介绍：曾是 AlphaStar 项目的负责人，现在和 Jeff、Noam 一起担任 Gemini 的联合技术负责人。他说自己和 Berkeley 渊源很深，2011 年读研究生时就见过 Dan Klein 组用机器学习打 StarCraft 的项目。这次他远程上课。</p>
+        <p>他把这一讲定位成“回看”：翻出大约六年前 AlphaStar 项目的旧幻灯片，发现今天 LLM 智能体遇到的很多问题，当年在 AlphaStar 里已经遇到过，有些解法也已经出现，还有一些当年做到的事情，今天的 LLM 还没做到同样的程度。讲座分三块：AlphaStar 本身和它的成绩；AlphaStar 的三段训练（模仿学习、强化学习、多智能体）和今天 LLM 的预训练、后训练对照；多智能体训练为什么能带来稳健性，以及它对 LLM 意味着什么。录像没有课程事务开场，也没有问答。这一讲没有公开幻灯片，字幕是人工字幕，个别人名和术语按上下文改正（例如字幕里的 LMCs 应是 LMSYS 的 Chatbot Arena 一类排行榜，SEMA 2.0 应是 SIMA 2）。</p>
+        <ol>
+            <li><a href="#t01">开场：为什么回看 AlphaStar，以及什么是智能体</a> · <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">StarCraft 难在哪，AlphaStar 做到了什么</a> · <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=327s" target="_blank">0:05:27</a></li>
+            <li><a href="#t03">从游戏到 LLM：三段训练，动作和工具调用</a> · <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=711s" target="_blank">0:11:51</a></li>
+            <li><a href="#t04">模仿学习和“提示”</a> · <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=1188s" target="_blank">0:19:48</a></li>
+            <li><a href="#t05">强化学习后训练，和 LLM 的差别</a> · <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=1588s" target="_blank">0:26:28</a></li>
+            <li><a href="#t06">为什么需要多智能体：稳健性和非传递性</a> · <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=1918s" target="_blank">0:31:58</a></li>
+            <li><a href="#t07">AlphaStar League 和它的训练动态</a> · <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=2374s" target="_blank">0:39:34</a></li>
+            <li><a href="#t08">训练技巧：消融、匹配和可控的剥削者</a> · <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=3050s" target="_blank">0:50:50</a></li>
+            <li><a href="#t09">多智能体 AI 和 LLM 的未来</a> · <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=3273s" target="_blank">0:54:33</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场：为什么回看 AlphaStar，以及什么是智能体</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=0s" target="_blank">0:00:00</a>–0:05:27</em></p>
+        <h3>想法会反复回来</h3>
+        <p>他说做这一讲有一点私心：想提醒做这一行的人，很多想法是循环出现的。今天 LLM 里用的一些办法，源头比 LLM 早得多。AlphaStar 是 DeepMind 当年做过的、在视频游戏上最先进的智能体，他说就算放到今天也是。所以这一讲会把 AlphaStar 和 Gemini 以及其他 LLM 智能体放在一起，用“事后看”和“往前看”两个角度来讲。</p>
+        <h3>DeepMind 最早那张图</h3>
+        <p>他放了一张“DeepMind 的元老幻灯片”：智能体、环境、目标、观测、动作。DeepMind 当初融资的路演材料里就有这张图的某个版本，只是没有 StarCraft。他说 DeepMind 被收购的时候，强化学习（reinforcement learning，智能体在环境里试错，按奖励信号改进策略的学习方法）还不是主流。</p>
+        <p>那时的设定比较简单：智能体连着单一环境，观测和动作有明确定义，目标就是最大化奖励。游戏里奖励往往是完全确定的，也好算。智能体永远在这个循环里优化奖励。</p>
+        <h3>今天的智能体</h3>
+        <p>现在除了传统意义上的智能体，还有帮用户做事的助手，环境是什么、动作是什么都变得模糊。他说接受这一点就好。他给出“至少从我们这边看最准确”的图：用户和一个东西交互，可以叫它智能体，用户提问、给反馈。这个智能体内部更复杂，把环境也看成整个包的一部分更有用：有一个智能体 harness（调度框架）控制怎样调用 LLM，去发出一个动作、一次搜索或一条终端命令，作用在一个很丰富的环境上，可以是一台电脑、一个计算机网络，也可以是游戏。</p>
+        <p>他提醒，后面讲 AlphaStar 的结果时，来自一个更简单的世界：单一环境，定义清楚，没有用户。世界已经变了，这些定义还会继续演化，尤其到最后讲多智能体系统的时候。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. StarCraft 难在哪，AlphaStar 做到了什么</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=327s" target="_blank">0:05:27</a>–0:11:51</em></p>
+        <h3>DeepMind 的游戏课程表</h3>
+        <p>DeepMind 被收购时刚刚攻下 Atari。他记得 Vlad（Volodymyr Mnih）在 NeurIPS 上讲那项结果，感觉很新鲜，他记得是和 sequence-to-sequence 同一届，也可能早一年。DeepMind 内部有一份按难度排的游戏清单：Go 在 Atari 之后几年，StarCraft 因为复杂度高，算是这条路上的收尾。他说今天 DeepMind 仍然在做游戏，比如世界模型，以及刚发布、能玩 3D 游戏的 SIMA 2，但方法很不一样。</p>
+        <p>2011 年他还是研究生，Dan Klein 组有一个用机器学习打 StarCraft 的项目，还有一整门课做这件事，里面多是老式 AI，也夹着一些机器学习，分别处理游戏的不同部分。那时一个神经网络打完整局游戏看起来几乎不可能，后来 AlphaStar 做到的就是这件事。他自己以前也玩 StarCraft，看到 DeepMind 把机器学习用在视频游戏上，很有共鸣，后来成了 AlphaStar 的负责人。</p>
+        <h3>游戏本身</h3>
+        <p>他说两分钟讲不清 StarCraft，大致可以看成一盘你不能一直看到棋盘的国际象棋。它是即时战略游戏，动作接近连续；信息部分可观测，要对敌人隐藏很多东西。动作空间很复杂：既要管高层战略，也要管微操，就是怎样在地图上调动单位。地图上有资源，采集资源换钱，造建筑、造单位，和敌人交战，摧毁对方所有建筑就赢。这个游戏在 1990 年代末就在韩国带起了电子竞技。画面上玩家只能在左下角小地图看到一部分，要移动镜头、派单位、下命令，节奏很快。AlphaStar 最后是训练一个神经网络，由它发出所有这些命令。</p>
+        <h3>成绩</h3>
+        <ul>
+            <li>宗师（grandmaster）级别：他说这个称号只给每个区域排名前 100 的玩家。团队在办公室里上线天梯对战，对手需要主动选择才可能遇到高级 AI，不知道自己在和 AlphaStar 打，不过很多人猜得到。</li>
+            <li>BlizzCon 2019：他把 BlizzCon 比作 StarCraft 界的 NeurIPS。团队在现场和很多玩家对战，其中有传奇选手 Serral，五局对战的录像在 YouTube 上。他说这是他所知 DeepMind 第一个真正放到外面和公众接触的 AI 系统，时间在疫情前。</li>
+            <li>几周后 Serral 说，他借用了 AlphaStar 和他对战时的某种打法（字幕此处有听不清的词）。他说这算给 DeepMind 一对一游戏时代画了句号：人类玩家开始向 AlphaStar 学，而 AlphaStar 本身是从很多人类玩家那里学来的。</li>
+        </ul>
+    </section>
+
+    <section id="t03">
+        <h2>03. 从游戏到 LLM：三段训练，动作和工具调用</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=711s" target="_blank">0:11:51</a>–0:19:48</em></p>
+        <h3>Alpha 系列项目的谱系</h3>
+        <p>他说当年接受记者采访时，记者不理解玩游戏对现实世界有什么用。他放了一条时间线，粗略标出各个 Alpha 项目怎样在算法或经验上借鉴前面的项目，游戏是试验“怎样把神经网络做大”的沙盒。Go 之后做 StarCraft；之后是早期的编程工作和第一批 LLM（Chinchilla），视觉语言模型 Flamingo、Gato；AlphaFold 也借了 Transformer、数据蒸馏等方面的东西。今天大部分研究和资源集中在一个很大的项目 Gemini 上，玩一款游戏只是这些模型能做的众多事情之一。他说游戏在通往 AGI 的路上仍然有位置。</p>
+        <h3>三段训练</h3>
+        <p>他引用 AlphaStar 的 Nature 论文里的图：造出这一个神经网络，按顺序做了三件事。</p>
+        <ol>
+            <li>监督学习，从人类数据学，对应今天说的预训练。</li>
+            <li>强化学习，对应今天的后训练。</li>
+            <li>这段强化学习发生在一个庞大的多智能体系统里。他说 LLM 领域在这一块的工作还不多，虽然在增加。</li>
+        </ol>
+        <p>他说从最高层的阶段划分就能看出，当年碰到的很多问题今天仍然适用。</p>
+        <h3>动作是一个 API 调用</h3>
+        <p>动作空间是固定的：Blizzard 早就有一套 API，原本用来在玩家之间发网络消息，团队直接拿来用。API 里有各种函数，不同函数要不同参数。他举的例子是一个叫 forcefield（力场）的技能，可以堵住斜坡：指定一组单位，在坐标 (6, 82) 放力场，参数里还有“相对当前延迟多少步”（比如等 10 步，大约半秒）和“只执行一次”。游戏里所有操作都这样下达。</p>
+        <p>他们的办法是搭一个自回归模型，一个小的循环神经网络，结构上让每个参数对应一个 softmax：要不要排队（是/否），什么时候执行（0 到 128 步之类的类别分布），作用在哪个位置（位置上的类别分布），依次输出。这个架构是手工设计的，再用模仿学习和强化学习去调它怎样输出组成一次 API 调用的命令序列，然后发给游戏。</p>
+        <h3>和今天的工具调用对照</h3>
+        <p>他说这和 LLM 的工具调用（tool use，模型按约定格式输出函数名和参数，由外部程序执行）很接近：今天有 MCP 等各种协议，说到底都是一个 API，规定怎样调搜索引擎、执行终端命令，或者在屏幕上点击。他当年就常说 AlphaStar 像一门语言，就是往游戏里发代码调用。</p>
+        <p>差别也明显。AlphaStar 的 API 是写死在网络结构里的，结构固定。今天用文本和代码的泛化能力去发 API 调用，可以接各种环境，而且只用一个 Transformer 写出文本或代码，再解释后发给环境。格式也灵活，想比较哪种格式更好，直接让模型换格式就行。AlphaStar 当年也做了很多消融，但每次都要重训模型、再看哪个打得更好，麻烦得多。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 模仿学习和“提示”</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=1188s" target="_blank">0:19:48</a>–0:26:28</em></p>
+        <h3>纯强化学习探索不出来</h3>
+        <p>他说模仿学习（imitation learning，让模型照着人类示范的动作学，LLM 世界一般叫预训练）至今仍是一个热门争论。StarCraft 和 Go、Atari 不同，动作空间组合爆炸，时间跨度也长得多，探索很困难，随机策略在这个游戏里基本做不出有用的事。所以围绕“苦涩的教训”（bitter lesson）的争论，即该不该先收集大量模仿数据来引导领域知识，在 StarCraft 这种远没到 AGI 难度的游戏里，他们的结论很清楚：需要先模仿学习，再在上面加一个从经验学习的强化学习循环。他说欢迎深度学习和强化学习在 LLM 里也这样结合。至于纯强化学习最终能不能一路走到底，他“强烈相信”答案是否定的。</p>
+        <p>纯强化学习的结果是：它确实学会了赢，但赢法令人不满意。它把所有农民（采资源的工人单位）一起派去进攻。新手会这么干，有的职业选手某些时候也会带农民一起冲。这个策略打败了游戏内置的最难 AI，靠的是内置 AI 没有被编程好去防这种进攻。他们反复看到这种结果，只好转向人类数据。</p>
+        <h3>人类录像和元数据条件</h3>
+        <p>Blizzard 收集了线上匿名录像，他们开源了超过 100 万局 StarCraft 对局，他说现在应该还能下载，适合做模仿学习研究。拿到大量人类数据是解法的一部分。</p>
+        <p>另一个当时感觉很不一样的做法：除了模仿每一步操作，因为整局已经结束，他们知道玩家水平如何，知道玩家最后造了哪些建筑和单位，就把这些元数据编码进去，作为条件输入给网络。这有点作弊，因为开局时你并不知道未来会出现哪些单位。但它是一个引导信号，让网络去找相关性，比如“将来会出现这种单位”，网络就学这种单位和怎样造它之间的关联，尽管这种关联很弱。</p>
+        <h3>这其实就是提示</h3>
+        <p>他说放到今天看，这是一种提示（prompt）或指令遵循：开局就告诉智能体要它做什么，按这个顺序造建筑，或者造这些单位，或者像职业选手、像新手那样打。这样一个智能体可以被用户“提示”成多种风格。</p>
+        <p>和 LLM 的差别：</p>
+        <ul>
+            <li>规模：这个智能体大约训练了 50 亿个 token，LLM 是超过 1 万亿 token，量级差很多。</li>
+            <li>形式：提示是结构化的，按团队预设的格式手工设计成二进制向量，没有用自然语言写成“先造一个 overlord 再造…”这样的句子。</li>
+            <li>来源：这些提示是看完整局游戏、把未来总结成向量，从第一帧就给进去。今天 LLM 的提示或指令往往需要某种人工标注，比如有人出一道编程竞赛题让智能体去解，或者一个要 LLM 证明的定理。</li>
+        </ul>
+        <p>加上这些之后，智能体从强化学习的退化状态走出来，开始打出像样的局面。它没有亲身经历过游戏，只是模仿了人类知识，这和 LLM 在做任何后训练之前的状态一样。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 强化学习后训练，和 LLM 的差别</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=1588s" target="_blank">0:26:28</a>–0:31:58</em></p>
+        <p>他说后训练（用强化学习）是很让人兴奋的方向，但哪怕投入了那么多，在 LLM 里大概仍然是最不成熟的部分。AlphaStar 里做的几件事，今天的 LLM 也以某种形式在做，原因也差不多。</p>
+        <h3>用 Elo 看每一步的贡献</h3>
+        <p>Elo 是给对手之间相对强弱打分的系统，国际象棋等游戏都用，今天大家熟悉它多半是因为给各家 LLM 排名的竞技场排行榜。他给的尺度：差 40 Elo 不算大但开始显著，差 400 是相当大的差距。他说下面这张图是一种不太完美的测法。</p>
+        <ul>
+            <li>不用人类数据从零训练：智能体不强。</li>
+            <li>只用监督学习的策略：900 Elo，作为启动强化学习多智能体系统的起点已经相当强。</li>
+            <li>用它初始化再做普通强化学习：涨一点，但容易出现行为塌缩，模仿学习里得到的整个策略分布的多样性丢了，LLM 里也常见。</li>
+            <li>加监督 KL 惩罚：他解释为把原始策略蒸馏到正在用强化学习训练的策略上，让它别太早押在一种打法上，保住风格和战略的多样性。这一步让 Elo 提高了 400，他说这件事本身也不容易做好。</li>
+            <li>再加上前面说的显式条件（告诉智能体要做什么）：Elo 又涨了将近 150。</li>
+        </ul>
+        <p>还有一个技巧：价值函数（value function，估计当前局面赢面有多大的模型）虽然游戏部分可观测，让价值函数看到整个棋盘会准得多，能降低训练的方差，而方差在强化学习里一直是问题。他说这个技巧在 LLM 的某些领域里也以不同形式被证明有用。</p>
+        <h3>LLM 和游戏的三点差别</h3>
+        <ul>
+            <li>奖励：StarCraft 基本能判断赢输，有趣的小问题是很多人在输之前就认输了，所以不是每局数据都走到胜负条件。LLM 的奖励常常没法完全规定，“给我写首好诗”，要人类达成一致只能祝你好运。</li>
+            <li>算力分配：他说让他很不舒服的一点是，LLM 的算力严重偏向预训练，大部分 FLOPs 花在预训练，后训练只占一点，他觉得这不对。AlphaStar 正相反，大部分算力、大部分权重更新发生在强化学习阶段。</li>
+            <li>过拟合：LLM 里很常见，因为对人类有意义、能用来训练的任务没有无限多，数据有限。StarCraft 每局都不一样，又受环境约束，不太有过拟合问题。他说这一点和上一点相关。</li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. 为什么需要多智能体：稳健性和非传递性</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=1918s" target="_blank">0:31:58</a>–0:39:34</em></p>
+        <h3>强模型也会犯低级错误</h3>
+        <p>他说模仿学习和强化学习他早有经验（sequence-to-sequence 就是重度的模仿学习，强化学习是加入 DeepMind 后学的），多智能体则全是在这个项目里学的，常常试一个很简单的想法就能很快看到很大的效果。在 AlphaStar 里做多智能体学习，目的是稳健性。</p>
+        <p>模型能做很厉害的事，但也常常失败。LLM 也一样：问它这个数比那个数大吗、strawberry 里有几个 r，模型可能翻车，尽管它在某些数学方向上已经有奖牌水平。AlphaStar 也这样：用模仿学习和强化学习训出很好的策略，自我对弈时 Elo 一直涨，可人类上手一打，发现一些很简单的策略它应对不了。高水平对抗时它反应很好，像超人，基本的东西却不懂。</p>
+        <h3>五个层次的“对手策略”</h3>
+        <p>他用游戏术语把能打败智能体的策略分了层，说这和 LLM 的失败很像：</p>
+        <ol>
+            <li>对抗策略（adversarial policy）：类似图像里的对抗样本，改一个像素，熊猫被认成飞机。在策略上，可能是把一个单位用某种方式移动，网络就崩了。除非让用户去试探，否则不太容易被发现，是从神经网络角度最基本的漏洞。</li>
+            <li>剥削者（exploiter）：反复正常地和同一个固定策略对打，最终找到弱点，然后在战略上一路深挖，直到每次都赢。他说这一层和下一层都和今天 LLM 上看到的情况相似。</li>
+            <li>奶酪（cheese）：一种可能有泛化性的取巧打法，对很多不同对手都比较稳，而剥削者只针对一个对手。它不是这个游戏的最优策略，但职业比赛里也常常把奶酪和正常打法混着用，因为看不到全图，随时得担心对手用这一招。和扑克一样，不能对一个看不见的对手优化过头，不可预测性很重要。</li>
+            <li>正常策略。</li>
+            <li>最优策略，用深度强化学习和多智能体去找极难。</li>
+        </ol>
+        <h3>非传递性</h3>
+        <p>这对应非传递性（non-transitivity）：一个策略换个对手还管不管用。对抗策略多半不管用，可能只针对你这套网络权重；剥削者针对一个不能更新权重的固定对手；奶酪往往能泛化。他说 strawberry 数 r 这类问题，不同公司训练方式不完全一样的模型都有，也许就属于奶酪这一类：有一定泛化性，但既不有趣也不强。</p>
+        <p>他的同事有个观察：大多数有意思的游戏可以画成一个陀螺形状。竖轴是玩家的内在强度（Elo）；在同一强度的横截面上，存在非传递的循环，同一 Elo 水平的三个模型可能互相克制，像石头剪刀布，水平不高时尤其如此。这个分析是针对零和游戏的，用到 LLM 上要做些抽象，但 LLM 确实有 Elo 分，也确实看到同一档排行榜成绩的模型强项各不相同。他跳过了一张 2020 年论文的幻灯片，大意是：水平不高的区域非传递性很强，水平很高时会出现谁也打不过的支配策略，大多数游戏都是这样。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. AlphaStar League 和它的训练动态</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=2374s" target="_blank">0:39:34</a>–0:50:50</em></p>
+        <h3>石头剪刀布上的几种训练法</h3>
+        <p>他先用石头剪刀布讲训练方法。三角形三个顶点是石头、剪刀、布，一个策略就是一个出拳分布，最优是均匀分布。朴素的自我对弈（self-play，智能体和自己的副本对打来训练）会在中心附近来回摆，局部又会强烈偏向某一种出法，很难收敛。</p>
+        <p>加入种群（population），让一群策略互相对打，直觉上好一些：我会碰到很多玩家，比如有个只出剪刀的很差的玩家，而我事先不知道对手是谁，最终可能学到纳什均衡，也就是中心点。他展示了三种做法的图，说在这个玩具例子里也不是每种都能得到想要的结果，最有希望的是最右边那种：在种群里永远和最强的对手打。AlphaStar 没有完全这样做，但这些直觉起了很大作用。</p>
+        <h3>真实发生过的“全造虚空辉光舰”</h3>
+        <p>StarCraft 里对应石头剪刀布的三种单位：虚空辉光舰（void ray），空中单位；不朽者（immortal），很强的地面单位，打不了空中；追猎者（stalker），能打空中，但不是最强的地面单位。虚空辉光舰克不朽者，不朽者克追猎者，追猎者克虚空辉光舰。他说如果简单地大量造某一种，游戏里大致就是这个关系。</p>
+        <p>从模仿学习出发，初始策略处在三者中间，哪种都不精，但代表了人类线上的整个策略分布。用纯自我对弈训练后，哪怕有蒸馏损失，策略也开始只造虚空辉光舰，微操很好，但高度专门化。整个“种群”（其实只是自我对弈）里只剩这一个策略，先验知识被洗掉了一些。他说从智能体的角度看，它是“妄想”的：一直和自己打虚空辉光舰对虚空辉光舰，对局很精彩，团队还录了下来。对手造不朽者没问题，可要是对手造追猎者，智能体根本没见过，因为它的对局里全是虚空辉光舰。如果规定职业选手只能造虚空辉光舰、不许取巧，它很强，但人会变着法子打，还有早期 rush 等等，所以这样行不通。</p>
+        <h3>加入剥削者</h3>
+        <p>League 的核心是加入剥削者。主智能体训练到某个时候，加入第二个智能体，它只关心打败主智能体。这里有不对称：剥削者能看到和主智能体的对局并从中学，主智能体不能针对它训练。主智能体偏向虚空辉光舰时，剥削者自然会去造追猎者。这样主智能体就见识到有人会用克制自己的单位，学会应对，甚至离开“全造虚空辉光舰”这个局部最优，看到对手大量造追猎者时去造不朽者。</p>
+        <h3>完整的 League</h3>
+        <p>完整系统是这个想法的加强版，他说具体规则其实很简单，他们没做太多实验：</p>
+        <ul>
+            <li>主智能体（main agents）：三个，每个种族一个，最后上天梯拿到宗师的就是它们。它们和自己打、和其他主智能体打、一直和整个种群打。</li>
+            <li>主剥削者（main exploiters）：从先验（模仿学习策略）出发，只想最大程度打败三个主智能体，可以针对主智能体训练，反之不行。等胜率很高，也就是剥削成功了，才存一个检查点公开出来：“我是新玩家，你们应付一下”。之后主智能体才能和这个冻结的检查点对打。剥削者再从先验重新开始。于是训练过程中会不断出现处于不同阶段的剥削者。</li>
+            <li>联赛剥削者（league exploiters）：同样的思路，但目标是打败种群里所有人，找对所有人都有效的漏洞，更接近奶酪。</li>
+        </ul>
+        <p>他说这里的学习动态很难看懂，哪怕是在一个游戏里，AlphaStar League 还有很多没挖完的东西。最后种群里有超过 1000 个强弱不同的智能体，剥削者会打败之前的智能体，主智能体又追上来打败剥削者，胜率动态各种各样。画出来也是陀螺形：最弱的那一层高度非传递，有 30000 个石头剪刀布循环，他的理解是能找到 30000 个智能体，一个打败下一个，一直循环；越往上越强，开始出现完全支配。</p>
+        <p>他举了训练中真实出现的一幕：一个红色剥削者发现了叫“光炮快攻”（cannon rush）的奶酪打法，蓝色主智能体没怎么见过，守不住。剥削者被冻结后一直用同一招，主智能体反复和它打，最终学会了防守：用农民去应对，这是正确反应，并且派人侦察，发现自己正处在这种局面。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 训练技巧：消融、匹配和可控的剥削者</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=3050s" target="_blank">0:50:50</a>–0:54:33</em></p>
+        <h3>剥削者带来的提升</h3>
+        <p>结果对比：如果种群里只有主智能体，三个主智能体互相打、也和自己的过去版本打，这叫虚拟自我对弈（fictitious self-play），能达到一定强度。他说这个分数不完美，人类去打会发现它没那么强，实际差距可能比图上更大，他们在线上做过一点检验，但这种实验很难做。加入主剥削者后强了很多；再加上联赛剥削者，得到最终系统，能稳住很多不同策略，也打得很强。</p>
+        <h3>学习路径很重要</h3>
+        <p>一个智能体是常常被剥削、很少被剥削，还是一开始从没被剥削，都会改变最后得到的策略。理论上还有很多要弄清，而在这类游戏加深度强化学习的场景里，理论也很难得到。</p>
+        <p>匹配（matchmaking）是其中一个参数：主智能体面对 1000 个对手，该和谁打？他们试了两种：</p>
+        <ul>
+            <li>和最能打败自己的对手打，也就是困难对手。</li>
+            <li>和胜率最接近 50/50 的对手打，这时结果的熵最大。如果最强对手每次都赢你，就没有学习信号。</li>
+        </ul>
+        <p>他说第二种方差稍好一些。这个例子说明，产生主策略的过程本身影响很大。</p>
+        <h3>让剥削者受控</h3>
+        <p>要产生有意思的反制策略、剥削者或奶酪，可控性很重要。他们不只是让剥削者从模仿学习的先验出发去打主智能体，有时还规定剥削的方式，比如“用这种单位来打败我”，用的就是前面讲的提示（条件）机制，相当于把剥削者的一只手绑在背后。这增加了稳健性和多样性。</p>
+        <p>他说项目时间有限，这些选择没能全面研究。主策略的多样性很重要。在 LLM 里获得多样性很容易：解这个定理，但用加泰罗尼亚语，或者用西班牙语，或者用最精简的方式，这些都能给模型面对新提示时增加一些稳健性。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 多智能体 AI 和 LLM 的未来</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=3273s" target="_blank">0:54:33</a>–0:58:58</em></p>
+        <h3>LLM 场景和游戏的不同</h3>
+        <ul>
+            <li>用户一般是合作的，不是零和博弈。我上线是想拿到信息、解决问题，和另一个智能体是合作关系。</li>
+            <li>但也有对抗性用户：大家都喜欢找奇怪的失败模式，Twitter 点赞是人类爱优化的一种奖励信号。更严肃的是，系统越来越接近 AGI、越来越强，有人会想用它做不该做的事，绕开系统的设计用途。他说合作和对抗两面都可以用不同方式借用 AlphaStar League 这类多智能体技术。</li>
+            <li>复杂度大得多：没有清楚的奖励；提示远不如“该造哪些单位”的几个比特干净，提示是自然语言，没有边界。</li>
+        </ul>
+        <h3>游戏成了评测</h3>
+        <p>让 LLM 打 StarCraft 是他的一个梦想，现在的模型能打，但打得不好。今天可以直接指示模型“做一个很好的 StarCraft 玩家”，把环境的控制权交给它，看它怎么做。游戏越来越多地被反过来用作评测，他提到 Kaggle 上很受欢迎的 Game Arena，以及有的 LLM 去打 Pokemon。他说已经有一些自动红队测试用了多智能体技术，但整体上还处在起步阶段，有大量研究可做。</p>
+        <h3>结论</h3>
+        <ul>
+            <li>LLM 之前的智能体研究里有很多值得学的东西：工具调用、架构、损失函数、正则化、价值函数，都可以认真回看。</li>
+            <li>他强烈相信人类先验会是通往 AGI 的路的一部分，同时要在先验之上积累经验。他看到这种组合成功过很多次，包括 AlphaGo 也是模仿加强化学习，他相信这是通往 AGI 最短的路，愿意就此讨论。</li>
+            <li>和 AlphaStar 比，LLM 上的强化学习或后训练还处在初期：LLM 也许训几千步，AlphaStar League 的后训练用了 10 的 10 次方量级的训练步数，后训练用的算力远多于预训练。LLM 还有奖励定义模糊的问题。</li>
+            <li>多智能体强化学习，不管以什么形式组织一群用户和智能体互相交流、并为此优化和训练，他认为很令人兴奋，可能在未来几年带来新的规模化突破，也许就来自在座的学生。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“Lots of ideas recirculate.” 很多想法会反复回来。（<a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=0s" target="_blank">0:00:00</a>）</li>
+            <li>“AlphaStar is like a language. You just need to issue these, literally, code calls or API calls into the game.” AlphaStar 像一门语言，你只需要往游戏里发出这些代码调用或 API 调用。（<a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=1104s" target="_blank">0:18:24</a>）</li>
+            <li>“So what happens when you apply pure reinforcement learning is that it actually discovers how to beat the enemy but in a way that is unsatisfactory.” 用纯强化学习时，它确实找到了怎么打败敌人，但方式让人不满意。（<a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=1273s" target="_blank">0:21:13</a>）</li>
+            <li>“This actually was a form of prompt or instruction following.” 这其实是一种提示，或者说指令遵循。（<a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=1424s" target="_blank">0:23:44</a>）</li>
+            <li>“Compute envelope for LLMs are heavily skewed towards pre-training. So you spend most of our flops in pre-training and only a little bit in post-training. And that feels wrong for a variety of reasons.” LLM 的算力预算严重偏向预训练，大部分 FLOPs 花在预训练，后训练只有一点，出于很多原因，这感觉不对。（<a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=1833s" target="_blank">0:30:33</a>）</li>
+            <li>“From the agent's perspective, it was delusional.” 从智能体的角度看，它是在妄想。（<a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=2618s" target="_blank">0:43:38</a>）</li>
+            <li>“My strong belief is that human priors are going to be part of the path to AGI.” 我强烈相信，人类先验会是通往 AGI 之路的一部分。（<a href="https://www.youtube.com/watch?v=ntjOxjZMaac&t=3438s" target="_blank">0:57:18</a>）</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>Berkeley RDI LLM Agents MOOC · Multi-Agent Systems in the Era of LLMs · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

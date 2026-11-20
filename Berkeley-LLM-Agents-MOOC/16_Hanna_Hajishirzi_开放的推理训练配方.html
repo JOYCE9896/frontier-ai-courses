@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hanna Hajishirzi：开放的推理训练配方 | Berkeley LLM Agents MOOC 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="15_Yu_Su_语言智能体的推理记忆与规划.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">Berkeley LLM Agents MOOC 目录</a> · 16</span>
+    <span><a href="17_Charles_Sutton_编程智能体与漏洞检测.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Hanna Hajishirzi：开放的推理训练配方</h1>
+        <p class="subtitle">Ai2 的 Tülu 3 后训练配方（SFT 数据混合、persona 合成数据、DPO 与 PPO 对比、RLVR 可验证奖励强化学习），s1 的 1000 条数据加 budget forcing 测试时扩展，以及 OLMo 2 的 mid-training 怎样在预训练阶段补推理能力</p>
+        <div class="author-meta">
+            主讲：Hanna Hajishirzi（University of Washington）· 课程：Berkeley CS294/194-280 Advanced Large Language Model Agents（2025 年春季） · 上课日期：2025 年 2 月 24 日 · 时长：1 小时 21 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=cMiu3A7YBks" target="_blank">课堂录像</a> · <a href="https://rdi.berkeley.edu/adv-llm-agents/slides/OLMo-Tulu-Reasoning-Hanna.pdf" target="_blank">幻灯片</a>（Berkeley RDI 公开，2025 年春季，本文依据录像字幕和幻灯片整理，是中文转述，不是逐字翻译；观点属于主讲人，内容以上课当天为准）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>Hanna Hajishirzi 是 University of Washington 的教授，同时在 Allen Institute for AI（Ai2）带团队。她的团队负责两个开放项目：OLMo（完全开放的语言模型，权重、训练数据、代码全部公开）和 Tülu（开放的后训练配方）。她说幻灯片里很多页来自她的学生和同事 Yizhong Wang、Nathan Lambert、Hamish Ivison、Faeze Brahman、Niklas Muennighoff。</p>
+        <p>这一讲围绕一个问题：怎样用公开的数据和方法，把语言模型的推理能力训练出来。她按训练流程倒着讲了三块，三块之间基本互相独立。第一块是后训练，也是篇幅最大的部分，完整走一遍 Tülu 3 的三步：指令微调、偏好微调、带可验证奖励的强化学习（RLVR）。第二块是测试时推理，主要讲 s1。第三块回到预训练，讲 OLMo 2 怎样在训练末段用高质量数据做 mid-training。上一讲 Jason Weston 讲过偏好优化，她在偏好微调部分提了一句。录像没有问答环节。</p>
+        <ol>
+            <li><a href="#t01">为什么要完全开放的模型，以及 OLMo 和 Tülu 的现状</a> · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">现代大模型怎样后训练，Tülu 3 配方的总体框架</a> · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=358s" target="_blank">0:05:58</a></li>
+            <li><a href="#t03">第一步：指令微调的数据从哪来、怎样混合</a> · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=651s" target="_blank">0:10:51</a></li>
+            <li><a href="#t04">推理需要什么样的数据：思维链、persona 合成与自洽过滤</a> · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=1005s" target="_blank">0:16:45</a></li>
+            <li><a href="#t05">第二步：偏好微调，DPO 和 PPO 哪个重要</a> · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=2020s" target="_blank">0:33:40</a></li>
+            <li><a href="#t06">第三步：RLVR，用验证函数代替奖励模型</a> · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=2961s" target="_blank">0:49:21</a></li>
+            <li><a href="#t07">测试时扩展：s1 和 budget forcing</a> · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=3891s" target="_blank">1:04:51</a></li>
+            <li><a href="#t08">预训练里的推理：OLMo 2 的 mid-training</a> · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=4504s" target="_blank">1:15:04</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 为什么要完全开放的模型，以及 OLMo 和 Tülu 的现状</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=0s" target="_blank">0:00:00</a>–0:05:58</em></p>
+        <h3>开放研究的理由</h3>
+        <p>她开场的论点是：AI 能走到今天，靠的是开放的科学研究和能完整拿到手的模型。可这几年，这个领域越来越多的研发关起门来做。她问：这是不是说语言模型的科学研究已经做完了？她的回答是没有。要搞清楚语言模型为什么有效、把它做得更好、造下一代模型，还要把它推到语言以外的领域（科学、医疗、非文本模态），减少偏见和风险，让它能在真实世界里用。她点到的具体方向有 LM agents、规划、推理、测试时扩展、高效模型。</p>
+        <p>要推动这些研究，她认为模型必须完全开放：透明，数据可以看；研究者和开发者拿得到；结果可以复现。幻灯片上引了一句话：AI 研究机构依赖闭源模型，就像天文学家靠报纸上印的照片研究太阳系。</p>
+        <p>她把现在的模型格局分成三类：闭源 API 模型、开放权重模型（只给权重，不给数据和训练过程）、真正开放的模型。OLMo 属于第三类，目标是开发、研究、推进语言模型，所有工作公开、有文档、可复现，让 AI 社区能在上面做研究，也让公众了解 AI 是怎样工作的。她也说，这个完全开放的生态只是整个 AI 版图里的一块。Ai2 想搭的是一套从预训练、mid-training、后训练到智能体的完整生态。</p>
+        <h3>过去一年发布的东西</h3>
+        <ul>
+            <li>预训练：OLMo 和 OLMo 2，OLMo 的混合专家（MoE）版本 OLMoE，还有完整的预训练数据。</li>
+            <li>后训练：Tülu 配方，已经套到 Llama、Qwen 等多个开放权重模型上，也用在了完全开放的 OLMo 上；工具包（OpenInstruct）、安全数据和工具包都公开。</li>
+            <li>测试时扩展：s1、OpenScholar 和 Self-RAG，最后会简短讲。</li>
+        </ul>
+        <h3>结果快照</h3>
+        <p>OLMo 2 发布了 7B 和 13B 两个规模。预训练结束时的基础模型，在一些数据集上比 Llama 3 和 Qwen 2.5 好一点，另一些差一点，平均下来持平，用的训练 token 更少。幻灯片上的图横轴是近似预训练 FLOPs，纵轴是平均性能，OLMo 2 的两颗星落在帕累托最优曲线上，旁边是 Qwen 2.5、Llama 3.1 等开放权重模型。</p>
+        <p>后训练这边，团队把 Tülu 配方用在了当时最大的开放权重模型 Llama 405B 上。她说 Tülu 3 405B 和 DeepSeek V3 持平或更好，和 GPT-4o 接近。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 现代大模型怎样后训练，Tülu 3 配方的总体框架</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=358s" target="_blank">0:05:58</a>–0:10:51</em></p>
+        <h3>预训练和后训练各做什么</h3>
+        <p>她从后训练讲起，因为团队让模型学会推理的工作，大部分发生在后训练。造一个现代大模型大致分两段。预训练让模型在海量数据（主要来自网页）上预测下一个 token。这样出来的模型还不能直接拿去用：不安全，可能不会听人类指令，推理也不太行。后训练之后，模型能聊天、能遵循指令、能接工具、能推理，遇到有害请求也知道拒绝。</p>
+        <p>她列了后训练的三类目标。一是对齐人类偏好，比如用 ChatGPT 时弹出“两个回答你更喜欢哪个”，收集的就是这类数据。二是工具使用，搜索、执行代码等。三是推理，比如教模型一步步解一道算术应用题。</p>
+        <h3>三个组成部分</h3>
+        <p>和大多数机器学习流程一样，后训练需要数据、训练（模型架构几乎都是 Transformer，再加训练算法）、以及一套仔细的评测回路，告诉你哪里在进步、哪里不行。她说这一讲主要讲什么样的数据重要，以及哪种算法适合哪种数据。后训练数据来源不同、形式不同、针对的能力也不同：解数学题要一种数据，做智能体要一种，教模型什么时候不该回答又要一种。核心问题是“在对的地方用对的数据”。</p>
+        <h3>Tülu 的版本演进</h3>
+        <p>Tülu 项目从 2023 年开始：</p>
+        <ul>
+            <li>Tülu 1（2023 年 6 月，NeurIPS 2023）：只研究怎样构造最好的监督微调数据，也就是指令数据。</li>
+            <li>Tülu 2（2023 年 11 月）：加入偏好数据。她说到这一步，只用开源模型就能和 ChatGPT 打平，某些地方超过 GPT-4（字幕原话如此）。</li>
+            <li>Tülu 2.5（2024 年 6 月）：系统比较 DPO 和 PPO 等偏好微调算法。</li>
+            <li>Tülu 3（2024 年 11 月）：把前面所有工作合在一起，再把同一套配方用到 OLMo 上，证明完全开放的训练配方也能用。</li>
+        </ul>
+        <p>Tülu 3 配方从基础模型出发，走三步：指令微调、偏好微调（用奖励模型）、RLVR（用验证器）。她说有时候需要在几步之间来回调。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 第一步：指令微调的数据从哪来、怎样混合</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=651s" target="_blank">0:10:51</a>–0:16:45</em></p>
+        <h3>先备齐原料</h3>
+        <p>她说成功的后训练从四件事开始：</p>
+        <ol>
+            <li>针对目标能力建立有意义的评测。Tülu 3 的目标能力是通用聊天、知识召回、数学和推理、编程、安全和拒绝不当请求（non-compliance）、多语言，以及精确遵循带约束的指令。有些评测集要团队自己造。她们沿用机器学习的老做法：一部分评测集用来开发，另一部分藏起来，训练全部结束后才测。</li>
+            <li>收集有代表性的提示词，也就是模型应该能回答的问题和指令。</li>
+            <li>检查许可证：数据是怎样收集的、有没有用户同意、许可条款是什么。</li>
+            <li>去污染（decontamination），把和评测集重合的训练数据去掉。她特别强调这一步：文献里有些数据集在某些基准上分数很高，但去污染没做仔细，因为实例很复杂，测试集很容易混进训练集。OpenInstruct 工具包里有现成的去污染代码。</li>
+        </ol>
+        <h3>指令微调是什么</h3>
+        <p>指令微调也叫监督微调（SFT, supervised fine-tuning）：拿大量“提示词加标准回答”的配对，微调预训练模型，让它学会遵循指令。幻灯片上的例子有“从下面的会议记录里提取要点”“总结这篇文档”“写一个调用 Google Maps API 的 Python 程序”“一个一个回答这些问题”“给我妻子写一封情书”。</p>
+        <h3>数据从哪来</h3>
+        <p>她讲了三条路：</p>
+        <ul>
+            <li>人工标注：贵、慢、方差大。推理这类任务的标注很复杂，普通标注员不一定做得了。</li>
+            <li>合成数据：她们 2023 年的 Self-Instruct 论文（ACL 2023）提出用另一个语言模型通过自我指令循环生成数据。效果在很多情况下不错，但有噪声，而且会偏向生成数据的那个模型。</li>
+            <li>混合：她说最近发现最优做法是把人工标注和其他模型合成的数据合在一起，建一个混合数据集合。</li>
+        </ul>
+        <p>她回顾了开源社区的数据整理工作：2022 年她们做了 Natural Instructions 和 Super-NaturalInstructions，只针对问答、摘要、翻译这类 NLP 任务；之后有 Self-Instruct；社区接着做出了 Alpaca、Vicuna 等一批合成数据集；还有偏短问答的 FLAN v1 等。完整列表在 Tülu 3 论文里。团队把这些公开数据集组合起来，挑信号最强的，做成最终的 SFT 混合数据。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 推理需要什么样的数据：思维链、persona 合成与自洽过滤</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=1005s" target="_blank">0:16:45</a>–0:33:40</em></p>
+        <h3>数据混合为什么难</h3>
+        <p>整理数据和混合数据是两条可以反复、并行推进的线。混合很费力：加很多写诗的数据，数学推理可能掉；加很多数学推理数据，写诗这种创意任务可能变差。要在所有能力上都保持高分，需要平衡。社区在试各种混合方法，有人工的经验分析，也有自动化混合，她说这方面文献还在发展。幻灯片上的两条经验是：在保持性能的前提下花大力气过滤数据；先从混合做起，再做针对性整理。</p>
+        <h3>Tülu 1 的混合实验</h3>
+        <p>2023 年能用的数据不多。Tülu 1 先把当时所有公开数据集拿来：SuperNI、CoT、Flan V2、Dolly、Open Assistant 1、Self-instruct、Unnatural Instructions、Alpaca、Code-Alpaca、GPT4-Alpaca、Baize、ShareGPT。有的是人写的（普通人或专家），有的是用 GPT-3/4 合成的。然后按能力分开评测：聊天、知识、推理、多语言、编程、安全。结果表里红色表示差，蓝色表示好。GPT4-Alpaca 和 ShareGPT 在聊天评测上分高；用思维链数据训练，推理评测分数更高。问题在于 ShareGPT、Self-instruct、Open Assistant 1 这些聊天好的数据，在知识和推理上不行。她们的做法是挑出在某一项上分高的数据集组合起来，得到“人工加合成”的混合。她补充说 ShareGPT 早期效果很好，后来因为许可证和收集方式有问题，在后续版本里去掉了。</p>
+        <h3>为什么推理要思维链数据</h3>
+        <p>她用一道题说明：商店衬衫“买二送一”，每件 25 美元，Sarah 要买 7 件，花多少钱？答案是 125 美元。如果训练数据只有题目和“125 美元”，模型从这条样本里学不到多少。社区普遍发现，用思维链（chain-of-thought, CoT，让模型把解题步骤一步步写出来）形式的答案更好。幻灯片上的 CoT 是：买二送一意味着每 3 件付 2 件的钱；7 件分成 2 整组（6 件）加 1 件；整组花 $2 \times (2 \times 25) = 100$ 美元；剩下 1 件 25 美元；合计 125 美元。</p>
+        <p>她总结的理由有几条：思维链让模型更容易处理多步复杂问题；暴露模型的推理过程；预训练时模型已经见过大量这类数据，后训练把“一步步想”的能力调出来；标注里更容易发现逻辑错误，因此更可信；和人解释问题的方式相近。</p>
+        <p>问题是人工标注思维链越来越难：费时、贵、常常需要专家（衬衫题简单，难的数学题要专家写），难以扩大规模，多样性也不够。</p>
+        <h3>persona 驱动的数据合成</h3>
+        <p>她们的办法还是混合：一边从现有资源里混合和挑选，一边做合成。合成用的是文献里一篇论文（Ge et al. 2024）的思路：给模型设定不同的 persona（人物身份），让它为某项技能（数学、编程、精确遵循指令）生成面向这个人的题目。这样能针对具体技能、保证多样性、还能扩大规模。</p>
+        <p>例子：提示词里写“为一位化学动力学研究者出一道数学题”，模型生成的题目是“化学家 Smith 博士正在研究……”。同一个 persona 也可以出逻辑推理题。她们试了很多 persona：专家、六岁小孩、计算机科学家、音乐家等。幻灯片上写约 25 万个 persona。用这个方法生成了：</p>
+        <ul>
+            <li>约 15 万道难数学题</li>
+            <li>约 5 万道小学数学题</li>
+            <li>约 3.5 万道 Python 编程题</li>
+            <li>约 3 万条精确遵循指令数据（幻灯片数字）</li>
+        </ul>
+        <p>persona 只用来生成题目，目的是提高题目多样性。解答由 GPT-4o 和 Claude Sonnet 生成逐步解法。</p>
+        <h3>效果和过滤</h3>
+        <p>评测用 MATH 和 GSM8K 两个数学数据集（GSM8K 是小学应用题，MATH 是更难的竞赛题）。实验把公开数据（通用数据 5 万条、NuminaMath-TIR 约 6.4 万条）和 persona 数学数据按不同比例混合，第一根柱子只用公开数据，最后一根是五五开。结论：persona 数学数据加得越多，MATH 越好；GSM8K 也涨但少得多，她认为是因为 GSM8K 的题比较简单，现有公开数据已经够了。加入小学数学题有帮助。</p>
+        <p>接着她们做了一步过滤：对每道合成题，让 GPT-4 生成多条推理路径，再做自洽性投票（self-consistency：多次采样，取多数一致的答案；她提到课程前面讲过）。没有多数票的实例删掉，留下给出多数答案的推理路径。这样删掉了约 40% 的数据。只用剩下的约 60%，MATH 基本持平（差距在误差范围内），GSM8K 提升更明显。</p>
+        <h3>其他生成思维链数据的方法</h3>
+        <ul>
+            <li>人工标注（例如 GSM8K）：推理轨迹质量高，但规模有限（幻灯片写只有 7K），推理风格不够多样。</li>
+            <li>Program-Aided Language Models（PAL）：把数学题转成 Python 代码再执行，执行结果保证正确；缺点是自然语言推理少，不像给小孩讲题那样直观，而且只适用于能写成代码的问题。</li>
+            <li>模型自己生成思维链：能扩展到很多问题，但质量高度依赖基础模型。</li>
+        </ul>
+        <p>她们是把这些方法结合着用的。</p>
+        <h3>Tülu 3 SFT 混合的消融</h3>
+        <p>最终的 SFT 混合按能力组织：聊天、知识、推理、多语言、编程、安全，再加上数学和精确遵循指令。她给的消融结果：</p>
+        <ul>
+            <li>去掉 WildChat（用来做通用聊天能力的数据），平均分降到 58.9，AlpacaEval 这类聊天评测掉得最多。</li>
+            <li>去掉 persona 数据，平均分 58.6，数学等项下降。</li>
+            <li>去掉数学数据，数学评测明显下降。</li>
+            <li>加入安全数据不损害通用能力。</li>
+        </ul>
+        <p>幻灯片上的经验总结：用真实用户和强模型的对话数据训练，几乎在所有方面都有帮助；安全训练和其他技能基本正交；persona 数据合成很适合用来补新技能。她还把 Tülu 3 SFT 数据和社区里流行的 MAmmoTH 等数据集、以及 Tülu 2 的 SFT 混合做了比较，Tülu 3 更好（具体数字字幕不清）。她说这个 SFT 混合还有很多可以改进的地方，希望开源社区一起改。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 第二步：偏好微调，DPO 和 PPO 哪个重要</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=2020s" target="_blank">0:33:40</a>–0:49:21</em></p>
+        <h3>偏好微调做什么</h3>
+        <p>偏好微调的目标是对齐人类偏好。例子：提示词“写一首关于 AI 的俳句”，模型输出后人给赞或踩。实际观察到的作用有两点：它对回答风格和聊天类评测（比如 ChatBotArena）的训练信号很强；它会继续提升 SFT 阶段的技能，但提升幅度小，数学这类能力涨得不多。</p>
+        <p>偏好数据长这样：提示词“用几句话给六岁小孩解释登月”，模型生成两个回答。一个说勇敢的宇航员坐特别的飞船飞到月亮上，开小车，在月面留下脚印，还带回月球岩石，“是一次大冒险”；另一个说 1969 年 Neil Armstrong 和 Buzz Aldrin 第一次登上月球，Michael Collins 留在飞船里。偏好实例标出前一个更生动、更适合六岁小孩。标注者是人，叫 RLHF（reinforcement learning from human feedback，基于人类反馈的强化学习）；标注者换成 GPT-4o、Claude Sonnet 这类模型，叫 RLAIF。</p>
+        <p>她解释为什么要偏好数据：很多任务是开放式生成，给一个回答打绝对分很难，比较两个回答哪个更好容易得多，标注任务因此简单了。但这种数据不能用 SFT 的算法直接训练。</p>
+        <h3>拆开 RLHF</h3>
+        <p>最一般的强化学习：策略（policy）在当前状态下采取行动，和环境交互，环境给奖励，状态更新。放到 RLHF 里，状态是输入策略的提示词，行动是生成的回答，环境是一个奖励模型。奖励模型是一个神经网络，用偏好数据训练，给定提示词，判断哪个回答更受偏好（Christiano et al. 2017）。然后用 PPO（Proximal Policy Optimization，Schulman et al. 2017，一种常用的策略梯度强化学习算法）去优化策略。</p>
+        <p>优化目标有两部分：让奖励尽量大；同时约束模型不要离基础模型太远，因为偏好很难建模。幻灯片上的符号是 $\pi$ 为 LLM 策略、$\pi_\theta$ 为基础模型、$x$ 为提示词、$y$ 为回答。常见的写法是（幻灯片上的公式在提取的文本里没有保留，这里给的是这个目标的标准形式）：</p>
+        $$\max_{\pi}\ \mathbb{E}_{x\sim D,\ y\sim\pi(\cdot\mid x)}\big[r(x,y)\big]\;-\;\beta\,\mathrm{KL}\big(\pi(\cdot\mid x)\,\|\,\pi_{\mathrm{ref}}(\cdot\mid x)\big)$$
+        <p>她说这就是在“对齐给定的偏好”和“不要离原模型太远”之间取平衡。</p>
+        <h3>DPO 和它的变体</h3>
+        <p>DPO（Direct Preference Optimization，Rafailov, Sharma, Mitchell et al. 2023）的出发点是：能不能直接对这个式子做梯度上升？经过一些推导，答案是可以：去掉单独训练奖励模型和强化学习这一套，直接从偏好数据训练策略，同时参照一个参考模型。她建议把 DPO 理解成一种排序目标。之后又出现了几个变体：</p>
+        <ul>
+            <li>PPO：先训练奖励模型，再用强化学习让策略最大化奖励。</li>
+            <li>DPO：直接在偏好数据上优化策略，没有显式奖励模型。</li>
+            <li>SimPO（Meng et al. 2024）：连参考模型都不用。</li>
+            <li>Length-normalized DPO：把偏好回答和被拒回答的对数似然按长度归一化。</li>
+        </ul>
+        <h3>DPO 和 PPO 的系统比较</h3>
+        <p>在 Tülu 2.5 的研究里，她们发现 PPO 几乎在所有情况下都比 DPO 好，通常能多出 1% 左右，代价是实现复杂、占内存、吞吐低。大模型上尤其难办，因为 PPO 要同时跑奖励模型和策略模型两个网络。DPO 只需要偏好数据和策略模型；PPO 需要偏好数据、奖励模型、提示词、生成结果和策略模型。选哪个取决于开发者的约束。</p>
+        <p>她给的逐步结果（纵轴是很多任务上的平均分）：</p>
+        <table>
+            <thead><tr><th>步骤</th><th>变化</th><th>类别</th></tr></thead>
+            <tbody>
+                <tr><td>初始 SFT 后，用较弱的偏好数据做 DPO</td><td>约 +2 分</td><td>算法</td></tr>
+                <tr><td>精心整理偏好数据后再做 DPO</td><td>从约 56 到约 61</td><td>数据</td></tr>
+                <tr><td>同样数据，DPO 换成 PPO</td><td>约 +1 分</td><td>算法</td></tr>
+                <tr><td>PPO 换更大的奖励模型</td><td>不到 0.5 分</td><td>模型</td></tr>
+                <tr><td>PPO 混入针对特定任务设计的提示词</td><td>平均分几乎不变</td><td>数据</td></tr>
+            </tbody>
+        </table>
+        <p>最后一步平均分没怎么涨，但只看推理（GSM8K）时，加入对推理有用的领域内提示词，提升很大。她的结论是领域内提示词对特定能力很重要。整体看，最大的提升来自数据。幻灯片上的要点：</p>
+        <ul>
+            <li>最重要的因素是高质量数据。</li>
+            <li>PPO 性能比 DPO 好，但 DPO 便宜，做数据消融更实际，更适合开发阶段。</li>
+            <li>扩大奖励模型不一定让下游模型变好。</li>
+            <li>使用领域内提示词能带来进一步提升，推理类尤其明显。</li>
+        </ul>
+        <h3>Tülu 3 的偏好微调</h3>
+        <p>把这些经验合起来做 Tülu 3。提示词三类：一部分沿用 SFT 用过的提示词（有助于保持性能），一部分是 SFT 没见过的新提示词，还有 SFT 没研究过的领域外提示词。回答由很多模型生成，从 7B 的弱模型（比如 Llama、OLMo 的 7B）到 GPT-4o 这样的强模型。她特别说要加入 on-policy 数据：要改进的是 Tülu 3 SFT 这个模型，所以要把它自己的回答也放进去，让偏好数据告诉它“这个比你差”或“你要做到 GPT-4o 那样”。幻灯片上写她们改进并扩大了 UltraFeedback（Cui et al. 2023）的偏好数据生成流程。</p>
+        <p>标注用 RLAIF：让 GPT-4o 从四个维度给回答打分，分别是有用性、指令遵循程度、真实性、诚实性，再二值化成“选中”和“被拒”。算法上试了 DPO、PPO 和 SimPO，PPO 收益不大，为了简单用了 DPO。幻灯片写最终用的是 length-normalized DPO。</p>
+        <p>三组消融：</p>
+        <ul>
+            <li>LLM 评审选谁：试了 GPT-4o、Llama 405B 等，GPT-4o 略好，最后用它。</li>
+            <li>off-policy 和 on-policy：初始 SFT 之后只用 off-policy 偏好到 60，只用 on-policy 到 60.7，两者合起来最好。</li>
+            <li>只用 SFT 的提示词还是加入新的领域外提示词：加入新提示词结果更好。</li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. 第三步：RLVR，用验证函数代替奖励模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=2961s" target="_blank">0:49:21</a>–1:04:51</em></p>
+        <h3>偏好微调的过度优化</h3>
+        <p>RLVR（reinforcement learning with verifiable rewards，带可验证奖励的强化学习）是 Tülu 3 新提出的第三步。动机来自 DPO 阶段的训练曲线（横轴训练步数，纵轴评测分数）：AlpacaEval 的提升趋于平台；IFEval（指令遵循评测）随训练步数增加反而略降；GSM8K 一开始涨，之后过拟合往下掉。也就是说，在指令遵循和推理这类复杂任务上，训练久了会出现过度优化。</p>
+        <p>她们回头看神经奖励模型。它被训练来判断哪个回答被选中、哪个被拒，但最后对每个回答输出一个分数。幻灯片上的例子是“What is a Tulu? A Tulu is a camel that…”得分 10.5，换个输入又是另一个分数。文献里也有研究指出，“A 比 B 好”这种人类反馈并不是衡量好回答的黄金标准。如果模型给 1000 分或 5.5 分，这个分数的含义是什么，说不清楚。</p>
+        <h3>换成规则奖励</h3>
+        <p>她们的想法是：对能验证对错的任务，去掉这套复杂设置，换一个简单的规则。比如问“2+2 等于几”，答案等于标准答案就返回 1，否则返回 0：</p>
+<pre><code>if answer == gold_label:
+    return 1
+else:
+    return 0
+</code></pre>
+        <p>强化学习的框架不变：提示词进来，策略生成 token，只是奖励模型换成了验证函数：</p>
+        $$r(x,y)=\begin{cases}1 & \text{if } y \text{ is correct}\\ 0 & \text{otherwise}\end{cases}$$
+        <p>用在三类数据上：GSM8K、MATH（有标准答案）、精确遵循指令（比如“句子以某个词开头”“写一段五个词的话”，生成结果是否满足约束可以检查）。她说 DeepSeek R1 今年早些时候发布，用的思路很接近，只是名字不一样。</p>
+        <p>这种做法只要最终答案或可验证的约束，不需要中间的思维链，也不需要和模型匹配的标注。算法是经典强化学习，她们用 PPO 优化。</p>
+        <h3>实验设置</h3>
+        <p>分别从 Tülu 3 SFT 和 Tülu 3 DPO 出发，每个评测配一个训练集和验证器，用 PPO 训练。训练实例总共在 10 万到 11 万量级：</p>
+        <table>
+            <thead><tr><th>评测</th><th>训练数据</th></tr></thead>
+            <tbody>
+                <tr><td>GSM8K</td><td>GSM8K 训练集（约 7k）</td></tr>
+                <tr><td>MATH</td><td>MATH 训练集（约 7k）</td></tr>
+                <tr><td>IFEval</td><td>IF persona 数据（约 15k）</td></tr>
+                <tr><td>BBH（BIG-Bench Hard）</td><td>Flan 数据集（约 90k）</td></tr>
+            </tbody>
+        </table>
+        <p>验证函数有的很简单，数学就是 if-else 判断预测是否等于那个数。约束类的稍复杂，要看满足了哪些约束、满足的比例是多少，但总体都不难。</p>
+        <h3>训练曲线</h3>
+        <ul>
+            <li>GSM8K：曲线持续上升，没有看到过度优化。在 SFT 上做 RLVR 的增量更大，但最高分来自在 DPO 之上做。</li>
+            <li>MATH：从 DPO 起步时开头略降，然后又开始上升。</li>
+            <li>IFEval：从 SFT 起步提升明显，从 DPO 起步提升少，她们认为是数据不够，还在研究。</li>
+            <li>BBH：用 Flan 数据做强化学习，在部分推理任务上有提升。这部分最后没放进 RLVR 混合，她说值得继续找其他可验证的任务。</li>
+        </ul>
+        <p>幻灯片上的说法是“It just works”，近期研究还有很多改进可做。OLMo 2 上她们把多个 RLVR 阶段叠起来：训练一段、截断，再接一段，平均分继续涨。</p>
+        <h3>为什么现在才有效</h3>
+        <p>她说 RLVR 并不新，这是在真实数据上用强化学习最简单的方式。用二值、稀疏的信号做强化学习早就有。现在有效，是因为基础模型的质量提高了很多（也更懂思维链）。图上在 GPT-2 这种老模型上做 RLVR，起始分数很低，强化学习带不来提升；基础模型变强后，RLVR 提升明显。她的解释是模型可以先探索，发现某种做法能拿到规则奖励后再利用它。</p>
+        <h3>结果</h3>
+        <ul>
+            <li>配方从 8B 扩到 70B、405B。Tülu 3 405B 经过 SFT、DPO、RLVR 后，平均分很接近最新版 GPT-4o，比 DeepSeek V3 好。</li>
+            <li>8B 和 70B 上和 Qwen Instruct、Llama Instruct 比，明显更好；也和 GPT-4o mini、Claude Haiku 这类闭源小模型相当。</li>
+            <li>RLVR 在大规模上效果更好：405B 的 MATH 从 60 涨到 67，约 7 分；70B 从 42 到 45。她说这符合她们的假设：基础越好，RLVR 阶段提升越多。</li>
+            <li>她们后来把优化算法从 PPO 换成 GRPO（Group Relative Policy Optimization，DeepSeek 提出的一种去掉价值网络、用同一题多次采样的组内相对分数做基线的算法），细节没讲。作为参照，Tülu 3 405B 的 MATH 是 67%；把配方用在 Qwen Math 模型上再配 GRPO，已经到 84.6。</li>
+        </ul>
+        <p>整个 Tülu 3 配方的代码、数据、流程和框架都公开了，模型可以在 playground.allenai.org 试。她建议大家做自己的后训练模型时，把一些通用能力数据也带上。同一套配方已经用在 Llama、Qwen 和 OLMo 基础模型上，在 OLMo 上提升也很明显。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 测试时扩展：s1 和 budget forcing</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=3891s" target="_blank">1:04:51</a>–1:15:04</em></p>
+        <h3>最小配方</h3>
+        <p>测试时扩展（test-time scaling）是推理时多花算力换更好答案的做法。她讲的是 s1，由 Niklas Muennighoff 主导，定位是“推理和测试时扩展的最小配方”：精心整理的 1000 条数据 s1K，加上一个最简单的测试时扩展方法 budget forcing，合起来就是 s1 模型。</p>
+        <h3>数据：从 59K 到 1K</h3>
+        <p>题目比 Tülu 3 的数据难得多。Tülu 3 主要是小学和高中到大学低年级的数学，这里收集的是奥赛、数学竞赛级别的题、逻辑谜题、概率题等。幻灯片上的两个例子：证明 $[0,1]$ 上的均匀分布不是两个独立同分布变量的卷积；掷三个 100 面骰子，最小点数的期望是多少。</p>
+        <p>过滤流程：一共 59K 道题；按质量过滤剩 52K；挑更难的剩 24K；再按多样性去掉相似题，最后 1K。她提前透露结论：在她们的基准上，用 59K 和用 1K 效果差不多。</p>
+        <p>题目定下来后，蒸馏推理轨迹和答案。幻灯片例子是一道物理题：人单位体积产生的功率比恒星高，如果太阳大小不变、单位体积功率和人一样，它的表面温度是多少。s1 用 Google Gemini 的 thinking 模型标注推理链，并保证里面有“这样……但让我再想想”这类思考 token。s1.1 换成了 DeepSeek R1 的推理轨迹，最终结果更好。数据覆盖几何、数论等很多领域，也有少量控制论、天文学。</p>
+        <h3>budget forcing</h3>
+        <p>她说这个方法简单到让大家都很意外。比如问 raspberry 里有几个 r（字幕把这题听成了别的词，幻灯片上是这个经典例子）。模型生成回答，如果还没用到分配的 token 预算，就往后加一个 “Wait” token，让模型接着生成。加 “Wait” 是在提示模型：你的答案不一定对。模型没有被训练去决定什么时候加 Wait，只要没达到预算就自然加，直到得到最终答案。反过来，如果模型想生成的 token 超过预算，就直接插入结束符，强行收尾。</p>
+        <h3>结果</h3>
+        <p>她们在 s1K 上训练 Qwen 32B。图的横轴是平均思考 token 数，纵轴是准确率：</p>
+        <ul>
+            <li>MATH500：限 512 个 token 时准确率约 65，预算放到 2048，准确率随 token 增加上升。</li>
+            <li>AIME（数学竞赛，更难）：让模型生成更长，同样的上升趋势。</li>
+            <li>GPQA Diamond（博士水平科学题）：同样随生成长度上升。</li>
+        </ul>
+        <p>要更短就插结束符，要更长（比如超过 8000 token）就插 Wait。她们比较了顺序扩展（budget forcing）和并行扩展（多条路径做多数投票，即自洽性），budget forcing 的曲线更陡，并行扩展有一些提升但不大。</p>
+        <h3>消融</h3>
+        <ul>
+            <li>数据：用全部 59K 数据，AIME 稍高，其他差不多。随机挑 1000 条或只按单一条件挑 1000 条，结果差很多，说明 s1K 质量高。</li>
+            <li>扩展方法：不做测试时扩展是基线；把 Wait 换成 “Hmm”“Alternatively”，或者不加任何字符串直接让模型继续，收益都更小。幻灯片还比较了 token/step/class 条件控制和拒绝采样。</li>
+        </ul>
+        <p>幻灯片的总结：用 1000 条多样样本训练出样本高效的推理模型，MATH 上超过 o1（幻灯片原文 “Better MATH than o1”）；再用 budget forcing 在测试时扩展性能。论文是 arxiv.org/abs/2501.19393。</p>
+        <h3>两个自我引导生成的工作</h3>
+        <p>她简单提了两项，没讲细节。Self-RAG 是一个检索增强生成（RAG，先检索相关文档再生成答案）模型，训练语言模型在生成过程中不时输出“评判 token”，判断生成内容是否合理、检索到的文档是否有用，再自我改进。OpenScholar 把这种自我引导改进循环用在综合科学文献、回答复杂科学问题上，演示站点是 openscholar.allen.ai。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 预训练里的推理：OLMo 2 的 mid-training</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=4504s" target="_blank">1:15:04</a>–1:20:53</em></p>
+        <h3>两阶段训练基础模型</h3>
+        <p>她回到前面那张 GPT-2 的图：基础模型弱时 RLVR 不起作用，所以要把基础模型做强。训练基础模型要分阶段，各阶段的学习率和数据都不同。幻灯片上的学习率曲线：</p>
+        <ul>
+            <li>不到 10B token 的 warmup，学习率升到最大值 3e-4。</li>
+            <li>在数万亿 token 上用余弦衰减降到 5e-5。</li>
+            <li>最后约 50B token，换成精心整理的高质量数据（很多是为复杂推理设计的），学习率线性降到 0。这一段叫 mid-training。</li>
+        </ul>
+        <p>mid-training 仍然是下一个 token 预测，但数据集中在复杂任务和推理上。两个阶段的对比：</p>
+        <table>
+            <thead><tr><th></th><th>预训练</th><th>mid-training</th></tr></thead>
+            <tbody>
+                <tr><td>预算占比</td><td>约 99%，数万亿 token</td><td>约 1%</td></tr>
+                <tr><td>数据</td><td>非结构化、多样的文本，大量来自网页；在算力预算内用能拿到的最好数据</td><td>上采样高质量数据和领域内数据，甚至放入 SFT 数据；用好那些量不够撑起预训练的好数据</td></tr>
+            </tbody>
+        </table>
+        <h3>数据配比</h3>
+        <p>OLMo 2 的预训练数据包括网页、代码、学术论文、STEM 论文、数学网页、数学证明等，总共约 4 万亿 token。mid-training 加入了大量数学数据，还有指令数据、合成数据、领域上采样，以及第一阶段稀缺的新数据源。</p>
+        <p>她举了一个例子：第一阶段结束时，OLMo 加减法不错，乘法不太行，于是在 mid-training 里加入合成乘法数据。做法是先做大量评测，找到缺陷，再在 mid-training 里针对性地补。</p>
+        <h3>效果</h3>
+        <p>预训练加 mid-training 之后，平均分从 50 到 60、从 56 到 68（两个规模），提升最大的是 GSM8K 和 DROP（带数学计算的阅读理解问答）。最终 OLMo 2 和 Llama 3.1 8B 持平，13B 的结果见论文，32B 的结果即将发布。</p>
+        <h3>结尾</h3>
+        <p>她最后放回开头那张“仍需研究的方向”图：语言模型的科学、改进模型、在真实世界使用、减少风险和偏见、拓展到文本之外，以及规划、测试时推理、高效模型、LM agents、医疗和科学中的语言模型。她感谢了 OLMo 和 Tülu 团队、UW 的学生和 Ai2 的同事，并说这些项目在招人。幻灯片最后一页还有一项没在录像里讲的工作：一个视觉语言模型的人类偏好评测，含 32.5 万对比较和 870 名标注者。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“The most important factor in building a really good preference tuning algorithm, uh, for us was high quality data.”<br>她对偏好微调各项消融的总结：对她们来说，做好偏好微调最重要的因素是高质量数据。 · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=2635s" target="_blank">0:43:55</a></li>
+            <li>“In general we saw [PPO] performs better than DPO in almost all cases; however it is much more complicated to implement and make it work, particularly for larger models.”<br>总体上 PPO 几乎在所有情况下都比 DPO 好，但实现和调通要复杂得多，模型越大越难。 · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=2439s" target="_blank">0:40:39</a></li>
+            <li>“We can replace this reward model with something rule based. For example, if my query is what is 2 + two, we can easily say if the answer is [gold], return one, otherwise return zero.”<br>可以把奖励模型换成规则：问 2+2 等于几，答案等于标准答案就返回 1，否则返回 0。 · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=3085s" target="_blank">0:51:25</a></li>
+            <li>“Why did it work now? We realize it's because, and now base model qualities have improved a lot, therefore RL can boost upon them.”<br>为什么现在才有效？她们意识到是因为基础模型的质量提高了很多，强化学习才能在上面提升。 · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=3533s" target="_blank">0:58:53</a></li>
+            <li>“Spoiler alert, alert: on our benchmarks using 59k data and 1K data almost similar, which is, which is very interesting.”<br>提前剧透：在她们的基准上，用 5.9 万条数据和用 1000 条数据效果差不多。 · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=3983s" target="_blank">1:06:23</a></li>
+            <li>“We did not train a model to decide when to add [wait]. We kind of naturally added [wait] when it didn't hit our token budget.”<br>她们没有训练模型去决定什么时候加 Wait，只要没达到 token 预算就自然地加上。 · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=4110s" target="_blank">1:08:30</a></li>
+            <li>“Adding safety data doesn't hurt general capabilities of the model.”<br>加入安全数据不会损害模型的通用能力。 · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=1927s" target="_blank">0:32:07</a></li>
+            <li>“At the end of this stage the [OLMo] model was not that good in doing multiplication but much better in doing addition and subtraction.”<br>第一阶段结束时，OLMo 乘法不太行，加减法好得多。 · <a href="https://www.youtube.com/watch?v=cMiu3A7YBks&t=4687s" target="_blank">1:18:07</a></li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>Berkeley RDI LLM Agents MOOC · Open Training Recipes for Reasoning in Language Models · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>
