@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第6讲：Q 学习 | Stanford CS224R 深度强化学习笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="05_离策略Actor-Critic.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS224R 目录</a> · 06</span>
+    <span><a href="07_离线强化学习.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第6讲：Q 学习</h1>
+        <p class="subtitle">对 Q 值取 argmax 得到的新策略为什么不会更差，从策略迭代到 Q 学习，Bellman 方程和 Bellman 最优方程，ε-贪心和 Boltzmann 探索，回放缓冲区的管理，目标网络和 DQN，过估计和 Double DQN，Q 学习里的 n 步回报，以及什么时候选 PPO、DQN 或 SAC</p>
+        <div class="author-meta">
+            主讲：Chelsea Finn · 课堂日期：2025 年 4 月 18 日 · 时长：1 小时 2 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=-7kv6jf0isQ" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs224r.stanford.edu/spring_2025/slides/06_cs224r_qlearning_2025.pdf" target="_blank">2025 幻灯片</a> · <a href="https://cs224r.stanford.edu/slides/06_cs224r_qlearning_2026.pdf" target="_blank">2026 幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            这一讲讲基于价值的方法（Value-based RL），核心是 Q 学习（Q-learning）。Chelsea 说基于 Q 学习的 DQN 可以算是第一个深度强化学习方法。学习目标有三条：Q 函数和策略是什么关系；怎样不学显式的策略网络也能做强化学习；实践中怎样让 Q 学习稳定。这是课程里最后一个在线强化学习算法，所以结尾她给了选算法的建议。
+        </p>
+        <p>
+            同一天 TA 还有一节 Q 学习复习课，笔记见<a href="19_辅导课_Q学习复习.html">辅导课</a>。2026 版幻灯片多了一张在线强化学习算法总表，放在最后一节。
+        </p>
+        <ol>
+            <li><a href="#t01">回顾，以及这一讲的目标</a> · <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">思考题：对 Q 值取 argmax 的新策略</a> · <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=364s" target="_blank">0:06:04</a></li>
+            <li><a href="#t03">从 Actor-Critic 到 Q 学习，Bellman 最优方程</a> · <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=814s" target="_blank">0:13:34</a></li>
+            <li><a href="#t04">术语和收敛性</a> · <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=1600s" target="_blank">0:26:40</a></li>
+            <li><a href="#t05">收集什么数据：探索策略和完整算法</a> · <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=1798s" target="_blank">0:29:58</a></li>
+            <li><a href="#t06">离策略和回放缓冲区管理，目标网络和 DQN</a> · <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=2228s" target="_blank">0:37:08</a></li>
+            <li><a href="#t07">过估计和 Double DQN</a> · <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=2626s" target="_blank">0:43:46</a></li>
+            <li><a href="#t08">Q 学习里的 n 步回报</a> · <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=3132s" target="_blank">0:52:12</a></li>
+            <li><a href="#t09">成功案例，以及怎样选在线算法</a> · <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=3369s" target="_blank">0:56:09</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 回顾，以及这一讲的目标</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=0s" target="_blank">0:00:00</a>–0:06:04 · Review of prior methods / Introduction to Q-learning</em></p>
+        <p>
+            价值函数和 Q 函数都表示未来的期望奖励。到目前为止的方法：策略梯度在收集数据和改进策略之间交替，提高未来奖励高（减去基线后）的动作的对数似然；Actor-Critic 多了一步，先估计策略的期望未来奖励，再用它改进策略。上一讲把 Actor-Critic 做成了离策略的，为此需要从旧策略数据中估计 Q 函数。推导出的递归式
+        </p>
+        $$Q^\pi(s,a) = r(s,a) + \gamma\,\mathbb{E}_{s'\sim p(\cdot\mid s,a),\ a'\sim\pi(\cdot\mid s')}\left[Q^\pi(s', a')\right]$$
+        <p>
+            对任意状态和动作都成立，所以可以用缓冲区里的 $(s, a, s')$，从当前策略采 $a'$，以 $r+\gamma\hat Q(s',a')$ 为目标做监督学习；目标要准确，数据需要覆盖最新策略会做的动作。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 思考题：对 Q 值取 argmax 的新策略</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=364s" target="_blank">0:06:04</a>–0:13:34 · Thought exercise on policy</em></p>
+        <p>
+            假设对某个策略 $\pi$ 已经有了很好的 Q 函数估计。与其按原策略行动，不如在每个状态选 Q 值最大的动作。定义一个确定性的新策略：
+        </p>
+        $$\pi_{\text{new}}(a_t\mid s_t) = \begin{cases}1 & a_t = \arg\max_{a} Q^\pi(s_t, a)\\ 0 & \text{otherwise}\end{cases}$$
+        <h3>二维导航的例子</h3>
+        <p>
+            从蓝色区域里某处出发，目标是到达星星，可以在二维平面上移动；到星星奖励为 1，其他地方为 0。当前策略总是向右走。往上走一格要 1 个时间步，横向某段距离要 2 个时间步（她画图说明）。问：新策略比当前策略好、差还是一样？是不是最优策略？为什么？
+        </p>
+        <p>
+            讨论后她总结：旧策略总向右走，不是最优，从下面几行出发根本碰不到星星。看 Q 值（这里折扣因子取 1）：
+        </p>
+        <ul>
+            <li>星星所在那一行：$V^\pi=1$。动作向右时 Q 值为 1；如果先向上，之后按策略就可能错过星星。</li>
+            <li>下面一行：向右的 Q 值为 0；向上的 Q 值为 1，因为先向上再按策略向右就能拿到奖励。</li>
+            <li>再下面一行：向上之后到的是上一行，按原策略向右仍到不了星星，所以所有动作的 Q 值都是 0。</li>
+        </ul>
+        <p>
+            于是新策略：星星那一行向右，下一行向上；再往下的行 Q 值全是 0，按默认行为继续向右。新策略比旧策略好，但不是最优，因为从更下面的初始状态出发，它仍会一直向右，拿不到奖励；最优策略在这些状态也应该向上。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>反复做几次就能得到最优策略吧？对，后面就讲迭代。</li>
+            <li>离星星越近 Q 值越高吗？这里为简单取了折扣 1。如果折扣是 0.9，Q 值会是 1、0.9、0.8、0.7 这样递减（她口头这样说），整行为 0 的那一行仍然是 0。如果奖励更密集，比如取到星星距离的负值，从这个策略出发只要一步就能得到一个从所有状态都能到星星的策略。</li>
+            <li>新策略总是更好吗？只要 $Q^\pi$ 准确，新策略至少和旧策略一样好，永远不会更差；如果旧策略已经最优，就一样好。原因是 argmax 选的是“从 $s$ 做这个动作、之后按原策略”时期望奖励最大的动作，它至少不比原策略会选的任何动作差。</li>
+        </ul>
+    </section>
+
+    <section id="t03">
+        <h2>03. 从 Actor-Critic 到 Q 学习，Bellman 最优方程</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=814s" target="_blank">0:13:34</a>–0:26:40 · From actor-critic to Q-learning / Q-learning algorithm steps / Bellman optimality equation</em></p>
+        <p>
+            既然如此，也许可以干脆不用策略网络，直接这样做：运行策略收集数据；拟合模型估计 $Q^\pi$（可以用上一讲的离策略方式）；把新策略定义为对 $Q^\pi$ 取 argmax；用新策略收集新数据，估计新策略的 $Q^\pi$。这里 $\pi$ 只是记号，没有策略网络，唯一的模型是 Q 网络。
+        </p>
+        <h3>连续动作怎么取 max</h3>
+        <p>
+            有学生问连续动作或更复杂的动作空间怎么办？离散动作（向上、向右）最容易。连续动作也能用，但要想办法做 max：原则上可以用梯度下降，但效果往往不好；动作维度不高时，采一批候选动作选 Q 最大的可能更好；还有一些基于采样的优化算法，迭代地采样、再细化。离散但很大的动作空间，原则上可以用某种离散搜索来最大化 Q。
+        </p>
+        <p>
+            奖励稀疏时呢？上面的例子就是稀疏奖励，仍然能工作。要注意的是，可能要把这个循环做很多次：第一次只在最上面一行得到好策略，环境越大，越要一次次往下推。这叫回传（Backup），把奖励从星星所在的状态回传到其他状态，大约要做问题时长那么多次。
+        </p>
+        <h3>策略迭代</h3>
+        <p>把离策略 Actor-Critic 里的策略梯度更新换成“定义 argmax 策略”：</p>
+        <ol>
+            <li>收集数据，通常用 $\pi$，也可以用别的策略；</li>
+            <li>拟合 $\hat Q^\pi$，目标 $y_i = r(s_i,a_i)+\gamma\hat Q^\pi(s'_i, a'_i)$，$(s_i,a_i,s'_i)$ 来自缓冲区，$a'_i$ 从策略采样；这一步可以走多步梯度，因为它不是 on-policy 的，只是在拟合目标；</li>
+            <li>定义新策略：对 $\hat Q^\pi$ 取 argmax 的动作概率为 1，其余为 0。</li>
+        </ol>
+        <p>
+            第 2 步叫策略评估（Policy Evaluation），第 3 步叫策略改进（Policy Improvement），这个两步迭代叫策略迭代（Policy Iteration）。新策略是确定性的，这也是不想直接用它收集数据的一个原因：动作缺少多样性，后面会讲用什么策略收集数据。
+        </p>
+        <h3>把改进放进目标里：Q 学习</h3>
+        <p>
+            有学生问，拟合目标时为什么要采样 $a'$，为什么不取 max 或取平均？她说可以采多次取平均，得到更好的目标估计；也可以把改进步骤直接放进 Q 函数的目标里：
+        </p>
+        $$y_i = r(s_i, a_i) + \gamma\max_{a'}\hat Q_\phi(s'_i, a')$$
+        <p>
+            这就是 Q 学习。理解方式之一：这些目标已经是新策略的 Q 值，改进步骤已放进 Q 的更新里，学到的是将要定义的新策略的 Q 值。
+        </p>
+        <p>
+            另一种理解：之前的递归式对任意状态、动作、任意策略都成立，当然也包括最优策略。最优策略总会选 Q 值最大的动作，所以只对最优策略成立的方程是把对下一动作的期望换成 max：
+        </p>
+        $$Q^\star(s,a) = r(s,a) + \gamma\,\mathbb{E}_{s'\sim p(\cdot\mid s,a)}\left[\max_{a'}Q^\star(s', a')\right]$$
+        <p>
+            Q 学习的更新是在尝试让这个等式成立，让左边等于右边。等式成立就意味着策略是最优的。所以可以把 Q 学习理解为：在找一个满足这个只对最优策略成立的方程的 Q 函数。
+        </p>
+        <h3>为什么用 Q 而不是 V</h3>
+        <p>
+            V 也能写出类似的方程。Q 的好处是可以直接从中得到策略：知道 Q，对动作取 argmax 就得到比之前更好的策略。只知道 $V(s)$，不知道哪个动作会带来更高的价值；原则上可以向前看一步，如果知道动力学，就预测 $s'$，选让 $\mathbb{E}[V(s')]$ 最大的动作。但我们不知道动力学，没法预测动作导致的下一状态。所以从价值函数得到（或改进）策略要比从 Q 函数难得多。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 术语和收敛性</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=1600s" target="_blank">0:26:40</a>–0:29:58 · Q-learning terminology</em></p>
+        <ul>
+            <li>Bellman 方程（Bellman Equation）：$Q^\pi(s,a) = r(s,a) + \gamma\,\mathbb{E}_{s', a'\sim\pi}[Q^\pi(s',a')]$，用来做策略评估。</li>
+            <li>Bellman 最优方程（Bellman Optimality Equation）：$Q^\star(s,a) = r(s,a) + \gamma\,\mathbb{E}_{s'}[\max_{a'} Q^\star(s',a')]$，只对最优策略成立。有时人们也非正式地把第二个叫 Bellman 方程。对价值函数 V 也能写出对应的两个方程，名字相同。</li>
+        </ul>
+        <p>
+            反复迭代会收敛到最优策略吗？有好消息也有坏消息。好消息：在很简单的设定下，状态和动作空间小到能把每个状态动作的 Q 值存在一张表里（表格型，Tabular），并且探索充分，这个算法会收敛。坏消息：基本上在其他任何情况下都不保证收敛，甚至可以构造出用线性 Q 函数也会发散的例子。反过来说，尽管可能发散，它可以被调得效果很好，结尾会看到例子。
+        </p>
+        <p>
+            有学生问这句话具体指什么？她承认说得有点含糊：它和 Q 值准不准关系不大（Q 值本来就是在这个过程中拟合出来的），而是关于状态动作空间的大小，小到能维护这张表；另外还要求数据完全覆盖所有状态和动作。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 收集什么数据：探索策略和完整算法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=1798s" target="_blank">0:29:58</a>–0:37:08 · Data collection strategies / Replay buffer management</em></p>
+        <p>
+            Q 学习是离策略的：方程对所有状态和动作成立，动作不必来自当前策略。而且数据比当前策略更宽反而有道理：目标里要对 Q 值做 max，会考虑很多可能的动作，离散动作时可能考虑全部动作，这时希望所有这些动作的 Q 值都准确。如果有某个动作从没收集过数据，它的 Q 值可能被错误地估得很高，目标就不准。所以最好用一个探索策略收集数据，覆盖比确定性策略更广的动作。
+        </p>
+        <h3>两种探索策略</h3>
+        <ul>
+            <li>ε-贪心（Epsilon-greedy）：以概率 $1-\epsilon$ 按当前策略（argmax）行动，以概率 $\epsilon$ 均匀随机选一个动作：
+            $$\pi_{\text{explore}}(a_t\mid s_t) = \begin{cases}1-\epsilon & a_t = \arg\max_a Q_\phi(s_t, a)\\ \epsilon/(|\mathcal{A}|-1) & \text{otherwise}\end{cases}$$
+            均匀随机的动作能很好地覆盖要考虑的动作。训练中常让 $\epsilon$ 从大变小：开始多探索，策略和 Q 估计变好之后少探索。叫“贪心”是因为大部分时候贪心，$\epsilon$ 概率不贪心。</li>
+            <li>Boltzmann 探索：按和 Q 值成比例的概率选动作，Q 值高的动作更常选。一种写法是把 Q 值取指数使之为正，再归一化：$\pi(a_t\mid s_t)\propto\exp\big(Q_\phi(s_t,a_t)\big)$。名字来自对能量取指数的 Boltzmann 分布。</li>
+        </ul>
+        <p>
+            有学生问连续动作怎么做？第一种在离散动作里常见得多。连续动作也能做，但要在动作上定义某种近似均匀的分布，需要知道范围；也可以用标准差很大的高斯来采样。她说连续动作空间里第二种更常见；具体怎么从中采样她一时想不起细节，会在 Ed 论坛上补充，可能的做法是去拟合一个策略。
+        </p>
+        <h3>完整的 Q 学习算法</h3>
+        <ol>
+            <li>用某个策略（如 ε-贪心）收集数据 $\{(s_i,a_i,s'_i,r_i)\}$，加入回放缓冲区 $\mathcal{R}$；</li>
+            <li>从 $\mathcal{R}$ 均匀采样一批 $(s_i,a_i,s'_i,r_i)$。和刚收集的数据分开采样，是为了去相关，近似从缓冲区 i.i.d. 地采样；</li>
+            <li>对 L2 损失求梯度更新 Q 函数：
+            $$\phi \leftarrow \phi - \alpha\sum_i\frac{d Q_\phi}{d\phi}(s_i,a_i)\Big(Q_\phi(s_i,a_i) - \big[r(s_i,a_i)+\gamma\max_{a'}Q_\phi(s'_i,a')\big]\Big)$$
+            括号里是 L2 损失的内层，用链式法则得到对参数的那一项；</li>
+            <li>第 2、3 步重复 $K$ 次，然后回到第 1 步。实践中 $K=1$ 很常见，但 $K$ 越大，每批数据走的梯度越多，数据效率越高。</li>
+        </ol>
+        <p>
+            有学生问，用随便什么策略收集数据，不是比用好策略或当前策略更差吗？她说用别的策略是为了学到更准的 Q 函数，之后才能学到更优的策略。这是一种权衡：前期收集不那么优的数据，换来后面更好。比如让强化学习 agent 帮你挑餐厅，如果还没试过几家，开始时就应该探索，哪怕去些可能不太好的餐厅，才能估计出这个人喜欢什么；估计好了之后再少探索。
+        </p>
+        <p>
+            图示：环境，空的回放缓冲区；用 ε-贪心策略在环境里探索，得到转移放进缓冲区；再用缓冲区更新 Q 函数，目标是得到最优策略的 Q 函数。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 离策略和回放缓冲区管理，目标网络和 DQN</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=2228s" target="_blank">0:37:08</a>–0:43:46 · Off-policy data handling / Target network usage</em></p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>采数据的策略和当前策略很像，还能叫离策略吗？因为更新用的是包含所有过去经验的回放缓冲区，所以叫离策略。这不是说缓冲区里没有当前策略的数据，而是说不只用当前策略的数据。</li>
+            <li>“某个策略”实践中是什么？就是 ε-贪心或 Boltzmann 这类，训练中还可以调整 $\epsilon$。</li>
+            <li>每轮迭代要重置学习吗？通常保留旧的 Q 参数热启动，继续训练。算法的产物是 Q，最终部署的策略是贪心地选 Q 最大的动作。</li>
+            <li>如果回放缓冲区只有 1 个数据点，就是 on-policy 了吧？她先说是，随即更正：如果采数据的策略（ε-贪心）和当前策略不同，即使缓冲区只有 1 个点也还是离策略。</li>
+            <li>怎样管理回放缓冲区，避免某些状态被过度采样？这是 Q 学习里的重要问题。通常会丢弃旧数据，先进先出（FIFO），缓冲区不是无限大；Q 学习的缓冲区通常相当大，可以固定一个大小，满了就从最旧的数据开始丢。训练刚开始缓冲区很小，有时第一轮会多收集一些数据来填充。还有异步收集和更新的算法（这门课不讲）：收集数据和更新网络都花时间，可以让一些线程往缓冲区加数据，另一些线程更新 Q 函数；这时缓冲区管理尤其重要，避免在一个数据点上跑 1000 步、另一个只跑 1 步。</li>
+        </ul>
+        <h3>目标网络</h3>
+        <p>
+            前面说过 Q 学习可能发散，用神经网络时常常不稳定，原因之一是目标在移动：目标里的 max 项随参数变化，优化过程很不平稳，$K=1$ 时尤甚。一个技巧是放慢目标变化的速度：保存一份 Q 函数参数的副本 $\phi'$，称为目标网络（Target Network），只在目标里使用 $Q_{\phi'}$，并冻结它，只是定期更新，比如每 100 步。
+        </p>
+        <ol>
+            <li>保存目标网络参数：$\phi'\leftarrow\phi$；</li>
+            <li>用某个策略收集数据，加入 $\mathcal{R}$；</li>
+            <li>从 $\mathcal{R}$ 采一批 $(s_i,a_i,s'_i,r_i)$；</li>
+            <li>$\phi \leftarrow \phi - \alpha\sum_i\frac{dQ_\phi}{d\phi}(s_i,a_i)\big(Q_\phi(s_i,a_i) - [r(s_i,a_i)+\gamma\max_{a'}Q_{\phi'}(s'_i,a')]\big)$；</li>
+            <li>第 3、4 步重复 $K$ 次，第 2 到 4 步重复 $N$ 次，然后回到第 1 步。</li>
+        </ol>
+        <p>
+            参数冻结意味着内层循环里标签不变，内层循环基本就是在做监督学习，只是不断有数据加进缓冲区，监督学习通常稳定得多。用了目标网络的算法就是 DQN，2013 年提出（Mnih 等，Playing Atari with Deep Reinforcement Learning）。她说在她看来这基本是第一个深度强化学习方法：用神经网络直接从游戏像素学会玩多种 Atari 游戏，是最早用强化学习训练神经网络完成相当复杂任务的例子之一；在那之前，很多强化学习例子都是玩具问题或很低维的设定。作业 2 要实现这个算法。
+        </p>
+        <p>
+            有学生问，能不能只存两张 Q 值表？不行，这个循环里会收集新数据，要对新数据计算目标 Q 值，所以必须存参数。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 过估计和 Double DQN</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=2626s" target="_blank">0:43:46</a>–0:52:12 · Overestimation bias / Double DQN algorithm</em></p>
+        <h3>Q 值准不准</h3>
+        <p>
+            在 Breakout 和 Seaquest 上画出训练过程中的奖励，奖励在上升；Q 值也在上升，这是预期的，因为 Q 值代表平均奖励。她插了一个实践提示：用 DQN 训练时，Q 函数的损失值常常是上升的，这可能让人紧张，因为习惯了损失下降。原因是不断收集到 Q 值更高的新数据，损失的尺度在变；最开始到处都是零奖励，损失很容易很小。所以损失上升不必惊慌，有时意味着策略开始变好。
+        </p>
+        <p>
+            看具体的 Q 值也合理：Pong 里球在某些位置时必须向上，此时“向上”的 Q 值高于“向下”和“不动”；球在对方半场时动作无所谓，Q 值比较均匀。但如果画出真实回报（红色水平线）和 Q 网络估计的价值，会看到很大的差距，估计总是高得多。这叫过估计（Overestimation）：Q 函数高估了策略有多好。Double DQN 能得到准确得多的 Q 函数，过估计少得多。
+        </p>
+        <h3>过估计从哪来</h3>
+        <p>目标里的 max 项可以写成</p>
+        $$\max_{a'}Q_{\phi'}(s', a') = Q_{\phi'}\big(s', \arg\max_{a'}Q_{\phi'}(s', a')\big)$$
+        <p>
+            选动作和评估这个动作用的是同一个 Q 函数。Q 函数不完美，像神经网络一样有噪声；用同一个 Q 函数选动作再评估，很容易选到那些因为噪声而 Q 值偏高的动作，利用噪声得到比实际更高的值。如果用不同的 Q 函数选和评估，两者的噪声和误差不同，就能去相关。
+        </p>
+        <h3>Double Q-learning</h3>
+        <p>
+            关键想法是用两个网络：网络 A 选动作，网络 B 评估。只要它们的噪声不同，就不会利用噪声，从而不高估：
+        </p>
+        $$Q_{\phi_A}(s,a) \leftarrow r + \gamma Q_{\phi_B}\big(s', \arg\max_{a'}Q_{\phi_A}(s',a')\big),\qquad Q_{\phi_B}(s,a) \leftarrow r + \gamma Q_{\phi_A}\big(s', \arg\max_{a'}Q_{\phi_B}(s',a')\big)$$
+        <p>
+            实践中我们已经有两个网络：当前网络和定期冻结的目标网络。所以用当前网络选最好的动作，用目标网络评估：
+        </p>
+        $$y = r + \gamma Q_{\phi'}\big(s', \arg\max_{a'}Q_\phi(s', a')\big)$$
+        <h3>课堂问答</h3>
+        <ul>
+            <li>能保证两个网络噪声不同吗？当然不能保证，有些噪声可能来自网络结构本身。但实践中用不同的网络效果很好。仍有一些过估计，几个游戏里 Q 值仍偏高，但比不做好得多。</li>
+            <li>用三个、四个网络呢？她说如果能得到更多独立的噪声样本也许有帮助，实践中值得一试；如果噪声来自保持不变的来源（比如网络结构），可能要引入那方面的变化才有用。</li>
+            <li>目标网络是旧的 Q，噪声不是一样吗？旧的 Q 已经过时，新的 Q 之后又经历了很多梯度更新、见过新的数据点。噪声不只来自初始化，也来自施加了哪些更新，所以很有帮助。</li>
+        </ul>
+    </section>
+
+    <section id="t08">
+        <h2>08. Q 学习里的 n 步回报</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=3132s" target="_blank">0:52:12</a>–0:56:09 · N-step returns</em></p>
+        <p>
+            Q 学习的目标是 $r+\gamma\max Q$。Q 值好的时候，max 那一项在更新里起主要作用；Q 函数差的时候（比如训练开始），只有奖励项有意义，而单步奖励可能说明不了多少。和 Actor-Critic 一样可以用 n 步回报：
+        </p>
+        $$y_{j,t} = \sum_{t'=t}^{t+n-1}\gamma^{t'-t} r_{j,t'} + \gamma^n\max_{a_{j,t+n}} Q_{\phi'}(s_{j,t+n}, a_{j,t+n})$$
+        <p>
+            她问：这个目标有什么问题？有同学答：离策略时，这些奖励来自回放缓冲区里收集数据的那个策略，而我们要估计的是最优策略的 Q 函数。所以有利有弊：偏差小得多，学得快得多，尤其在早期；但这些奖励属于收集数据的策略，不属于最优策略。$n=1$ 没有这个问题，因为奖励只是 $s$ 和 $a$ 的函数，而估计的就是 $Q(s,a)$。
+        </p>
+        <p>怎么办？</p>
+        <ul>
+            <li>最常见的、也许不太令人满意的答案：忽略它，假装没这回事，照样用 $n\gt 1$。n 步回报尽管不正确，往往确实能提升算法表现。</li>
+            <li>动态选择 $n$，只用遵循当前策略的数据：看数据里做的动作是否和最大 Q 值的动作一致。也可以让 $n$ 在训练后期变小，因为那时 Q 值可能更准。这种做法只适合动作空间小、数据大多接近 on-policy 的情况。</li>
+            <li>用重要性采样给这些奖励加权。</li>
+        </ul>
+    </section>
+
+    <section id="t09">
+        <h2>09. 成功案例，以及怎样选在线算法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=-7kv6jf0isQ&t=3369s" target="_blank">0:56:09</a>–1:01:40 · Q-learning success cases / RL algorithm selection</em></p>
+        <h3>成功案例</h3>
+        <ul>
+            <li>玩游戏：Q 学习在大多数 Atari 游戏上超过了人类（Mnih 等，2015）。图里那条线以上的游戏是达到或超过人类水平的，以下是不如人类的。</li>
+            <li>机器人抓取（Kalashnikov 等，2018）：这是连续动作的例子，用 Q 学习训练的 Q 函数，再在动作上做连续优化，找到抓物体的好方式。上一讲说过强化学习能得到成功率更高、更可靠的策略，这里也一样，抓取成功率达到 96%。用强化学习的另一个好处是，抓东西有时要先拨动物体再抓，它也能学会。</li>
+        </ul>
+        <h3>选算法的建议</h3>
+        <p>这是最后一个在线强化学习方法，她给了自己的建议（幻灯片标题是 Chelsea's advice）：</p>
+        <ul>
+            <li>PPO 及其变体：在乎稳定和易用时，一般不需要太多调参，但数据效率很低；适合不在乎数据效率的情况。</li>
+            <li>DQN 及其变体：离散动作或低维连续动作时效果很好，数据效率可以不错，取决于细节和离策略的程度。</li>
+            <li>SAC 及其变体：最在乎数据效率时，需要多一些调参，稳定性也比 DQN 差一些。</li>
+        </ul>
+        <p>
+            小结：这一讲讲了 Q 学习，以及实践中的目标网络、Double DQN 和 n 步回报，定义了 Bellman 方程和 Bellman 最优方程，概括起来就是不学显式策略做强化学习。在线强化学习算法暂时告一段落。
+        </p>
+        <h3>2026 版幻灯片补充：在线强化学习算法总表</h3>
+        <table>
+            <thead><tr><th></th><th>Vanilla PG</th><th>PPO 类方法</th><th>离策略 Actor-Critic（如 SAC）</th><th>Q 学习</th></tr></thead>
+            <tbody>
+                <tr><td>用什么数据</td><td>On-policy（不用重要性权重）</td><td>技术上离策略，常被称为 on-policy</td><td>离策略，回放缓冲区</td><td>离策略，回放缓冲区</td></tr>
+                <tr><td>拟合价值函数</td><td>不拟合</td><td>$V^\pi$</td><td>$Q^\pi$</td><td>$Q^\star$</td></tr>
+                <tr><td>怎样估计好坏</td><td>$\sum r_t - b$</td><td>$V^\pi$ 用 MC、TD 或 n 步回报；$A^\pi = r+\gamma V(s')-V(s)$ 或 GAE</td><td>TD 或 n 步回报</td><td>TD 或 n 步回报</td></tr>
+                <tr><td>怎样做成离策略</td><td>不适用</td><td>重要性权重</td><td>用 TD 拟合 Q，$a$ 从 $\pi$ 采样</td><td>用 TD 拟合 $Q^\star$</td></tr>
+                <tr><td>策略更新</td><td>$(\nabla\log\pi)\left(\sum r_t - b\right)$</td><td>$(\nabla\log\pi)\hat A^\pi$</td><td>$(\nabla\log\pi)\hat Q^\pi$</td><td>$\max_a\hat Q^\star(s,a)$</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>$Q^\pi$ 准确时，$\arg\max_a Q^\pi(s,a)$ 定义的新策略至少和 $\pi$ 一样好；反复做策略评估和策略改进就是策略迭代。</li>
+            <li>把改进放进目标：$y = r + \gamma\max_{a'}Q(s',a')$，即 Q 学习，它在让 Bellman 最优方程 $Q^\star(s,a)=r+\gamma\mathbb{E}_{s'}[\max_{a'}Q^\star(s',a')]$ 成立。用 Q 而不用 V，是因为不知道动力学也能从 Q 得到策略。</li>
+            <li>表格情形且探索充分时收敛；用函数逼近时不保证收敛，甚至可能发散，但能调得很好。</li>
+            <li>Q 学习是离策略的，用 ε-贪心或 Boltzmann 探索收集数据，回放缓冲区先进先出。</li>
+            <li>稳定 Q 学习的三个技巧：目标网络（DQN）；Double DQN，用当前网络选动作、目标网络评估，减轻过估计；n 步回报，偏差小但对离策略数据不严格正确，实践中常被忽略。</li>
+            <li>选算法：要稳定易用选 PPO；离散或低维连续动作选 DQN；最在乎数据效率选 SAC。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224R Deep Reinforcement Learning · Lecture 6: Q-Learning · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

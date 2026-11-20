@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第10讲：大模型推理的强化学习 | Stanford CS224R 深度强化学习笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="09_LLM偏好优化_RLHF与DPO.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS224R 目录</a> · 10</span>
+    <span><a href="11_基于模型的强化学习.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第10讲：大模型推理的强化学习</h1>
+        <p class="subtitle">把解数学题写成稀疏奖励、确定性动力学的 MDP，监督微调和拒绝采样微调（RFT）的数据扩展规律，自生成数据为什么会带来“虚假步骤”，用 rollout 估计每一步的 Q 值和优势，按优势过滤、逐步 DPO、在线强化学习和过程优势验证器 PAV，以及 DeepSeek-R1 这类思考模型到底变了什么</p>
+        <div class="author-meta">
+            主讲：客座讲者 Aviral Kumar（Carnegie Mellon University 教授）· 课堂日期：2025 年 5 月 2 日 · 时长：1 小时 11 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=O2VpNnwB4lM" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs224r.stanford.edu/spring_2025/slides/10_cs224r-rl_for_reasoning_lecture.pdf" target="_blank">2025 幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            客座讲者 Aviral Kumar 讲大语言模型推理（Reasoning）的强化学习。他说推理对不同的人意味着不同的东西，一节课也很难讲全，他自己这学期的课两周前讲类似内容也没讲完，所以只给一种视角，并把问题限定在解数学题上。他按时间把内容分成两部分：DeepSeek-R1 这类模型出现（2025 年 1 月）之前的经典方法，分为模仿学习类、离线强化学习类和在线强化学习类；以及这些方法怎样延伸到如今的“思考模型”。第一部分主要以他自己的两篇论文为线索，他说选它们不是因为这些论文发明了很多技术，而是因为它们对现有方法做了很多为什么有效、为什么失败的实证分析。
+        </p>
+        <p>
+            这一讲会用到前面的模仿学习（<a href="02_模仿学习.html">第 2 讲</a>）、优势函数（<a href="04_Actor-Critic方法.html">第 4 讲</a>）、PPO（<a href="05_离策略Actor-Critic.html">第 5 讲</a>）、AWR 和过滤式行为克隆（<a href="07_离线强化学习.html">第 7 讲</a>）、DPO（<a href="09_LLM偏好优化_RLHF与DPO.html">第 9 讲</a>）。2026 年这一讲换了讲者（Noam Brown），没有公开录像，所以本文只依据 2025 年的录像和幻灯片。
+        </p>
+        <ol>
+            <li><a href="#t01">问题：解数学题，以及只靠下一个 token 预测为什么不够</a> · <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">提纲和 MDP 设定</a> · <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=370s" target="_blank">0:06:10</a></li>
+            <li><a href="#t03">三种训练轴：SFT、拒绝采样微调 RFT、强化学习</a> · <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=743s" target="_blank">0:12:23</a></li>
+            <li><a href="#t04">数据扩展分析和泛化瓶颈</a> · <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=1257s" target="_blank">0:20:57</a></li>
+            <li><a href="#t05">虚假步骤</a> · <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=1681s" target="_blank">0:28:01</a></li>
+            <li><a href="#t06">信用分配：用 rollout 估计每一步的 Q 值和优势</a> · <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=1957s" target="_blank">0:32:37</a></li>
+            <li><a href="#t07">按优势过滤步骤</a> · <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=2504s" target="_blank">0:41:44</a></li>
+            <li><a href="#t08">逐步 DPO：离线强化学习版本</a> · <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=3054s" target="_blank">0:50:54</a></li>
+            <li><a href="#t09">在线强化学习：0/1 奖励、GRPO 和过程优势验证器</a> · <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=3317s" target="_blank">0:55:17</a></li>
+            <li><a href="#t10">思考模型：什么变了</a> · <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=3959s" target="_blank">1:05:59</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 问题：解数学题，以及只靠下一个 token 预测为什么不够</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=0s" target="_blank">0:00:00</a>–0:06:10 · Introduction / Solving math problems / Conventional training / Limitations of current methods</em></p>
+        <p>
+            人们关注的一个基准是 AIME（American Invitational Mathematics Examination），幻灯片上是 2025 年的一道数论题和参考解答。目标是：模型看到题目后，用自然语言写出像参考解答那样的解，并且最后答案正确。
+        </p>
+        <h3>传统做法：下一个 token 预测</h3>
+        <p>
+            训练基础模型的传统范式是下一个 token 预测：把数据切成 token 串，用负对数似然损失预测序列中的下一个 token。用到推理上，就是把问题和参考解答都 token 化，训练模型在给定问题串的条件下预测答案串。为什么这能行？他说这是开放的研究问题，他喜欢的一种看法是看一个误差界：学到的模型 $p_\theta(y\mid x)$ 只能以某个误差逼近真实的专家模型 $p^\ast$，误差 $\|p_\theta - p^\ast\|$ 取决于训练数据的大小。数据足够多，误差就小，就能逼近能力很强的专家。
+        </p>
+        <h3>数据有限</h3>
+        <p>
+            现实中，很多推理问题（以及其他领域）的数据都不够让这个误差界足够小，只做下一个 token 预测学不到人类水平的能力。有工作研究过数据量：如果只是不断从互联网上取难题的高质量解答来做监督训练，据估计到 2028 年就会用完这类高质量数据，而模型显然还没到能做出好研究、替代人类研究员的程度。机器人和具身智能里数据同样很有限。
+        </p>
+        <p>
+            一个具体例子：IMO 2021 的一道题，大概就在某些模型的训练集里。让 OpenAI 的模型（他说是 o 系列，好像是 o1）解，它写出的解看起来很像人类专家写的，却漏掉了背后的逻辑。这道题要证明一个不等式，不能逐项去看表达式，必须把整个求和当作整体；模型却逐项分析，最后断言自己的结论，没有意识到出错，也没有纠正。所以现有的监督训练范式在推理上会生成看起来像正规考试答案、但逻辑内容不对的解。这就是强化学习想修正的。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 提纲和 MDP 设定</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=370s" target="_blank">0:06:10</a>–0:12:23 · RL for reasoning overview / Problem setup</em></p>
+        <p>
+            他问有多少人知道 DeepSeek-R1：中国公司 DeepSeek 发布的模型，很擅长竞赛数学和竞赛编程题，和 OpenAI 的 o 系列、Gemini thinking、Claude Sonnet thinking 这些思考模型是同一类。这一讲先讲这些模型出现之前的经典技术，再讲之后变得突出的技术，以及从前者到后者需要改变的一些有意思的地方。他说文献很多，难免漏掉一些，这只是他认为合理的一种划分。
+        </p>
+        <h3>把解题写成 MDP</h3>
+        <ul>
+            <li>初始状态 $s_0$：题目的 token 串。</li>
+            <li>动作：解答被切成一系列步骤，每一步是一个动作。</li>
+            <li>状态转移：$s_1$ 就是 $s_0$ 和 $a_0$ 拼接起来的 token 串，$s_2 = (s_0, a_0, a_1)$，依此类推，直到给出最终答案。</li>
+            <li>奖励：最终答案（比如框里的 8）正确得 $+1$，否则得 0，即 $r(\hat y, y^\ast)\in\{0, 1\}$。</li>
+        </ul>
+        <p>
+            用强化学习的术语，这是一个稀疏奖励、确定性动力学的 MDP：过程中没有外部环境给你下一状态，只有初始状态和逐个加上的动作，在终止时根据答案对错得到奖励。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>动作空间有多大？可以是无穷的。和连续控制里固定维度的连续向量不同，这里是可变长度的离散 token 串，可能很多。</li>
+            <li>答案是证明、而不是一个数值时怎么办？他说社区还没找到合适的技术，所以从有确定最终答案的竞赛题开始，暂时假设有确定的最终答案。</li>
+            <li>会不会答案对了但步骤不好？会，这一讲后面会讲。</li>
+        </ul>
+    </section>
+
+    <section id="t03">
+        <h2>03. 三种训练轴：SFT、拒绝采样微调 RFT、强化学习</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=743s" target="_blank">0:12:23</a>–0:20:57 · Imitation learning techniques / Rejection fine-tuning / Reinforcement learning approaches</em></p>
+        <p>
+            第一部分以他的 NeurIPS 2024 论文为线索（Setlur、Garg、Geng、Garg、Smith、Kumar，RL on Incorrect Synthetic Data Scales the Efficiency of LLM Math Reasoning by Eight-Fold），做数据扩展分析：在不同数据量上训练各类方法，看它们表现如何。设定：数据集包含题目（初始状态）和标准答案（Oracle 解），标准答案用来定义奖励函数。三个轴：
+        </p>
+        <ol>
+            <li>SFT（模仿学习）：在（题目，人写的标准解）上训练模型生成解。扩展的是题目和标准解的数量。</li>
+            <li>拒绝采样微调（Rejection Fine-Tuning，RFT）：在模型自己生成的多个正确解上训练。</li>
+            <li>强化学习：在任意数据上训练，包括没成功、奖励为 0 的 rollout。强化学习不要求数据高质量或高奖励，离线强化学习（作业里有）就能从次优数据学习。</li>
+        </ol>
+        <h3>RFT 算法</h3>
+        <p>对 $t = 1, \ldots, T$：</p>
+        <ol>
+            <li>对数据集中的题目 $x$，从当前模型采样多个解 $y_1, \ldots, y_n\sim\pi_\theta(\cdot\mid x)$；</li>
+            <li>用标准答案 $y^\ast$ 检查每个解的最终数字，计算 $r(y_1), \ldots, r(y_n)$；</li>
+            <li>只保留正确的：$\tilde S = \{y_j \mid r(y_j) = 1\}$；</li>
+            <li>在 $\tilde S$ 上做模仿学习（叫 BC 或 SFT 都行），训练 $\pi_\theta$ 只生成正确的解。</li>
+        </ol>
+        <p>
+            “拒绝”指拒掉错误的解。它的好处是不需要人写的标准解，只需要模型自己能生成、而且最后正确的解，这些是从策略采样的 on-policy rollout，按正确与否过滤，因为奖励函数是已知的。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>会不会迫使模型写得很啰嗦？不会，这里没有鼓励啰嗦。如果成功的解恰好需要更长篇幅，它就会被鼓励啰嗦，否则不会。比如“2+2=?”，有的解绕十种方式算，但大多数解直接写 4，就会训练模型直接输出 4。</li>
+            <li>方法用错误的思路得到了正确答案，不就在鼓励学错误思路吗？是的，所以要看实验结果，就是接下来的部分。</li>
+            <li>数据会偏向简单题吗？某种程度上会。实际做法是先在人写的标准数据上做 SFT，让模型对这些题有一定能力，再在上面做 RFT。</li>
+        </ul>
+    </section>
+
+    <section id="t04">
+        <h2>04. 数据扩展分析和泛化瓶颈</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=1257s" target="_blank">0:20:57</a>–0:28:01 · Empirical analysis / Data scaling analysis / Generalization bottlenecks</em></p>
+        <p>
+            基准是 GSM8K 和 MATH。他说这两个基准现在已经被完全解决，往后再用它们比较方法没有意义，但在 2024 年（正好一年前）它们很有代表性。这里展示的是在 DeepSeek V2（当时最好的数学模型之一）上的结果，纵轴是微调后的平均测试误差，横轴是微调用的数据量。
+        </p>
+        <ul>
+            <li>SFT 和 RFT 的误差都随题目数量增加而下降，但下降很慢。拟合一条平滑曲线，测试误差大约像 $D^{-0.15}$ 或 $D^{-0.05}$，指数很小。理想情况是像 $D^{-1/2}$ 那样快速下降，用合理的数据量就能解决。推理方法的目标就是把这条曲线往左下推。</li>
+            <li>第一个结果：RFT 的测试误差明显更好。用 RFT 达到的测试误差，SFT 需要 2 倍的题目和 2 倍的人写解答才能达到。也就是说，在这个设定下，从自己的策略采样再模仿正确答案（on-policy 模仿），数据效率是只做 SFT（离策略模仿）的 2 倍。</li>
+        </ul>
+        <h3>但不能一直这样做下去</h3>
+        <p>
+            加大 RFT 的规模，也就是增大 $n$，采样大量解、挑出正确的、全部拿去做行为克隆，这个做法不行：on-policy 模仿做得太多会损害泛化。横轴换成每题保留的正确解数量（$|\tilde S|$ 乘一个常数，题目数 8K 不变），一开始误差下降，过了某个点误差开始上升，回报递减，在有些数据集上误差甚至变高。不可能靠一直生成更多自己的解、模仿它们得到更好的表现。
+        </p>
+        <p>
+            有学生问扩大 $\tilde S$ 时会不会去重。他说会，幻灯片上删掉了这个细节。方法很多，可以用基于编辑距离的拒绝；常见做法是多采一些，比如 $2n$ 个，再留下其中最多样的 $n$ 个。
+        </p>
+        <p>
+            高层结论：在有限数量的初始状态上拟合自生成数据会损害泛化。用前面的 MDP 图看，就是在一组 $s_0$ 上训练、在新的测试题上评估，在同一组 $s_0$ 上训练太多，就会撞上泛化瓶颈。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 虚假步骤</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=1681s" target="_blank">0:28:01</a>–0:32:37 · Spurious steps analysis</em></p>
+        <p>
+            为什么会这样？他用模仿学习里的概念来解释：虚假步骤（Spurious Steps）。从自己的模型大量采样再在上面 on-policy 训练时，有些轨迹里会出现虚假的步骤：步骤本身错了，但不知怎么没影响到生成，比如做了一个错的计算，后来又恢复过来，最后答案还是对的。但这些步骤其实是有害的。
+        </p>
+        <p>
+            GSM8K 里最明显的一个例子：模型算到一半说“所需总金额是 100 乘以 2，等于 200”，下一行又把计算倒过来，真实的计算是 100 除以 2。中间写 200 的那一步就是虚假步骤：不需要、而且错误，这条 rollout 仍得到了正确答案，但这一步本不该出现。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>步骤总是一句话吗？暂时可以理解为一句话，没有普遍认可的定义；后半部分会看到步骤是一整块内容的例子。</li>
+            <li>这是误差上升的主要原因吗？能测量吗？两个答案都是肯定的，它是误差上升的主要原因之一。普通的“拟合数据好不好”的指标看不出来。论文里测量了虚假步骤的数量，它随时间增长。他说没法证明这是唯一原因，只能说明它应该是个问题，而且是大问题之一。</li>
+            <li>怎么判断一步是不是虚假的？实验里有一种做法，它也决定了接下来要讲的方法。这个方法采样完整轨迹；也可以采样部分轨迹，但需要更高级的机制。</li>
+            <li>会不会过拟合到某类“碰巧得到正确答案”的方法上？大体上是，只是他不知道怎么定义“方法”。可以说先算 100 乘 2 再发现错了是一种方法上的现象，也可以说这里的方法只是一堆算术，是语义问题。从符号角度说，有一组 token 在训练集上仍能导向正确答案，但在测试题上不一定帮你做对。这和模仿学习里的因果混淆（Causal Confusion）很像：策略生成了一些坏东西（比如虚假步骤），你也许最后答对了，却学到了错误的关联。</li>
+            <li>另一位同学问那一步到底是不相关还是错误。他说那一步本身不一定错，但是不相关的；可是如果给语言模型一百万个不相关的 token 让它从中挖出真正重要的信息，在测试集上这会很难。所以即使只是不相关，也会成为问题。</li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. 信用分配：用 rollout 估计每一步的 Q 值和优势</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=1957s" target="_blank">0:32:37</a>–0:41:44 · Credit assignment</em></p>
+        <p>
+            怎样解决？这就是强化学习的用武之地，也就是第三个轴：使用错误的数据或错误的 rollout。简单的想法是给每一步分配信用（Credit Assignment）：如果能知道策略生成的每一步、每个状态的效用，就能据此过滤掉坏的解。
+        </p>
+        <h3>用 rollout 估计前缀有多好</h3>
+        <p>
+            给定一条从题目出发、逐步走到最终答案（假设是错的，红点）的轨迹。取它的前缀（到目前为止的所有 token，即状态），让另一个模型（rollout 策略）从这个前缀出发把解补完，做很多次：
+        </p>
+        <ul>
+            <li>很多次 rollout 都得到正确答案：这个前缀大概不坏，至少没影响这个 rollout 策略的解题能力。</li>
+            <li>从这个前缀出发怎么试都错：前缀里显然有问题。</li>
+            <li>有时对有时错：可能仍有问题，不是最好的，但至少比总是失败好。</li>
+        </ul>
+        <p>
+            这种“做 rollout、估计未来的期望成功率”的做法，和价值函数很像，算的就是这个 rollout 策略在这个 MDP 里得到的期望 0/1 奖励。写成数学：题目 $x$，步骤 $y_1, \ldots, y_L$（这里的 $y_i$ 是每一步，和前面表示独立采样的 $y_1,\ldots,y_n$ 记号有点冲突），rollout 策略 $\tilde\pi$ 的 Q 值是
+        </p>
+        $$Q^{\tilde\pi}(x, y_{1:i-1}, y_i) = \mathbb{E}_{y_{i+1:L}\sim\tilde\pi(\cdot\mid x, y_{1:i})}\left[r\big(y_{1:L}, y^\ast\big)\right]$$
+        <p>
+            对照 Q 函数的定义 $Q^\pi(s,a)=\mathbb{E}\big[\sum_{t=0}^{\infty}\gamma^t r_t\mid s_0=s, a_0=a\big]$：这里折扣因子 $\gamma=1$，奖励只在终止时出现，之前全是 0，所以只剩一个期望；一般定义里还有当前一步的 $r(s,a)$，这里它是 0。
+        </p>
+        <h3>用哪个策略做 rollout</h3>
+        <p>
+            有学生问是否用同一个策略做 rollout。他说公式本身不限定用哪个策略。他的看法是 rollout 策略应该和当前策略不同，否则会以同样的方式失败；文献里有工作认为用同一个策略也足够好。在相应的实验规模上，他没见过能明确定论的同等对比；现有证据大多指向用不同策略的好处，这也说得通，但有一部分社区（尤其 NLP 社区）用同一个策略，发现效果也还行。
+        </p>
+        <p>有学生问这和轨迹拼接、优势加权有关吗？他说完全相关，论文里讨论了这个设定下的拼接。</p>
+        <h3>优势</h3>
+        <p>
+            一般的优势是 $A^\pi(s,a)=Q^\pi(s,a)-V^\pi(s)$。这里动力学是确定的，状态就是前一状态拼上新步骤的 token，所以可以把优势定义为相邻两个前缀的 Q 值之差：
+        </p>
+        $$A^{\tilde\pi}(x, y_{1:i-1}, y_i) = Q^{\tilde\pi}(x, y_{1:i-1}, y_i) - Q^{\tilde\pi}(x, y_{1:i-2}, y_{i-1})$$
+        <p>
+            所以写的是 Q 减 Q 而不是 Q 减 V，意义相同。对每一步都能算出优势，有正有负，衡量这一步对从这个前缀出发最终成功贡献了多少。如果第二步之后 Q 值比第一步之后低，第二步大概不是好步骤。负的或低的优势表示坏步骤或虚假步骤，不想从中学习；正的优势表示好步骤。幻灯片上的示例给每一步标了 0.66、0.0、0.25、$-0.66$、$-0.75$、$-0.25$ 这样的优势值。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>要拟合一个 Q 函数吗？文献里有两类做法。一类显式拟合一个类似 Q 函数的量，NLP 社区叫过程奖励模型（Process Reward Model，PRM）：上一讲的奖励模型给整个问答打分，这个给每一步打分，所以叫“过程”奖励模型。他不认为 PRM 和 Q 值语义上完全相同，但很多 NLP 的人这么叫。另一类直接用 rollout 估计优势。</li>
+            <li>这怎样帮模型学到通用的解题策略？最终是把一条长轨迹的成功拆成其中各步的成功。如果模型把问题拆成四步，又能定位哪一步出了错，就能更好地学那一步，而不是含糊地认为失败时大概是第三步的问题，其实可能是第一步。你仍然需要数据来学习，但数据效率大大提高。</li>
+        </ul>
+    </section>
+
+    <section id="t07">
+        <h2>07. 按优势过滤步骤</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=2504s" target="_blank">0:41:44</a>–0:50:54 · Step filtering</em></p>
+        <p>
+            第一种用法：按优势过滤。在 RFT 的基础上，从模型采样轨迹（可以是 on-policy 的），对每一步做 rollout 估计优势；如果这一步优势为正，就把它放进模仿学习（SFT）的训练集。即使这一步来自一条错误的解，只要它本身优势高，也放进去；反过来，即使来自一条正确的解，如果某一步优势很低或很负，就扔掉。
+        </p>
+        <p>
+            这很像优势加权回归，只是这里对优势做过滤，而不是乘指数化的优势。也可以对所有数据训练、把损失乘以 $e^{A}$，但他说那个目标要调很多参，如果只能跑一次实验，一般更推荐过滤。
+        </p>
+        <h3>训练的到底是什么</h3>
+        <p>
+            有学生问，是不是只在错误解中好步骤之前的部分上训练？他说不是，他们起初也以为只能那样，还专门做了消融。假设 $A(s_1, a_1)$ 很正、$A(s_0, a_0)$ 很负，你不会训练策略在 $s_0$ 生成 $a_0$，只训练它在 $(s_0, a_0)$（也就是 $s_1$）的条件下生成 $a_1$。损失是“给定 $s_i$ 生成 $a_i$”，不训练模型生成之前的动作或步骤。
+        </p>
+        <ul>
+            <li>有没有一个单独的提示器在模型行动时不断提示它？没有。强化学习里，训练时让策略在 $s_1$ 生成 $a_1$、在 $s_2$ 生成 $a_2$，但部署时它一口气生成一整串 token；$s_1$ 就是题目 token 加上到目前为止的步骤，同一个策略接着生成下一步。只是训练时把它拆成了步骤。</li>
+            <li>只在某一步上训练，是因为马尔可夫性质、不在乎怎么到达那里吗？某种程度上不是。$s_1$ 包含了全部历史（题目拼上第一步），换个角度看它是以全部历史为条件的非马尔可夫策略；如果把 $s_1$ 定义为拼接后的状态，它就是马尔可夫的。按步骤来是为了更好地弄清解的哪一部分让模型走偏了。</li>
+            <li>如果 Q 值很负、但优势是正的，要放进训练集吗？他们确实把错误轨迹里真正好的步骤放进了数据集，这没问题。但如果某些轨迹从任何前缀出发都不可能成功，优势和 Q 值都很小，把它们过滤掉可能会好一点；他没有很确定的结果，不打算说这就是正确做法。看起来敏感性不大，因为问题在前缀，而你只训练在前缀条件下生成那一步，不训练模型生成前缀。</li>
+        </ul>
+        <h3>结果</h3>
+        <p>
+            这解决了前面误差上升的问题，至少在他们能训练的范围内：同样以每题正确答案数为横轴，按优势过滤比 RFT 好，RFT 之前是误差回升的。他们按某种启发式定义测了虚假步骤的数量，从定性角度看也减少了。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 逐步 DPO：离线强化学习版本</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=3054s" target="_blank">0:50:54</a>–0:55:17 · DPO for reasoning</em></p>
+        <p>
+            同样的原则可以用于离线强化学习，这就是基于 DPO 的方法。做法和精确计算优势稍有不同，但流程一样：从正在训练的基础模型取一条解，假设是错的。之前是保留有用的步骤、丢掉其他；现在做 rollout 时，不丢掉 rollout、也不只是用它估计优势，而是取一条共享前缀、最终成功的 rollout，和模型自己那条没成功的解组成一个偏好对：（前缀 + 一段正确的修正）优于（前缀 + 一段错误的步骤），放进 DPO 训练集。对一条正确的解也一样：从它的前缀做 rollout，也许有一条 rollout 没成功，同样组成偏好对。
+        </p>
+        <p>
+            和前面有两处不同：一是认识到前缀是共享的，正确和错误 rollout 的区别只在前缀之后那一小段；二是不只用 rollout 计算优势，而是保留 rollout 里的完整步骤，在这些 token 上训练。损失就是在这两段解上套用原来的 DPO 损失。
+        </p>
+        <p>算法：对 $t = 1, \ldots, T$：</p>
+        <ol>
+            <li>从当前策略采样 $y_1, \ldots, y_n\sim\pi_\theta(\cdot\mid x)$；</li>
+            <li>从这些解的前缀做 rollout，构造偏好数据集 $\mathcal{D}_{\text{pref}}$：前缀来自当前模型，偏好对的一部分来自正在训练的 $\pi_\theta$，另一部分来自 rollout 策略；</li>
+            <li>在 $\mathcal{D}_{\text{pref}}$ 上最小化 DPO 损失。</li>
+        </ol>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>rollout 要质量高还是要多样？他说他们在一篇论文里尝试形式化过：可以写出一个式子，求让它最大的 rollout 策略，它在某种程度上平衡多样性和质量。如果模型很差、大多生成错解，就需要一个多少能成功的 rollout 策略，否则永远只看到失败，学不到怎样解题；如果模型还行，比如 50% 准确率，可能只需要多样的解法，看出自己更容易在哪些地方失败，也就是覆盖。和强化学习里的所有问题一样，是探索和利用的权衡。</li>
+            <li>怎样把一条采样轨迹切成步骤？这项工作里按句子切。一般来说可以在模型里约定：OpenAI 的模型常生成 markdown 的“Step 1”大标题，然后写一段，再“Step 2”。随着模型指令遵循能力变强，可以提示它对复杂问题按特定格式回答，比如“不要用 step 这个词，每次写一个逻辑块的计算，画一条横线，再写下一块”，它多半会照做，训练中也可以这样，再按格式划分步骤。没有通用定义。</li>
+            <li>有没有生成步骤的特殊 token 约定？他没见过普遍采用的约定。他们用过、也见过别的论文用的约定是生成“Step #1:”之类再写内容，可以是好几行，但这仍是少数。这项工作用行，后续工作用了 step 标记。</li>
+        </ul>
+        <h3>结果：8 倍数据效率</h3>
+        <p>
+            再回到以原始数据集题目数量为横轴的图，两个模型 Llama 2 和 DeepSeek V2（他说用 Llama 2 说明这工作有多老，虽然才一年，但 Llama 2 感觉已经很久远了）。和只在人写解答上训练的 SFT（实线）相比，逐步 DPO（虚线）达到同样测试误差所需数据少 8 倍；RFT 是 2 倍，为避免图太乱删掉了那条线；8 倍在 Llama 2 上也大致成立。高层结论：用这种逐步信用分配做离线强化学习，比模仿学习的数据效率高得多，同样的基础模型、少 8 倍的题目就能达到同样表现。
+        </p>
+        <ul>
+            <li>图里的 Pass@5 是什么？给模型五次机会，至少成功一次的比例。这是一种评估方式：模型一次做不对，给它 $n$ 次也许能做对，这就是 Pass@n。对这个结果来说不重要，要看的是 8 倍的数据效率提升。</li>
+            <li>推荐用什么采样温度？他见过大多数人用 0.6，但不是定死的。</li>
+        </ul>
+    </section>
+
+    <section id="t09">
+        <h2>09. 在线强化学习：0/1 奖励、GRPO 和过程优势验证器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=3317s" target="_blank">0:55:17</a>–1:05:59 · Online RL recipes</em></p>
+        <h3>基本做法：0/1 奖励</h3>
+        <p>
+            最基本的在线做法不用逐步优势，而是把 RFT 推广到在线强化学习：不再过滤再做 SFT，直接做 on-policy 强化学习。从当前策略生成 rollout（可能对也可能错），用奖励函数检查答案打分；没给出答案可以扣分，违反格式也可以扣分，有各种奖励塑形（Reward Shaping）的做法。然后用策略梯度最大化奖励，基本形式就是 $\nabla\log\pi\cdot r$：
+        </p>
+        $$\nabla_\theta J(\theta) = \mathbb{E}_{x,\ y\sim\pi_\theta(\cdot\mid x)}\left[\nabla_\theta\log\pi_\theta(y\mid x)\, r(y, y^\ast)\right]$$
+        <p>
+            也有很多工作超越基本的 REINFORCE 式策略梯度，用 GRPO 之类的方法。他说 GRPO 就是 PPO 在这个设定下的扩展：PPO 用学到的价值函数，GRPO 用基于 rollout 的优势估计代替学到的价值函数（或 Q 函数）。归根到底是同一套基本强化学习配方，用在这个带 0/1 奖励的 MDP 上。
+        </p>
+        <h3>在线强化学习里的逐步优势</h3>
+        <p>
+            最后一种方法：在线强化学习里也用逐步优势。训练过程中，从当前策略取解，做 rollout 计算优势；也可以不每次都做 rollout，而是训练一个类似奖励模型的东西去拟合这些优势（或 Q 值）预测。这和 RLHF 的奖励模型很像，区别是它给每一步打分（每一步的 Q 值或优势），而不是给整个序列一个奖励。有了这个优势预测网络，对策略的任何 rollout，都可以查询它给每一步打分，然后优化“最终奖励加上这些逐步优势”。
+        </p>
+        <p>
+            他们把它叫做过程优势验证器（Process Advantage Verifiers，PAV）：“过程”因为给每一步打分，“优势”因为拟合的是优势函数，“验证器”因为在推理领域，奖励模型常被称为验证器（Verifier）。看到这个词，可以理解为奖励模型的同义词，这里也可以看作某种 Q 函数或价值函数。论文是 Setlur 等，Rewarding Progress: Scaling Automated Process Supervision for LLM Reasoning（ICLR 2025）。
+        </p>
+        <p>
+            结果：做稠密奖励强化学习（过程奖励或基于优势的奖励），比 ORM（结果奖励模型，Outcome Reward Model），也就是只在轨迹末尾给稀疏的 0/1 奖励，准确率高得多。样本效率提升约 5 到 6 倍，绝对性能提升约 6% 到 7%。他说这些数看起来不大，但在他们用的 2B 和 9B 模型上，据说是某些数据集上能得到的最好结果。幻灯片还指出，PAV 提供了解决难题至关重要的探索：基础策略独立尝试 $N=256$ 次也解不出的难题，用 PAV 训练后能发现解。
+        </p>
+        <h3>课堂问答</h3>
+        <p>
+            推理能泛化到什么程度？在 MATH 上训练，会提升 GSM8K 吗？他说不会，很多人都展示过；但在难度不一的混合提示上训练就可以。上面那个基本的在线配方就是很多公开了配方的思考模型所用的，比如 DeepSeek-R1，它在相当程度上能泛化，但不是对所有问题都能泛化。
+        </p>
+        <h3>第一部分要点（幻灯片）</h3>
+        <ul>
+            <li>挑战：模仿正确数据能扩展，但扩展得慢，而且会引入被记住的虚假步骤。</li>
+            <li>算法：精心构造、针对具体模型的负数据，通过离线或在线强化学习能帮助解决这个问题。</li>
+            <li>结果：离线强化学习比模仿学习样本效率高 8 倍；带稠密优势奖励的在线强化学习再提升 5 到 6 倍。</li>
+        </ul>
+    </section>
+
+    <section id="t10">
+        <h2>10. 思考模型：什么变了</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=O2VpNnwB4lM&t=3959s" target="_blank">1:05:59</a>–1:10:30 · Modern thinking models</em></p>
+        <p>
+            第二部分主要参考 DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning（2025）、Kimi K1.5: Scaling Reinforcement Learning with LLMs，以及可选的 Optimizing Test-Time Compute requires Solving a Meta-RL Problem（Setlur 等，CMU MLD Blog，2025）。他跳过了一些幻灯片，录像里只讲了要点。
+        </p>
+        <p>
+            新的思考模型（DeepSeek-R1 系列、OpenAI 的 o 系列）可以想得更久、给出更好的答案。他的看法（幻灯片上标注“这是我的版本”）是，这些模型的训练配方和这一讲讲的很相似，只有一些小变化：
+        </p>
+        <ul>
+            <li>强化学习的训练目标没变：DeepSeek-R1 用 GRPO，本质是加了一些调整的 PPO（他口头说成了 TRPO，幻灯片上是 GRPO）；Kimi 1.5 用某种 APA（Advantage-Induced Policy Alignment）。不用细究，大致都是稍加调整的策略梯度方法。奖励函数有一些小改动。</li>
+            <li>粗略地说，动作空间变了。他说这么讲很粗糙，严格说是错的，因为模型仍然逐 token 生成；但做强化学习的基础模型更擅长执行有意思的“元过程”了：写出一个解，再去验证，回溯到某处换种做法。可以把这看成步骤的另一种定义，模型能生成比“再算一个量”更有意思的步骤，也就是重新审视答案、验证、回溯、规划这类“宏动作”（Macro Actions）。</li>
+            <li>大幅提高 token 预算，把多个宏动作串起来：告诉模型思考多少 token 都行，强化学习时可以采样很长的解，只要最后答对。在这样的条件下，强化学习训练算法能给出好得多的表现，这就是现在的思考模型。</li>
+        </ul>
+        <p>
+            一个反事实实验：如果拿一个不会做基本的答案检查、验证或生成更好答案的模型，现在用强化学习就训不好它（幻灯片引 Gandhi 等，Cognitive Behaviors that Enable Self-Improving Reasoners，2025：某个模型在强化学习中不提升）。所以高层技术没变，变的是基础模型能采样出更有意思的步骤来训练，这带来了现在看到的惊人结果。
+        </p>
+        <h3>幻灯片上未展开的内容</h3>
+        <ul>
+            <li>思考模型的轨迹示例（Marjanović 等，DeepSeek-R1 Thoughtology，2025）。</li>
+            <li>形式化：最终目标是在测试题上的表现，模型采样的回答比通常的解更长，每道题有总的计算约束，这个计算预算是固定的；可以用强化学习（像 DeepSeek-R1 那样的结果奖励强化学习）优化，也可以用 SFT 或 RFT（收集数据、按正确性过滤、最大化似然）。</li>
+            <li>强化学习训练会放大回答长度（Kimi 1.5 技术报告），幻灯片问“为什么？”。</li>
+            <li>新范式：测试时扩展（Test-Time Scaling）。与其换更大的语言模型，不如让模型生成更长的回答、“想得更多”、自我纠错（Snell 等，Scaling LLM Test-Time Compute Optimally can be more Effective than Scaling Model Parameters，ICLR 2025 Oral）。思考模型登上排行榜前列（OpenAI 的 o3 和 o4-mini 博客，2025）。</li>
+            <li>结尾总结的几个要素：把问题看成一个适应（Adaptation）问题；用奖励信号训练，强化学习远胜 SFT；只有结果奖励不够，需要稠密奖励。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>解数学题是稀疏 0/1 奖励、确定性动力学的 MDP：状态是题目加已写步骤的拼接，动作是步骤。</li>
+            <li>只做下一个 token 预测，测试误差随数据量下降很慢（约 $D^{-0.15}$），高质量数据也快用完了。RFT（采样、按正确性过滤、模仿）比 SFT 数据效率高 2 倍，但做太多会因虚假步骤损害泛化。</li>
+            <li>信用分配：从前缀做 rollout，估计每一步的 $Q^{\tilde\pi}$，优势取相邻前缀的 Q 值之差，负优势对应坏步骤或虚假步骤。</li>
+            <li>按优势过滤步骤（类似 AWR）解决了误差回升；逐步 DPO 用共享前缀的成功与失败 rollout 组成偏好对，数据效率是 SFT 的 8 倍。</li>
+            <li>在线强化学习：0/1 奖励加策略梯度（REINFORCE、GRPO）；用 PAV 给每一步优势作稠密奖励，样本效率再高 5 到 6 倍，绝对性能高 6% 到 7%，并帮助探索难题。</li>
+            <li>思考模型的训练目标没变，变的是基础模型能执行验证、回溯等宏动作，以及大幅增加的 token 预算。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224R Deep Reinforcement Learning · Lecture 10: RL for LLM Reasoning · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

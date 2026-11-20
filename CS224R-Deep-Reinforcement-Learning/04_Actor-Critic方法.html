@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第4讲：Actor-Critic 方法 | Stanford CS224R 深度强化学习笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="03_策略梯度.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS224R 目录</a> · 04</span>
+    <span><a href="05_离策略Actor-Critic.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第4讲：Actor-Critic 方法</h1>
+        <p class="subtitle">价值函数、Q 函数和优势函数，用优势函数改写策略梯度，只拟合 $V^\pi$ 就能估计优势，蒙特卡洛估计和自举（TD）估计的偏差方差取舍，n 步回报，折扣因子的另一种解释，以及完整的 Actor-Critic 算法</p>
+        <div class="author-meta">
+            主讲：Chelsea Finn · 课堂日期：2025 年 4 月 11 日 · 时长：1 小时 4 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=oejFZShW9hU" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs224r.stanford.edu/spring_2025/slides/04_cs224r_actor_critic_2025.pdf" target="_blank">2025 幻灯片</a> · <a href="https://cs224r.stanford.edu/slides/04_cs224r_actor_critic_2026.pdf" target="_blank">2026 幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            上一讲的策略梯度用一条轨迹里实际观察到的未来奖励来给动作加权，噪声大，也浪费数据。这一讲的 Actor-Critic 方法额外训练一个网络来估计“状态和动作有多好”，用这个估计代替单条轨迹的奖励和。Chelsea 说 Actor-Critic 是 PPO 等算法的基础，这些算法被用来训练语言模型、在仿真里训练人形机器人。
+        </p>
+        <p>
+            学习目标有两条：怎样估计某个策略下一个状态和动作有多好，这叫策略评估（Policy Evaluation），在 Actor-Critic 之外也很有用；怎样用这些估计构造更好的强化学习算法。幻灯片后半部分的离策略 Actor-Critic 这节课没讲到，放在<a href="05_离策略Actor-Critic.html">第 5 讲</a>。2026 版幻灯片和 2025 版内容相同。
+        </p>
+        <ol>
+            <li><a href="#t01">回顾：策略梯度和重要性权重</a> · <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">价值函数、Q 函数和优势函数</a> · <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=262s" target="_blank">0:04:22</a></li>
+            <li><a href="#t03">用优势函数改进策略梯度</a> · <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=724s" target="_blank">0:12:04</a></li>
+            <li><a href="#t04">算法结构，以及只拟合 $V^\pi$</a> · <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=1319s" target="_blank">0:21:59</a></li>
+            <li><a href="#t05">蒙特卡洛估计</a> · <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=1879s" target="_blank">0:31:19</a></li>
+            <li><a href="#t06">自举估计，和蒙特卡洛的对比</a> · <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=2342s" target="_blank">0:39:02</a></li>
+            <li><a href="#t07">n 步回报和折扣因子</a> · <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=2995s" target="_blank">0:49:55</a></li>
+            <li><a href="#t08">完整的 Actor-Critic 算法</a> · <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=3380s" target="_blank">0:56:20</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 回顾：策略梯度和重要性权重</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=0s" target="_blank">0:00:00</a>–0:04:22 · Recap and importance weights / Introduction to actor-critic</em></p>
+        <p>
+            在线强化学习：用策略在环境里收集一批数据，用它改进策略，重复。策略梯度的更新是：从策略采 $N$ 条轨迹，计算动作对数似然的梯度，用未来奖励加权；再减去基线（比如平均奖励），使高于平均的未来对应的动作似然上升，低于平均的下降。
+        </p>
+        <p>
+            这个算法完全是 on-policy 的，每批数据只能走一步梯度，要改进就得收集大量数据。上次开始讨论怎样变成 off-policy：用新策略的动作概率除以旧策略的动作概率作为重要性权重，给目标加权。她补充说重要性权重的数学很简单漂亮，但它不是万能的，只适用于两个策略很接近的情况；策略差别大时，这个比值会变得很大或很小，梯度估计也会变差。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 价值函数、Q 函数和优势函数</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=262s" target="_blank">0:04:22</a>–0:12:04 · Value and Q functions / Policy evaluation example</em></p>
+        <p>
+            价值函数 $V^\pi(s)$ 表示从状态 $s$ 出发、之后一直按策略 $\pi$ 行动，奖励之和的期望。期望写在里面更清楚：
+        </p>
+        $$V^\pi(s_t) = \sum_{t'=t}^{T}\mathbb{E}_{\pi}\left[r(s_{t'}, a_{t'})\mid s_t\right]$$
+        <p>
+            直观理解：从这个状态出发，用策略收集很多条轨迹，把从这一步到结束的奖励加起来，再对这些轨迹取平均，就是这个状态对这个策略来说有多好。
+        </p>
+        <p>
+            Q 函数 $Q^\pi(s,a)$ 和它很接近，区别是先在 $s$ 做一个指定的动作 $a$（它不一定是策略会选的），然后再按 $\pi$ 行动。因为环境是随机的，做完这个动作也可能到达不同的状态，所以同样取平均：
+        </p>
+        $$Q^\pi(s_t, a_t) = \sum_{t'=t}^{T}\mathbb{E}_{\pi}\left[r(s_{t'}, a_{t'})\mid s_t, a_t\right]$$
+        <p>两者的关系：状态价值等于按策略选动作时 Q 值的期望：</p>
+        $$V^\pi(s_t) = \mathbb{E}_{a_t\sim\pi(\cdot\mid s_t)}\left[Q^\pi(s_t, a_t)\right]$$
+        <p>
+            最后一个量是优势函数（Advantage Function），衡量在某个状态做动作 $a$ 比按策略行动好多少：
+        </p>
+        $$A^\pi(s_t, a_t) = Q^\pi(s_t, a_t) - V^\pi(s_t)$$
+        <p>
+            有学生问 V 和 Q 之间有没有归一化。她说期望就是平均，用样本估计时会除以样本数，从这个意义上说有归一化。另一位同学问怎样从定义推出 $V=\mathbb{E}[Q]$：Q 里 $a_t$ 是作为输入给定的，之后的动作从 $\pi$ 采样；如果把 $a_t$ 也从策略采样再代进去，得到的就是 V。
+        </p>
+        <h3>例子：学打鼓</h3>
+        <p>
+            你想学打鼓，如果一个月内能演奏这首曲子奖励为 1，否则为 0，所以 $T$ 是一个月后。动作有三个：$a_1$ 坐在海滩上，$a_2$ 看电视，$a_3$ 练鼓。当前策略是在所有状态下都坐海滩，当前状态下你还不会打鼓。$V^\pi$、三个动作的 $Q^\pi$ 和 $A^\pi$ 分别是多少？
+        </p>
+        <ul>
+            <li>$V^\pi = 0$：一直坐海滩，学不会打鼓。</li>
+            <li>$Q^\pi(s, a_1) = Q^\pi(s, a_2) = 0$。</li>
+            <li>$Q^\pi(s, a_3)$：如果练这一次就够，是 1；如果比如只练了一小时、之后按策略坐海滩，可能低于 1，取决于一个时间步有多长。</li>
+            <li>$A^\pi = Q^\pi - V^\pi$：练鼓为正，另外两个为 0。</li>
+        </ul>
+        <p>
+            有学生问，如果练一次不够学会，Q 是 1、介于 0 和 1 之间，还是 0？她说它表示的是练了这么多之后能演奏的概率，可能是 0，练一次可能很难学会；对很有天赋的人，只练一次就够，值会高一些。类似地，下国际象棋时，价值函数就是某个人在某个局面下获胜的概率，评估的是这个状态对这个人有多好。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 用优势函数改进策略梯度</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=724s" target="_blank">0:12:04</a>–0:21:59 · Actor-critic components / Limitations of policy gradients / Advantage estimation</em></p>
+        <p>
+            上次两个让人不满意的例子。一是学走路时，策略向前迈一小步然后向后摔倒，我们会压低“向前迈一步”的似然，因为不知道是不是这一步导致了摔倒；如果能知道向前迈一步是有进展、有优势的，就能提高它的似然。这暗示了 Actor-Critic 的直觉。二是叠夹克的稀疏奖励：只叠了袖子或只铺平的轨迹奖励为 0，没被利用起来；如果能知道这些动作对任务有进展，就能正面地使用这些轨迹。总结：策略梯度对收集到的数据利用效率不高，能判断哪些动作有优势，就能更好地利用数据。
+        </p>
+        <p>
+            有学生问，向前迈一步在策略梯度里算负还是中性？她说在那批轨迹里，这条轨迹的 reward-to-go 很负，低于平均，实际上在倒退，所以会压低向前迈步的似然。今天的算法原则上能提高向前迈步的似然、降低向后摔的似然。
+        </p>
+        <h3>第一步：用 Q 代替单样本的奖励和</h3>
+        <p>
+            关键在梯度里那一项 $\sum_{t'=t}^{T} r(s_{i,t'},a_{i,t'})$，它告诉我们未来奖励为负时要压低似然。它是在状态 $s$ 做动作 $a$ 之后未来奖励的估计，但只来自一条轨迹。更好的版本是真正的 Q 函数：多次运行策略得到的、在策略期望下的真实 reward-to-go。梯度变成
+        </p>
+        $$\nabla_\theta J(\theta) \approx \frac{1}{N}\sum_{i=1}^{N}\sum_{t=1}^{T}\nabla_\theta\log\pi_\theta(a_{i,t}\mid s_{i,t})\, Q^\pi(s_{i,t}, a_{i,t})$$
+        <p>Q 值高的动作似然上升，Q 值低的下降。</p>
+        <h3>第二步：基线换成 V</h3>
+        <p>
+            之前的基线是平均奖励。照搬过来就是平均 Q 值，采样一些 $s_i, a_i$ 取平均；而按策略对动作取 Q 的期望就是 $V^\pi$。所以自然的基线就是价值函数，Q 减 V 就是优势函数：
+        </p>
+        $$\nabla_\theta J(\theta) \approx \frac{1}{N}\sum_{i=1}^{N}\sum_{t=1}^{T}\nabla_\theta\log\pi_\theta(a_{i,t}\mid s_{i,t})\, A^\pi(s_{i,t}, a_{i,t})$$
+        <p>
+            优势高的动作似然上升，优势低的下降。回到打鼓的例子，练鼓相对当前策略的优势高，于是提高练鼓的似然，降低其他动作的似然。另一种说法是：对优势函数估计得越好，梯度噪声越小；知道真实优势函数，就能得到很好的梯度。可惜我们不知道真实的优势函数，接下来几页讲怎样估计。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>和原来的策略梯度在采样上有什么不同？原来对轨迹里的一个状态动作对，只用这条轨迹的奖励和，相当于只用一个数据点来估计，噪声很大。概念上的真实优势，是从这个状态和动作出发把策略运行无数次，和从这个状态按策略行动比较得到的。</li>
+            <li>这样做还在优化原来的目标吗？是，优化的是完全相同的期望奖励和。如果优势函数准确，这就是那个目标的正确梯度，采样只是用来采状态和动作。在有真实优势的前提下，这是梯度的无偏估计；今天后面会看到有偏的东西。</li>
+            <li>基线是对当前批次平均还是对所有轨迹平均？如果设成真实的 V，相当于无穷多个样本；怎样估计 V 马上讲。</li>
+        </ul>
+    </section>
+
+    <section id="t04">
+        <h2>04. 算法结构，以及只拟合 $V^\pi$</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=1319s" target="_blank">0:21:59</a>–0:31:19 · Actor-critic algorithm structure / Value function approximation</em></p>
+        <p>
+            原来的循环是“运行策略”和“改进策略”。现在多一步：拟合一个估计期望回报的模型，也就是估计 $V^\pi$、$Q^\pi$ 或 $A^\pi$；改进策略时使用这个估计。
+        </p>
+        <h3>为什么只拟合 V</h3>
+        <p>
+            直接拟合 $A^\pi$ 不容易拿到直接的监督信号。分别拟合 Q 和 V 又要学两个东西。可以把优势改写成只依赖 $V^\pi$ 的形式。Q 值等于当前这一步的奖励加上之后的奖励；之后会到达某个下一状态 $s_{t+1}$，它从环境动力学中采样；从 $s_{t+1}$ 起按策略行动的奖励和就是 $V^\pi(s_{t+1})$：
+        </p>
+        $$Q^\pi(s_t, a_t) = r(s_t, a_t) + \mathbb{E}_{s_{t+1}\sim p(\cdot\mid s_t, a_t)}\left[V^\pi(s_{t+1})\right] \approx r(s_t, a_t) + V^\pi(s_{t+1})$$
+        <p>
+            我们没法从动力学采样，但收集数据时确实看到了一个 $s_{t+1}$，就用它做单样本近似。于是
+        </p>
+        $$A^\pi(s_t, a_t) \approx r(s_t, a_t) + V^\pi(s_{t+1}) - V^\pi(s_t)$$
+        <p>只要有 $V^\pi$ 的估计，就能估计优势，所以直接拟合 V。</p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>为什么是近似？下一状态有多种可能，我们只用了数据里看到的那一个样本，要精确就得用无穷多样本。环境很确定时这个估计很好，可能的未来不多；越随机越差。后面会看到用大量数据、多步梯度让它不那么糟的办法。</li>
+            <li>需要和环境新的交互吗？不需要，$s_t, a_t, s_{t+1}$ 来自同一条轨迹。她还说很多强化学习文献为了简单把上标 $\pi$ 省掉，但它很重要，因为这是某个特定策略的价值，不是任意策略的。</li>
+            <li>为什么选 V 而不是 Q 或 A？实践中更简单一些。也有直接估计 Q 的方法，下周会讲。</li>
+        </ul>
+        <p>
+            $V^\pi$ 用一个神经网络表示，参数记作 $\phi$：输入状态，输出一个标量，表示这个状态在这个策略下的价值，记作 $\hat V^\pi_\phi(s)$。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 蒙特卡洛估计</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=1879s" target="_blank">0:31:19</a>–0:39:02 · Temporal difference learning / Monte Carlo estimation</em></p>
+        <p>
+            怎样估计 $V^\pi$？最初的 vanilla policy gradient 只用一条轨迹的单个样本，不学模型。原则上可以用很多样本：回到同一个状态，从那里做很多次 rollout。但这要求能把世界重置到那个状态，在很多场景里很难；在仿真里有时能重置模拟器，但实践中通常不这么做。
+        </p>
+        <p>
+            既然不能重置，就把采到的多条轨迹放在一起，用单样本估计作为标签训练一个模型。轨迹里会有相似的状态，网络可以把数据“摊销”起来：环境里相似状态出现多次，各自带着对应的未来奖励，网络就能在给定状态上得到更密集的奖励信息。
+        </p>
+        <p>
+            具体做法：对数据集中第 $i$ 条轨迹的第 $t$ 步，计算从 $t$ 到结束观察到的奖励和，作为标签：
+        </p>
+        $$y_{i,t} = \sum_{t'=t}^{T} r(s_{i,t'}, a_{i,t'})$$
+        <p>
+            这样就得到一个监督学习数据集 $\{(s_{i,t}, y_{i,t})\}$，数据点个数是轨迹数乘以平均步数。用 L2 误差拟合：
+        </p>
+        $$\min_\phi\ \frac{1}{2}\sum_{i}\sum_{t}\left\|\hat V^\pi_\phi(s_{i,t}) - y_{i,t}\right\|^2$$
+        <p>这叫蒙特卡洛估计（Monte Carlo Estimation）：跑很多次模拟、很多次 rollout，学习预测未来奖励的结果。</p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>每次策略改变都要重新收集数据、重新拟合吗？用这个方法是的。她说这是拟合价值函数最简单也最笨的方法，后面会看到能复用其他数据的方法。</li>
+            <li>既然要跑那么多 rollout，学一个“给定状态动作预测未来状态”的模型是否合理？状态空间很小时可以直接存下来做估计；也可以训练网络预测未来状态，这类方法叫基于模型的方法，在学习世界的模型，几周后会讲。</li>
+            <li>每走一步策略梯度都要训练一次价值网络吗？这里的梯度步是在拟合价值函数，不改变策略，所以可以在这个目标上走很多步梯度而不用重新收集数据。</li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. 自举估计，和蒙特卡洛的对比</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=2342s" target="_blank">0:39:02</a>–0:49:55 · Bootstrapping in actor-critic / Monte Carlo vs bootstrapping</em></p>
+        <p>
+            有比蒙特卡洛更好的做法。训练到一半时，我们已经开始知道某些状态的价值，可以把自己的估计用作监督目标：已知从这一步到下一步得到了奖励 $r$，就用 $r$ 加上下一状态的价值估计作为目标，而不用整段未来奖励的和。
+        </p>
+        <p>理想的目标是真实的期望奖励和，它等于当前奖励加上下一步起的期望奖励，后者就是下一状态的价值：</p>
+        $$y_{i,t} = \sum_{t'=t}^{T}\mathbb{E}_{\pi}\left[r(s_{t'}, a_{t'})\mid s_{i,t}\right] \approx r(s_{i,t}, a_{i,t}) + V^\pi(s_{i,t+1}) \approx r(s_{i,t}, a_{i,t}) + \hat V^\pi_\phi(s_{i,t+1})$$
+        <p>
+            用自己对下一步价值的估计作为监督目标的一部分，这叫自举（Bootstrapping）。训练目标和之前完全一样，还是回归到这些目标，只是标签换了；而且标签会随着梯度下降而变，所以通常每次梯度更新都重新计算标签。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>多久更新一次 $\hat V$？实践中每一步都可以更新；网络很大、更新很贵时也可以少更新几次。通常每个梯度步都更新。</li>
+            <li>这是基于一条轨迹，还是基于多条相近的轨迹？数据集跨多条轨迹，$i$ 索引轨迹、$t$ 索引时间。对单个数据点，不会从它出发跑多次模拟，但标签用的是对下一状态之后会发生什么的估计，而不是这条轨迹里实际发生的单个样本，所以能更好地估计下一状态所有可能的结果。</li>
+            <li>价值函数为什么只输入 $s$，不包括之前的时间步？理想目标是未来奖励之和，它是当前奖励加上以当前状态为条件的未来奖励，未来只取决于当前所在的状态。</li>
+            <li>是否需要一个好的初始价值估计？开始时估计很差，目标也会很差。初始化有一些讲究，但通常不需要特别花哨，可以直接开始训练。不要把网络初始化成输出 $-1000$ 之类的值，不过一般也不会那样初始化。她说自己实践中没见过这方面的问题；原则上也可以先用蒙特卡洛目标把数值拉到合理范围，再换成自举。</li>
+            <li>这是反向传播的一部分吗？用反向传播来优化这个目标；同时也可以把它看成把信息沿时间向后传播，这和在网络里反向传播梯度是两回事。这个做法的另一个名字是时序差分学习（Temporal Difference Learning，TD），看的是下一时间步和当前时间步之间的差。</li>
+        </ul>
+        <p>小结：蒙特卡洛用 rollout 的奖励和监督；自举用奖励加上对下一状态的当前价值估计监督。</p>
+        <h3>练习：两条轨迹</h3>
+        <p>
+            假设只有两条轨迹（实践中会更多）：一条最终奖励为 $-1$，另一条最终奖励为 $1$，之前每一步奖励都是 0。两条轨迹经过同一个蓝色状态，之后分开；粉色状态在最终奖励为 $-1$ 的那条轨迹上、蓝色状态之前。用蒙特卡洛和用自举分别估计蓝色状态和粉色状态的价值是多少？
+        </p>
+        <ul>
+            <li>蒙特卡洛，蓝色状态：同一个状态在数据里出现两次，标签分别是 $-1$ 和 $1$，平均为 0。这是蒙特卡洛唯一能同时用到两条轨迹信息的情况。</li>
+            <li>蒙特卡洛，粉色状态：只看到它所在轨迹的未来奖励和，是 $-1$。</li>
+            <li>自举，蓝色状态：同样是平均未来，没什么特别可以自举的，也是 0。</li>
+            <li>自举，粉色状态：它的未来里有蓝色状态，而蓝色状态的估计是 0，所以粉色状态也被赋值为 0。</li>
+        </ul>
+        <p>
+            这是两种估计不同的例子。可以说自举的估计更准，因为它借助自己的价值估计，更有效地在轨迹之间汇总信息。
+        </p>
+        <p>
+            两种方法的取舍：蒙特卡洛方差高，但完全无偏；自举方差低得多，但可能不正确，因为当前的价值估计难免有一些误差，即有偏差。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. n 步回报和折扣因子</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=2995s" target="_blank">0:49:55</a>–0:56:20 · N-step returns / Discount factors</em></p>
+        <h3>n 步回报</h3>
+        <p>
+            有没有折中？蒙特卡洛用整段奖励和，TD 用一步奖励加下一状态价值。可以在两者之间插值：先把未来 $n$ 步的奖励加起来（在方差还没涨太多之前），再接上第 $t+n$ 步的价值估计：
+        </p>
+        $$y_{i,t} = \sum_{t'=t}^{t+n-1} r(s_{i,t'}, a_{i,t'}) + \hat V^\pi_\phi(s_{i,t+n})$$
+        <p>
+            它的方差比完整的蒙特卡洛小得多，尤其 $n$ 较小时；偏差可能比一步 TD 小，因为用了更多直接观察到的奖励。这个目标叫 n 步回报（n-step Returns）。$n=1$ 是一步自举，$n=T$ 就是完整的蒙特卡洛，实践中通常介于两者之间效果最好。时间步很小时它尤其有用：如果一个时间步只有 10 毫秒，两步之间几乎什么都没发生。
+        </p>
+        <p>
+            有学生问，轨迹很长时能不能把几种目标都加进数据集？原则上可以。但高方差的标签通常会让学习变差，因为带来更多随机性；价值估计不好时，自举标签也是问题。所以实践中一般只选一种来监督。
+        </p>
+        <h3>折扣因子</h3>
+        <p>
+            到目前为止都在直接加奖励。第一讲提过，回合无限长或很长时，价值估计会变得很大，不一定想把未来所有奖励一视同仁地加起来。一个简单的办法是在目标里加一个系数，偏向更早的奖励：
+        </p>
+        $$y_{i,t} \approx r(s_{i,t}, a_{i,t}) + \gamma\,\hat V^\pi_\phi(s_{i,t+1}),\qquad \gamma\in[0,1]$$
+        <p>
+            $\gamma=1$ 时和之前一样，也可以设成 0.9 或 0.99，意思是更在乎当前的奖励，不那么在乎将来的奖励。加折扣因子可以看成稍微改变了决策过程：相当于 agent 在任何时刻都有一定概率“死掉”。比如 $\gamma=0.99$，等价于每一步有 1% 的概率进入一个奖励为 0、而且永远出不去的状态。对原来的 MDP，就是以概率 $1-\gamma$ 进入这个死亡状态，其余转移概率都乘以 $\gamma$。（幻灯片注明这页改编自 Sergey Levine 的课件。）
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>$\gamma$ 和 n 步回报有关系吗？$\gamma$ 小时做法要变吗？n 步回报里最后那个价值项的系数会变成 $\gamma^n$。它们是相互关联的：$\gamma$ 的选择取决于环境；如果要看得更远，通常是因为环境更确定、或时间步更小，这也会影响 $\gamma$ 的选择。</li>
+            <li>向前看多远，会影响你更重视短期还是长期吗？不会影响有多“贪心”，因为价值函数估计的都是奖励之和，几种目标估计的是同一个量。$n$ 只关系到在奖励上往前看多远，取决于方差增长得多快：增长慢可以看远一点，增长很快就用较小的 $n$。</li>
+        </ul>
+    </section>
+
+    <section id="t08">
+        <h2>08. 完整的 Actor-Critic 算法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=oejFZShW9hU&t=3380s" target="_blank">0:56:20</a>–1:03:30 · Summary of actor-critic</em></p>
+        <ol>
+            <li>用策略采样一批数据 $\{s_{i,t}, a_{i,t}, r_{i,t}, s_{i,t+1}\}$；</li>
+            <li>用数据里的奖励拟合价值估计 $\hat V^\pi_\phi$，例如用 n 步回报作为目标，在 $\min_\phi \sum_{i,t}\|\hat V^\pi_\phi(s_{i,t}) - y_{i,t}\|^2$ 上走多步梯度；</li>
+            <li>估计优势：$\hat A^\pi(s_{i,t}, a_{i,t}) = r(s_{i,t}, a_{i,t}) + \gamma\hat V^\pi_\phi(s_{i,t+1}) - \hat V^\pi_\phi(s_{i,t})$，它根据价值函数和看到的奖励，告诉我们数据里做的那个动作有多好；</li>
+            <li>计算策略梯度 $\nabla_\theta J(\theta)\approx\sum_{i,t}\nabla_\theta\log\pi_\theta(a_{i,t}\mid s_{i,t})\,\hat A^\pi(s_{i,t}, a_{i,t})$，提高估计为有优势的动作的似然，降低没有优势的；</li>
+            <li>$\theta\leftarrow\theta+\alpha\nabla_\theta J(\theta)$，然后回到第 1 步采新的一批数据。</li>
+        </ol>
+        <p>
+            这里有两个神经网络：一个是策略，一个是价值函数。这叫 Actor-Critic 算法：策略网络是行动者（Actor），价值网络是评论者（Critic），因为它在评判状态和策略有多好。回到前面的例子，这个算法能利用“向前迈一步再向后摔”的数据：尤其用自举估计时，它能从数据中学到向前迈一步相对其他动作有正的优势，对收集到的数据利用效率高得多。
+        </p>
+        <p>
+            回顾：策略梯度根据观察到的结果多做好事、少做坏事；Actor-Critic 学会估计什么好什么坏，再根据估计多做好事。用神经网络显式估计价值函数，可以得到更好的策略梯度。为此多了一步拟合模型。估计价值有三种办法：直接用奖励和（蒙特卡洛），用价值函数自举，以及两者混合（n 步回报）。这些统称策略评估。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>$V^\pi(s)$：从 $s$ 按 $\pi$ 行动的期望奖励和；$Q^\pi(s,a)$：先做 $a$ 再按 $\pi$；$V^\pi(s)=\mathbb{E}_{a\sim\pi}[Q^\pi(s,a)]$；优势 $A^\pi = Q^\pi - V^\pi$。</li>
+            <li>用优势替换单样本奖励和：$\nabla_\theta J\approx\sum_{i,t}\nabla_\theta\log\pi_\theta(a_{i,t}\mid s_{i,t})\,A^\pi(s_{i,t},a_{i,t})$，V 就是自然的基线。</li>
+            <li>只需拟合 $V^\pi$：$A^\pi(s_t,a_t)\approx r(s_t,a_t)+\gamma V^\pi(s_{t+1})-V^\pi(s_t)$。</li>
+            <li>策略评估的目标：蒙特卡洛 $\sum_{t'\ge t} r$（无偏、高方差）；自举 $r+\gamma\hat V(s_{t+1})$（低方差、有偏）；n 步回报介于两者之间，实践中常最好。</li>
+            <li>折扣因子 $\gamma$ 等价于每步以 $1-\gamma$ 的概率进入零奖励的吸收状态。</li>
+            <li>Actor-Critic = 策略网络（actor）+ 价值网络（critic），能更有效地利用数据。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224R Deep Reinforcement Learning · Lecture 4: Actor-Critic Methods · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

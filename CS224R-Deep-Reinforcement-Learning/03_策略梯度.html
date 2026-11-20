@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第3讲：策略梯度 | Stanford CS224R 深度强化学习笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="02_模仿学习.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS224R 目录</a> · 03</span>
+    <span><a href="04_Actor-Critic方法.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第3讲：策略梯度</h1>
+        <p class="subtitle">在线强化学习的基本循环，用对数导数技巧推出策略梯度，REINFORCE 算法和代理目标，三个机器人例子看梯度在做什么，因果性和基线两种降方差办法，on-policy 的代价，以及用重要性采样推出离策略策略梯度</p>
+        <div class="author-meta">
+            主讲：Chelsea Finn · 课堂日期：2025 年 4 月 9 日 · 时长：1 小时 3 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=KCAOXd4IO9o" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs224r.stanford.edu/spring_2025/slides/03_cs224r_policy_gradients_2025.pdf" target="_blank">2025 幻灯片</a> · <a href="https://cs224r.stanford.edu/slides/03_cs224r_policy_gradients_2026.pdf" target="_blank">2026 幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            上一讲的模仿学习简单、可扩展，但超不过演示者，也不能靠试错改进。这一讲开始讲在线强化学习，第一个算法是策略梯度（Policy Gradient）。Chelsea 说策略梯度是一些流行算法的基础，包括训练腿式机器人和训练语言模型用的算法，也是课程默认项目的一部分；今天能走到一半，到周五（下一讲 Actor-Critic 和 PPO）就有了大部分。学习目标是理解策略梯度背后的直觉，会实现，知道什么时候用。
+        </p>
+        <p>
+            推导部分用到这些符号：$\tau$ 是轨迹，$p_\theta(\tau)$ 是策略 $\pi_\theta$ 下的轨迹分布，$r(\tau)=\sum_t r(s_t,a_t)$ 是轨迹的奖励和，$J(\theta)$ 是要最大化的目标。2026 版幻灯片和 2025 版内容基本一致。
+        </p>
+        <ol>
+            <li><a href="#t01">从模仿学习到在线强化学习</a> · <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">在线强化学习的循环和目标函数</a> · <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=183s" target="_blank">0:03:03</a></li>
+            <li><a href="#t03">推导策略梯度：对数导数技巧</a> · <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=378s" target="_blank">0:06:18</a></li>
+            <li><a href="#t04">REINFORCE 算法和实现细节</a> · <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=926s" target="_blank">0:15:26</a></li>
+            <li><a href="#t05">直觉：加权的模仿，形式化的试错</a> · <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=1290s" target="_blank">0:21:30</a></li>
+            <li><a href="#t06">高方差，以及利用因果性</a> · <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=1618s" target="_blank">0:26:58</a></li>
+            <li><a href="#t07">奖励尺度问题和基线</a> · <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=2063s" target="_blank">0:34:23</a></li>
+            <li><a href="#t08">稀疏奖励的例子和代理目标</a> · <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=2925s" target="_blank">0:48:45</a></li>
+            <li><a href="#t09">小结，以及 on-policy 的问题</a> · <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=3252s" target="_blank">0:54:12</a></li>
+            <li><a href="#t10">重要性采样和离策略策略梯度</a> · <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=3377s" target="_blank">0:56:17</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 从模仿学习到在线强化学习</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=0s" target="_blank">0:00:00</a>–0:03:03 · Reinforcement learning recap / Imitation learning limitations / Policy gradient introduction</em></p>
+        <p>
+            回顾：强化学习的目标是最大化期望奖励和，期望取在轨迹的概率分布上，这个分布由在世界中行动的策略和可能随机的环境动力学决定，再加上奖励函数。上一讲的模仿学习通过最大化演示动作的似然来模仿专家，简单、可扩展，但不能超过演示者，也不能通过试错改进。上一讲还定义了离线算法（只用已有数据集）和在线算法（用学到的策略产生的新数据）。今天讲怎样用强化学习超过演示者、通过练习变好，具体是在线强化学习，第一个算法是策略梯度。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 在线强化学习的循环和目标函数</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=183s" target="_blank">0:03:03</a>–0:06:18 · Online RL workflow / RL objective formulation</em></p>
+        <p>在线强化学习算法的框架：</p>
+        <ol>
+            <li>初始化策略。可以随机初始化网络权重，也可以用模仿学习初始化，也可以用启发式方法，取决于问题。</li>
+            <li>运行策略收集数据，也就是在世界里尝试各种做法。</li>
+            <li>用这批数据改进策略。</li>
+            <li>重复：用更新后的策略收集新数据，再用最新一批数据更新。</li>
+        </ol>
+        <p>
+            她画了一个简单的二维导航任务：第一轮有些轨迹奖励差，有些还行；多轮之后策略好一些，有时拿高奖励，有时仍然低；再多几轮，希望能成功。
+        </p>
+        <p>
+            要知道一个策略有多好，不能只看网络权重，必须运行它。估计期望的办法是把策略跑多次，观察奖励，取平均：
+        </p>
+        $$J(\theta) = \mathbb{E}_{\tau\sim p_\theta(\tau)}\left[\sum_t r(s_t,a_t)\right] \approx \frac{1}{N}\sum_{i=1}^{N}\sum_t r(s_{i,t}, a_{i,t})$$
+        <p>
+            收集数据很直接：采样动作，观察下一状态，再送进策略得到新动作，如此重复。难的是收集完数据之后怎样改进策略。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 推导策略梯度：对数导数技巧</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=378s" target="_blank">0:06:18</a>–0:15:26 · Deriving the gradient / The log derivative trick / Policy gradient formula</em></p>
+        <p>
+            目标写成 $\theta^\star=\arg\max_\theta \mathbb{E}_{\tau\sim p_\theta(\tau)}[r(\tau)]$，其中 $r(\tau)$ 是轨迹上奖励之和的简写，记这个期望为 $J(\theta)$。神经网络一般用梯度法训练，所以需要 $\nabla_\theta J(\theta)$。直接求很难：$J$ 对 $\theta$ 的依赖是通过采样出来的轨迹实现的，我们没法对采样过程求导，而且采样还依赖我们不知道的环境动力学。
+        </p>
+        <h3>第一步：把期望写成积分</h3>
+        $$J(\theta) = \int p_\theta(\tau)\, r(\tau)\, d\tau$$
+        <p>积分是求和，是线性运算，可以把梯度移进积分：</p>
+        $$\nabla_\theta J(\theta) = \int \nabla_\theta p_\theta(\tau)\, r(\tau)\, d\tau$$
+        <p>这一步本身没帮上忙，我们不想为了求梯度去算这个积分。</p>
+        <h3>第二步：对数导数技巧</h3>
+        <p>
+            她问大家 $\log$ 的导数是什么（$1/x$），然后写出这个恒等式：
+        </p>
+        $$p_\theta(\tau)\,\nabla_\theta \log p_\theta(\tau) = p_\theta(\tau)\,\frac{\nabla_\theta p_\theta(\tau)}{p_\theta(\tau)} = \nabla_\theta p_\theta(\tau)$$
+        <p>链式法则给出分子上的 $\nabla_\theta p_\theta(\tau)$，两个 $p_\theta(\tau)$ 相消。用它替换积分里的 $\nabla_\theta p_\theta(\tau)$：</p>
+        $$\nabla_\theta J(\theta) = \int p_\theta(\tau)\,\nabla_\theta \log p_\theta(\tau)\, r(\tau)\, d\tau = \mathbb{E}_{\tau\sim p_\theta(\tau)}\left[\nabla_\theta \log p_\theta(\tau)\, r(\tau)\right]$$
+        <p>
+            现在 $p_\theta$ 被提了出来，整个东西又是一个期望，可以用样本估计，而且 $\theta$ 出现在期望里面。
+        </p>
+        <p>
+            有学生问：这还是要采样，原来的问题就是不能对采样求导，这样有什么用？她说不同之处在于 $\theta$ 现在出现在期望里面。我们仍然不对采样过程求导，但可以对 $\theta$ 求导；采足够多的样本，就能得到相当准确、依赖 $\theta$ 的梯度估计。
+        </p>
+        <h3>第三步：展开 $\log p_\theta(\tau)$</h3>
+        <p>轨迹概率是</p>
+        $$p_\theta(\tau) = p(s_1)\prod_{t=1}^{T}\pi_\theta(a_t\mid s_t)\,p(s_{t+1}\mid s_t,a_t)$$
+        <p>取对数，连乘变成求和：</p>
+        $$\log p_\theta(\tau) = \log p(s_1) + \sum_{t=1}^{T}\Big[\log\pi_\theta(a_t\mid s_t) + \log p(s_{t+1}\mid s_t,a_t)\Big]$$
+        <p>
+            对 $\theta$ 求梯度时，初始状态分布和动力学都不依赖 $\theta$，第一项和最后一项消失，只剩
+        </p>
+        $$\nabla_\theta \log p_\theta(\tau) = \sum_{t=1}^{T}\nabla_\theta \log\pi_\theta(a_t\mid s_t)$$
+        <p>
+            这一项能算：就是对网络输出取对数后做一次反向传播。代回去得到策略梯度（也叫 vanilla policy gradient）：
+        </p>
+        $$\nabla_\theta J(\theta) = \mathbb{E}_{\tau\sim p_\theta(\tau)}\left[\left(\sum_{t=1}^{T}\nabla_\theta\log\pi_\theta(a_t\mid s_t)\right)\left(\sum_{t=1}^{T} r(s_t,a_t)\right)\right]$$
+        <p>
+            它比原来那个好用得多：从策略采样轨迹，算出奖励，再对每个动作算 $\nabla\log\pi$，求和相乘，就得到一个可以作用到网络权重上、指向更高奖励的梯度。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. REINFORCE 算法和实现细节</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=926s" target="_blank">0:15:26</a>–0:21:30 · Vanilla policy gradient algorithm / Implementation details</em></p>
+        <p>用 $N$ 条采样轨迹估计期望：</p>
+        $$\nabla_\theta J(\theta) \approx \frac{1}{N}\sum_{i=1}^{N}\left(\sum_{t=1}^{T}\nabla_\theta\log\pi_\theta(a_{i,t}\mid s_{i,t})\right)\left(\sum_{t=1}^{T} r(s_{i,t},a_{i,t})\right)$$
+        <p>$N$ 越大，对期望的估计越好。完整算法：</p>
+        <ol>
+            <li>运行策略 $\pi_\theta(a\mid s)$，采样轨迹 $\{\tau^i\}$；</li>
+            <li>用这些样本计算 $\nabla_\theta J(\theta)$ 的估计；</li>
+            <li>$\theta \leftarrow \theta + \alpha\nabla_\theta J(\theta)$；</li>
+            <li>回到第 1 步，用新策略收集新一批数据。</li>
+        </ol>
+        <p>这叫 REINFORCE 算法，或 vanilla policy gradient 算法。</p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>怎样用数据算第一项？拿到 $N$ 条长度为 $T$ 的轨迹，把其中的状态送进策略做前向传播，得到动作分布（比如类别分布），取数据中那个动作的概率，取对数，再对网络做一次反向传播。</li>
+            <li>$r(\tau)$ 是什么？就是 $\sum_t r(s_t,a_t)$ 的简写，她只是不想把求和写五遍。</li>
+            <li>这是估计，因为只用 $N$ 个样本；样本无穷多时才是精确的，那当然做不到。</li>
+            <li>$\nabla\log\pi$ 要手算吗？取决于网络结构，但不用手算，用 PyTorch 之类库的自动微分。</li>
+        </ul>
+    </section>
+
+    <section id="t05">
+        <h2>05. 直觉：加权的模仿，形式化的试错</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=1290s" target="_blank">0:21:30</a>–0:26:58 · Policy gradient intuition / Trial and error formalization</em></p>
+        <p>
+            公式的第一项和模仿学习目标的梯度一样：模仿学习最大化演示动作的对数概率，梯度就是 $\nabla\log\pi$。所以第一项可以读作“提高在线数据中这些动作的似然”。第二项用这条轨迹的奖励和来加权。合起来就是按奖励加权的模仿梯度：提高高奖励轨迹中动作的似然，降低负奖励轨迹中动作的似然。你在模仿自己收集的数据，奖励为负时梯度方向相反，会把你推离坏的行为、推向好的行为。
+        </p>
+        <p>
+            画成图：初始的轨迹分布上，好的那条轨迹附近概率被抬高，坏的那条附近概率被压低，策略被鼓励做更像高奖励轨迹的事。更简短地说，就是多做观察到的好事、少做坏事。这也是对试错（Trial and Error）的形式化：尝试不同做法，看到好结果就多做，犯了错就少做。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>和模仿学习的区别，是不是模仿学习只有“对或错”，这里有“对多少、错多少”？她说原则上这个方法也能用于很稀疏的奖励，比如成功得 1、否则得 0，只是效果可能不好，后面会讲。主要区别有两条：这里策略在自己的 rollout 上收集数据并应用目标；这里用了奖励，模仿学习则盲目模仿所有数据，默认数据是好的。</li>
+            <li>第一个状态怎么采样？通常由问题设定决定，被看作环境的属性。训练 agent 玩弹球机，初始状态由弹球机给出；语言模型里，初始观测可能是用户问的第一个问题。</li>
+            <li>能不能用这个思路改进模仿学习，按奖励给轨迹加权？完全可以。</li>
+            <li>实践中先做一段模仿学习再切换到策略梯度合理吗？很合理。从随机初始化开始，策略会做随机的事；奖励很密集时还行，否则有演示的话用演示初始化很合适，然后在初始策略上继续改进。</li>
+            <li>不知道奖励函数该怎么定，能用模仿学习先得到一些概念吗？几讲之后会讲奖励学习，以及怎样用专家数据学奖励；实践中有难度。</li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. 高方差，以及利用因果性</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=1618s" target="_blank">0:26:58</a>–0:34:23 · High variance examples / Improving gradient causality</em></p>
+        <h3>例 1：人形机器人学走路</h3>
+        <p>
+            在仿真里教人形机器人走路，奖励是向前的速度：前进为正，后退为负，不动为 0。策略一开始不太好，采到五条轨迹：
+        </p>
+        <ol>
+            <li>向后摔倒；</li>
+            <li>向前摔倒，技术上得到正奖励，奖励和为正；</li>
+            <li>站着不动，奖励为 0；</li>
+            <li>向前迈一小步然后向后摔，开头奖励为正，后面为负，总和为负；</li>
+            <li>向后迈一大步再向前迈一小步，先负后正，总和仍为负。</li>
+        </ol>
+        <p>
+            她让大家讨论这个梯度会鼓励什么。有同学答：鼓励向前摔，也许还有站着不动。她说基本对：轨迹 1、4、5 的奖励和为负，其中所有动作拿到负梯度；轨迹 2 为正，所有动作拿到正梯度；轨迹 3 约为 0，梯度约为 0。所以会鼓励向前摔，不鼓励向后摔，也不鼓励迈步。这很糟，我们想要的是迈步，不是向前摔。
+        </p>
+        <p>
+            这说明梯度噪声大、方差高（High Variance）：取决于采到哪些轨迹，梯度会剧烈变化。如果采到了几条向前走的轨迹，梯度估计会完全不同。这就是“方差高”的意思。
+        </p>
+        <p>
+            有学生问，为什么要从同一个策略采多条轨迹，采一条不行吗？两个原因：策略不是确定性的，想探索不同策略就要多采；环境也可能是随机的，即使策略确定，结果也会不同，多采能学到这些不同结果。
+        </p>
+        <h3>改进 1：只用未来的奖励</h3>
+        <p>
+            一个简单的观察：轨迹中间做的动作，对之前的状态没有任何影响。现在的梯度却用整条轨迹的所有奖励，甚至会因为轨迹前面的奖励好坏去鼓励或惩罚后面的动作。比如轨迹 5 先向后迈一大步、再向前迈一小步，我们应该能从中学到“向前迈小步是好的”。做法是把奖励求和移到对时间的求和里面，并且只从当前时刻 $t$ 往后加：
+        </p>
+        $$\nabla_\theta J(\theta) \approx \frac{1}{N}\sum_{i=1}^{N}\sum_{t=1}^{T}\nabla_\theta\log\pi_\theta(a_{i,t}\mid s_{i,t})\left(\sum_{t'=t}^{T} r(s_{i,t'},a_{i,t'})\right)$$
+        <p>
+            括号里这个量叫 reward-to-go。为什么可以这样做？比如 $t=100$，动作 $a_{100}$ 只会影响之后的奖励，对 $s_{50}$、$s_{51}$、$s_{99}$ 都没有影响，所以这些奖励可以从这个动作的权重里去掉。她说严格写出数学推导有点麻烦，道理就是世界里的因果性：$t$ 时刻的行为不影响更早时刻的奖励。这样对轨迹 5，开头的动作似然会降低，后面向前迈的那一小步因为未来奖励之和为正，似然会提高。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>先向前迈一步再向后迈一步的情况，这个改进还是帮不上忙。她说这很难处理，因为从算法的角度看，可能就是向前那一步导致了后面的后退或摔倒。强化学习很大一部分就是弄清动作对未来的影响，这要从经验中学，所以不能把那些未来奖励去掉。</li>
+            <li>如果开头很糟、后面某一步做得很好，会有足够时间累积吗？假设 $T=10$，第 6 步做得好，那么该动作的权重是 $\sum_{t'=6}^{10} r$，如果这一步很快或在之后四步内带来高奖励，就会提高它的似然。这很依赖奖励函数。</li>
+            <li>固定长度的问题里，加 10 个奖励和加 4 个奖励，梯度会不同？她说如果时长固定为 $T$，要让状态真正满足马尔可夫性，状态里需要包含剩余时间的信息；策略不知道回合快结束了，状态就不是真正马尔可夫的。把剩余步数加进状态，不同情况就成了不同状态。</li>
+        </ul>
+    </section>
+
+    <section id="t07">
+        <h2>07. 奖励尺度问题和基线</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=2063s" target="_blank">0:34:23</a>–0:48:45 · Reward scaling challenges / Introducing baselines / Optimal baselines</em></p>
+        <h3>例 2：策略好了一些之后</h3>
+        <p>
+            同样的问题，用只看未来奖励的版本，但策略好一些了：一条向前摔，一条慢慢踉跄向前，一条稳稳向前走，一条向前跑。梯度会鼓励什么？同学们的回答：跑的那条奖励最高，最受鼓励；只要有向前的进展都会被鼓励；也有人说可能会鼓励“向前摔、站起来、再向前摔”，不过站起来更难。
+        </p>
+        <p>
+            她总结：这些轨迹的奖励全是正的。跑的那条最高，所以最受鼓励；但 1、2、3 也是正的，策略也会被鼓励去做这些事，只是程度低一些。只要权重非负，就会提高这些轨迹中动作的似然，有时就会鼓励踉跄向前。我们希望策略尽可能跑得快。
+        </p>
+        <p>
+            有学生问这是局部最优吗？她说原因是梯度噪声大。如果策略会跑，梯度会鼓励它继续跑；数据里有其他轨迹时，它们也会产生影响。但这不会收敛到局部最优：这一步会多鼓励跑，下一批数据里跑得更多，再下一步更鼓励跑，最终会收敛到全局最优，只是因为梯度方差大，走得慢。有学生问会不会鼓励机器人向前滚？这批数据里没有滚的轨迹，一般不会，除非梯度凑巧组合出来；有滚的数据才会鼓励滚。
+        </p>
+        <p>
+            这个例子说明结果对奖励函数的尺度很敏感。反过来，如果所有奖励都是负的，策略只会拿到负梯度，没有正梯度。这是这类方法的一个大问题。
+        </p>
+        <h3>改进 2：减去基线</h3>
+        <p>修正办法很简单：把 $r(\tau)$ 换成 $r(\tau)-b$，$b$ 是一个常数，比如平均奖励：</p>
+        $$\nabla_\theta J(\theta) \approx \frac{1}{N}\sum_{i=1}^{N}\nabla_\theta\log p_\theta(\tau_i)\,\big[r(\tau_i) - b\big],\qquad b = \frac{1}{N}\sum_{i=1}^{N} r(\tau_i)$$
+        <p>
+            这样比平均好的行为会提高似然，比平均差的会降低似然。这个 $b$ 叫基线（Baseline）。为什么可以随便减一个 $b$？证明它在期望上对梯度没有影响：
+        </p>
+        $$\mathbb{E}_{\tau\sim p_\theta}\left[\nabla_\theta\log p_\theta(\tau)\, b\right] = \int p_\theta(\tau)\,\nabla_\theta\log p_\theta(\tau)\, b\, d\tau = \int \nabla_\theta p_\theta(\tau)\, b\, d\tau = b\,\nabla_\theta\int p_\theta(\tau)\, d\tau = b\,\nabla_\theta 1 = 0$$
+        <p>
+            推导分四步：写成积分；反向使用对数导数技巧；梯度是线性运算，$b$ 是常数，都移到积分外面；概率密度的积分等于 1，1 的梯度是 0。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>如果能精确计算期望，基线就没用了吧？对。基线有用是因为我们只能用样本估计期望；它是降低估计方差的一种方法，而且是无偏的（Unbiased）：只要基线是常数，就不改变梯度的期望。可以证明它降低了梯度估计的方差。</li>
+            <li>$b$ 依赖轨迹，真的是常数吗？对一整批数据用同一个 $b$：收集一批数据，算出 $b$，这批数据上的所有更新都用它。</li>
+            <li>它为什么能降方差？可以把方差解析地写出来证明，她没有展开。直觉上就是多做高于平均的事，少做低于平均的事。</li>
+        </ul>
+        <p>
+            平均奖励不是最优基线。可以写出方差，对 $b$ 求导令其为 0，得到最优基线；它和平均奖励很接近，只是多了一些加权项。平均奖励已经相当好。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 稀疏奖励的例子和代理目标</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=2925s" target="_blank">0:48:45</a>–0:54:12 · Sparse reward challenges / Surrogate objective implementation</em></p>
+        <h3>例 3：叠夹克</h3>
+        <p>
+            机器人叠夹克，叠得整齐奖励为 1，有褶皱为 0.5，没叠好为 0。采到四条轨迹：1 没碰夹克；2 只叠了袖子没叠完；3 把夹克铺平但没叠；4 叠好了。加了基线之后梯度是什么样？
+        </p>
+        <p>
+            1、2、3 的奖励是 0，4 为正。有了基线，4 的梯度为正，鼓励这种行为；1、2、3 都被压制。这在某种意义上是好的，会鼓励叠衣服。但有两点不满意：1、2、3 的梯度完全相同，没有区分，而其中有些明明比别的好，这在一定程度上是奖励函数太稀疏造成的；另外叠袖子其实是一件好事，最好能利用这部分数据，现在它反而拿到负梯度。周五会讲能利用轨迹中好的部分的技术。
+        </p>
+        <p>
+            结论：策略梯度仍然噪声大、方差高，奖励密集时效果最好，批量大时效果最好。如果没采到第 4 条、只采到失败轨迹，梯度就是 0，无法改进。有学生问能不能改进奖励函数？能，更密集的奖励在这些情况下会好很多。但仍有可以做得更好的场景：比如叠好袖子拿到正奖励，然后把夹克掉到地上，这时前半段的好行为还是用不上，周五会讲怎样给前半段一个好的梯度。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>基线能和“只用未来奖励”一起用吗？可以，但要更仔细地考虑基线怎么定，因为在轨迹不同位置，求和的项数不同。</li>
+            <li>平均奖励做基线，需要不断更新吗？需要。策略变好之后，“高于平均”和“低于平均”的界线会变，要在最新一批数据上重新计算。</li>
+        </ul>
+        <h3>实现：代理目标</h3>
+        <p>
+            原则上可以对每一项单独做反向传播，但那要做 $N\times T$ 次，效率很低。更好的做法是对整个目标做自动微分，只做一次前向和一次反向。可以写一个代理目标（Surrogate Objective），它的梯度等于上面的策略梯度。叫“代理”是因为它和最初的“最大化期望奖励”不是同一个目标：
+        </p>
+        $$\tilde J(\theta) = \frac{1}{N}\sum_{i=1}^{N}\sum_{t=1}^{T}\log\pi_\theta(a_{i,t}\mid s_{i,t})\left(\sum_{t'=t}^{T} r(s_{i,t'},a_{i,t'}) - b\right)$$
+        <p>
+            （她提到幻灯片上这里有个笔误，第二个求和应该在第一个求和里面。）括号里的权重当作常数，然后用反向传播和自动微分软件做一次反向即可。实践中，离散动作策略上它看起来就像一个加权的交叉熵损失，高斯策略上像平方误差，也可以用扩散等更复杂的策略。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 小结，以及 on-policy 的问题</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=3252s" target="_blank">0:54:12</a>–0:56:17 · Summary of on-policy RL / On-policy limitations</em></p>
+        <p>
+            到这里的小结：用对数梯度技巧估计强化学习目标的梯度；这相当于用未来奖励给策略似然加权；减去基线（比如平均奖励）能进一步改进梯度；即使有这两个技巧，梯度仍然有噪声，所以最适合大批量和密集奖励。这是第一个在线强化学习算法，在“用策略收集一批数据”和“改进策略”之间交替，形式化了试错学习。直觉始终是：多做高奖励的事，少做低奖励的事。
+        </p>
+        <p>
+            还有什么麻烦？采样过程的细节。梯度公式假设样本来自 $\pi_\theta$，而第 3 步就改变了 $\theta$。所以每走一步梯度，就得重新收集数据来估计梯度。我们训练神经网络通常要走成千上万步梯度，这就成了问题。
+        </p>
+        <ul>
+            <li>On-policy（同策略）：更新只使用当前策略的数据。</li>
+            <li>Off-policy（离策略）：更新可以复用其他的、过去的策略的数据。</li>
+        </ul>
+        <p>这是在线强化学习算法的一个属性。vanilla policy gradient 是 on-policy 的。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 重要性采样和离策略策略梯度</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=KCAOXd4IO9o&t=3377s" target="_blank">0:56:17</a>–1:02:38 · Importance sampling / Off-policy policy gradient</em></p>
+        <p>
+            能不能推一个离策略版本的策略梯度？这里只追求“稍微离策略”：能在同一批数据上走不止一步梯度。工具是重要性采样（Importance Sampling），它在强化学习之外也很有用，解决的问题是：想估计某个分布下的期望，却不从这个分布采样。
+        </p>
+        <p>
+            设想要估计 $\mathbb{E}_{x\sim p(x)}[f(x)]$，但只能从 $q(x)$ 采样。$q$ 通常叫提议分布（Proposal Distribution），在这里就是旧策略：我们有旧策略的样本，想估计走了一步梯度之后的新策略下的量。写成积分，只要 $q(x)$ 的支撑合理，就可以乘上一个等于 1 的项：
+        </p>
+        $$\mathbb{E}_{x\sim p(x)}[f(x)] = \int p(x) f(x)\,dx = \int q(x)\frac{p(x)}{q(x)} f(x)\,dx = \mathbb{E}_{x\sim q(x)}\left[\frac{p(x)}{q(x)} f(x)\right]$$
+        <p>
+            也就是从 $q$ 采样，再用 $p/q$ 给要估计的量加权：用旧策略的样本，按“新策略下的概率除以旧策略下的概率”加权。唯一的条件是：凡是新策略有概率的地方，提议分布必须有非零的支撑；$q(x)=0$ 时式子没有定义。一般来说，新旧策略越接近，重要性采样效果越好。
+        </p>
+        <h3>用到策略上</h3>
+        <p>
+            要更新最新的策略 $\pi_{\theta'}$，但样本来自 $\pi_\theta$：
+        </p>
+        $$\nabla_{\theta'}J(\theta') = \mathbb{E}_{\tau\sim p_\theta(\tau)}\left[\frac{p_{\theta'}(\tau)}{p_\theta(\tau)}\sum_{t=1}^{T}\nabla_{\theta'}\log\pi_{\theta'}(a_t\mid s_t)\left(\sum_{t'=t}^{T} r(s_{t'},a_{t'}) - b\right)\right]$$
+        <p>
+            轨迹概率之比里，初始状态分布和动力学项会相消，只剩策略概率之比的连乘：
+        </p>
+        $$\frac{p_{\theta'}(\tau)}{p_\theta(\tau)} = \prod_{t=1}^{T}\frac{\pi_{\theta'}(a_t\mid s_t)}{\pi_\theta(a_t\mid s_t)}$$
+        <p>
+            问题是轨迹很长时，这个连乘会变得很小或很大：100 个数相乘，都大于 1 就会爆炸，都小于 1 很快趋于 0。所以实践中改成对时间步而不是对轨迹取期望。这样做又有个小麻烦：比值应该是状态动作对的边缘概率之比 $\pi_{\theta'}(s_t,a_t)/\pi_\theta(s_t,a_t)$，而不是给定状态的动作概率之比，前者很难测量。实践中常把其中状态分布之比 $\pi_{\theta'}(s_t)/\pi_\theta(s_t)$ 近似为 1。她说这不正确，但这是能做到的最好办法。于是得到常见的最终形式：
+        </p>
+        $$\nabla_{\theta'}J(\theta') \approx \frac{1}{N}\sum_{i=1}^{N}\sum_{t=1}^{T}\frac{\pi_{\theta'}(a_{i,t}\mid s_{i,t})}{\pi_\theta(a_{i,t}\mid s_{i,t})}\nabla_{\theta'}\log\pi_{\theta'}(a_{i,t}\mid s_{i,t})\left(\sum_{t'=t}^{T} r(s_{i,t'},a_{i,t'}) - b\right)$$
+        <p>
+            完整算法和之前一样，只是现在可以在同一批数据上走多步梯度。
+        </p>
+        <h3>KL 约束（幻灯片内容，录像没时间讲）</h3>
+        <p>
+            幻灯片接着问：如果策略在采样新数据之前变化太大怎么办？数据就不再反映策略将会访问的状态，梯度估计变得不准。能不能在梯度更新时约束策略不要偏离太远？一个常见选择是限制新旧策略之间的 KL 散度（KL Divergence，衡量两个分布差多少的量）：
+        </p>
+        $$\mathbb{E}_{s\sim\pi_\theta}\left[D_{\text{KL}}\big(\pi_{\theta'}(\cdot\mid s)\,\|\,\pi_\theta(\cdot\mid s)\big)\right]\le\delta$$
+        <p>下一讲讲 Actor-Critic 方法，会紧接着今天的内容，包括 PPO。</p>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>在线强化学习：初始化策略，收集数据，改进策略，重复。策略梯度是第一个在线算法，是 on-policy 的，直接对强化学习目标求导。</li>
+            <li>对数导数技巧 $p\,\nabla\log p = \nabla p$ 给出 $\nabla_\theta J(\theta)=\mathbb{E}_{\tau\sim p_\theta}\left[\sum_t\nabla_\theta\log\pi_\theta(a_t\mid s_t)\, r(\tau)\right]$，初始分布和动力学不依赖 $\theta$，所以不需要知道动力学。</li>
+            <li>降方差：利用因果性只用未来奖励 $\sum_{t'\ge t} r$；减去基线 $b$（如平均奖励），基线在期望上对梯度无影响，是无偏的。</li>
+            <li>实现时写一个代理目标，一次前向一次反向，形式像加权的交叉熵或平方误差。</li>
+            <li>离策略策略梯度：用重要性采样，按 $\pi_{\theta'}/\pi_\theta$ 加权，可以在一批数据上走多步梯度；配合 KL 约束防止策略偏离太远。</li>
+            <li>直觉：多做高奖励的事，少做低奖励的事。梯度仍然很嘈杂，最适合大批量和密集奖励。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224R Deep Reinforcement Learning · Lecture 3: Policy Gradients · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

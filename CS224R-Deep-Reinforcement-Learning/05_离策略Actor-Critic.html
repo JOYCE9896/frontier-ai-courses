@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第5讲：离策略 Actor-Critic（PPO 与 SAC）| Stanford CS224R 深度强化学习笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="04_Actor-Critic方法.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS224R 目录</a> · 05</span>
+    <span><a href="06_Q学习.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第5讲：离策略 Actor-Critic（PPO 与 SAC）</h1>
+        <p class="subtitle">在一批数据上走多步梯度为什么会不稳定，KL 惩罚和重要性权重截断，PPO 的最终代理目标、GAE 和超参数，经验回放缓冲区，怎样用旧策略的数据拟合当前策略的 Q 函数，SAC 的结构，以及 PPO 和 SAC 各自适合什么场景</p>
+        <div class="author-meta">
+            主讲：Chelsea Finn · 课堂日期：2025 年 4 月 16 日 · 时长：1 小时 9 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=cRGKc-nAWho" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs224r.stanford.edu/spring_2025/slides/05_cs224r_offpolicy_actor_critic_2025.pdf" target="_blank">2025 幻灯片</a> · <a href="https://cs224r.stanford.edu/slides/05_cs224r_offpolicy_actor_critic_2026.pdf" target="_blank">2026 幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            上一讲的 Actor-Critic 是 on-policy 的。这一讲从它出发，推出两个实际在用的算法：PPO（Proximal Policy Optimization）和 SAC（Soft Actor-Critic）。PPO 是“稍微离策略”：在一批数据上走很多步梯度，用截断的重要性权重防止策略偏离太远。SAC 是“更离策略”：把过去所有经验存进回放缓冲区，改为拟合 Q 函数，用旧数据估计当前策略的价值。最后比较 PPO、SAC 和模仿学习。Chelsea 说今天的学习目标是掌握 PPO 和 SAC 这类实用算法背后的全部关键概念。
+        </p>
+        <p>2026 版幻灯片在结尾多了一页“在线强化学习实践指南”，放在第 9 节。</p>
+        <ol>
+            <li><a href="#t01">回顾：策略梯度、价值函数和 Actor-Critic</a> · <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">一批数据走多步梯度：代理目标和不稳定</a> · <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=366s" target="_blank">0:06:06</a></li>
+            <li><a href="#t03">让新策略靠近旧策略：KL 惩罚</a> · <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=1163s" target="_blank">0:19:23</a></li>
+            <li><a href="#t04">截断重要性权重和 PPO 的下界目标</a> · <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=1698s" target="_blank">0:28:18</a></li>
+            <li><a href="#t05">广义优势估计 GAE</a> · <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=2266s" target="_blank">0:37:46</a></li>
+            <li><a href="#t06">完整的 PPO 算法、超参数和效果</a> · <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=2528s" target="_blank">0:42:08</a></li>
+            <li><a href="#t07">更离策略：回放缓冲区，以及它破坏了什么</a> · <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=2802s" target="_blank">0:46:42</a></li>
+            <li><a href="#t08">改为拟合 Q 函数</a> · <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=3141s" target="_blank">0:52:21</a></li>
+            <li><a href="#t09">SAC，以及 PPO 和 SAC 的比较</a> · <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=3874s" target="_blank">1:04:34</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 回顾：策略梯度、价值函数和 Actor-Critic</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=0s" target="_blank">0:00:00</a>–0:06:06 · Recap of policy gradients / Value and Q-functions / Example of policy evaluation / Recap of actor-critic</em></p>
+        <p>
+            策略梯度：收集一批数据，提高未来奖励高的动作的概率，减去平均奖励基线，多做高于平均的事。这一切要求数据来自正要更新的那个策略；用重要性权重可以走多步梯度，不必每走一步就重新收集。价值函数 $V^\pi(s)$ 是从 $s$ 起按 $\pi$ 行动的期望奖励和，$Q^\pi(s,a)$ 是先做 $a$ 再按 $\pi$，优势 $A^\pi=Q^\pi-V^\pi$，都针对某个特定策略。
+        </p>
+        <p>
+            她用 AlphaGo 举了一个直观例子：奖励是对局结果（赢或输），价值函数就是在当前棋盘状态下、按当前策略下棋的期望结果。策略越强，价值越高；局面对这个策略越有利，价值也越高。所以价值同时受策略和状态影响。Q 函数类似，只是先考虑某一步特定的落子，再按策略继续。
+        </p>
+        <p>
+            上一讲的 Actor-Critic 用优势估计代替轨迹里的奖励和，并用一个价值网络做策略评估，目标可以是奖励和、一步自举 $r+\hat V(s')$ 或 n 步回报；优势估计为 $r+\hat V(s')-\hat V(s)$。那一讲主要是 on-policy 的，今天推出两个实际在用的算法 PPO 和 SAC，从 Actor-Critic 出发让它们离策略、更高效，最后比较 PPO、SAC 和模仿学习。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 一批数据走多步梯度：代理目标和不稳定</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=366s" target="_blank">0:06:06</a>–0:19:23 · Introduction to PPO / Surrogate objective function / Learning instabilities / Gradient step comparison / Overfit policy behavior</em></p>
+        <p>
+            on-policy Actor-Critic 的步骤：采样数据，用价值函数拟合奖励，对所有状态动作估计优势，估计策略梯度并更新。想走多步梯度，就要能在新参数 $\theta'$ 处估计梯度，而数据是 $\pi_\theta$ 收集的。办法是重要性权重：
+        </p>
+        $$\nabla_{\theta'}J(\theta') \approx \sum_{t,i}\frac{\pi_{\theta'}(a_{i,t}\mid s_{i,t})}{\pi_\theta(a_{i,t}\mid s_{i,t})}\,\nabla_{\theta'}\log\pi_{\theta'}(a_{i,t}\mid s_{i,t})\,\hat A^{\pi_\theta}(s_{i,t}, a_{i,t})$$
+        <p>
+            优势估计仍然是走梯度之前的旧策略 $\pi_\theta$ 的。这样采一批数据、拟合一次优势之后，就可以算梯度、走一步、再算梯度、再走一步；随步数变化的只有重要性权重（当然反向传播也是对新参数做的），优势估计始终基于旧策略。
+        </p>
+        <h3>代理目标</h3>
+        <p>
+            实现时要写一个代理目标，让 PyTorch 的自动微分直接给出梯度。利用 $\pi\nabla\log\pi=\nabla\pi$，上式中的 $\pi_{\theta'}\nabla_{\theta'}\log\pi_{\theta'}$ 就是 $\nabla_{\theta'}\pi_{\theta'}$，所以代理目标是
+        </p>
+        $$\tilde J(\theta') \approx \sum_{t,i}\frac{\pi_{\theta'}(a_{i,t}\mid s_{i,t})}{\pi_\theta(a_{i,t}\mid s_{i,t})}\,\hat A^{\pi_\theta}(s_{i,t}, a_{i,t})$$
+        <p>
+            看这个目标就能看出问题。策略要最大化它，于是想对优势为正的动作大幅提高概率，尤其是原来概率很低的动作，这样比值能变得很大；对优势为负的动作则压低概率。这本身合理，麻烦在于优势是基于旧策略、而且只基于一批数据估计的。在这个目标上走太多步，就会对这些优势过拟合：它们会过时，不再适用于新策略，学习就会很不稳定。
+        </p>
+        <h3>步数和稳定性</h3>
+        <p>
+            她画了示意图，横轴是收集的状态动作数，纵轴是策略拿到的奖励。每批数据只走 1 步梯度，学得很慢，需要很多数据；走 5 步，按数据量算学得更快；再贪心一点走更多步，奖励可能涨得很快，但学习不稳定，某个时候甚至崩溃，因为策略对那些优势过拟合了，比如把某个优势高的动作概率推到 1，策略表现却很差。
+        </p>
+        <p>
+            有学生问过拟合的策略在实践中是什么样子？她说取决于问题。一种情况是给数据里某个优势高的动作分配极高概率，由于神经网络比较平滑，它周围的动作概率也被抬高，策略变得很确定、不再探索。她举了一个二维网格的例子：目标在某处，好的策略会走过去停下；过拟合的策略可能学到“向右好”，却没学到要在那里停下、也没学到要往上走，于是一直沿直线走，最后卡在角落里，因为它过拟合了一批告诉它往这边走的数据。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>“5 步”是指循环 5 次再收集新数据吗？是，然后重新拟合价值函数，目前只在当前这批数据上拟合，后面会看到怎样复用以前的批次。</li>
+            <li>代理目标和原来的公式有什么不同？是同一个东西。看代理目标更容易直观理解重要性权重让“提高概率”变得很容易；后面修改代理目标时，PPO 看梯度会更复杂，看代理目标更清楚。</li>
+            <li>为什么要用重要性权重？它让我们能走不止一步梯度。没有它，就无法在旧数据上准确估计新策略的梯度。</li>
+            <li>“过时”是什么意思？优势是基于一批有限的数据（可能几千个时间步）、在旧策略下估计的，走了 50 步、100 步之后就过时了。网格例子里，旧策略在某处也许会往上走，所以优势告诉你“到这里应该往这边，因为之后会往上”；可新策略之后会做别的事，那些优势就不再准确，需要用新策略收集新数据。另外，策略在提高概率时会主动偏离旧策略很多，变化越大，优势越不可能还适用。</li>
+        </ul>
+    </section>
+
+    <section id="t03">
+        <h2>03. 让新策略靠近旧策略：KL 惩罚</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=1163s" target="_blank">0:19:23</a>–0:28:18 · Importance weight challenges / Addressing weight issues / KL divergence constraint / Memory and tuning / Surrogate objective details</em></p>
+        <p>
+            关键想法：让新策略和旧策略保持接近，优势估计就更可能仍然有效。有两种办法。第一种是在代理目标里加一项，显式鼓励两个动作分布相似，常用 KL 散度做惩罚：
+        </p>
+        $$\tilde J_{\text{con}}(\theta') = \sum_{t,i}\frac{\pi_{\theta'}(a_{i,t}\mid s_{i,t})}{\pi_\theta(a_{i,t}\mid s_{i,t})}\,\hat A^{\pi_\theta}(s_{i,t}, a_{i,t}) - \beta\, D_{\text{KL}}\big(\pi_{\theta'}(\cdot\mid s_{i,t})\,\|\,\pi_\theta(\cdot\mid s_{i,t})\big)$$
+        <p>
+            这会鼓励策略在多走几步梯度时保持接近，优势函数就更准确，可以更稳定地走更多步。它仍然会限制步长，所以是一种平衡；理想效果是走更多步、曲线又不崩。
+        </p>
+        <h3>课堂讨论</h3>
+        <ul>
+            <li>有同学指出：比值的分母（旧策略）是固定的，策略控制的是分子，可以把它推得很大或很小，权重可能趋于 0 或无穷，取决于旧策略的概率有多小。加约束之后，比值被鼓励接近 1，不能任意推到无穷或 0。</li>
+            <li>做 KL 约束需要把旧参数留在内存里，会增加内存开销，大语言模型里这并不少见，要保留一整份旧模型的权重。也有缓存的办法，比如只保存这批数据上各状态的旧概率。</li>
+            <li>代理目标里这个比值一开始是 1，走了一步梯度之后才开始偏离。目标是只让策略改变一点。另一个角度：如果策略网络的输入是图像，改变图像特征需要很多步梯度，你想走很多步来改进特征，同时又不大幅改变动作分布，避免这个目标过拟合。</li>
+            <li>怎样让它变一点但不变太多？KL 前面通常有一个需要调的超参数 $\beta$，控制允许偏移多少，用 KL 约束时它往往是很重要的超参数；但一般只在一个数量级内调，不用精确找到 0.423 之类的值。</li>
+            <li>怎样实现？代理目标交给 PyTorch、TensorFlow 或 JAX，它们算出的梯度就是第一行的梯度。查一下两个类别分布或两个高斯之间 KL 散度的表达式（高斯情形是均值和方差的函数），加到代理目标里就行。</li>
+            <li>$J$ 和 $\tilde J$ 的区别？$\tilde J$ 是代理目标，严格说不是真正的目标；真正的 $J(\theta)$ 是期望奖励和，这是它的一个估计。</li>
+        </ul>
+        <p>
+            她说 KL 约束很常见，PPO 也有一个用 KL 约束的版本，但不是最常用的版本；它在偏好优化里用得很多，几周后会再见到。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 截断重要性权重和 PPO 的下界目标</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=1698s" target="_blank">0:28:18</a>–0:37:46 · Importance weight clipping / PPO clipping mechanism / PPO lower bound / Clipping motivation</em></p>
+        <h3>技巧 1：截断重要性权重</h3>
+        <p>
+            第二种办法：直接去掉策略把比值改很多的动机。把重要性权重 $w = \pi_{\theta'}/\pi_\theta$ 截断到 $[1-\epsilon, 1+\epsilon]$ 之间，$\epsilon$ 可以是 0.2，也就是低于 0.8 就算 0.8，高于 1.2 就算 1.2。写成数学形式是先 $\max(w, 1-\epsilon)$ 再 $\min(\cdot, 1+\epsilon)$：
+        </p>
+        $$\operatorname{clip}(w, 1-\epsilon, 1+\epsilon) = \min\big(\max(w, 1-\epsilon), 1+\epsilon\big)$$
+        $$\tilde J(\theta') \approx \sum_{t,i}\operatorname{clip}\left(\frac{\pi_{\theta'}(a_{i,t}\mid s_{i,t})}{\pi_\theta(a_{i,t}\mid s_{i,t})}, 1-\epsilon, 1+\epsilon\right)\hat A^{\pi_\theta}(s_{i,t}, a_{i,t})$$
+        <p>
+            比值超过 1.2 之后，再提高概率也没有好处，目标停留在 $1.2\times$ 优势。它不显式约束策略不变，但去掉了大幅偏离旧策略的激励。实践中 $\epsilon$ 常取 0.2，不是一个极小的数。限制重要性权重的范围是 PPO 背后的关键想法之一。
+        </p>
+        <h3>技巧 2：和原目标取最小值</h3>
+        <p>
+            截断有一个怪异之处：在少数情况下，截断反而会让目标变好。比如策略给一个负优势的动作分配了很低的概率，比值跌破下限，被截断到更大的权重。所以 PPO 最终把截断后的目标和原目标取最小：
+        </p>
+        $$\tilde J^{\text{PPO}}(\theta') \approx \sum_{t,i}\min\left(\frac{\pi_{\theta'}(a_{i,t}\mid s_{i,t})}{\pi_\theta(a_{i,t}\mid s_{i,t})}\hat A^{\pi_\theta}(s_{i,t}, a_{i,t}),\ \operatorname{clip}\left(\frac{\pi_{\theta'}(a_{i,t}\mid s_{i,t})}{\pi_\theta(a_{i,t}\mid s_{i,t})}, 1-\epsilon, 1+\epsilon\right)\hat A^{\pi_\theta}(s_{i,t}, a_{i,t})\right)$$
+        <p>
+            取最小保证截断永远不会让目标变好，于是得到原代理目标的一个下界（Lower Bound）。她说如果要最大化一个和原目标不同的东西，最好它是下界，这样你不会把它最大化到超过原目标。这就是 PPO 最终的代理目标。
+        </p>
+        <h3>为什么需要技巧 2</h3>
+        <p>
+            她说自己不确定这种情况在实践中多常见、技巧 2 有多关键。动机是：策略可能整体上提高了好行为的概率、压低了坏行为的概率，但在某些少见的情况下，提高一个好动作的概率时，另一个相似状态下有一个很坏的动作也被一起抬高了。具体数字：某个状态动作对的优势是 $-1000$，新策略给它 0.9 的概率，旧策略给 0.1，比值是 9；截断到 1.2 后乘以 $-1000$，比不截断时的 $9\times(-1000)$ 好得多，等于截断让目标变好了。取最小值后，这个数据点就不会被截断，从而不鼓励这类“意外”。
+        </p>
+        <p>
+            有学生问，为什么不只截上限、不截下限？她说反过来也有类似情况：优势为 $+1000$，新策略给 0.1、旧策略给 0.9，比值是 $1/9$，乘以 1000；如果把 $1/9$ 截到 0.8，也会让目标变好。两边都截、再取下界，两种情况都不会被截断所鼓励。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 广义优势估计 GAE</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=2266s" target="_blank">0:37:46</a>–0:42:08 · Advantage estimation tricks / Generalized Advantage Estimation</em></p>
+        <p>
+            PPO 的第三个技巧在优势估计上，她说这个技巧她自己也不确定有多必要，没做过很多对比。价值函数 $V^\pi$ 照常用蒙特卡洛或自举拟合。之前的优势估计只看一步：$r(s_t,a_t)+\hat V(s_{t+1})-\hat V(s_t)$。也可以像 n 步回报那样，往前加多步奖励再接价值：
+        </p>
+        $$\hat A^{(n)}(s_t, a_t) = \sum_{t'=t}^{t+n-1}\gamma^{t'-t} r(s_{t'}, a_{t'}) + \gamma^n\hat V(s_{t+n}) - \hat V(s_t),\quad n = 1, \ldots, N,\ N\ll T$$
+        <p>
+            GAE（Generalized Advantage Estimation）把不同 $n$ 的估计加权平均。不同视野的估计方差不同，组合起来可能比只用一步的偏差更小。权重怎么选是一个超参数：通常主要用前几项以降低方差，权重随视野增大衰减得很快，所以大部分权重仍在 $n=1$ 上。（GAE 原论文的常见写法是权重按 $\lambda^{n-1}$ 衰减，这是背景知识，不是课上的推导。）
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>用了这些权重，$\gamma$ 还要设成 1 吗？两者一起用，展开后会出现 $\gamma$ 和 $\lambda$ 相乘的项。</li>
+            <li>这是不是就是对不同 $n$ 的 n 步回报做加权平均？区别是价值函数仍按常规方法拟合，加权只用在估计优势上；除此之外可以这么理解。</li>
+            <li>GAE 有什么好处？她说不太好讲清楚。一种看法是：只用一步回报时，尤其时间步很密，如果 V 不完全准，估计可能有偏差，视野拉长可能更好。至于为什么不只用一个 $n$ 而用混合，也许能在不确定哪个 $n$ 合适时对冲一下。她说自己没有很好的理由，也不完全确定用和不用的性能差别。幻灯片上引用了 GAE 作者之一对“为什么”的回答。</li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. 完整的 PPO 算法、超参数和效果</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=2528s" target="_blank">0:42:08</a>–0:46:42 · Final PPO algorithm / PPO hyperparameters / PPO performance comparison / PPO implementation details</em></p>
+        <ol>
+            <li>从 $\pi_\theta$ 采样一批数据 $\{(s_{1,i}, a_{1,i}, \ldots, s_{T,i}, a_{T,i})\}$；</li>
+            <li>用数据中的奖励和拟合 $\hat V^{\pi_\theta}_\phi$；</li>
+            <li>计算 GAE 优势估计 $\hat A^{\pi_\theta}$；</li>
+            <li>在 PPO 代理目标（截断重要性权重 + 取最小）上走 $M$ 步梯度更新策略；</li>
+            <li>回到第 1 步：此时 $\theta$ 变成刚才的 $\theta'$，用最新策略采新数据，拟合新的价值函数。价值函数可以从上一轮热启动，也可以从头训，取决于领域。</li>
+        </ol>
+        <h3>示例超参数</h3>
+        <p>她强调超参数一般要按领域调，这里只是给个大概感觉，不是推荐值：</p>
+        <ul>
+            <li>每批数据约 2000 个时间步。长时程问题（比如每条 1000 步）就只有几条轨迹，短时程问题则多一些。</li>
+            <li>第 4 步常在这批数据上跑约 10 个 epoch；批大小 64 时约 300 步梯度。因为有截断，能走 300 步而不至于很不稳定。</li>
+            <li>截断范围 $\epsilon=0.2$。</li>
+            <li>外层循环跑约 500 次，总共约一百万个时间步的经验。</li>
+        </ul>
+        <p>
+            在一个简单的仿真任务（半只猎豹 HalfCheetah 之类）上，横轴是收集的时间步数，纵轴是奖励。米色曲线是 vanilla policy gradient（稍微聪明一点的版本，但不拟合优势、不截断），PPO 在上面，用更少的经验就提升得快得多，因为它拟合了优势函数，并且靠截断能在同一批数据上走多得多的梯度步。
+        </p>
+        <p>
+            有学生问图中每条曲线是不是各自用最好的超参数？她说每个算法有自己的超参数，最佳做法是在一两个环境上找到好的超参数，再用到其余环境；也有需要换一套超参数的情况，比如控制频率 1 Hz 和 5 Hz，或者优化语言模型和优化 HalfCheetah。一个好习惯是不要按环境逐个调超参数，因为那等于用了更多数据和样本来得到超参数，而这些不会反映在学习曲线上。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 更离策略：回放缓冲区，以及它破坏了什么</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=2802s" target="_blank">0:46:42</a>–0:52:21 · Off-policy methods / Replay buffers / Replay buffer algorithm / Value function challenges</em></p>
+        <p>
+            到目前为止：一批数据走一步梯度是完全 on-policy；一批数据走多步梯度是离策略。能不能更离策略，复用以前的批次，用上过去所有的试错经验？两个想法：
+        </p>
+        <ol>
+            <li>保留所有过去的数据，放进回放缓冲区（Replay Buffer）。作业 1 里已经见过：一个不断加入过去数据的数据集，到某个时候也可能删掉很旧的数据。叫“回放”是因为在重放过去的经验。</li>
+            <li>修改一些公式，去掉其中 on-policy 的假设。</li>
+        </ol>
+        <p>
+            改造后的 Actor-Critic 更“在线”：采一个时间步的数据，更新策略，再采一个，再更新。更新时从回放缓冲区采样，用所有过去的经验而不只是最近的。
+        </p>
+        <ol>
+            <li>从空的缓冲区开始；用策略做动作 $a\sim\pi_\theta(a\mid s)$，得到 $(s, a, s', r)$，存进缓冲区 $\mathcal{R}$；</li>
+            <li>从缓冲区采一个小批量转移 $\{(s_i, a_i, r_i, s'_i)\}$，有很小概率正好是刚采的，其余是随机抽到的旧经验；</li>
+            <li>用目标 $y_i = r_i + \gamma\hat V^\pi_\phi(s'_i)$ 更新价值函数，目标和以前一样，只是在小批量上平均；</li>
+            <li>估计优势 $\hat A^\pi(s_i,a_i) = r(s_i,a_i)+\gamma\hat V^\pi_\phi(s'_i)-\hat V^\pi_\phi(s_i)$；</li>
+            <li>计算 $\nabla_\theta J(\theta)\approx\frac{1}{N}\sum_i\nabla_\theta\log\pi_\theta(a_i\mid s_i)\hat A^\pi(s_i,a_i)$，更新策略，重复。</li>
+        </ol>
+        <p>
+            她说这个算法现在是坏的，坏在两个地方。她让大家讨论第一个：用缓冲区里所有旧策略的数据、按自举目标拟合价值函数时，学到的是哪个策略的价值函数？
+        </p>
+        <p>
+            她说答案没有别的问题那么干净。有同学答：最新策略的数据大概只有一个点，缓冲区其余部分都不是它的，所以不是当前策略的价值。旧策略做的动作不同，下一状态和奖励也就不同。学到的是过去所有策略的某种混合：如果数据以某种方式收集，可能像 $N$ 个旧策略的平均；但实际更复杂，有些状态里某个旧策略走了这边，另一个走了那边，所以有的状态是策略混合，有的状态更像某一个策略，很难干净地写出来。确定的是，它不是当前策略的价值函数，而我们需要当前策略的价值，才能估计当前策略的优势、得到准确的梯度。
+        </p>
+        <p>
+            第二个错误：第 5 步里的动作 $a_i$ 不是当前策略会做的动作，传进优势里的也不是。后面会修正这一点，先处理价值函数。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 改为拟合 Q 函数</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=3141s" target="_blank">0:52:21</a>–1:04:34 · Fixing replay issues / Q-function fitting / Q-function recursion / SAC target estimation / Sufficient action coverage</em></p>
+        <p>
+            怎样用旧策略的回放数据拟合当前策略的价值函数？想法是改为拟合 Q。从定义出发：
+        </p>
+        $$Q^{\pi_\theta}(s_t, a_t) = \sum_{t'=t}^{T}\mathbb{E}_{\pi_\theta}\left[r(s_{t'}, a_{t'})\mid s_t, a_t\right]$$
+        <p>
+            把第一项单独写出来，它的状态和动作就是输入的 $s_t, a_t$，所以奖励已知；剩下的是从 $s_{t+1}$ 起的未来奖励和，其中 $s_{t+1}$ 来自动力学，之后的动作和状态来自 $\pi_\theta$。这又可以写成下一步的 Q：
+        </p>
+        $$Q^{\pi_\theta}(s_t, a_t) = r(s_t, a_t) + \mathbb{E}_{s_{t+1}\sim p(\cdot\mid s_t,a_t),\ a_{t+1}\sim\pi_\theta(\cdot\mid s_{t+1})}\left[Q^{\pi_\theta}(s_{t+1}, a_{t+1})\right]$$
+        <p>
+            Q 被递归地定义为当前奖励加上下一步的 Q。这个等式对任意状态和动作都成立，没有假设数据是用哪个策略收集的。
+        </p>
+        <p>
+            缓冲区里的数据是 $(s, a, r, s')$，加上后续轨迹的未来奖励。动作 $a$ 是旧策略做的，未来奖励以复杂的方式依赖旧策略的动作，所以不想用后半段。但拟合 $Q(s,a)$ 时动作是输入，和当前策略会做的动作不同也没关系。于是：
+        </p>
+        <ol>
+            <li>从缓冲区采 $(s_i, a_i, r_i, s'_i)$。$a_i$ 来自旧策略，但动力学不变。</li>
+            <li>从当前策略采 $a'_i\sim\pi_\theta(\cdot\mid s'_i)$。</li>
+            <li>目标 $y_i = r_i + \gamma\hat Q^{\pi}_\phi(s'_i, a'_i)$，用 L2 误差拟合：输入状态和动作，输出这个标签。</li>
+        </ol>
+        <p>
+            因为下一个动作是从当前策略采样的，而不是取自数据，得到的就是当前策略的 Q 函数估计。这里对下一状态的期望用数据里那一个 $s'$ 做单样本估计，对下一动作的期望用一个 $a'$ 做单样本估计；也有方法对同一个 $s'$ 采多个动作来更好地估计这个期望，批量里每个数据点各采一次，本身也算多个样本。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>Q 的输入动作来自旧策略，但后面的轨迹仍是别的策略走的，Q 应该加当前策略的奖励，怎么办？把 Q 用当前策略的 Q 来表示之后，第二项根本不用未来数据：用到了 $s'$，但不用 $s'$ 之后的任何东西，用的是对下一步 Q 的自举估计，下一个动作也换成当前策略采的。</li>
+            <li>这是否要求见过所有状态动作对？她说这是很好的洞察。不需要见过所有对，但要让目标准确，数据必须覆盖和当前策略会做的动作相近的动作。没见过的话，Q 就不准，需要用当前策略收集数据。从旧策略那里并不能免费得到很好的 Q 估计，仍需要对“当前策略会做什么”有不错的覆盖，但它提供了一种利用旧数据的途径。如果某个状态完全没有数据是问题，有数据但只有很不一样的动作也是问题；神经网络能做一定的泛化和插值，这会有帮助。</li>
+            <li>用 KL 约束让策略靠近之前的策略，会对动作覆盖有帮助吗？她说接下来要看的算法没这么做，但这是个好主意。KL 约束在强化学习里经常出现，因为很多时候都假设不偏离之前的策略太远；对接下来的算法，这样做在某些情况下也可能更好。</li>
+        </ul>
+        <p>
+            修改后的第 3 步：用目标 $y_i=r_i+\gamma\hat Q(s'_i,a'_i)$ 更新 $\hat Q$，状态来自缓冲区，下一动作来自当前策略在缓冲区下一状态上的采样。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. SAC，以及 PPO 和 SAC 的比较</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cRGKc-nAWho&t=3874s" target="_blank">1:04:34</a>–1:09:21 · Soft Actor-Critic / SAC vs PPO / Real-world RL applications</em></p>
+        <h3>修正策略更新</h3>
+        <p>
+            最后修策略更新这一步。两处改动：用 Q 代替 A，不再减基线，方差会更高，但可以接受，因为现在用的是整个缓冲区的大量数据；当前策略的动作很可能比过去策略的动作好，所以这一步的动作从当前策略采样，而不用缓冲区里的动作：
+        </p>
+        $$\nabla_\theta J(\theta) \approx \frac{1}{N}\sum_i\nabla_\theta\log\pi_\theta(a^\pi_i\mid s_i)\,\hat Q^\pi(s_i, a^\pi_i),\quad a^\pi_i\sim\pi_\theta(a\mid s_i)$$
+        <p>这和拟合 Q 时用的技巧一样，只是用在当前状态而不是下一状态上。完整算法：</p>
+        <ol>
+            <li>做动作 $a\sim\pi_\theta(a\mid s)$，得到 $(s,a,s',r)$，加入 $\mathcal{R}$；</li>
+            <li>从 $\mathcal{R}$ 采小批量 $\{(s_i,a_i,r_i,s'_i)\}$；</li>
+            <li>用 $y_i=r_i+\gamma\hat Q^\pi_\phi(s'_i,a'_i)$、$a'_i\sim\pi_\theta(\cdot\mid s'_i)$ 更新 $\hat Q^\pi_\phi$；</li>
+            <li>用 $a^\pi_i\sim\pi_\theta(a\mid s_i)$ 计算上面的 $\nabla_\theta J(\theta)$；</li>
+            <li>$\theta\leftarrow\theta+\alpha\nabla_\theta J(\theta)$，重复。</li>
+        </ol>
+        <p>
+            还剩一个问题：缓冲区里的状态不是当前策略访问的状态。这一点没什么可做的，但也不一定是坏事，它意味着策略在更宽的状态分布上学习，而不只是自己会访问的那些状态。这基本就是 Soft Actor-Critic（SAC）。幻灯片注明：对高斯策略还可以用重参数化技巧（Reparameterization Trick）更好地估计这个梯度，也有更花哨的拟合 Q 的办法，后两讲会讲；参考论文是 Haarnoja 等人的 Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor（2018）。
+        </p>
+        <h3>PPO 和 SAC 的比较</h3>
+        <p>
+            对比图里，更离策略、用回放缓冲区的方法（橙色）比更少离策略的方法（棕色）数据效率高得多，SAC 这类算法能高效得多地学习。代价是超参数往往更难调，用 Q 函数时通常也没有 PPO 稳定。
+        </p>
+        <ul>
+            <li>完全离策略足够高效，可以直接在真实机器人上做强化学习：用 SAC 在不到两小时内从零学会向前走（Haarnoja 等，Soft Actor-Critic Algorithms and Applications，2018）。</li>
+            <li>基于 SAC 的算法学习精密装配，用演示做种子（HIL-SERL，Luo 等，2024）：在测试的所有任务上成功率都是 100%，模仿学习的成功率低得多，而且强化学习得到的策略动作更快。</li>
+            <li>PPO 是需要稳定学习、可以不那么省数据时的常用算法。仿真里数据不是问题，可以收集海量数据；在仿真里学策略，仔细调好模拟器，策略也许能迁移到真实世界，比如四足机器人的敏捷运动（Tan 等，Sim-to-Real: Learning Agile Locomotion For Quadruped Robots，2018）。</li>
+            <li>OpenAI 在仿真里训练机械手解魔方再迁移到真实手上（Solving Rubik's Cube with a Robot Hand，2019），用的是 PPO，执行约五分钟后魔方复原。她提醒，一般来说操作任务的仿真到真实迁移要难得多，成功率也低。</li>
+            <li>PPO 也是语言模型的常用选择，下周讲奖励建模时开始讨论。</li>
+        </ul>
+        <h3>2026 版幻灯片补充：在线强化学习实践指南</h3>
+        <table>
+            <thead><tr><th></th><th>PPO</th><th>SAC（以及更新的 RLPD、EXPO 等）</th></tr></thead>
+            <tbody>
+                <tr><td>位置</td><td>更 on-policy：在一批 rollout 上走多步梯度，然后重新收集</td><td>更 off-policy：使用过去经验的回放缓冲区</td></tr>
+                <tr><td>主要优点</td><td>稳定，更“即插即用”</td><td>数据效率高</td></tr>
+                <tr><td>主要缺点</td><td>数据效率低</td><td>不太稳定，常需要更多调参</td></tr>
+                <tr><td>马尔可夫性</td><td>如果用蒙特卡洛价值函数，可以不依赖马尔可夫性质</td><td>重度依赖马尔可夫性质</td></tr>
+            </tbody>
+        </table>
+        <p>两者都一样：如果有模仿数据或演示，用它们做种子会有帮助，前者用来初始化策略权重，后者可以把演示加进回放缓冲区。</p>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>在一批数据上走多步梯度需要重要性权重 $\pi_{\theta'}/\pi_\theta$；走太多步会对基于旧策略的优势过拟合，学习不稳定甚至崩溃。</li>
+            <li>让新策略靠近旧策略：加 KL 惩罚 $-\beta D_{\text{KL}}$，或截断权重到 $[1-\epsilon,1+\epsilon]$。</li>
+            <li>PPO 的代理目标：$\sum\min\big(w\hat A,\ \operatorname{clip}(w,1-\epsilon,1+\epsilon)\hat A\big)$，是原代理目标的下界；配合 GAE；典型设置约 2000 步一批、10 个 epoch、$\epsilon=0.2$。</li>
+            <li>更离策略：回放缓冲区 + 拟合 Q，目标 $r+\gamma\hat Q(s', a')$ 中 $a'$ 从当前策略采样；策略梯度用 $\hat Q(s, a^\pi)$，$a^\pi$ 也从当前策略采样。这基本是 SAC。需要数据对当前策略动作有足够覆盖。</li>
+            <li>SAC 数据效率高，能在真实机器人上训练，但更难调、更不稳；PPO 稳定、省事，但费数据，常用于仿真和语言模型。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224R Deep Reinforcement Learning · Lecture 5: Off-Policy Actor Critic · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

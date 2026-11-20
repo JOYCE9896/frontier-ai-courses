@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第7讲：离线强化学习 | Stanford CS224R 深度强化学习笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="06_Q学习.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS224R 目录</a> · 07</span>
+    <span><a href="08_奖励学习.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第7讲：离线强化学习</h1>
+        <p class="subtitle">为什么要从固定数据集学策略，直接跑离策略算法为什么会高估分布外动作的 Q 值，离线强化学习相对模仿学习的优势（轨迹拼接），过滤式行为克隆，优势加权回归 AWR、AWAC，期望分位数回归和隐式 Q 学习 IQL，以及幻灯片上的保守 Q 学习 CQL</p>
+        <div class="author-meta">
+            主讲：Chelsea Finn · 课堂日期：2025 年 4 月 23 日 · 时长：1 小时 8 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=lRDaXnPIzks" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs224r.stanford.edu/spring_2025/slides/07_cs224r_offline_rl_2025.pdf" target="_blank">2025 幻灯片</a> · <a href="https://cs224r.stanford.edu/slides/07_cs224r_offline_rl_2026.pdf" target="_blank">2026 幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            离线强化学习（Offline RL）是从一个给定的数据集学习策略，数据不是自己的策略收集的，也不能再收集新数据。Chelsea 给的三个学习目标：离线强化学习的核心难点是什么；两类方法以及它们为什么有效；离线强化学习为什么能比同样从离线数据学习的模仿学习做得更好。
+        </p>
+        <p>
+            这一讲建立在前几讲的价值函数拟合上。2025 版幻灯片里还有保守 Q 学习（CQL）一节，录像里没时间讲，它是作业 3 的内容，本文在第 9 节按幻灯片补上；2026 版幻灯片删掉了 CQL，其余内容基本相同。
+        </p>
+        <ol>
+            <li><a href="#t01">回顾：三种拟合价值函数的方法</a> · <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">为什么要离线强化学习</a> · <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=461s" target="_blank">0:07:41</a></li>
+            <li><a href="#t03">核心难点：分布偏移和 Q 值高估</a> · <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=835s" target="_blank">0:13:55</a></li>
+            <li><a href="#t04">相对模仿学习的优势，以及过滤式行为克隆</a> · <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=1595s" target="_blank">0:26:35</a></li>
+            <li><a href="#t05">优势加权回归 AWR</a> · <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=1955s" target="_blank">0:32:35</a></li>
+            <li><a href="#t06">AWR 的优势估计和完整算法</a> · <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=2621s" target="_blank">0:43:41</a></li>
+            <li><a href="#t07">AWAC：用数据里的下一动作做 TD</a> · <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=3138s" target="_blank">0:52:18</a></li>
+            <li><a href="#t08">隐式 Q 学习 IQL 和期望分位数回归</a> · <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=3380s" target="_blank">0:56:20</a></li>
+            <li><a href="#t09">保守 Q 学习 CQL（幻灯片内容）和怎样选算法</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 回顾：三种拟合价值函数的方法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=0s" target="_blank">0:00:00</a>–0:07:41 · Recap of Online RL</em></p>
+        <p>
+            策略梯度提高带来高于平均结果的动作的似然；引入价值函数之后，Actor-Critic（PPO、SAC）根据估计的好坏来鼓励策略。她特意重温拟合价值函数的几种方法，因为它们在今天很重要。
+        </p>
+        <ol>
+            <li>蒙特卡洛：目标是从该状态起的奖励和，$\min_\phi\sum\|\hat V^\pi_\phi(s_t) - \sum_{t'=t}^{T} r(s_{t'},a_{t'})\|^2$。</li>
+            <li>自举（TD）：目标是 $r(s_t,a_t)+\gamma\hat V^\pi_\phi(s_{t+1})$。这两种里数据都来自要评估的那个策略，是 on-policy 的策略评估。</li>
+            <li>数据来自旧策略的混合时，改为拟合 Q：目标 $r+\gamma\hat Q^\pi_\phi(s_{t+1}, a_{t+1})$，其中 $s, a, s_{t+1}$ 来自数据集，$a_{t+1}$ 从要评估的策略采样。如果 $a_{t+1}$ 也取自数据，得到的就是数据背后那个策略的价值，而不是要学的策略的价值。</li>
+        </ol>
+        <p>
+            第三种很重要的一点：因为用自己的估计做标签，Q 函数必须在和将要评估的动作相似的动作上训练过。如果策略和旧策略差别很大，标签就不准，学不出准确的 Q。它需要动作上的良好覆盖。完整的离策略 Actor-Critic：用策略收集数据存入缓冲区，采样，用这些目标更新 Q，更新策略以提高 Q 值高的动作的似然，重复。
+        </p>
+        <p>
+            有学生问这是不是 Q 学习？她说这是两讲之前的 SAC。Q 学习学的是最优策略的 Q 函数，目标里不从策略采样，而是取 $\max_{a'}$；只要估计有好的覆盖，它也能离策略地做。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 为什么要离线强化学习</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=461s" target="_blank">0:07:41</a>–0:13:55 · Introduction to Offline RL</em></p>
+        <p>
+            在线强化学习（不论 on-policy 还是离策略）：收集数据，用最新数据或至今所有数据更新策略，重复。离线强化学习：事先给定一个数据集，在上面训练策略，不迭代收集数据。适用的情况：
+        </p>
+        <ul>
+            <li>手里已有现成系统或人收集的数据，而用当前策略收集数据有风险或不安全。比如学开车，有大量人类驾驶数据，部署一个还不会开车的策略很危险。又比如用强化学习寻找治疗方案，她提到一个预防癫痫发作的项目：有了现有系统的离线数据，就不必从一个本来就不好的策略收集数据。</li>
+            <li>更微妙的一点：多次运行在线强化学习时，你其实已经有以前策略的数据，最好复用，不要每次做实验都重新收集。比如训练机器人抓东西，纯在线方法每次跑算法都要重新收集数据，很低效，第一次运行时算法本身多半还要改。所以在线数据通常比离线数据贵，离线数据可以反复使用。</li>
+        </ul>
+        <p>
+            离线和在线可以结合：先在已有数据集上训练（比如人类驾驶数据），策略不错之后再在线收集数据改进（比如配安全员）。很多真实应用都想这样结合，因为部署之后还能继续改进策略很有价值。
+        </p>
+        <p>
+            有学生问，离线强化学习能不能看成“数据来源未知的离策略在线强化学习”的特例？她说这个看法对。但纯离线强化学习有一个严格要求：完全不能收集更多数据，而离策略在线强化学习可以，所以严格说不是特例。不过算法上会借用一些离策略技术，因为它们能利用旧策略的数据，而离线数据集就来自某个未知策略。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 核心难点：分布偏移和 Q 值高估</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=835s" target="_blank">0:13:55</a>–0:26:35 · Offline RL Challenges</em></p>
+        <p>
+            给定数据集 $\mathcal{D}=\{(s_i,a_i,s'_i,r_i)\}$，比如很多人在很多地方开不同的车。我们不知道收集数据的策略（多人收集就是多个策略），但从数学上把它看成一个策略很有用，称为行为策略（Behavior Policy）$\pi_\beta$；多个策略时可以把 $\pi_\beta$ 看成它们的加权混合，所以不失一般性。数据的分布对应 $\pi_\beta$ 的状态分布 $s\sim d^{\pi_\beta}(s)$、动作分布 $a\sim\pi_\beta(a\mid s)$、动力学 $s'\sim p(s'\mid s,a)$ 和奖励 $r=r(s,a)$。
+        </p>
+        <p>目标是学一个好的策略 $\pi_\theta$：</p>
+        $$\max_\theta\ \mathbb{E}_{\tau\sim p_\theta(\tau)}\left[r(\tau)\right]$$
+        <p>
+            这个期望是在学到的策略下取的，而数据来自另一个策略，所以收集数据的策略和部署的策略之间有分布偏移，我们又不能从学到的策略采样。这是离线强化学习的一大难点。环境动力学在数据和学到的策略之间不变，分布偏移只由策略的变化引起。
+        </p>
+        <ul>
+            <li>有学生问，数据足够全面时，学到的策略和行为策略的分布会不会一样？她说极少发生。通常你想超过数据集，学到比平均司机更好的策略，于是分布可能比原策略窄；如果原策略本来就很好，那更像模仿学习，仍可能偏离数据分布。</li>
+            <li>数据从哪来？可以是人收集的、手工设计的系统或控制器产生的、以前的强化学习运行留下的，也可以是这些来源的混合。</li>
+        </ul>
+        <h3>直接跑离策略算法会怎样</h3>
+        <p>
+            既然离线和离策略有关，能不能直接在离线数据集上跑 SAC 这样的离策略算法？有同学说：Q 估计是在从策略采样的动作上评估的，策略又在提高 Q 值高的动作的似然；如果数据来自另一个策略，用来监督 Q 函数的那个 Q 估计可能不准，因为数据里不一定见过学到的策略会做的动作。Q 不准，策略就会坏。
+        </p>
+        <p>
+            她展开讲：数据里有动作 $a_1, a_2, a_3$，车还有很多数据里没有的动作，比如开去“冒险” $a_4$、掉头 $a_5$、倒车 $a_6$。训练开始时 Q 函数是随机初始化的，对某个状态，它在各动作上的值看起来有些随机。只有 $a_1$ 到 $a_3$ 所在的范围是数据分布内的，范围外的 Q 值是任意的，没有任何数据约束它。策略更新会提高 Q 值高的动作的似然，于是可能选中一个分布外、随机初始化恰好偏高的动作，而它永远不会知道这个动作真正的 Q 值。数据里从没见过一辆车在高速上掉头，那个动作的 Q 值是随机的，有的偏高、有的偏低，策略就会利用分布外动作上的这些误差。
+        </p>
+        <p>
+            幻灯片上的说法：目标 $r+\gamma\mathbb{E}_{a'\sim\pi}[\hat Q(s',a')]$ 中，在数据集外的 $a'$ 上评估 Q 时，Q 是不可靠的；策略更新会寻找 Q 过度乐观的动作；更新之后这些 Q 值就被高估了，并不断强化这种其实不在数据里的“好行为”。换个角度，这发生在学到的策略偏离行为策略太远的时候，分布外动作就是和行为策略做法差别很大的动作；贴近行为策略就不会有这个问题。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>离散动作空间呢？基本一样。如果数据集的每个状态都覆盖了所有动作，就不会有这个问题，因为一切都在分布内；但实践中总有状态缺少一些动作，那些状态上仍会高估。</li>
+            <li>更新 Q 时能不能直接排除分布外动作？有这样的方法。麻烦的是我们并不知道什么在分布内、什么在分布外，只有状态动作样本。一个状态选了 $a_1$，另一个很相似但不完全相同的状态选了 $a_2$，那么对第一个状态，$a_2$ 严格说没见过；对给定状态，你不知道哪些动作在分布内。</li>
+        </ul>
+        <p>
+            离线强化学习方法背后的关键想法：一是想办法不偏离行为策略太远，二是避免分布外动作。缓解高估是离线强化学习方法的核心目标。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 相对模仿学习的优势，以及过滤式行为克隆</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=1595s" target="_blank">0:26:35</a>–0:32:35 · Filtered Behavior Cloning</em></p>
+        <p>
+            一种离线方法就是做模仿学习。它有效是因为只用数据里出现过的动作监督，隐式地避开了分布外动作。但不想用纯模仿学习，因为离线数据未必最优：数据里的人类司机不一定按你希望自动驾驶车开的方式开。离线强化学习应该利用奖励信息，指出哪些行为好、哪些不那么好，从而超过数据背后的策略；纯模仿学习超不过数据里的专家。
+        </p>
+        <h3>轨迹拼接</h3>
+        <p>
+            好的离线强化学习方法还能把好的行为拼接起来（Trajectory Stitching）。数据里有两条轨迹：一条从 $s_1$ 经 $s_2$、$s_3$ 走下去，最后拿到负奖励；另一条在中途经过和 $s_3$ 相近的状态，后半段 $s_7$ 到 $s_9$ 拿到好奖励。$s_1$ 到 $s_3$ 是好行为，$s_7$ 到 $s_9$ 也是好行为。离线强化学习原则上能学到从 $s_1$ 一路到 $s_9$ 的策略，把第一条的前半段和第二条的后半段拼起来；模仿学习做不到，它在交汇的状态会对两种动作分布取平均。
+        </p>
+        <h3>过滤式行为克隆</h3>
+        <p>
+            先看一个很简单的基线：只模仿高奖励的轨迹。定义新数据集，保留奖励和超过阈值的轨迹，阈值可以是某个分位数，比如第 70 百分位，也就是只留前 30%：
+        </p>
+        $$\tilde{\mathcal{D}} := \{\tau \mid r(\tau) \gt \eta\}$$
+        $$\max_\theta\ \sum_{(s,a)\in\tilde{\mathcal{D}}}\log\pi_\theta(a\mid s)$$
+        <p>
+            这就是常规的模仿学习目标。这是“第一个”离线强化学习方法，很初级，叫过滤式行为克隆（Filtered Behavior Cloning），或者只模仿前 k% 的数据。它利用奖励的方式很原始，也做不到拼接：坏轨迹会被整条过滤掉，学不到把两段好行为连起来。但它是个好基线，尝试任何离线强化学习方法之前都应先试它，作为对照，确保你的方法比它好。她说引入它的另一个原因是，一些最好的离线强化学习方法其实和它差别不大，也有模仿学习的成分。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 优势加权回归 AWR</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=1955s" target="_blank">0:32:35</a>–0:43:41 · Advantage Weighted Regression</em></p>
+        <p>
+            与其只挑好的轨迹，不如模仿所有数据，但按每个转移里动作有多好给模仿目标加权。优势函数表示 $a_t$ 比策略的平均做法好多少，正适合做权重。用指数化的优势加权：
+        </p>
+        $$\theta \leftarrow \arg\max_\theta\ \mathbb{E}_{(s,a)\sim\mathcal{D}}\left[\log\pi_\theta(a\mid s)\,\exp\big(A(s,a)\big)\right]$$
+        <p>
+            为什么取指数，有一个推导，课上不展开。回到拼接的例子：在交汇的那个状态，往好结果走的动作 Q 值是 1，往另一边走（至少数据里）是 0，状态价值是两者的平均，所以前者优势为正，后者为负。用优势加权模仿目标，就会告诉策略在那个状态走向好结果。只要优势估计好，这个目标就能拼接离线数据里的好行为。
+        </p>
+        <p>
+            可以证明这个优势加权模仿目标在近似一个带 KL 约束的目标：在不偏离行为策略太远的约束下，最大化以 Q 值衡量的未来奖励。她说这对离线强化学习是很合理的目标，因为离行为策略太远，就得不到改进策略所需的好信息。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>要超过模仿学习，是否需要假设轨迹有完全相交的状态？不需要，图里她特意让 $s_7$ 和 $s_3$ 不完全相同。用神经网络表示策略和优势函数时，相似的状态和动作自然有相似的输出，所以只要状态相近就能泛化；效果取决于状态有多近、数据集有多大，能否学到把它们表示得相近。</li>
+            <li>实践中要担心指数项爆炸吗？实际算法里会加一个温度超参数，写成 $\exp\big(\frac{1}{\alpha}A\big)$，能防止它变得极大。</li>
+            <li>和 Actor-Critic 的目标有什么不同？Actor-Critic 里直接乘优势，不取指数；这里从离线数据集采样，Actor-Critic 一般从在线数据采样，SAC 里的动作还来自策略而不是数据集。她说这些差别没有很快的推导；一种理解是在线强化学习目标常在优化反向 KL，离线方法更像前向 KL，但解释起来比较长。幻灯片上列了参考文献（Peng、Kumar、Zhang、Levine，Advantage-Weighted Regression，2019）。</li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. AWR 的优势估计和完整算法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=2621s" target="_blank">0:43:41</a>–0:52:18 · AWR Implementation Details</em></p>
+        <p>
+            优势总是对应某个策略：在 $s$ 做 $a$、之后按某个策略。先估计行为策略的优势。怎样估计，同时避免前面那种高估？
+        </p>
+        <p>
+            版本 1 用最简单的蒙特卡洛。因为拟合的是行为策略的价值函数，数据正好来自要评估的策略，直接回归未来奖励和即可：
+        </p>
+        $$\min_\phi\sum_{s_t\sim\mathcal{D}}\left\|\hat V^{\pi_\beta}_\phi(s_t) - \sum_{t'=t}^{T} r(s_{t'}, a_{t'})\right\|^2$$
+        <p>
+            得到优势可以用 $r+\hat V(s_{t+1})-\hat V(s_t)$，但这依赖价值函数比较准，因为是一步时序差分。另一个选择是直接用实际观察到的未来奖励和减去价值，更简单，也不依赖这个差分：
+        </p>
+        $$\hat A^{\pi_\beta}(s_t, a_t) = \sum_{t'=t}^{T} r(s_{t'}, a_{t'}) - \hat V^{\pi_\beta}_\phi(s_t)$$
+        <p>
+            这对应一个简单又流行的算法：优势加权回归（Advantage-Weighted Regression，AWR）。她强调用 $r+V(s_{t+1})$ 的版本也成立，这个版本只是常用、在离线数据上效果不错。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>之前说蒙特卡洛方差高、GAE 更好，这里能用 GAE 吗？完全可以，这里只是更简单。</li>
+            <li>离线数据集够大、方差没那么大，所以才用蒙特卡洛吗？这是原因之一，数据集大时方差不那么要紧，估计也更准。但很大程度上也是为了简单：价值函数用监督学习拟合，策略用加权监督学习拟合，算法很简单。即使有离线数据集，它的方差也比后面要讲的估计大。</li>
+        </ul>
+        <h3>思考题：确定性的行为策略</h3>
+        <p>
+            如果数据背后的策略是确定性的，比如车在某些车道上总是直行，从不左转右转，这个算法会学到什么优势？有同学答：总做同一个动作，奖励和就等于 V，没有动作上的变化，所以所有优势估计都是 0，指数项为 1，就退化成了纯模仿学习。她说能退化回模仿学习是好事：数据里看不到不同动作的差别，策略本来就不可能超过行为策略。
+        </p>
+        <ul>
+            <li>收集离线数据时，是否应该有时偏离专家策略，多看到一些动作？一般来说，离线数据里动作越多样越好，尤其你觉得专家并非最优时，这样才有可能超过数据里的专家。</li>
+            <li>实践中优势经常是 0 吗？真实的优势函数在其他动作上不是 0，只是数据里没看到那些动作。只要数据里动作有变化，优势就会明显不为 0，取决于数据集有多宽。</li>
+            <li>优势函数在数据集外的动作上会怎样？这个目标只在数据集里的动作上评估它，所以不会越出支撑集。如果别处要在数据外的动作上评估，它就不准，只是网络优化出来的任意值，离数据近也许还合理，离得远可能错得离谱。</li>
+            <li>优势是不是总接近 0？如果数据集宽，一个状态（或相似状态）下会看到多样的动作，比如三个动作的奖励和分别是 $+10$、$+1$、$-5$，价值函数估计是它们的平均，约为 3（她口头说的），优势就分别约为 7、$-2$、$-8$。状态下结果有差别，优势才有差别。</li>
+        </ul>
+        <h3>完整的 AWR 算法</h3>
+        <ol>
+            <li>拟合价值函数：$\min_\phi\sum_{s_t\sim\mathcal{D}}\|\hat V^{\pi_\beta}_\phi(s_t) - \sum_{t'=t}^{T} r(s_{t'},a_{t'})\|^2$；</li>
+            <li>训练策略：
+            $$\max_\theta\ \mathbb{E}_{(s_t,a_t)\sim\mathcal{D}}\left[\log\pi_\theta(a_t\mid s_t)\exp\left(\frac{1}{\alpha}\left(\sum_{t'=t}^{T} r(s_{t'},a_{t'}) - \hat V^{\pi_\beta}_\phi(s_t)\right)\right)\right]$$
+            $\alpha$ 是控制分布有多尖的温度超参数。</li>
+        </ol>
+        <p>
+            优点：很简单，大概是能超过过滤式模仿学习的最简单的实现；不查询、也不在任何分布外动作上训练，所以更稳定。缺点：蒙特卡洛估计有噪声；学到的是行为策略的优势 $\hat A^{\pi_\beta}$，对应的策略比 $\pi_\theta$ 弱，所以对数据集的改进幅度有限。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. AWAC：用数据里的下一动作做 TD</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=3138s" target="_blank">0:52:18</a>–0:56:20 · Advantage Weighted Actor-Critic</em></p>
+        <p>
+            最好能用 TD（自举）更新，又不在分布外动作上查询 Q。之前目标里的问题是 $a'$ 从要学的策略采样。一个很简单的改动：$a'$ 直接取数据集里的下一动作：
+        </p>
+        $$\hat Q^{\pi_\beta} \leftarrow \arg\min_Q\ \mathbb{E}_{(s,a,s',a')\sim\mathcal{D}}\left[\Big(Q(s,a) - \big(r + \gamma Q(s', a')\big)\Big)^2\right]$$
+        <p>
+            这样 $a'$ 一定在数据里出现过，$(s', a')$ 有监督目标。用这种方式估计 Q（再用它估计优势），得到的算法叫优势加权 Actor-Critic（Advantage-Weighted Actor-Critic，AWAC）。它去掉了 AWR 的一个弱点，可以用自举了；但估计的仍是 $\pi_\beta$ 的价值，不是要学的策略的价值。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 隐式 Q 学习 IQL 和期望分位数回归</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lRDaXnPIzks&t=3380s" target="_blank">0:56:20</a>–1:07:50 · Implicit Q-Learning</em></p>
+        <p>
+            能不能估计一个比行为策略更好的策略的 Q？看自举目标：$r+\gamma Q(s',a')$ 是 $V^{\pi_\beta}(s')$ 的一个样本。对给定状态，不同动作带来不同的奖励和，数据里其实有一个价值的分布（直方图）。用 L2 损失回归，得到的是这个分布的均值，也就是行为策略的价值 $\mathbb{E}_{a\sim\pi_\beta}[Q(s,a)]$。如果改为拟合更高的分位，比如第 70 百分位，也许就得到一个比行为策略更好的策略的价值；支撑集内最好的策略对应直方图靠右的位置。办法是换一个非对称的损失。
+        </p>
+        <h3>期望分位数回归</h3>
+        <p>
+            L2 损失是关于误差 $x$ 对称的 $x^2$。改用非对称的损失，在某个方向上的误差罚得轻一些：
+        </p>
+        $$\ell^\lambda_2(x) = \begin{cases}(1-\lambda)\,x^2 & x \lt 0\\ \lambda\,x^2 & \text{otherwise}\end{cases}$$
+        <p>
+            $\lambda=0.5$ 时就是普通的 L2（差一个常数倍）；$\lambda$ 偏离 0.5 时，两侧误差的权重不同，拟合出的值会偏向分布的高处或低处。这叫期望分位数回归（Expectile Regression），对任意随机变量都适用：均值是一条曲线，不同的 $\lambda$ 给出不同的期望分位数。她讲方向时口误了一次，以幻灯片的公式为准。
+        </p>
+        <p>
+            用到价值函数上：对高估和低估都惩罚，但稍微高估一点罚得没那么重。前面那个例子里，均值是 3；取合适的 $\lambda$，最优输出会是更高的值，比如 6（她说没有算出精确值）。
+        </p>
+        <h3>IQL 算法</h3>
+        <ol>
+            <li>用期望分位数损失拟合价值函数：$\min_V\ \mathbb{E}_{(s,a)\sim\mathcal{D}}\left[\ell^\lambda_2\big(\hat Q(s,a) - V(s)\big)\right]$；</li>
+            <li>用普通均方误差拟合 Q 函数，以价值函数为目标：$\min_Q\ \mathbb{E}_{(s,a,s')\sim\mathcal{D}}\left[\big(Q(s,a) - (r(s,a) + \gamma V(s'))\big)^2\right]$；</li>
+            <li>估计优势 $\hat A = \hat Q - \hat V$，用 AWR 得到策略：$\max_\theta\ \mathbb{E}_{(s,a)\sim\mathcal{D}}\left[\log\pi_\theta(a\mid s)\exp\big(\tfrac{1}{\alpha}(\hat Q(s,a) - \hat V(s))\big)\right]$。</li>
+        </ol>
+        <p>这叫隐式 Q 学习（Implicit Q-Learning，IQL，Kostrikov、Nair、Levine，ICLR 2022）。</p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>这样会高估价值吗？这个算法从不把数据外的动作作为输入，而那是之前高估的主要来源。至于 $\lambda$，设得太极端会高估；通常选一个不那么激进、偏中间的值（她说的具体数字字幕不清）。它确实高估了 $\pi_\beta$ 的价值，这是故意的，因为要估计的是一个比 $\pi_\beta$ 更好的策略的价值。</li>
+            <li>策略在逐步改进，要不要逐渐调小 $\lambda$？数据不是自己的策略收集的，全部来自离线数据集，所以保持不变合理，你始终想比行为策略好固定的一截。如果开始收集在线数据，数据会偏向更好的策略，这时把 $\lambda$ 调回接近 0.5 可能更合理。</li>
+            <li>在哪里拟合 Q？也可以用蒙特卡洛回报配合期望分位数目标。用 Q 的好处是可以用自举备份，Q 的目标方差比奖励和低；这些想法对蒙特卡洛同样适用。</li>
+        </ul>
+        <p>
+            IQL 的优点：不需要查询分布外动作；策略仍只在数据里的动作上训练；actor 和 critic 的训练解耦，先在数据上拟合价值函数和 Q 函数，收敛或训够之后再训练策略。
+        </p>
+        <h3>小结和延伸</h3>
+        <p>
+            在线数据很贵，每次跑算法都要重新收集，复用离线数据很有用。离线强化学习的大难点是行为策略和学到的策略之间的偏移导致 Q 值高估。办法：过滤或加权的模仿学习是简单基线；只在数据里的动作上监督策略，隐式地把策略约束在 $\pi_\beta$ 附近，从而避开分布偏移；轨迹拼接让离线强化学习能超过纯模仿学习。
+        </p>
+        <p>
+            她的建议：过滤式行为克隆和 IQL 都是好方法，但 IQL 可能效果更好，尤其数据集更宽时。想做离线预训练加在线微调，IQL 也是很好的算法，配合在线收集数据效果也不错。IQL 有一个变体 IDQL（Hansen-Estruch 等，2023），策略类用扩散策略，效果也很好；它除了用扩散，更新方式也有些不同，想深入可以看看。幻灯片上的应用例子是 LinkedIn 用离线强化学习优化给用户发通知的策略（Prabhakar 等，Multi-Objective Optimization of Notifications Using Offline RL，2022），指标包括周活跃用户数、通知总量和通知点击率；她说这个应用用的是课上没讲的算法。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 保守 Q 学习 CQL（幻灯片内容）和怎样选算法</h2>
+        <p><em>2025 版幻灯片第 25–28 页。这一讲的录像没讲到 CQL，Chelsea 把它放到了下一讲开头，课上的讲解和问答见<a href="08_奖励学习.html#t01">第 8 讲第 1 节</a>；这里按幻灯片记录公式。作业 3 要实现 CQL。幻灯片注明改编自 Sergey Levine 的课件。</em></p>
+        <p>
+            回到随机初始化的 Q 函数：在下一状态 $s'$ 上，数据支撑之外的动作 Q 值可能任意偏高。能不能在不显式建模行为策略的情况下抑制高估？想法是直接把大的 Q 值往下压：
+        </p>
+        $$\hat Q^\pi = \arg\min_Q\max_\mu\ \mathbb{E}_{(s,a,s')\sim\mathcal{D}}\left[\Big(Q(s,a) - \big(r(s,a) + \gamma\mathbb{E}_\pi[Q(s',a')]\big)\Big)^2\right] + \alpha\,\mathbb{E}_{s\sim\mathcal{D}, a\sim\mu(\cdot\mid s)}\left[Q(s,a)\right]$$
+        <p>
+            第一项是标准的 critic 更新，第二项压低大的 Q 值。可以证明 $\alpha$ 足够大时 $\hat Q^\pi\le Q^\pi$。再加一项把数据里 $(s,a)$ 的 Q 值往上推：
+        </p>
+        $$\ldots\ -\ \alpha\,\mathbb{E}_{(s,a)\sim\mathcal{D}}\left[Q(s,a)\right]$$
+        <p>
+            这样不再保证对所有 $(s,a)$ 都有 $\hat Q^\pi\le Q^\pi$，但保证对数据里的所有状态 $s$，$\mathbb{E}_{\pi(a\mid s)}[\hat Q^\pi(s,a)]\le\mathbb{E}_{\pi(a\mid s)}[Q^\pi(s,a)]$。这就是保守 Q 学习（Conservative Q-Learning，CQL）。
+        </p>
+        <p>完整算法：</p>
+        <ol>
+            <li>在 $\mathcal{D}$ 上用 $\mathcal{L}_{\text{CQL}}$ 更新 $\hat Q^\pi$；</li>
+            <li>更新策略：离散动作时取 $\pi(a\mid s)=1$ 当 $a=\arg\max_{\bar a}\hat Q^\pi(s,\bar a)$，否则为 0；连续动作时 $\theta\leftarrow\theta+\eta\nabla_\theta\mathbb{E}_{s\sim\mathcal{D}, a\sim\pi_\theta(\cdot\mid s)}[\hat Q^\pi(s,a)]$。</li>
+        </ol>
+        <p>
+            怎样计算 $\mathcal{L}_{\text{CQL}}$：在目标里再加一个正则项 $\mathcal{R}(\mu)$。常见选择是最大熵正则，此时最优的 $\mu(a\mid s)\propto\exp(Q(s,a))$，于是 $\mathbb{E}_{s\sim\mathcal{D}, a\sim\mu(\cdot\mid s)}[Q(s,a)] = \log\sum_a\exp(Q(s,a))$，不需要显式构造 $\mu$。
+        </p>
+        <h3>选哪个离线算法（幻灯片）</h3>
+        <ul>
+            <li>过滤式行为克隆：使用离线数据的好的第一步。</li>
+            <li>保守 Q 学习：只有一个超参数。</li>
+            <li>隐式 Q 学习：能拼接数据，并且显式约束在数据支撑上。</li>
+            <li>这仍是活跃的研究领域。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>离线强化学习只用给定数据集，不收集新数据；适用于在线收集贵或不安全、或想复用以前数据的场合，也可以和在线微调结合。</li>
+            <li>核心难点：目标期望在 $\pi_\theta$ 下，数据来自 $\pi_\beta$；直接跑离策略算法时，策略会利用分布外动作上被高估的 Q 值。</li>
+            <li>相对模仿学习，离线强化学习能利用奖励、拼接轨迹，超过数据背后的策略。过滤式行为克隆是必试的基线。</li>
+            <li>AWR：$\max_\theta\mathbb{E}_\mathcal{D}[\log\pi_\theta(a\mid s)\exp(\frac{1}{\alpha}\hat A^{\pi_\beta})]$，只在数据动作上训练，近似带 KL 约束的目标；行为策略确定时退化为模仿学习。</li>
+            <li>AWAC 用数据中的 $a'$ 做 TD；IQL 用期望分位数损失拟合 $V$，得到比 $\pi_\beta$ 更好的策略的价值，再用 AWR 提取策略，全程不查询分布外动作。</li>
+            <li>CQL（幻灯片）：压低大的 Q 值、抬高数据里的 Q 值，得到保守的 Q 估计。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224R Deep Reinforcement Learning · Lecture 7: Offline RL · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

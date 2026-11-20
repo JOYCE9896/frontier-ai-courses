@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第8讲：奖励学习 | Stanford CS224R 深度强化学习笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="07_离线强化学习.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS224R 目录</a> · 08</span>
+    <span><a href="09_LLM偏好优化_RLHF与DPO.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第8讲：奖励学习</h1>
+        <p class="subtitle">先收尾离线强化学习：IQL 为什么只对 V 用非对称损失，保守 Q 学习 CQL 和 LinkedIn 通知的应用；再讲奖励从哪来，目标分类器为什么会被策略钻空子、怎样用策略访问的状态做负例（以及它和 GAN 的关系），从成对偏好学习奖励模型，语言模型的 RLHF 流程和 RLAIF</p>
+        <div class="author-meta">
+            主讲：Chelsea Finn · 课堂日期：2025 年 4 月 25 日 · 时长：1 小时 6 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs224r.stanford.edu/spring_2025/slides/08_cs224r_reward_learning_2025.pdf" target="_blank">2025 幻灯片</a> · <a href="https://cs224r.stanford.edu/slides/08_cs224r_reward_learning_2026.pdf" target="_blank">2026 幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            前 20 多分钟把离线强化学习讲完：补充 IQL 的一个细节，然后讲第二类方法保守 Q 学习（CQL）和它在 LinkedIn 的应用。之后转入奖励学习。到目前为止（除了模仿学习）一直在最大化奖励和，可奖励从哪来？Chelsea 给的学习目标：为什么任务说明（Task Specification）很难，朴素的奖励设定方法为什么会失败，有哪些从人类监督中学习奖励函数的方法。讲两类：从目标示例学习，和从人类偏好学习。后者是下一讲 RLHF 和 DPO 的基础。
+        </p>
+        <p>2026 版幻灯片删掉了 CQL，换成了一个机器人上的离线强化学习例子（π*0.6），放在第 2 节。</p>
+        <ol>
+            <li><a href="#t01">离线强化学习回顾：IQL 为什么只对 V 用非对称损失</a> · <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">保守 Q 学习 CQL</a> · <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=435s" target="_blank">0:07:15</a></li>
+            <li><a href="#t03">应用：LinkedIn 通知；离线强化学习小结</a> · <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=1305s" target="_blank">0:21:45</a></li>
+            <li><a href="#t04">奖励从哪来</a> · <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=1588s" target="_blank">0:26:28</a></li>
+            <li><a href="#t05">目标分类器，以及它和 GAN 的关系</a> · <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=1713s" target="_blank">0:28:33</a></li>
+            <li><a href="#t06">从成对偏好学习奖励</a> · <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=2605s" target="_blank">0:43:25</a></li>
+            <li><a href="#t07">完整算法和应用例子</a> · <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=3141s" target="_blank">0:52:21</a></li>
+            <li><a href="#t08">语言模型的 RLHF、RLAIF 和小结</a> · <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=3520s" target="_blank">0:58:40</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 离线强化学习回顾：IQL 为什么只对 V 用非对称损失</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=0s" target="_blank">0:00:00</a>–0:07:15 · Introduction to offline RL</em></p>
+        <p>
+            离线强化学习的设定：从一批由未知行为策略 $\pi_\beta$ 收集的数据学习，不做在线收集，目标是最大化 $\pi_\theta$ 下的奖励。用传统算法时，Q 函数会在学到的策略采样出的、数据没覆盖的动作上被查询，造成高估。上一讲的主要算法 IQL 完全避免了在数据集动作之外查询：只用数据中的状态和动作学价值函数和 Q 函数；普通更新只会学到 $\pi_\beta$ 的价值，所以对 V 用非对称损失，学一个比行为策略更好的策略的价值；Q 用标准 L2 损失。
+        </p>
+        <h3>为什么 V 用非对称损失，Q 不用</h3>
+        <p>
+            执行策略时有两个随机来源：选哪个动作，以及做了动作之后落到哪个状态。她用数字举例：
+        </p>
+        <ul>
+            <li>动作 $a_1$：实际到达的下一状态价值大约是 8，低于 $\hat Q(s,a_1)$，因为这次运气差了一点；</li>
+            <li>动作 $a_2$：比 $a_1$ 差，$\hat Q(s,a_2)=5$，但这次运气好，下一状态的真实价值是 8；</li>
+            <li>动作 $a_3$：很冒险，$\hat Q(s,a_3)=-5$，这次结果没那么坏，下一状态价值是 0。</li>
+        </ul>
+        <p>
+            拟合 V 时回归的是不同动作的 Q 值，可以学平均，也可以偏向较大的 Q 值；偏向大的 Q 值，对应的是更好的动作，也就是比行为策略更好的策略。拟合 Q 时目标是下一状态的价值，如果这里也用非对称损失，就会偏向那些下一状态价值较高的样本，优化出来的不是更好的策略，而是“更走运”的策略，而运气是动作控制不了的。所以 Q 用 L2。之所以 V 和 Q 都要学，是因为 Q 才能告诉我们哪个动作更好，AWR 那一步要用到。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 保守 Q 学习 CQL</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=435s" target="_blank">0:07:15</a>–0:21:45 · Conservative Q-learning</em></p>
+        <p>
+            另一类离线方法：仍然从策略查询动作、估计价值，但要抑制高估，不让算法选那些因为在分布外而 Q 值偏高的动作。想法是在数据支撑之外把 Q 值压下去：对分布外的一切悲观（保守），在数据支撑内不那么保守。
+        </p>
+        <h3>版本 1：压低大的 Q 值</h3>
+        <p>
+            在标准的 critic 损失上加一项，最小化某个分布 $\mu$ 下的 Q 值。$\mu$ 最好覆盖策略可能考虑的分布外动作，而策略会考虑 Q 值高的动作，所以选让 Q 值最大的 $\mu$：
+        </p>
+        $$\min_\phi\max_\mu\ \mathcal{L}_{\text{critic}}(\hat Q_\phi) + \alpha\,\mathbb{E}_{s\sim\mathcal{D},\,a\sim\mu(\cdot\mid s)}\left[\hat Q_\phi(s,a)\right]$$
+        <p>
+            其中 $\mathcal{L}_{\text{critic}} = \mathbb{E}_{(s,a,s')\sim\mathcal{D}}\big[(Q(s,a) - (r(s,a)+\gamma\mathbb{E}_\pi[Q(s',a')]))^2\big]$。$\alpha$ 是超参数。可以证明 $\alpha$ 足够大时，学到的 critic 是真实 Q 函数的下界：画出各动作的 Q 值，学到的 $\hat Q$ 整条曲线都在真实 Q 下面。
+        </p>
+        <h3>版本 2：把数据里的 Q 值推回去</h3>
+        <p>
+            版本 1 可能太悲观，因为它压低所有 Q 值；但数据支撑内的动作我们有更多数据，不想压低它们。于是加一项抵消：对数据集中的状态和动作，把 Q 值往上推：
+        </p>
+        $$\min_\phi\max_\mu\ \mathcal{L}_{\text{critic}}(\hat Q_\phi) + \alpha\,\mathbb{E}_{s\sim\mathcal{D},\,a\sim\mu(\cdot\mid s)}\left[\hat Q_\phi(s,a)\right] - \alpha\,\mathbb{E}_{(s,a)\sim\mathcal{D}}\left[\hat Q_\phi(s,a)\right]$$
+        <p>
+            目标是让 Q 函数在数据支撑内比较准，在支撑外偏低，因为支撑外我们本来就学不准。加了这一项后，不再保证对所有 $(s,a)$ 都是下界，但保证在期望意义上，对数据集中所有状态是下界：$\mathbb{E}_{\pi(a\mid s)}[\hat Q^\pi(s,a)]\le\mathbb{E}_{\pi(a\mid s)}[Q^\pi(s,a)]$。她没展开推导；$\alpha=0$ 时不成立，$\alpha$ 要足够大，具体条件她记不清，可以看 CQL 论文的证明。这就是保守 Q 学习（Conservative Q-Learning，CQL）。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>这会影响在数据支撑外的泛化吗？会，让你在支撑外更悲观，$\alpha$ 控制悲观的程度。如果你觉得自己处在能更好泛化的情形，可以选小一点的 $\alpha$，多用原 critic 目标、少用正则项。</li>
+            <li>公式里该写 $Q$ 还是 $\hat Q$？应该是 $\hat Q_\phi$，就是我们在学的 Q 函数。幻灯片上把 Q 当作被最小化的对象，记号略有不同。</li>
+            <li>$\mu$ 是什么，是数据支撑外的一个“假策略”吗？可以大致看成一个策略，但不是要执行的策略，它会去寻找 Q 值高的动作（在分布内或分布外都行）并压低它们；到了分布内，就被第三项抵消，所以分布内估计更准。</li>
+            <li>“对 $\mu$ 取 max”在分布意义上是什么？就是选一个 Q 值高的 $\mu$。实践中对某些选择可以不显式表示 $\mu$，马上讲。</li>
+            <li>既然要在训练分布外压低 Q，为什么不直接做行为克隆？这个算法有可能明显超过行为克隆，任何强化学习方法都在利用奖励信息学 Q 值高的策略。上一讲的方法只在分布内动作上训练策略，也能超过行为克隆，这里是另一种思路。</li>
+        </ul>
+        <h3>完整算法和 $\mu$ 的处理</h3>
+        <ol>
+            <li>在数据集上优化上面的目标，得到 $\hat Q^\pi$；</li>
+            <li>更新策略：离散动作时直接取 Q 最大的动作；连续动作时要用某种更新，让策略选 Q 值高的动作，如 $\theta\leftarrow\theta+\eta\nabla_\theta\mathbb{E}_{s\sim\mathcal{D},a\sim\pi_\theta(\cdot\mid s)}[\hat Q^\pi(s,a)]$；重复。</li>
+        </ol>
+        <p>
+            要显式构造 $\mu$ 会很麻烦，多一个活动部件。$\mu$ 应该找 Q 值高的动作，这样才能压低错误的大 Q 值，作用在 Q 值小的动作上意义不大；但又不希望它只盯着 Q 最大的那一个动作，照现在的写法它可能塌缩成确定性的。所以给 $\mu$ 加一个正则项 $\mathcal{R}(\mu)$，鼓励它考虑更宽的动作集合，具体是让它在 Q 值大的同时有一定的熵。同时最大化 Q 和熵时，最优的 $\mu$ 有闭式解，正比于指数化的 Q 值：
+        </p>
+        $$\mu(a\mid s)\propto\exp\big(Q(s,a)\big)\quad\Rightarrow\quad \mathbb{E}_{a\sim\mu(\cdot\mid s)}[Q(s,a)]\ \text{这一项变成}\ \log\sum_a\exp\big(Q(s,a)\big)$$
+        <p>最终目标：</p>
+        $$\mathcal{L}_{\text{CQL}} = \mathcal{L}_{\text{critic}} + \alpha\,\mathbb{E}_{s\sim\mathcal{D}}\left[\log\sum_a\exp\big(Q(s,a)\big)\right] - \alpha\,\mathbb{E}_{(s,a)\sim\mathcal{D}}\left[Q(s,a)\right]$$
+        <p>唯一依赖 $\mu$ 的项被替换掉了，不需要构造 $\mu$。连续动作空间时，这个 log-sum-exp 要用采样估计。作业 3 要实现 CQL。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 应用：LinkedIn 通知；离线强化学习小结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=1305s" target="_blank">0:21:45</a>–0:26:28 · Offline RL application</em></p>
+        <p>
+            LinkedIn 的人用 CQL 优化发通知（比如邮件通知）的策略（Prabhakar 等，Multi-Objective Optimization of Notifications Using Offline RL，2022）。发通知时希望点击多，说明用户可能感兴趣；也希望总发送量少，不骚扰用户；还关心周活跃用户。他们比较了现有系统（基线）、Double DQN，以及在 DQN 目标上加 CQL 项。用离线数据训练加了 CQL 的策略，再上线做 A/B 测试，点击率更高，通知总量更少，用户使用量也略有上升。这是离线强化学习、具体是这个算法在相当真实的场景中的应用。
+        </p>
+        <p>
+            有学生问，为什么一开始要保守？这回到离线强化学习最初的动机：不能收集在线数据时，学不出远超数据的策略。保守是专门针对数据支撑外，因为那些地方你无法再收集数据；如果假设能远远超出数据，可能学到不准的 Q 函数，进而得到差的策略。
+        </p>
+        <p>
+            小结：在线数据贵，用离线数据有用；离线强化学习的核心难点是行为策略和学到的策略之间的偏移带来的高估；今天的办法是显式惩罚 Q 值；离线强化学习方法能拼接好行为、利用奖励信息，从而超过模仿学习，包括过滤式模仿学习。
+        </p>
+        <h3>2026 版幻灯片补充：机器人上的离线强化学习</h3>
+        <p>
+            2026 版这里换成了一个“离线强化学习在实践中”的例子，出处是 π*0.6: a VLA That Learns From Experience（2025），被称为机器人后训练的迭代式离线强化学习配方：
+        </p>
+        <ol>
+            <li>用策略 $\pi$ 收集一大批数据（rollout 和 DAgger 的混合）；</li>
+            <li>用蒙特卡洛拟合 $V^{\pi_\beta}$；</li>
+            <li>训练一个以优势为条件的策略 $\pi\big(a_t\mid s_t, \hat A(s_t,a_t)\big)$。</li>
+        </ol>
+        <p>2026 版的回顾页把上一讲概括为两个关键想法：只在数据集采样的动作上训练策略；用非对称的期望分位数损失拟合一个比 $\pi_\beta$ 更好的策略的价值函数。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 奖励从哪来</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=1588s" target="_blank">0:26:28</a>–0:28:33 · Reward learning overview</em></p>
+        <p>
+            强化学习最早的一些应用是电脑游戏，直接用游戏得分做奖励，就能得到玩得很好的玩家（幻灯片引 Mnih 等 2015）。真实场景里奖励往往没那么直接。让机器人把水从水壶倒进杯子，对机器人相当复杂，小孩却做得不错；人喝到水也许会得到某种满足，机器人没有。要给倒水写奖励，就得表示水在哪、有没有洒、有没有进杯子，很难。聊天机器人里，人不会直接告诉你“这个奖励是 1、那个是 10”。自动驾驶里，真实世界也不给奖励，要考虑交通规则、乘客舒适度等很多因素。
+        </p>
+        <p>
+            有时可以用真实奖励的代理（Proxy）：让人给奖励（成功为 1，否则为 0）；点击率也是代理，我们并不在乎人点击本身，它只是我们在乎的东西的替代。但代理也有很多缺点，值得想想有没有别的方式给强化学习算法提供监督。
+        </p>
+        <p>
+            已经见过的替代办法是模仿学习，完全不需要奖励函数。但模仿学习不考虑结果，不为某个结果优化，只是模仿动作；有时演示也很难提供，或者专家的自由度和机器人不同，难以得到好的演示数据。奖励学习想回答的是：我们想看到的底层结果是什么，专家想达成什么，人想要什么。人能推断奖励，她放了一些视频，很小的孩子也能看出别人的目标并去帮忙。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 目标分类器，以及它和 GAN 的关系</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=1713s" target="_blank">0:28:33</a>–0:43:25 · Goal classifiers and GANs</em></p>
+        <p>
+            最简单的做法：给出成功和失败的例子，训练一个分类器预测成功与否。比如让机器人把笔袋放到笔记本后面，给几张放好的正例、几张没放好的负例，训练二分类器（正例标 1、负例标 0），用分类器的输出当奖励。步骤：
+        </p>
+        <ol>
+            <li>收集成功和不成功状态的例子（目标集合内和集合外的状态）；</li>
+            <li>训练二分类器；</li>
+            <li>用这个分类器做奖励跑强化学习。</li>
+        </ol>
+        <p>
+            她问会出什么问题。一个同学说奖励会很稀疏，只告诉你在不在目标集合里，你得自己想办法朝它推进。另一个同学说策略可能学会骗过分类器，而不是真的完成任务。她说第一点完全正确，但特别要命的是第二点：分类器只在你提供的样本分布上训练过，策略却能访问各种状态，包括和初始数据集很不一样的状态。和离线强化学习里的问题类似，对着分类器优化时，策略会找出分类器不准、而且偏乐观的状态，钻它的空子。
+        </p>
+        <h3>把策略访问的状态加为负例</h3>
+        <p>
+            恰好这一讲刚讲完 CQL，可以用类似的思路。在抽象空间里，正的目标状态在一边，负例在另一边，二分类器学出一条决策边界。策略看到这边是正、那边是负，可能跑到边界外某处，其中有些状态是好的，有些不是。简单的办法：把策略访问到的状态作为新数据加进分类器的训练集。我们没有好的奖励、也不想在线要人监督，所以不知道真实标签，那就保守一点，全部标成负例，重新训练分类器。分类器在这些状态附近会越来越准。
+        </p>
+        <ol>
+            <li>收集初始的成功状态和不成功状态；</li>
+            <li>训练分类器区分两者；</li>
+            <li>用策略收集经验，用基于分类器的奖励更新策略；</li>
+            <li>把访问过的状态加入负例，重新训练分类器；重复 3、4。</li>
+        </ol>
+        <h3>课堂讨论</h3>
+        <ul>
+            <li>分类器可能不够鲁棒，对数据集里的正例过拟合：正例很少时，决策边界可能只紧紧包住这几个正例，连它们旁边的状态都不算。办法是给分类器加正则，标准的正则就有帮助，鼓励它更平滑。</li>
+            <li>负例越加越多，不重新平衡的话分类器可能处处预测负。关键是把数据平衡成 50/50，采样时负例占一半、正例占一半。</li>
+            <li>原来的负例会被策略采到的负例淹没，要不要也平衡它们？可以，取决于初始负例有多少。</li>
+            <li>策略最终会访问到和正例一样的状态，却被标成负例，这些标签是错的。她说只要做了平衡，并且正则足够或数据足够，这可能没关系。比如数据里 50% 是真正例；另外 50% 里有 40% 是假负例（实际是正的），10%（包括原始负例）是真负例。平衡之后，分类器对一个真正例不会输出 1，但输出的正类概率仍会高于 50%，高于负类概率。只要还有一些真负例在（包括原始负例），真正例的概率就严格大于 0.5，真负例的概率小于 0.5；只有当另一半全是假负例时才正好是 50%。</li>
+            <li>能不能用置信区间而不是 0/1？也可以直接把概率当奖励，不做阈值，这完全可以。置信区间也许有帮助，但可能需要更复杂的强化学习方法，她没多想过。</li>
+            <li>访问到一个很难区分的状态会怎样？有正则时，它多半被标成正，因为正则让函数平滑，但很取决于它和正例差多远。</li>
+            <li>跑完一条轨迹后能看到真实标签吗？不能，假设除了初始训练集没有更多人类监督。不过也可以给一部分数据标上正或负，用来继续更新分类器，这也是很有效的做法，而且有办法只标一部分轨迹，也有助于稳定训练。</li>
+        </ul>
+        <h3>这其实就是 GAN</h3>
+        <p>
+            有学生问，这能不能用生成对抗网络（Generative Adversarial Network，GAN）来解决：分类器是判别器，agent 是生成器？她说这恰好就是 GAN：分类器是判别器，区分给定的正例和策略访问的所有状态；生成器就是策略。GAN 是一种生成模型，常用于图像生成：训练分类器区分真实样本和生成的样本，再训练生成器让分类器认为它生成的是真的。幻灯片上举了 ViT-VQGAN 生成的图像，以及 Phenaki 生成的宇航员在火星上跳舞、遛狗的视频。
+        </p>
+        <h3>机器人上的例子</h3>
+        <p>
+            一篇论文（Sharma、Ahmed、Ahmad、Finn，Self-Improving Robots: End-to-End Autonomous Visuomotor Reinforcement Learning，2023）收集了 50 条演示，把最终状态当作成功示例训练分类器，并用演示初始化回放缓冲区。直接模仿演示成功率约 26%，50 条演示不多，再多收也很难到 100%。用这种方式学到的分类器做奖励跑强化学习，成功率是 62%，还不算很好，但比模仿学习高得多。研究中也发现，给分类器加正则、防止它对开头那 50 个正例过拟合很重要。
+        </p>
+        <h3>小结</h3>
+        <p>
+            预训练好的分类器在被优化时会被钻空子；解决办法是在强化学习过程中，用策略访问的状态作负例更新分类器。她跳过了一点：不只可以学目标分类器，还能学完整的奖励函数，把演示里所有状态作正例、策略 rollout 里所有状态作负例，可以证明这是在学状态分布上的奖励，而不只是目标状态。优点：很实用。缺点：对抗训练可能不稳定，可以直接借用 GAN 文献里的各种正则技巧；还需要目标（期望行为）的示例，有时生成这些示例很费力。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 从成对偏好学习奖励</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=2605s" target="_blank">0:43:25</a>–0:52:21 · Learning from preferences</em></p>
+        <p>
+            这里不只想到达目标集合里的状态，而是要区分好行为和坏行为，这可能超出“到达好状态”。不要求（或在演示和目标示例之外）提供示例，而是对整条 rollout 给反馈。可以直接问“这条轨迹有多好？”：从蓝点出发、尽快到星星，给一条轨迹打分其实很难。换个问法：“哪条更好？”她问大家蓝色和粉色哪条好，所有人都说蓝色。相对偏好通常比评估绝对表现容易，不只二维线条如此，很多真实场景也是。
+        </p>
+        <h3>把偏好写成目标</h3>
+        <p>
+            人说轨迹 $\tau_w$ 比 $\tau_l$ 好（$w$ 表示胜出、$l$ 表示落败），记作 $\tau_w\succ\tau_l$。合理的理解是，好轨迹中状态动作的奖励和应该更大：
+        </p>
+        $$\sum_{(s,a)\in\tau_w} r_\theta(s,a) \gt \sum_{(s,a)\in\tau_l} r_\theta(s,a),\quad\text{简写为}\ r_\theta(\tau_w)\gt r_\theta(\tau_l)$$
+        <p>
+            每个二元偏好标签只告诉我们一点关于奖励的信息，要把很多标签汇总起来学奖励函数。数据集是很多对轨迹，每对标明哪条更好。奖励函数用神经网络表示，参数 $\theta$，输入状态和动作，输出一个标量。人在分类哪条轨迹更好，奖励也应该有判别力。
+        </p>
+        <p>
+            机器学习里喜欢用概率和最大似然。把好轨迹和差轨迹的奖励差送进 sigmoid 函数 $\sigma$（把数压到 0 和 1 之间），当作“$\tau_a$ 比 $\tau_b$ 好”的概率估计，然后最大化对数概率：
+        </p>
+        $$P(\tau_a\succ\tau_b) = \sigma\big(r_\theta(\tau_a) - r_\theta(\tau_b)\big),\qquad \max_\theta\ \mathbb{E}_{\tau_w,\tau_l}\left[\log\sigma\big(r_\theta(\tau_w) - r_\theta(\tau_l)\big)\right]$$
+        <p>
+            具体就是：对每一对，分别算奖励和，相减，过 sigmoid，用梯度法最大化。轨迹 $\tau$ 可以是完整的，也可以是部分的。完整轨迹如果是从 Palo Alto 开到旧金山、或者打扫厨房，包含很多子部分，可能有的部分好、有的部分差，所以也可以说“这条轨迹的这一段比那一段好”。（这种成对比较的概率形式通常叫 Bradley-Terry 模型，课上没提这个名字，下一讲会用到。）
+        </p>
+        <p>
+            有学生问，人没有说好多少：一条比另一条好一点，另一条差得远，这个目标没考虑偏好的强弱。她说数据多的时候，你会得到很多两两偏好，比如 A 比 B 好、B 比 C 好，由此形成排序，迫使奖励函数给最好的那条赋远高于最差那条的奖励，所以已经能做到你想要的。另一种办法是直接给人一批让他们排序，信息更明确。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 完整算法和应用例子</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=3141s" target="_blank">0:52:21</a>–0:58:40 · Preference learning details</em></p>
+        <ol>
+            <li>从轨迹数据集中采样一批 $k$ 条轨迹，请人对这 $k$ 条排序；</li>
+            <li>用当前奖励模型计算每条轨迹的奖励（前向传播，对状态动作求和）；</li>
+            <li>对排序中的每一对（共 $\binom{k}{2}$ 对）用上面的目标算梯度，做反向传播；</li>
+            <li>用梯度更新 $\theta$；重复，这就是在一个数据集上做梯度下降。</li>
+        </ol>
+        <p>
+            语言模型里这是学奖励函数的常见方式：通常对同一个提示采样 $k$ 个回答，请人排序。用同一个起点是有用的：不同提示（不同起点）的回答之间很难比较，比如某条轨迹更快到达，但它起点更容易。所以通常采样起点相似的一批轨迹。
+        </p>
+        <h3>放进强化学习循环</h3>
+        <p>
+            也可以在强化学习的循环里做：从策略采样，请人排序，更新奖励模型；奖励模型更准之后更新策略，得到新的 rollout，再请人标注，再更新奖励，如此重复。
+        </p>
+        <h3>例子</h3>
+        <ul>
+            <li>最早的一批偏好学习工作在仿真里（Christiano 等，Deep Reinforcement Learning from Human Preferences，NeurIPS 2017）：让一个仿真体做后空翻，很难写奖励函数。他们在强化学习循环中问了人 900 次“这个比那个好吗？”，得到一个会后空翻的策略，同时学到了一个符合人偏好的后空翻奖励函数。</li>
+            <li>驾驶（Sadigh 等，Active Preference-Based Learning of Reward Functions，RSS 2017）：用这种方法学习保持车道、保持速度、避免碰撞各有多重要，可以想见避免碰撞远比保持某个速度重要。</li>
+            <li>语言模型：对“怎么做煎蛋卷？”这样的提示，采样两个回答，问人哪个更好。训练时可能花钱请人标注；你用 ChatGPT 时它有时也会问你这种问题，你在帮 OpenAI 学一个更符合你偏好的奖励函数。有了偏好数据，就能训练一个奖励模型 $r_\theta(x, y)$，判断对提示 $x$ 的回答 $y$ 有多好。</li>
+        </ul>
+    </section>
+
+    <section id="t08">
+        <h2>08. 语言模型的 RLHF、RLAIF 和小结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PDIxDhA9Z6Y&t=3520s" target="_blank">0:58:40</a>–1:05:58 · LLM feedback and wrap up</em></p>
+        <h3>训练 ChatGPT 这类模型的流程</h3>
+        <ol>
+            <li>大规模预训练：在很大、质量参差的数据上预测下一个 token。这一步之后的模型知道很多东西，但不好控制，可能不回答问题、不按要求做，只是接上合理的下一个 token。</li>
+            <li>监督微调（Supervised Fine-Tuning，SFT）：构造更高质量的数据集，对给定提示写出应该怎样回复，在上面做模仿学习。</li>
+            <li>用人类反馈在更高质量的偏好数据上微调 SFT 模型：收集偏好数据（也有现成的偏好数据集可用，不一定要用自己的模型收集）；训练判断回答好坏的奖励模型；用强化学习最大化这个奖励。一种较常见的做法是用 PPO。下周三会细讲偏好学习。</li>
+        </ol>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>$x$ 只是提示，还是整个对话历史？通常是整个历史。给语言模型建强化学习问题时可以建成序列问题，也有一种更简单粗糙的写法：把全部历史作为输入，把下一个回答当作优化对象。</li>
+            <li>怎样从排序得到那个概率？排序 A 比 B 好、B 比 C 好，$k$ 条轨迹就能组成 $\binom{k}{2}$ 对，每对里一条是被偏好的 $\tau_w$，一条是不被偏好的 $\tau_l$；采一对，代进公式。</li>
+            <li>$\sigma$ 是什么？sigmoid，一个把数值压到 0 和 1 之间的简单函数。</li>
+        </ul>
+        <h3>RLAIF</h3>
+        <p>
+            也可以不用人，而是问一个强模型“这个比那个好吗？”。偏好可以有很多维度，有时可以专门问你在乎的那一维。这叫基于 AI 反馈的强化学习（Reinforcement Learning from AI Feedback，RLAIF）。一个用例是防止模型生成有害内容：把两个回答给模型，问哪个危害更小（Bai 等，Constitutional AI: Harmlessness from AI Feedback，2022）。一个洞察是评判通常比生成容易，这是用 AI 反馈也许能得到更强模型的原因之一；有工作表明用这种反馈可以在不同维度上提升模型表现。
+        </p>
+        <h3>小结</h3>
+        <ul>
+            <li>奖励不能想当然。</li>
+            <li>从目标学习：很实用；对抗训练可能难优化；需要期望行为的示例。</li>
+            <li>从人类偏好学习：成对偏好很容易提供；不需要目标示例或演示；已在语言模型上大规模部署；可能需要在强化学习循环里持续提供监督。</li>
+        </ul>
+        <p>
+            她鼓励大家想想：目标和人类偏好只是反馈的一种形式，还有很多方式可以给学习中的 agent 提供监督，比如口头告诉它“做得好”“有帮助”“有帮助但有点刻薄”，这方面还有很多可做的研究。另外还有无监督强化学习（Unsupervised RL）这个方向：不由人告诉 agent 该做什么，让 agent 有自己的好奇心、自己提目标。一个例子是一个 agent 设目标、另一个 agent 去达成，写成两人博弈，能产生有意思的行为（Sukhbaatar 等，Intrinsic Motivation and Automatic Curricula via Asymmetric Self-Play，ICLR 2018）。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>IQL 只对 V 用非对称损失：偏向更好的动作是可控的，偏向更好的下一状态只是运气。</li>
+            <li>CQL：$\mathcal{L}_{\text{critic}} + \alpha\,\mathbb{E}_{s\sim\mathcal{D}}[\log\sum_a\exp Q(s,a)] - \alpha\,\mathbb{E}_{(s,a)\sim\mathcal{D}}[Q(s,a)]$，压低支撑外的大 Q 值、保住数据内的 Q 值，得到期望意义上的下界。</li>
+            <li>目标分类器做奖励会被策略钻空子；把策略访问的状态作负例、平衡正负、正则化分类器，这实际上就是 GAN。</li>
+            <li>偏好学习：$\max_\theta\mathbb{E}[\log\sigma(r_\theta(\tau_w)-r_\theta(\tau_l))]$，排序可拆成 $\binom{k}{2}$ 对；可以在强化学习循环里迭代。</li>
+            <li>语言模型流程：预训练、SFT、偏好数据训练奖励模型、用强化学习（如 PPO）最大化奖励；也可以用 AI 反馈（RLAIF）。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224R Deep Reinforcement Learning · Lecture 8: Reward Learning · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

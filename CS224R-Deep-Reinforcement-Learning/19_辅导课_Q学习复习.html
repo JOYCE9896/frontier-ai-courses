@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>辅导课：Q 学习复习 | Stanford CS224R 深度强化学习笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="18_前沿问题与如何做研究.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS224R 目录</a> · 19</span>
+    <span><a href="index.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>辅导课：Q 学习复习</h1>
+        <p class="subtitle">MDP、价值函数、Q 函数和优势的复习，在网格世界里用表格型 Q 迭代传播价值，最优策略和最优优势的性质，参数化的 Q 函数，从定义推出 TD 目标和 n 步回报、偏差与方差的取舍，轨迹拼接，半梯度和目标网络（硬更新与 Polyak 平均）、梯度裁剪和 Huber 损失，回放缓冲区，以及过估计和用 critic 集成缓解它</p>
+        <div class="author-meta">
+            主讲：助教 Anikait Singh · 课堂日期：2025 年 4 月 18 日 · 时长：51 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=07MQNMcxhZU" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs224r.stanford.edu/spring_2025/slides/section_q_learning_tutorial.pdf" target="_blank">2025 辅导课幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            这是和<a href="06_Q学习.html">第 6 讲</a>同一天的 Q 学习辅导课，由助教 Anikait Singh 讲。先很简短地复习 MDP，然后在一个可控的表格型网格世界里看拟合 Q 迭代怎样一步步学出 Q 函数，再到参数化的 Q 学习，讲 TD 回归和蒙特卡洛 rollout 之间的偏差方差取舍，最后讲学好 Q 函数需要的实践细节：回放缓冲区、过估计、怎样处理 TD 学习的梯度问题。他提到讲义 PDF 里附了一个 Colab，可以自己玩这些表格环境。
+        </p>
+        <ol>
+            <li><a href="#t01">复习：MDP、价值函数、Q 函数和优势</a> · <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">表格型 Q 迭代：网格世界里的价值传播</a> · <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=274s" target="_blank">0:04:34</a></li>
+            <li><a href="#t03">最优价值、最优策略和优势</a> · <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=690s" target="_blank">0:11:30</a></li>
+            <li><a href="#t04">参数化的 Q 函数</a> · <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=1084s" target="_blank">0:18:04</a></li>
+            <li><a href="#t05">TD 和蒙特卡洛，n 步回报</a> · <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=1287s" target="_blank">0:21:27</a></li>
+            <li><a href="#t06">价值函数的轨迹拼接</a> · <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=1840s" target="_blank">0:30:40</a></li>
+            <li><a href="#t07">半梯度、目标网络和其他稳定技巧</a> · <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=1999s" target="_blank">0:33:19</a></li>
+            <li><a href="#t08">回放缓冲区</a> · <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=2397s" target="_blank">0:39:57</a></li>
+            <li><a href="#t09">过估计和 critic 集成</a> · <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=2568s" target="_blank">0:42:48</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 复习：MDP、价值函数、Q 函数和优势</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=0s" target="_blank">0:00:00</a>–0:04:34 · Introduction to Q-learning / Markov decision processes / Value and Q functions</em></p>
+        <p>
+            马尔可夫决策过程（MDP）：agent 和环境交互，由状态和动作集合、转移动力学（从某状态做某动作到下一状态）、对状态动作的奖励，以及起始状态、折扣因子和时长（轨迹长度）定义，折扣因子和时长用来鼓励更长或更短的轨迹。这节课用的网格世界：一个小机器人要走到右上角的宝石。目标是在要学的策略下最大化期望回报，表格环境里策略就是每个状态该做的动作。
+        </p>
+        <ul>
+            <li>价值函数 $V^\pi(s)$：从 $s$ 出发、按 $\pi$ 行动的期望未来奖励。</li>
+            <li>Q 函数 $Q^\pi(s,a)$：额外以动作为条件，可以探查某个即时动作：做这个动作和做另一个动作，价值分别是多少。</li>
+            <li>关系：$V^\pi(s) = \mathbb{E}_{a\sim\pi(\cdot\mid s)}[Q^\pi(s,a)]$。</li>
+            <li>优势 $A^\pi(s,a) = Q^\pi(s,a) - V^\pi(s)$：在当前时间步做动作 $a$ 再按策略走，比按策略走好多少。</li>
+        </ul>
+    </section>
+
+    <section id="t02">
+        <h2>02. 表格型 Q 迭代：网格世界里的价值传播</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=274s" target="_blank">0:04:34</a>–0:11:30 · Tabular Q-iteration / Q-learning implementation</em></p>
+        <p>课上见过的 Bellman 方程（这里是最优 Q 函数）：</p>
+        $$Q^\ast(s_t, a_t) = \mathbb{E}_{s_{t+1}\sim p(\cdot\mid s_t,a_t)}\left[r(s_t, a_t) + \gamma\max_{a'}Q^\ast(s_{t+1}, a')\right]$$
+        <p>把它变成迭代过程，第 $k+1$ 次迭代的 Q 函数由第 $k$ 次的 Q 函数做同样的最大化得到：</p>
+        $$Q_{k+1}(s_t, a_t) \leftarrow \mathbb{E}_{s_{t+1}}\left[r(s_t, a_t) + \gamma\max_{a'}Q_k(s_{t+1}, a')\right]$$
+        <p>
+            从一个空的网格世界开始，所有 Q 值为 0（$Q_0$ 一般初始化为全零），然后迭代地把奖励从终止状态传回网格里的所有状态。这是 TD 学习或一般 Q 学习的基础。
+        </p>
+        <h3>环境设置</h3>
+        <ul>
+            <li>每一步有五个动作：原地不动、左、右、上、下。每个格子画成四个三角，比如在这个格子“向上”的 Q 值是上面那个三角的值，“向左”是左边那个。</li>
+            <li>走到右上角得奖励 $+1$，走到中间上方的“岩浆”格子得 $-1$，两者都是终止状态，在这些状态做任何动作都得到那个奖励，所以 $Q_1$ 里它们是 $+1$ 和 $-1$。</li>
+            <li>有折扣因子，鼓励机器人尽快到达目标，不做多余的探索。</li>
+        </ul>
+        <p>
+            第 2 次迭代时，离右上角很近的状态开始有 Q 值；多次迭代后填满整个网格，Q 函数稳定收敛。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>Bellman 方程和这个迭代式有什么区别？Bellman 方程没有表示迭代次数的下标，只说对最优策略这个关系成立；自然的推论是可以迭代地做：从已知奖励的终止状态开始传播信息，学到状态动作空间里每一处的真实 Q 函数，所以迭代式有下标 $k$ 和 $k+1$。</li>
+            <li>这是蒙特卡洛还是动态规划？这里是动态规划算法。快速判断的启发式：更新式两边都出现 Q 函数，一般就是动态规划式的；蒙特卡洛的 Q 学习和价值函数更新里只会出现奖励。因为是动态规划，才从终止状态开始往回传播。</li>
+        </ul>
+    </section>
+
+    <section id="t03">
+        <h2>03. 最优价值、最优策略和优势</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=690s" target="_blank">0:11:30</a>–0:18:04 · Optimal policies / Advantages of Q-learning</em></p>
+        <ul>
+            <li>$V^\ast(s)$：不以动作为条件，每个状态一个值。右上角得 $+1$，折扣 0.9 作用在离它更远的每个状态上：一步之外是 0.9，两步之外是 0.81，依此类推填满网格，除了岩浆格是 $-1$。</li>
+            <li>$Q^\ast(s,a)$：就是上面看到的中间那张图，可以通过算法收敛得到，也可以解析地算出来。</li>
+            <li>策略 $\pi^\ast$：确定性函数，因为对任何没有部分可观测性的 MDP，最优策略都可以是确定性的，严格定义为 Q 函数的 argmax：$\pi^\ast(s)=\arg\max_a Q^\ast(s,a)$。从任何状态出发，它通常给出一条到目标的路径，一般是最短路径。</li>
+        </ul>
+        <p>
+            有学生问：看这些图，我好像只需要策略，其他的有什么用？他说值得好好想想。在这个表格领域里，策略就是对 Q 函数取 argmax 提取出来的，需要 Q 函数来确定整个状态空间里的价值，才能提取策略。也有只用策略的方法，比如前几节课的策略梯度，但它们在环境方差大时有问题：环境的奖励或转移动力学方差很大时，策略梯度或基于蒙特卡洛的方法会吃力；Q 函数可以用偏差换方差，是应对这种环境的另一种方式。各有取舍，有些环境配置下学 Q 函数更好。
+        </p>
+        <h3>最优优势</h3>
+        <p>
+            对最优策略，优势总是非正的：最优策略做的动作优势为 0，因为它们一样好；不是最优策略的动作优势为负，因为没有动作比最优策略更好。网格图右边，红色的是那些走向岩浆格之类的动作，优势为负。比如在格子 (0, 0)，向上和向右可能导向相近的价值，两者的优势都是 0，都和最优策略一致；但最优策略是确定性的，最终会选其中一个。
+        </p>
+        <h3>当前策略和最优策略</h3>
+        <p>
+            图中对比 $Q^\ast(s,a)$、$\pi^\ast(a\mid s)$ 和一个次优策略的 $Q^\pi(s,a)$、$\pi(a\mid s)$。次优策略不是确定性的，很多地方并不指向正确的动作，有时甚至走向岩浆格，相应的 Q 函数也和最优 Q 函数不同。可以学一个以某个策略为条件的 critic（Q 函数），告诉你离最优策略多远、怎样改进。比如做 Actor-Critic 式的算法，就用这个以策略为条件的 critic 告诉你哪些动作可能比你在做的更好，以此做一步改进。$Q^\ast$ 已经收敛，最优策略不能再被改进。$Q^\pi$ 对应当前策略，$Q^\ast$ 对应最优策略。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 参数化的 Q 函数</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=1084s" target="_blank">0:18:04</a>–0:21:27 · Parametric Q-learning</em></p>
+        <p>
+            在这些表格环境里玩、看价值怎样传播很好，但这能扩展吗？可惜不能：状态或动作空间变大时，表格型价值函数会有成千上万甚至上百万行，很难学。如果用神经网络学参数化的价值函数，能更好地泛化：两个状态在语义上或字面上相近，希望它们的 Q 值也相近，这是学到的表示带来的平滑性。接下来看怎样用回归技术，在连续和离散环境中用神经网络学价值函数。
+        </p>
+        <ul>
+            <li>价值函数 $V^\pi(s)$：输入状态，输出一个标量。它和动作空间无关，所以通常只有一种参数化方式。</li>
+            <li>连续 Q 函数：输入状态和动作，输出一个标量。连续空间里很难枚举所有动作，所以把动作当输入；计算期望时通常从策略采样动作，是基于样本的估计。</li>
+            <li>离散 Q 函数：输入状态，输出所有可能动作的 Q 值向量，比如网格世界里同时预测上、下、左、右、不动的 Q 值，再挑你想用的那个。也可以用连续那种表示学离散 Q 值，但只要离散空间能处理，一般建议用这种，因为能枚举空间里的所有动作；求期望时能枚举所有动作，得到精确估计。</li>
+        </ul>
+    </section>
+
+    <section id="t05">
+        <h2>05. TD 和蒙特卡洛，n 步回报</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=1287s" target="_blank">0:21:27</a>–0:30:40 · TD vs Monte Carlo / N-step returns</em></p>
+        <p>他在白板上推导，改编自 Sutton 和 Barto 的教材。以 $V^\pi(s)$ 为例，Q 也可以类似推导。价值以状态为条件，表示从该状态起的期望回报：</p>
+        $$V^\pi(s) = \mathbb{E}_\pi\left[R_t\mid s_t = s\right] = \mathbb{E}_\pi\left[\sum_{k=0}^{\infty}\gamma^k r(s_{t+k}, a_{t+k})\ \middle|\ s_t = s\right]$$
+        <p>
+            从当前时刻起看所有未来奖励，按离当前状态的步数用折扣因子的幂次打折，再求和。这是价值函数的蒙特卡洛（Monte Carlo）估计。
+        </p>
+        <p>做一点代数，转成一步 TD 估计。先把 $k=0$ 的那一项单独拿出来：</p>
+        $$V^\pi(s) = \mathbb{E}_\pi\left[r(s_t, a_t) + \sum_{k=1}^{\infty}\gamma^k r(s_{t+k}, a_{t+k})\ \middle|\ s_t = s\right] = \mathbb{E}_\pi\left[r(s_t, a_t) + \gamma\sum_{k=0}^{\infty}\gamma^k r(s_{t+1+k}, a_{t+1+k})\ \middle|\ s_t = s\right]$$
+        <p>第二项看起来很像价值函数，只是在下一状态，于是：</p>
+        $$V^\pi(s) = \mathbb{E}_\pi\left[r(s_t, a_t) + \gamma V^\pi(s_{t+1})\ \middle|\ s_t = s\right]$$
+        <p>
+            这就得到了 TD 目标。区别在于：蒙特卡洛估计是整条轨迹上的折扣回报和，没有偏差；TD 估计把价值函数代了回去，价值函数可能不准，会引入一些偏差，但把视野从 $H$（很多问题里很大）缩短到 1，方差大大降低。
+        </p>
+        <h3>n 步回报</h3>
+        <p>
+            刚才只展开了一次，也可以展开 $n$ 次，在偏差和方差之间权衡：偏差来自价值函数的参数化，方差来自轨迹的视野，因为奖励函数或转移动力学可能有噪声，每条 rollout 之间会有差异。他拿来 iPad 确认记号，展开 $n$ 步后价值函数的折扣变成 $\gamma^n$：
+        </p>
+        $$V^\pi(s) = \mathbb{E}_\pi\left[\sum_{k=0}^{n-1}\gamma^k r(s_{t+k}, a_{t+k}) + \gamma^n V^\pi(s_{t+n})\ \middle|\ s_t = s\right]$$
+        <p>
+            这在完整折扣回报和的蒙特卡洛 rollout 与价值函数估计之间做了插值，可以在 TD 和蒙特卡洛之间有效权衡。
+        </p>
+        <h3>图示和对比</h3>
+        <p>
+            蒙特卡洛：从某个状态让策略一直 rollout 到终止状态，收集多条，平均它们的 reward-to-go 计算价值估计；每一步动作都会引入转移动力学或奖励的噪声，方差可能很大。TD 备份：只展开一步，然后用下一状态的价值估计来降低方差，但价值函数可能不准，带来偏差。有学生问两者会收敛到同一个结果吗？他说表格情形下两者应收敛到同一个结果，超出表格情形就不一定了。
+        </p>
+        <table>
+            <thead><tr><th></th><th>TD</th><th>n 步回报</th><th>蒙特卡洛</th></tr></thead>
+            <tbody>
+                <tr><td>自举深度</td><td>1 步</td><td>$n$ 步</td><td>整个 episode</td></tr>
+                <tr><td>偏差</td><td>高</td><td>中间，取决于 $n$</td><td>无</td></tr>
+                <tr><td>方差</td><td>低</td><td>中间</td><td>高</td></tr>
+            </tbody>
+        </table>
+        <p>
+            这也很依赖所处的环境。比如语言领域里，很多人的做法其实就是蒙特卡洛 rollout，因为很多情况下环境动力学几乎是完美的，数学或代码推理这类领域的奖励信号也是完美的，不用担心动力学的方差；到了 agent 领域或机器人领域，这些因素就又回来了。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 价值函数的轨迹拼接</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=1840s" target="_blank">0:30:40</a>–0:33:19 · Value function stitching</em></p>
+        <p>
+            动态规划还带来拼接（Stitching）。左边的迷宫里，策略收集了两条轨迹，一条从 A 到 B，一条从 C 到 D。通过一步动态规划，可以找到从 A 到 D 的最优路径，因为每一步都看它前面一步，能把这些轨迹拼起来形成通往目标的最优路径。这让你对空间有更好的覆盖，算法可能更高效一些。离线强化学习里的轨迹拼接见<a href="07_离线强化学习.html">第 7 讲</a>。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 半梯度、目标网络和其他稳定技巧</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=1999s" target="_blank">0:33:19</a>–0:39:57 · Target networks / Learning stability techniques</em></p>
+        <h3>半梯度</h3>
+        <p>
+            Q 值估计是当前奖励加上下一步 Q 值（对所有动作取 max）的折扣。左边的 Q 函数和右边的是同一个，如果梯度也穿过右边传播，优化会很难。一个技巧是半梯度（Semi-gradient）：冻结目标、不给它传梯度，让优化更稳定。用一个样本的损失写出来：
+        </p>
+        $$y = r(s_t, a_t) + \gamma\,\text{sg}\big[V_w(s_{t+1})\big],\qquad \mathcal{L}(w) = \big(V_w(s_t) - y\big)^2$$
+        <p>
+            MSE 两边都是学习中的网络，很不稳定；stop gradient（$\text{sg}$）阻止梯度传到右边，目标就固定了，梯度只穿过左边的网络。
+        </p>
+        <h3>目标网络</h3>
+        <p>
+            为了更稳定，再加一个目标网络（Target Network），延迟右边的更新，让 Q 函数回归一个更稳定的目标。半梯度技巧用的是同一组参数只是不传梯度；目标网络则是一组完全独立的参数 $w'$，按下面的方式更新：
+        </p>
+        <ul>
+            <li>硬更新：以固定频率把目标网络更新为最新的模型，$w'\leftarrow w$。</li>
+            <li>软更新：指数移动平均（EMA）或 Polyak 平均，用一个衰减参数在见过的 Q 函数之间平滑插值，每一步都更新：
+            $$w'\leftarrow\tau w' + (1-\tau)\,w$$</li>
+        </ul>
+        <p>
+            他认为实践中人们倾向用软更新，两者经验上都还不错。这样做是为了让回归时价值函数有一个很稳定的目标，去掉右边的梯度、引入目标网络都让学习问题容易得多。要考虑目标网络更新的频率等，但大多数情况下这个超参数已经稳定在 0.99 左右（Polyak 平均）。
+        </p>
+        <h3>梯度裁剪和 Huber 损失</h3>
+        <ul>
+            <li>梯度裁剪（Gradient Clipping）：梯度太大时（不幸的是 TD 这类更新经常出现），裁剪一下，让优化更稳。损失地形图上，不裁剪会绕着最优参数打转，裁剪后能平滑地接近。</li>
+            <li>用 MSE 以外的目标：常用的是 Huber 损失，是 L1 和 L2 损失之间的插值：离目标远时像 L1，不受离群点影响；接近正确值时 L2 起作用，让你越来越接近目标值。</li>
+        </ul>
+        <p>还有别的做法，这些是人们发现对学习价值函数有帮助的标准技巧。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 回放缓冲区</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=2397s" target="_blank">0:39:57</a>–0:42:48 · Replay buffers</em></p>
+        <p>
+            回放缓冲区是一种存储 agent 见过的过去经验的记忆结构，以 $(s, a, r, s')$ 元组的形式存单个转移，而不是整条轨迹。这样做的好处：
+        </p>
+        <ul>
+            <li>打破数据的时间相关性：每一步采样的是转移而不是轨迹，可以跨轨迹，从整个数据集（第 1 到第 $n$ 条轨迹）里采任意索引。</li>
+            <li>避免近因偏差（Recency Bias）：有过去访问过的轨迹的缓冲区，就不会对当前策略过拟合。Q 函数受益于对空间的大量覆盖，缓冲区不让分布被当前策略收窄。</li>
+            <li>这些都带来更好的样本效率，让 agent 有效地复用经验。</li>
+        </ul>
+        <p>
+            缓冲区有时有最大容量，取决于你的存储能力。一般不是问题，如果是，可以按需重新加权或丢弃部分缓冲区。
+        </p>
+        <p>
+            有学生问能不能用带历史的结构？他说人们试过 RNN，甚至 Transformer 结构，比如 Decision Transformer 以长历史为条件预测动作和价值，各有取舍。学 critic 或 Q 函数时完全可以这样做；策略方面，语言里默认就这样做，但在机器人等数据有时间相关性的地方，带历史学习更微妙，需要更多设计决策。怎样保留至今见过的所有状态和动作、甚至以前尝试的经验，是很有意思的方向。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 过估计和 critic 集成</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=07MQNMcxhZU&t=2568s" target="_blank">0:42:48</a>–0:50:39 · Overestimation bias / Critic ensembling</em></p>
+        <h3>为什么会过估计</h3>
+        <p>
+            这部分沿用函数逼近强化学习里的一个推导。Q 学习的 Bellman 或 TD 备份右边有一个 max 操作。用神经网络参数化 Q 函数时，估计中会有噪声。记学到的近似 Q 函数为 $Q^{\text{approx}}$，真实（最优）的为 $Q^{\text{target}}$，用 $Y_{s',a}$ 表示建模误差等带来的噪声：
+        </p>
+        $$Q^{\text{approx}}(s', a) = Q^{\text{target}}(s', a) + Y_{s',a},\qquad \mathbb{E}[Y_{s',a}] = 0$$
+        <p>
+            如果预测目标时右边有噪声，它会很糟糕地传到左边。一步迭代之后，左边的误差是 $\max_a Q^{\text{approx}}(s', a) - \max_a Q^{\text{target}}(s', a)$。即使噪声均值为 0，因为有 max，这个误差的均值也是正的，Q 值被高估：
+        </p>
+        $$\mathbb{E}\left[\max_a Q^{\text{approx}}(s', a)\right] \ge \max_a Q^{\text{target}}(s', a)$$
+        <p>
+            有学生问，这是不是和只采样部分动作有关？他说不是：只看一部分动作时，对全部动作取 max 的真实目标值可能更高，那样这个性质反而不一定成为问题。主要问题来自建模误差：右边的 Q 值有时可能被高估，多轮动态规划之后，误差会传遍整个状态空间并累积。他澄清这里说的误差是 Q 函数本身的误差，不是所做动作的问题：假设离散空间里能枚举所有动作，看每个动作的值，失效情况是学到的 Q 函数和真实最优 Q 函数之间的差。Q 函数可能因为噪声被建模得比真实目标高，即使噪声均值为 0，动态规划更新时由于 max 操作，它会传到左边变成非零均值的噪声，传遍整个状态空间，让 Q 值越来越大，这就是过估计。
+        </p>
+        <p>
+            图示（来自 Double Q-learning 论文）：一列是各步的价值估计，一列是估计和 Q 函数可能的最大值之间的差，一列是真实值和要学的值之间的差。红色的普通 Q 学习类算法误差条很大，因为高估了真实值并把它传遍所有状态。
+        </p>
+        <h3>critic 集成</h3>
+        <p>
+            一种做法是 critic 集成（Critic Ensembling）：用一组网络估计 Q 函数的认知不确定性（Epistemic Uncertainty），在集成上取最小，得到 Q 值的低估：
+        </p>
+        $$y = r + \gamma\min_{i=1,\ldots,N}Q_{w'_i}(s', a')$$
+        <p>
+            有效的原因是：网络初始化不同，在各状态上的误差也很不一样，集成再取最小可以减少不确定性、去掉这些建模误差。这在 Double Q-learning 这类工作里被证明有效：图右边，红色的标准 Q 学习误差很大，只用大小为 2 的集成（即 Double Q-learning）就能缓解很多过估计误差，让训练稳定得多。在线 Q 学习算法里用 2 个就够，大多数情况下效果很好，再多就饱和了。离线强化学习里可以把集成规模加大很多：那里是在静态数据集上工作，离开当前状态或动作分布的支撑所产生的误差会被传播得更厉害，所以很注意所处的分布很重要，集成能大大缓解分布偏移，学到对 Q 值的低估，避免噪声带来的高估（他提到 EDAC、SAC-N 这类方法，字幕不清）。在语言模型的奖励建模里也有类似的过估计效应，会降低表现，有论文用 LoRA、或让网络共享大部分层再加线性适配器之类的参数高效方式来做集成。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>表格型 Q 迭代 $Q_{k+1}(s,a)\leftarrow\mathbb{E}[r+\gamma\max_{a'}Q_k(s',a')]$ 从终止状态把价值传遍网格；$V^\ast$ 随离目标的步数按 $\gamma^k$ 衰减；最优策略是 $Q^\ast$ 的 argmax，最优优势非正，最优动作的优势为 0。</li>
+            <li>参数化 Q 函数：连续动作时输入 $(s,a)$ 输出标量，离散动作时输入 $s$ 输出每个动作的值（能精确求期望）。</li>
+            <li>从 $V^\pi(s)=\mathbb{E}[\sum_k\gamma^k r_{t+k}]$ 推出 TD 目标 $r+\gamma V(s_{t+1})$ 和 n 步回报 $\sum_{k\lt n}\gamma^k r_{t+k}+\gamma^n V(s_{t+n})$：TD 偏差高方差低，蒙特卡洛无偏差高方差，n 步居中；语言模型里动力学和奖励近乎完美，蒙特卡洛很常用。</li>
+            <li>动态规划能拼接轨迹（A 到 B 加 C 到 D 得到 A 到 D）。</li>
+            <li>稳定技巧：半梯度（目标处 stop gradient）、目标网络（硬更新或 Polyak 平均，$\tau\approx 0.99$）、梯度裁剪、Huber 损失；回放缓冲区存单个转移，打破时间相关、避免近因偏差。</li>
+            <li>max 操作让零均值噪声变成正偏差，导致过估计；对 critic 集成取最小（Double Q-learning 用 2 个）能缓解，离线强化学习中可用更大的集成。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224R Deep Reinforcement Learning · Tutorial Session: Review of Q-Learning · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

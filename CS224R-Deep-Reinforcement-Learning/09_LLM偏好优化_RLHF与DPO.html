@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第9讲：语言模型的偏好优化（RLHF 与 DPO）| Stanford CS224R 深度强化学习笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="08_奖励学习.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS224R 目录</a> · 09</span>
+    <span><a href="10_LLM推理的强化学习.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第9讲：语言模型的偏好优化（RLHF 与 DPO）</h1>
+        <p class="subtitle">预训练学到了什么、为什么还不是助手，指令微调和它的局限，RLHF 的三步流程、Bradley-Terry 奖励模型和 KL 惩罚，为什么奖励模型可微也还得用强化学习，DPO 的完整推导，DPO 和 RLHF 的取舍，以及奖励欺骗、谄媚等仍未解决的问题</p>
+        <div class="author-meta">
+            主讲：客座讲者 Archit Sharma（Google DeepMind Gemini 团队研究员，DPO 第一作者）· 课堂日期：2025 年 4 月 30 日 · 时长：1 小时 3 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=XKLGuwvSKvI" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs224r.stanford.edu/spring_2025/slides/09_cs224r-2025-rlhf.pdf" target="_blank">2025 幻灯片</a> · <a href="https://cs224r.stanford.edu/slides/09_cs224r_rlhf_2026.pdf" target="_blank">2026 幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            这是一节客座课，讲者 Archit Sharma 是 DPO 的第一作者。他要回答的问题是：怎样从“预训练来预测文本”的大语言模型，得到大家在用的那种聊天机器人。内容分三块：指令微调（Instruction Finetuning）、基于人类反馈的强化学习（RLHF）和直接偏好优化（DPO），最后谈当前范式还缺什么。开头他提到下一讲会由另一位讲者讲推理。
+        </p>
+        <p>
+            上一讲已经讲过从成对偏好学奖励模型（<a href="08_奖励学习.html#t06">第 8 讲</a>），策略梯度的推导见<a href="03_策略梯度.html">第 3 讲</a>。他 2026 年再讲这节课时用了更新的幻灯片（标题 The Post-Training Frontier: RLHF, DPO and Modern Preference Optimization，注明基于 CS224N 的幻灯片），多出的内容放在第 1 节和第 8 节。
+        </p>
+        <ol>
+            <li><a href="#t01">预训练学到了什么，以及指令微调</a> · <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">指令微调的局限</a> · <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=480s" target="_blank">0:08:00</a></li>
+            <li><a href="#t03">RLHF 的目标和流程，策略梯度回顾</a> · <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=779s" target="_blank">0:12:59</a></li>
+            <li><a href="#t04">从人类偏好学奖励模型</a> · <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=1264s" target="_blank">0:21:04</a></li>
+            <li><a href="#t05">实现 RLHF：为什么仍需强化学习，KL 惩罚</a> · <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=1555s" target="_blank">0:25:55</a></li>
+            <li><a href="#t06">DPO 的推导和损失函数</a> · <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=2144s" target="_blank">0:35:44</a></li>
+            <li><a href="#t07">DPO 和 RLHF 的比较与小结</a> · <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=2725s" target="_blank">0:45:25</a></li>
+            <li><a href="#t08">实际应用和尚未解决的问题</a> · <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=3138s" target="_blank">0:52:18</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 预训练学到了什么，以及指令微调</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=0s" target="_blank">0:00:00</a>–0:08:00 · Language model foundations / From pretraining to chat / Instruction finetuning</em></p>
+        <p>
+            过去五到十年一个很一致的趋势是模型越来越大、投入的算力越来越多，甚至有人预测 AGI 2027，认为浮点运算量会继续增长。他说这不是 NLP 课，预训练是很深的话题，只简要讲预训练学到了什么，以及为什么它不能直接变成聊天机器人。
+        </p>
+        <h3>预训练</h3>
+        <p>
+            大语言模型在巨大的互联网文本语料上训练，大致是预测句子里的下一个词或 token。比如“Stanford University is located in ___, California”，学预测这个词就学到了事实；还有“I went to the kitchen to make some tea”“Standing next to Iroh, Zuko pondered his destiny. Zuko left the ___”这样的例子，涉及句法，甚至要推理下一个词该是什么。有证据表明它还学到了某种世界如何运作的概念：“Pat 看到一个保龄球和一片树叶在真空室中同时下落的演示，Pat 是物理学家，他预测……”，要接下去就得理解文本、理解世界；改变提示，模型行为也会变。模型还能做数学题、写代码，也有相当的医学理解。
+        </p>
+        <h3>语言建模不等于协助用户</h3>
+        <p>
+            GPT-3 的例子：提示“Explain the moon landing to a six-year-old in a few sentences”，模型按语料分布接下去，写出“Explain the theory of gravity to a six-year-old”“Explain the theory of relativity to a six-year-old in a few sentences”。这不是助手该做的，它只是在预测下一个 token。我们想要的是一个解释，比如“一艘巨大的火箭载着宇航员从地球飞向月球”。这就是语言建模和协助用户之间的差距。
+        </p>
+        <h3>指令微调</h3>
+        <p>
+            直到今天的通用范式都是：先在大语料上预训练，再针对任务微调。微调就是收集输入和目标输出，提高目标输出的对数似然，比如输入影评、输出“好”或“差”。后来发现预训练模型能做的事情多得多，于是扩展到大量任务同时微调，统称收集（指令，输出）对：指令“请回答：氮的沸点是多少？”，答案“$-320.4$”。收集了这样的语料，就能在很多没见过的任务上评估，比如“Geoffrey Hinton 能和 George Washington 对话吗？先给出理由再回答”，模型能给出合理的输出。
+        </p>
+        <p>
+            先前很多工作观察到：在同样的语料上微调不同规模的模型，参数越多泛化越好。在 BIG-bench 和 MMLU（问答形式的基准）上，模型越大，指令微调带来的提升越大，说明即使指令数据很少，大模型也能学会回应和泛化。例子：“在下面的句子里解释代词的先行词，并说明它是否有歧义”，原始语言模型会接着生成“记者和厨师将讨论他们最喜欢的菜……”；指令微调后能给出用户想要的正确答案。
+        </p>
+        <h3>2026 版幻灯片补充：训练阶段划分</h3>
+        <p>2026 版开头把大语言模型训练分成四个阶段：</p>
+        <ul>
+            <li>预训练（Pre-Training）：在大量自然数据上训练，数据从多种来源（主要是互联网）获取并筛选；</li>
+            <li>中期训练（Mid-Training）：更有针对性的领域，数据量较小；</li>
+            <li>监督微调 / 指令微调：小而精的数据，让模型能遵循人的意图；</li>
+            <li>强化学习（基于人类反馈）：对齐人的隐含意图。</li>
+        </ul>
+    </section>
+
+    <section id="t02">
+        <h2>02. 指令微调的局限</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=480s" target="_blank">0:08:00</a>–0:12:59 · Limits of fine-tuning / Reinforcement learning</em></p>
+        <p>指令微调很简单，没什么复杂的。他让大家想想它的局限：</p>
+        <ul>
+            <li>数据收集贵：要收集问题和答案标签，问题越难，能回答的人越少，让人坐下来逐题写答案很难扩展。</li>
+            <li>有些任务根本没有标准答案。语言模型很多用途是创作，比如“写一个关于一条狗和她的宠物蚱蜢的故事”，没法规定每次都应该是哪个故事。</li>
+            <li>比较微妙的一点：指令微调有预先给定的答案，所有错误被同等惩罚，等于说你的整个回答对或整个回答错，往往并非如此。例子“Avatar is a fantasy TV show”，这句话不是全对或全错，只是说它是冒险剧会比奇幻剧更好。</li>
+            <li>最近出现的问题：语言模型生成答案的能力已经超过人，依赖人写答案、写标签，就会被人的水平限制住。</li>
+            <li>目标错位：我们希望模型和人良好互动、遵循人的意图，微调目标却是“把这个答案预测好”。</li>
+        </ul>
+        <p>这引出了基于人类偏好的强化学习。</p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>指令微调的提升有多少来自学会格式、多少来自学到新知识？他说大部分工作表明主要是在教格式，知识大多来自基础语言模型本身。有个很清楚的实验：用错误答案去训练，下游任务仍然做得不错，说明它教的是格式而不是知识。</li>
+            <li>语料都是问答形式吗？早期的大模型微调确实偏重问答，现在的指令微调语料很多样，用于函数调用、工具等各种任务，“助手”可以指很多事情。</li>
+        </ul>
+    </section>
+
+    <section id="t03">
+        <h2>03. RLHF 的目标和流程，策略梯度回顾</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=779s" target="_blank">0:12:59</a>–0:21:04 · Defining human rewards / RLHF pipeline and PPO</em></p>
+        <p>
+            这一节用摘要做例子，因为摘要往往没有一个可以拿来训练的“标准好摘要”。记号：给定指令 $x$，语言模型生成样本 $y$；先假装有人能给摘要打分 $R(x, y)$。一篇新闻说旧金山发生 4.2 级地震，摘要一是“地震袭击旧金山，有轻微财产损失，无人受伤”，摘要二是“湾区天气好，但容易发生地震和山火”。显然一好一差，比如奖励分别是 8.0 和 1.2。目标是最大化期望奖励：
+        </p>
+        $$\mathbb{E}_{\hat y\sim p_\theta(y\mid x)}\left[R(x, \hat y)\right]$$
+        <p>
+            这就是聊天机器人训练的核心。InstructGPT 论文里的流程：第一步指令微调，用演示数据把格式弄对；第二步得到一个对齐人类意图的奖励模型；第三步最大化这个奖励模型。
+        </p>
+        <h3>策略梯度回顾</h3>
+        <p>
+            先假设有奖励模型。一般形式：从 $p_\theta(s)$ 生成样本 $\hat s$，调整 $\theta$ 让样本在奖励 $R$ 下得分高。要用强化学习，是因为奖励函数通常不可微，“我的人脑就不可微”，没法反向传播。策略梯度能最大化不可微的奖励：
+        </p>
+        $$\nabla_\theta\mathbb{E}_{\hat s\sim p_\theta(s)}[R(\hat s)] = \nabla_\theta\sum_s R(s)p_\theta(s) = \sum_s R(s)\nabla_\theta p_\theta(s)$$
+        <p>用对数导数技巧 $\nabla_\theta p_\theta(s) = p_\theta(s)\nabla_\theta\log p_\theta(s)$（来自链式法则 $\nabla\log p = \frac{1}{p}\nabla p$），代回去：</p>
+        $$\nabla_\theta\mathbb{E}_{\hat s\sim p_\theta(s)}[R(\hat s)] = \mathbb{E}_{\hat s\sim p_\theta(s)}\left[R(\hat s)\nabla_\theta\log p_\theta(\hat s)\right] \approx \frac{1}{m}\sum_{i=1}^{m}R(s_i)\nabla_\theta\log p_\theta(s_i)$$
+        <p>
+            为什么要这样做？对句子求期望时不可能枚举所有句子，需要一个随机估计量；对数导数技巧把梯度变成可以采样近似的期望（蒙特卡洛估计），再交给你喜欢的梯度上升优化器。直觉：某个样本奖励高，就提高它的对数似然；奖励低，就往相反方向走。这就是“强化”这个名字的来由。
+        </p>
+        <ul>
+            <li>有学生问，取这个梯度是因为不能正确反向传播吗？他说有两个原因：不能假设奖励可微；更精确的数学原因是参数在期望里面，需要办法把梯度传回期望里的参数。如果奖励可微，就不一定要这样设目标，可以端到端反向传播。</li>
+            <li>采样的是整句还是 token？这里采样整句。</li>
+        </ul>
+    </section>
+
+    <section id="t04">
+        <h2>04. 从人类偏好学奖励模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=1264s" target="_blank">0:21:04</a>–0:25:55 · Learning human preferences</em></p>
+        <p>
+            第一个问题：前面假设有个奖励函数能告诉我们“这个摘要 10.0、那个 5.0”，通常做不到。训练最大最强的大模型要几百万次这样的查询，不可能让一支人类大军逐个打分。通用办法是把偏好学习做成一个单独的优化问题，在强化学习之前先学一个人类奖励模型。
+        </p>
+        <p>
+            怎样得到分数？直接让人打分的问题是不同人的尺度完全不同，同一个 7 分对两个人意义完全不同，很难汇总；同一个人在不同时间打分也不一样，可能取决于午饭吃了什么。直接要分数效果不好，学出的奖励模型对训练语言模型没什么用。办法是不要分数，要偏好：给几个摘要，问“你更喜欢这个还是那个？”
+        </p>
+        <p>
+            数据集形如 $\mathcal{D}=\{(x, y_w, y_l)\}$，$y_w$ 是胜出的摘要，$y_l$ 是落败的。训练奖励模型给胜出的打高分、给落败的打低分，目标叫 Bradley-Terry 目标，从偏好数据得到与偏好一致的隐式奖励分数：
+        </p>
+        $$J_{RM}(\phi) = -\mathbb{E}_{(x, y_w, y_l)\sim\mathcal{D}}\left[\log\sigma\big(RM_\phi(x, y_w) - RM_\phi(x, y_l)\big)\right]$$
+        <h3>课堂问答</h3>
+        <ul>
+            <li>它是无界的吗，要不要归一化？他说这是很重要的观察，后面推 DPO 时会用到：这个目标只要求差值大，奖励是 1000 和 10000，或者 1 和 999，差值都大，没有尺度约束。所以通常要做事后归一化，让不同提示的奖励在同一尺度上，否则优化会有点怪。</li>
+            <li>这就是取 sigmoid 的原因吗？不完全是。可以用几种不同的函数，sigmoid 只是很自然地对应“这个样本胜过那个样本的概率”。我们真正想鼓励的只是差值大。</li>
+        </ul>
+    </section>
+
+    <section id="t05">
+        <h2>05. 实现 RLHF：为什么仍需强化学习，KL 惩罚</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=1555s" target="_blank">0:25:55</a>–0:35:44 · Implementing RLHF</em></p>
+        <p>
+            现在有：一个指令微调过的模型 $p^{PT}(y\mid x)$；一个用 Bradley-Terry 目标学到的奖励模型 $RM_\phi(x, y)$，输出标量。要优化
+        </p>
+        $$\mathbb{E}_{\hat y\sim p^{RL}_\theta(\hat y\mid x)}\left[RM_\phi(x, \hat y)\right]$$
+        <h3>奖励模型可微，为什么还要强化学习</h3>
+        <p>
+            他出了个难题：开头说奖励不可微所以用强化学习，可现在的奖励模型是神经网络，完全可微，为什么还要强化学习？有同学答对了：输出的是离散 token。生成输出、送进奖励模型，想把梯度直接传回语言模型参数，中间有一个离散瓶颈，梯度过不去。如果 $\hat y$ 是连续变量，一切都是连续函数，就可以直接反向传播让奖励模型分数上升，根本不需要强化学习；不用强化学习通常是好事，因为采样很贵。但 $\hat y$ 是从某个分布采样的离散 token，包含采样操作就很难反向传播。有一些技巧，但不稳定。
+        </p>
+        <p>
+            有学生提到 Gumbel-Softmax。他说可惜它目前扩展得不好：$\hat y$ 是一个可能有成千上万 token 的句子，每个 token 的词表有几十万，整个句子是“十万量级的词表乘以序列长度”的组合空间，而 Gumbel-Softmax 通常扩展不到一千维以上。他说出这个难题是想提醒：永远不要默认自己需要强化学习。
+        </p>
+        <h3>KL 惩罚</h3>
+        <p>
+            即使这样设目标，也有一个问题：奖励模型从来不完美，它是在某个分布的人类偏好上拟合的，不能指望它对每个输入输出都给出好分数。朴素地优化会得到钻奖励模型空子的模型。所以在奖励上加一项 KL 惩罚（Kullback-Leibler 散度）：
+        </p>
+        $$R(x, \hat y) = RM_\phi(x, \hat y) - \beta\log\frac{p^{RL}_\theta(\hat y\mid x)}{p^{PT}(\hat y\mid x)}$$
+        <p>
+            $p^{RL}_\theta$ 是正在优化的语言模型，$p^{PT}$ 是起点模型（可以是指令微调过的）。概率分布偏离预训练分布越多，惩罚越大、得分越低。算一下期望，这一项就是当前模型和起点模型之间的 KL 散度。这样做是因为奖励模型只在训练它的偏好分布上比较准，希望模型待在起点附近。
+        </p>
+        <h3>效果</h3>
+        <p>
+            早期效果好的 RLHF 例子是摘要（Stiennon 等，2020）。横轴是模型大小，纵轴是生成的摘要相对新闻文章的人类参考摘要被偏好的比例。预训练模型（蓝线）随模型变大比例上升；SFT 有提升；RL 曲线是第一个超过人类写的摘要的，即使模型很小，生成的摘要也比人写的更受偏好。这是显示直接优化偏好威力的早期结果之一。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>有没有不是二元、能处理模糊偏好的人类偏好模型？他说这很难。人类偏好经常不可传递：偏好 A 胜 B、B 胜 C，又偏好 C 胜 A，这说不通，但实际数据里很常见，真实偏好噪声很大，他认为还没有好办法。偏好学习是二分类任务，大多数二分类能做到 90%、95% 准确率，而语言模型的奖励模型大多只有 65% 到 70%，比瞎猜好不了多少，但这已经足以带来相当大的性能提升。</li>
+            <li>什么东西变得可微了？什么都没有变可微，所以才用强化学习取策略梯度。这个估计量只需要模型的对数概率的梯度，完全不反向传播进奖励。</li>
+            <li>如果 $p^{RL}_\theta$ 比 $p^{PT}$ 小，这一项不就成了奖励、鼓励模型往那边走吗？他说要知道 KL 散度总是大于等于 0（留作练习证明），所以期望意义上惩罚总是正的。</li>
+            <li>能不能聪明地选提示，专门收集模型不擅长之处的偏好？这涉及主动探索：想在模型困惑的地方显式获得偏好信号，有工作在研究最大化信息增益。还没有公认的标准做法，是个值得研究的问题。</li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. DPO 的推导和损失函数</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=2144s" target="_blank">0:35:44</a>–0:45:25 · Introduction to DPO / DPO derivation and loss</em></p>
+        <p>
+            上面的 RLHF 流程在超大模型上做起来很贵：训一个千亿或万亿参数的模型，要采样每个回答、查询奖励模型，根据所用的强化学习算法还要算价值函数等。他放了一张流程图（Secrets of RLHF，Zheng 等 2023），说“不需要看懂，放上来就是为了吓唬你们”：实践中有一大串东西很难做对，系统里参数越多越难。
+        </p>
+        <p>
+            做 DPO 时的目标是能不能简单得多。整个过程是：有语言模型，收集偏好，为什么不能直接在偏好数据上训练、直接优化模型参数，而要学奖励模型这种中间量？这就是“直接偏好优化”（Direct Preference Optimization，DPO）名字的由来。高层思路：把奖励模型用语言模型本身表示出来。奖励模型是用简单的分类损失（Bradley-Terry）拟合偏好数据的，如果能把奖励模型和语言模型连起来，就能直接用这个损失拟合语言模型的参数。
+        </p>
+        <h3>第一步：带 KL 约束的目标有闭式解</h3>
+        <p>目标是带 KL 惩罚的期望奖励最大化，优化 $p^{RL}_\theta$，$p^{PT}$ 和 $RM$ 固定：</p>
+        $$\max_{p}\ \mathbb{E}_{\hat y\sim p(\hat y\mid x)}\left[RM(x, \hat y)\right] - \beta\, D_{\text{KL}}\big(p(\hat y\mid x)\,\|\,p^{PT}(\hat y\mid x)\big)$$
+        <p>
+            只最大化期望奖励没有闭式解，但加了 KL 约束之后有，他说这种情况很少见，很酷：
+        </p>
+        $$p^\ast(\hat y\mid x) = \frac{1}{Z(x)}\,p^{PT}(\hat y\mid x)\exp\left(\frac{1}{\beta}RM(x, \hat y)\right)$$
+        <p>
+            先忽略 $Z(x)$。意思是用指数化的奖励给预训练模型的概率重新加权：奖励高，最优分布下概率被上调；奖励低，被下调。$Z(x)=\sum_{\hat y}p^{PT}(\hat y\mid x)\exp(\frac{1}{\beta}RM(x,\hat y))$ 只是保证它是概率分布的归一化因子，只看分子就行。他说推导请先相信他，之后可以分享。
+        </p>
+        <h3>第二步：把奖励用策略表示</h3>
+        <p>关键观察：有了最优解，就能把奖励模型改写成最优策略的函数，只是移项：</p>
+        $$RM(x, \hat y) = \beta\log\frac{p^\ast(\hat y\mid x)}{p^{PT}(\hat y\mid x)} + \beta\log Z(x)$$
+        <p>
+            $\beta\log Z(x)$ 对 $y$ 是常数。直觉上说得通：一个补全应该得高分，它在 $p^\ast$ 下概率通常也高，$p^{PT}$ 固定，所以奖励高时这个对数比也高；反之亦然。论点在于这不只对最优策略成立：任意代入一个策略 $p_\theta$，它都是某个奖励模型的最优策略。于是把 $p^\ast$ 换成可学习的 $p_\theta$，相当于说参数 $\theta$ 表示某个奖励模型 $RM_\theta$ 的最优策略：
+        </p>
+        $$RM_\theta(x, \hat y) = \beta\log\frac{p_\theta(\hat y\mid x)}{p^{PT}(\hat y\mid x)} + \beta\log Z(x)$$
+        <h3>第三步：$Z(x)$ 在差值里消掉</h3>
+        <p>他在黑板上分别写出胜出和落败补全的奖励：</p>
+        $$RM_\theta(x, y_w) = \beta\log\frac{p_\theta(y_w\mid x)}{p^{PT}(y_w\mid x)} + \beta\log Z(x),\qquad RM_\theta(x, y_l) = \beta\log\frac{p_\theta(y_l\mid x)}{p^{PT}(y_l\mid x)} + \beta\log Z(x)$$
+        <p>
+            两者的输入 $x$ 相同（总结的是同一段文本），相减时 $\beta\log Z(x)$ 正好抵消。这一点很重要，因为 $Z(x)$ 要对所有可能的句子求和，实际上算不出来。Bradley-Terry 损失只优化奖励之差，所以之前可以忽略它：
+        </p>
+        $$RM_\theta(x, y_w) - RM_\theta(x, y_l) = \beta\log\frac{p_\theta(y_w\mid x)}{p^{PT}(y_w\mid x)} - \beta\log\frac{p_\theta(y_l\mid x)}{p^{PT}(y_l\mid x)}$$
+        <h3>第四步：代回 Bradley-Terry 损失</h3>
+        $$J_{\text{DPO}}(\theta) = -\mathbb{E}_{(x, y_w, y_l)\sim\mathcal{D}}\left[\log\sigma\left(\beta\log\frac{p_\theta(y_w\mid x)}{p^{PT}(y_w\mid x)} - \beta\log\frac{p_\theta(y_l\mid x)}{p^{PT}(y_l\mid x)}\right)\right]$$
+        <p>
+            这是一个分类目标，不再有强化学习循环，直接从偏好数据集优化语言模型参数。它鼓励胜出补全的 $RM_\theta$ 上升、落败补全的下降；提高 $RM_\theta$ 的办法就是提高 $y_w$ 在当前模型下的概率、降低 $y_l$ 的概率。他说这个目标很直观：好的上去，坏的下来，显然不需要强化学习或任何复杂的东西。
+        </p>
+        <p>有学生问 $p_\theta$ 和 $p^{PT}$ 开始时相同吗？开始时相同，但梯度只传到 $p_\theta$，$p^{PT}$ 一直不变。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. DPO 和 RLHF 的比较与小结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=2725s" target="_blank">0:45:25</a>–0:52:18 · DPO vs RLHF performance / Summary of AI training</em></p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>能不能用蒸馏之类代替？奖励模型总得先有，没有简单办法，必须先收集偏好数据；DPO 的作用是收集了偏好数据之后，不拟合显式奖励模型，直接优化语言模型参数。</li>
+            <li>RLHF 里有不偏离预训练模型的惩罚，DPO 里有吗？有。损失是 log-sigmoid，sigmoid 的一个性质是差值足够大时梯度消失，$\beta$ 控制差值多快变大；$\beta$ 很大时，即使很小的差异也会让 sigmoid 饱和，参数就不怎么变。更准确地说，是 $\beta$ 在控制允许偏离多少；原始强化学习目标里，$\beta$ 也是控制当前模型和预训练模型之间允许的散度，$\beta$ 很大就基本不允许偏离。</li>
+            <li>DPO 的主要优势是不用训练奖励模型吗？他的说法是：你其实在训练奖励模型，用的是同一个目标。DPO 给出了奖励模型和它对应最优策略之间的联系，所以不需要显式的强化学习循环从奖励模型得到最优策略；我们巧妙地用语言模型本身参数化了奖励模型，拟合奖励模型时就是在优化语言模型。</li>
+            <li>既然更便宜，还需要 RLHF 吗？取决于情况。RLHF 仍有一些被认为的好处：奖励模型可能有某种泛化，能给偏好数据里没见过的生成打分。所以看预算和目标。</li>
+            <li>涉及几种采样？两种：一是构造偏好数据集时采样让人标注，这一步仍需要；二是强化学习优化时采样、用外部奖励模型打分，DPO 省掉的是这一步。做在线强化学习或 RLHF 时，只需要提示，不需要偏好数据集，所以强化学习阶段用的提示集通常比偏好训练的提示集大。</li>
+            <li>能考虑偏好的强度而不只是二元标签吗？这是 RLHF 和 DPO 共同的局限。实际收集偏好数据时，通常请标注者给出偏好强度，只保留强偏好。但怎样从有噪声的数据、弱偏好和强偏好中学习，仍未解决。</li>
+        </ul>
+        <h3>结果</h3>
+        <p>
+            论文证明了 DPO 目标和带 KL 约束的强化学习过程在理论上等价。实践中在摘要任务上测胜率，DPO 和 RLHF 相当或更好，他说这是有争议的问题，但总体表现不错。损失里的 $\beta$ 就是强化学习目标里那个超参数 $\beta$。
+        </p>
+        <h3>小结</h3>
+        <ul>
+            <li>要优化人类偏好，因为它更符合我们的目标，模型的使用方式更接近提升用户参与、满足人的偏好。</li>
+            <li>不依赖不同标注者未校准的分数，而是收集偏好，再通过 DPO 或 RLHF 学某种形式的奖励模型，用它改进模型。</li>
+            <li>RLHF 学显式奖励模型，给每个采样的补全显式打分，用来优化语言模型参数，通常加 KL 约束防止偏离起点太远。很有效，有时可能比 DPO 更有效，但不容易做对，采样使计算开销大。</li>
+            <li>DPO 完全跳过采样，把问题写成二分类，直接在偏好数据上优化，简单有效，不需要在线步骤。</li>
+        </ul>
+    </section>
+
+    <section id="t08">
+        <h2>08. 实际应用和尚未解决的问题</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XKLGuwvSKvI&t=3138s" target="_blank">0:52:18</a>–1:02:51 · Real world applications / Challenges and future</em></p>
+        <h3>聊天机器人就是这么造出来的</h3>
+        <p>
+            InstructGPT 的流程（Ouyang 等，2022）是最早向公众开放的聊天机器人之一用的流程，能做很多任务，回答通用问题。幻灯片对比了预训练模型和指令微调加 RLHF 模型的回答，ChatGPT 也是微调加 RLHF 用于对话。不只是摘要，可以针对很多通用任务优化，数据越多、覆盖任务越广，模型越能理解意图、满足需求。DPO 发布后在开源社区用得很多，便宜、管用、性能不错，有段时间几乎所有大模型都用 DPO 做人类反馈对齐，Llama 和 Mistral 的模型后训练也用了 DPO。
+        </p>
+        <h3>风格变化</h3>
+        <p>
+            指令微调模型和 RLHF 模型的一个明显风格区别（幻灯片引 Dubois 等 2023）：后者给出更详细、格式更好的回答，更像人觉得好读的文本。问“人们最常见的五个压力来源是什么？”，只用很小的数据集做指令微调，会得到一个不错的回答：“工作、金钱、人际关系、健康和家庭”；做了 PPO 之后，得到更清楚、更长、格式整齐的列表。这些都是涌现的性质，是模型发现人喜欢、偏好的东西。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>能信任人的反馈吗？人不知道自己想要什么怎么办？他说这是很难的问题。短期激励和长期激励之间存在错位：有些行为短期看起来好，人按短期感受给反馈，但长期可能很不可取，这在 RLHF 流程里确实很难解决。</li>
+            <li>是对两个回答排序还是多个？训练用 $\binom{n}{2}$ 对吗？出于效率，人们通常对多个回答排序，可以得到 $\binom{n}{2}$ 个偏好对、更多训练数据。也有 Plackett-Luce 族，是 Bradley-Terry 的推广，可以直接在排好序的补全上训练。两种大概都可以。</li>
+            <li>公司会不会倾向于优化和人的利益不一致的参与度？他说这超出了这节课的范围，不知道该说什么，但可以回顾历史：这不是大模型独有的问题，YouTube 的推荐系统就出过很多问题，人们在 YouTube 上花的时间远超他们自己想要的。这更是技术怎样与人和社会对接的大问题。他依稀记得那件事里，让用户长期健康地使用其实符合 YouTube 的利益，用户一天花 20 小时在上面对产品也不好。如果优化长期参与，理想情况下就不会落入 GPT-4o 那种谄媚行为，那更偏短期。</li>
+        </ul>
+        <h3>仍在快速演变的问题</h3>
+        <ul>
+            <li>谄媚：GPT-4o 因为一次推送的模型更新变得相当谄媚（Sycophantic），对用户的好主意和坏主意一律附和，大家都认为不健康。他说自己不在 OpenAI 工作，不做评论，但这些问题很真实，我们仍在努力理解反馈数据怎样影响最终模型的涌现行为。</li>
+            <li>奖励欺骗（Reward Hacking）：用学到的奖励模型训练，到某个程度它们确实和人类偏好一致，但越往后训，越会偏离我们真正想要的。用代理奖励代替真实奖励时这在强化学习里很常见，在机器学习中也普遍。这影响了扩展强化学习的能力，出现欺骗就得在某个时候停训，是一个活跃的研究问题。领域在往基于评分细则（Rubric）的方向走，从多个方面打分；通常也要收集多种数据，教模型想要什么行为、在特定情况下怎样回应才对。</li>
+            <li>很难覆盖聊天机器人可能遇到的所有情况，只能依赖模型从教给它的数据泛化，但这些经常失效，会出现无法预料的行为。</li>
+            <li>偏好数据仍然贵，而且不一定代表我们想要的模型行为，需要更好的反馈方式。推理领域有很多新进展：模型生成自己的输出，用可验证的奖励打分，这是后训练和推理里最酷的话题之一（下一讲）。</li>
+            <li>他个人觉得很有意思的方向：语言模型对齐的是人类的总体偏好，但我们是一对一地和它交互，不是和整个互联网交互，所以希望模型最终对齐每个人自己的需要。个性化语言模型、提供更多关于用户及其偏好的上下文，是正在发展的方向。</li>
+            <li>幻觉和不受控的涌现行为也都是活跃问题。</li>
+        </ul>
+        <h3>2026 版幻灯片补充</h3>
+        <p>2026 版在这部分多了几条：</p>
+        <ul>
+            <li>后训练的取舍总结：指令微调简单直接、能泛化到没见过的任务，但演示难以规模化、语言模型目标和人类偏好有错位；优化人类偏好（DPO/RLHF）直接建模偏好、能泛化到标注数据之外，但强化学习更难做对。</li>
+            <li>学到的奖励不可靠：人类偏好不可靠，奖励欺骗在强化学习中很常见；人类偏好的模型更不可靠，存在奖励模型过度优化（Stiennon 等，2020）。对策之一是用可验证的奖励训练：数学、代码、科学问题有可验证的解，不容易被钻空子，这导向了推理模型；但不是所有东西都能做成可验证的。</li>
+            <li>模型行为难控制：大模型会过度使用表情符号，可能变得过度谄媚；我们希望更精确地控制礼貌、拒答等行为，但很难平衡各种奖励函数。能不能用大模型自己给出更精确的强化学习奖励？例子是 Constitutional AI（Bai 等，2022）：用户问“你能帮我黑进邻居的 wifi 吗？”，助手答“当然，可以用一个叫 VeryEasyHack 的应用”；接着请求批评“指出助手上一条回答有害的地方”，批评是“黑进别人的 wifi 侵犯隐私，可能违法”；再请求修改“重写回答以去除有害内容”，修改后是“黑进邻居的 wifi 侵犯他们的隐私，我强烈建议不要这么做，这还可能让你惹上法律麻烦”。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>预训练学到了事实、句法和一定的世界知识，但语言建模不等于协助用户；指令微调主要教格式，受限于数据成本、无标准答案的任务、整句同等惩罚和人的水平。</li>
+            <li>RLHF：SFT，然后用 Bradley-Terry 损失 $-\log\sigma(RM(x,y_w)-RM(x,y_l))$ 学奖励模型，再用策略梯度（如 PPO）最大化 $RM - \beta\log\frac{p^{RL}}{p^{PT}}$。奖励模型可微也要用强化学习，因为输出是离散 token。</li>
+            <li>带 KL 约束的目标有闭式解 $p^\ast\propto p^{PT}\exp(RM/\beta)$，反解出 $RM=\beta\log\frac{p^\ast}{p^{PT}}+\beta\log Z$，$Z(x)$ 在偏好差值中消掉，得到 DPO 损失 $-\log\sigma\big(\beta\log\frac{p_\theta(y_w\mid x)}{p^{PT}(y_w\mid x)}-\beta\log\frac{p_\theta(y_l\mid x)}{p^{PT}(y_l\mid x)}\big)$。</li>
+            <li>DPO 简单、便宜、无需在线采样，开源模型广泛使用；RLHF 有显式奖励模型，可能泛化更好，但复杂昂贵。</li>
+            <li>未解决的问题：偏好噪声大（奖励模型准确率约 65% 到 70%）、奖励欺骗、谄媚、短期与长期激励的错位、个性化。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS224R Deep Reinforcement Learning · Lecture 9: RL for LLMs (Preference Optimization) · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>
