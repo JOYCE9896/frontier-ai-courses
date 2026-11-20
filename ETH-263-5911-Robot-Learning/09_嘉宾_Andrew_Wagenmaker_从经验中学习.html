@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Andrew Wagenmaker：让机器人从经验中学习 | ETH Robot Learning 2026 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="08_强化学习二.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">ETH Robot Learning 目录</a> · 09</span>
+    <span><a href="10_生成模型.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>嘉宾讲座 · Andrew Wagenmaker：让机器人从经验中学习</h1>
+        <p class="subtitle">为什么随机探索在真实机器人上行不通，怎样把探索从动作空间搬到扩散策略的噪声空间（DSRL），用几十分钟在线训练把成功率从不到一半提到接近 100%；以及行为克隆预训练为什么不一定适合后续 RL，怎样按示范者行为的不确定性调整探索</p>
+        <div class="author-meta">
+            主讲：Andrew Wagenmaker（UC Berkeley 博士后，合作导师 Sergey Levine），ETH Robot Learning 课程嘉宾讲座<br>
+            课程：Robot Learning: From Fundamentals to Foundation Models（ETH Zürich 263-5911，Week 5）· 时长：32 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=CPmTpXA5azw" target="_blank">课堂录像</a>（ETH Zürich 公开，2026 年春季，本文依据录像字幕整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            这是第 5 周的嘉宾讲座，接在 Oier Mees 的“强化学习（二）”那一讲后面。主持人介绍说，Andrew Wagenmaker 是 UC Berkeley 电子工程与计算机系的博士后，跟 Sergey Levine 做研究；博士在 University of Washington 读，导师是 Kevin Jamieson；也在 Microsoft 和 Dylan Foster 合作过。他研究动态、序贯、交互环境中的学习，重点是可扩展的探索方法，让策略能高效地在线改进。第 6 周课上讨论的论文之一 “Steering Your Diffusion Policy with Latent Space RL” 就是他这次讲的第一项工作。
+        </p>
+        <p>
+            讲座分两部分。第一部分：给定一个行为克隆训练出的扩散策略，怎样通过在它的输入噪声上做强化学习，得到像人一样有方向的探索，并快速把成功率提上去。第二部分：如果之后要做 RL，预训练阶段该怎样训练策略，他的答案是让策略按示范者行为的不确定性来调整探索。最后的问答谈到和 π*0.6 的比较、用不用 VLM 做评价器，以及噪声不能引导策略时怎么办。
+        </p>
+        <ol>
+            <li><a href="#t01">动机：怎样学会熨衬衫</a> · <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">从经验中学习难在探索</a> · <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=315s" target="_blank">0:05:15</a></li>
+            <li><a href="#t03">回顾：行为克隆和扩散策略</a> · <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=606s" target="_blank">0:10:06</a></li>
+            <li><a href="#t04">在噪声空间里探索</a> · <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=794s" target="_blank">0:13:14</a></li>
+            <li><a href="#t05">预训练该怎么做才利于后续学习</a> · <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=1272s" target="_blank">0:21:12</a></li>
+            <li><a href="#t06">按不确定性调整探索</a> · <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=1514s" target="_blank">0:25:14</a></li>
+            <li><a href="#t07">问答</a> · <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=1672s" target="_blank">0:27:52</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 动机：怎样学会熨衬衫</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=0s" target="_blank">0:00:00</a>–0:05:15</em></p>
+        <h3>人是怎么学会的</h3>
+        <p>
+            他从一个日常任务讲起：熨衬衫。人学熨衬衫，可能会先看几个视频，吸收一些东西，然后自己试。他说他自己第一次就没做对：衬衫要摆得恰到好处，不能熨出褶子，有很多细节。所以学这种任务不能只看网上的视频，得真的去做：在环境里采取动作，观察环境怎么反应，再据此调整行为。人在真实世界里学任务，需要一定的交互和经验。
+        </p>
+        <h3>机器人现在怎么学</h3>
+        <p>
+            要让机器人熨衬衫，可以用类似的起点：拿某种数据源，可能是互联网数据，可能是模拟衬衫的仿真器，也可能是人在机器人上示范怎么熨，用这些数据训练机器人，然后部署。他说这有点简化，但今天机器人学习大多是这个范式：用行为克隆训练策略，或者在仿真里训练，部署到世界上，希望它能工作。
+        </p>
+        <p>
+            可是家里并没有机器人在熨衬衫。他认为原因之一是每种数据源都有短板：
+        </p>
+        <ul>
+            <li>仿真器：如果有准确的仿真模型，在仿真里学往往很好，但衬衫这种物体的动力学很复杂，做出准确的仿真模型并不容易。</li>
+            <li>互联网数据：可以拿很多 YouTube 视频，但它们和物理世界没有对应关系，看人熨衬衫并不能告诉你要给机器人发什么电机指令。</li>
+            <li>人类示范：他说这条路过去几年带来了很多成功，但采集足够多的示范很贵，而且即使采得更多，示范和机器人部署之间总有一定的分布偏移（distribution shift，训练数据和实际运行时遇到的情况不一致），性能还是到不了完美。</li>
+        </ul>
+        <p>
+            所以拿这些先验数据训练策略再部署，还不足以让机器人在真实世界里做好复杂任务。他的主张是，应该参照人学复杂任务的方式，让机器人从经验中学习，在真实世界里一边尝试一边学，而不是拿一份固定数据训练完就部署。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 从经验中学习难在探索</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=315s" target="_blank">0:05:15</a>–0:10:06</em></p>
+        <h3>需要能区分对错的经验</h3>
+        <p>
+            他说从经验中学习有很多难点，他认为最根本的一个是：要收集能区分正确行为的经验。这叫探索（exploration）：在真实世界里尝试，从经验里学会做对的事，整个过程就是强化学习。
+        </p>
+        <p>
+            回到熨衬衫。教学视频说第一步是用喷壶往衬衫上喷水。我们希望机器人在真实世界里交互、收集经验，这些经验能告诉它应该拿起喷壶。如果部署一个策略，它试了几种做法，其中一种碰巧是对的，就可以用这次正确尝试得到的信息学会正确行为。反过来，如果一个策略从来不去拿喷壶喷衬衫，在真实世界里跑多少次，都收集不到能让它学会的经验。所以从交互中学习，最根本的是让机器人收集到这种经验，引出能带来学习的交互，而且越快越好。
+        </p>
+        <h3>传统 RL 的探索在物理世界里不扩展</h3>
+        <p>
+            传统 RL 里的探索是这样的：把一个对世界一无所知的智能体扔进环境，它尝试各种做法直到找到正确行为，再相应更新。比如机器人在某个状态，原则上可以朝任何方向移动手臂，于是随便选一个方向到新状态，再随便选一个方向，如此往复。跑很多次，会得到一堆杂乱的行为。他说很明显，即使这样做一千次、一百万次，机器人大概也不会拿起喷壶喷衬衫。
+        </p>
+        <p>
+            他的结论是，RL 社区传统上对探索的理解，在物理世界里扩展不了，给不出可扩展、高效的方法。他认为大家转向行为克隆、仿真学习这些做法，很大原因是现有的探索方法、在真实世界里收集有用经验的方法，效率太低，学不出来。
+        </p>
+        <h3>人怎么探索</h3>
+        <p>
+            人在同一个状态下，可能只会考虑三个动作：拿熨斗、拿喷壶、拿衬衫。因为人对世界有了解，人引出的行为比机器人的有结构、有方向得多。他说他学熨衬衫大概试了 10 次就会了。人的探索可以在机器人上高效运行，传统探索则太低效、太随机、没有方向。他接下来要讲的就是怎样让机器人像人一样探索和学习。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 回顾：行为克隆和扩散策略</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=606s" target="_blank">0:10:06</a>–0:13:14</em></p>
+        <h3>行为克隆</h3>
+        <p>
+            他先回顾从示范中学习。现在很多机器人学习是这样做的：对关心的任务，让人操作机器人完成，收集一大份状态和动作的数据集；然后训练一个生成模型，在给定状态下预测人当时做的动作。这叫行为克隆（behavioral cloning）或模仿学习，希望策略能复现人的行为，在机器人上自主完成示范过的任务。
+        </p>
+        <h3>扩散策略是从噪声到动作的映射</h3>
+        <p>
+            他说这个生成模型怎样参数化，对后面的内容很重要。现在机器人学习里常把它做成扩散模型或 flow 模型。可以把扩散模型理解为一个生成模型：输入一份噪声，通常从标准高斯分布采样，经过迭代去噪，变成一个被训练得像示范者动作的动作。他略过了细节，强调的要点是：这些行为克隆策略可以简单地看成从噪声到示范动作的映射。写成式子，记行为克隆策略为 $\pi^{\text{BC}}$，噪声为 $w$：
+        </p>
+        $$w \sim \mathcal{N}(0, I), \qquad a = \pi^{\text{BC}}(s, w).$$
+        <p>
+            他说出于各种原因，这在行为克隆上效果很好，已经成了机器人学习的标准做法。
+        </p>
+        <h3>部署时的表现</h3>
+        <p>
+            部署时：在某个状态采一份噪声，去噪成动作，在机器人上执行；到下一个状态再采噪声、去噪、执行。这样会引出各种行为，有时完成任务，有时没有。他说模仿学习得到的策略通常还算合理，但不够好，可能 20% 的时候成功，可能 50%，而我们想要 90% 甚至 100%。
+        </p>
+        <p>
+            他从两个角度提问：给定一个行为克隆策略，能不能拿它当起点，得到前面那种更有结构、像人一样的探索？反过来，能不能把它改进到 90% 到 100% 的成功率？
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 在噪声空间里探索</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=794s" target="_blank">0:13:14</a>–0:21:12</em></p>
+        <h3>想法</h3>
+        <p>
+            一个在大量合理的人类示范上训练过的行为克隆策略，在某个状态下可能给出三种选择：去拿喷壶、去拿衬衫、去拿熨斗。因为它被训练来模仿人，人在这里会做这几种合理动作，策略输出的也是这几种。
+        </p>
+        <p>
+            既然策略是从高斯噪声到示范动作的映射，就可以把传统 RL 里在动作空间上的均匀探索，换成在噪声空间上探索，也就是控制噪声的生成。试一份噪声，去噪后是去拿喷壶的动作；另一份噪声去噪后去拿熨斗；再一份去拿衬衫。把均匀探索从动作空间搬到噪声空间，借助行为克隆策略本身的性质，就能引出一组很有结构、都是合理人类动作的输出行为。
+        </p>
+        <p>
+            还可以更进一步。放一份噪声，去噪成动作，在机器人上执行，得到反馈说这个动作不对，就把探索分布从这份噪声移开；再采一份，执行后发现是对的，就把探索分布移向这份噪声。这可以用标准的 RL 训练来做。通过修改采样过程，就能锁定正确的输出行为。
+        </p>
+        <h3>算法</h3>
+        <p>他提出的算法有三个组成部分：</p>
+        <ul>
+            <li>行为克隆策略 $\pi^{\text{BC}}$：训练好的初始策略，看成从噪声 $w$ 到动作 $a$ 的映射；</li>
+            <li>噪声策略 $\pi^{W}(w \mid s)$：控制噪声生成，在每个状态输出一份噪声；</li>
+            <li>噪声评价器 $Q^{W}(s, w)$：由此引出的价值函数，估计在状态 $s$ 下选噪声 $w$ 的价值。</li>
+        </ul>
+        <p>
+            他说训练很简单。每一步用标准的价值函数训练方法拟合每个状态下每份噪声的价值；训练噪声策略去最大化这个价值函数，也就是选价值最高的噪声：
+        </p>
+        $$\pi^{W} \leftarrow \arg\max_{\pi^{W}} \; \mathbb{E}_{s,\, w \sim \pi^{W}(\cdot \mid s)}\big[Q^{W}(s, w)\big].$$
+        <p>
+            执行时，用噪声策略生成噪声，送进行为克隆策略得到动作，在机器人上执行，观察新状态，加进数据集。也就是说，行为克隆策略是起点，通过 RL 调整它的输入分布，锁定正确行为，得到有结构的探索；做得对的话，就能得到像人一样的探索和像人一样的改进。
+        </p>
+        <h3>真机结果</h3>
+        <p>
+            他展示的例子是把蘑菇拿起来放到布上。行为克隆策略一开始表现还行，但成功率不到 50%。用他们的方法在噪声空间里探索，从一开始，尝试不同噪声引出的行为就很有结构，几乎像人一样：不是每次都成功，但每次都是在合理的范围里尝试。
+        </p>
+        <p>
+            作为对照，之前真实世界机器人 RL 的最好方法是在动作空间里探索、尝试不同动作。他说从一开始那种探索基本没用：试了很多东西，大多是在空中乱动，完全没有和目标任务发生有意义的交互，也收集不到该怎么完成任务的有用信息。两者都在调整分布，一个调噪声分布，一个调动作分布，而他们的方法只用 25 个 episode 的在线交互就锁定了正确行为。
+        </p>
+        <h3>顺带解决的技术问题</h3>
+        <p>
+            他简短提到，这个方法还绕开了在预训练行为克隆策略上做 RL 的很多技术难题，尤其是扩散策略：由于扩散的去噪过程，加上没法写出动作的似然，常规 RL 算法不能直接用在它们上面。这个方法让行为克隆策略可以放进 RL 训练循环里，以前基本做不到。
+        </p>
+        <h3>更多结果</h3>
+        <p>
+            他们在多种扩散策略和 VLA 上用过，效果普遍很好：把成功率不到 50% 的行为克隆策略，在 30 到 90 分钟的在线训练里提到 90% 到 100%。
+        </p>
+        <p>
+            他还展示了一个不是他们做的视频：字节跳动的研究者把这个方法用在他们的双臂平台上，做一个精度要求很高的任务。只用人类示范训练，成功率不到 50%，怎么也训不出可靠的策略；用这个方法通过在线交互调整策略输出的动作分布后，成功率接近 100%。
+        </p>
+        <p>
+            他的结论是，通过在线交互改进策略，可以超过行为克隆或仿真预训练给的水平。关键是要高效，而利用行为克隆策略里已有的结构，就能得到高效的在线探索。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 预训练该怎么做才利于后续学习</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=1272s" target="_blank">0:21:12</a>–0:25:14</em></p>
+        <p>
+            第二部分时间不多，他讲得较快。第一部分假设已经有一个用行为克隆训好的策略，那么问题来了：如果之后要用 RL 改进，行为克隆是最好的预训练方式吗？这个初始阶段一般叫预训练（pre-training），它是不是让策略从经验中学习的最好初始化？
+        </p>
+        <h3>好的预训练策略要能做出“改进所需的行为”</h3>
+        <p>
+            回到开头的例子：两个预训练策略，都会去熨衣板，但策略 A 会去碰喷壶，策略 B 不会。我们更想要 A，因为执行 A 能收集到让它学会的经验，B 收集不到。所以预训练时真正要的是：保证策略能收集到改进所需的经验，改进需要的行为要在策略的分布之内。
+        </p>
+        <h3>行为克隆不一定做到</h3>
+        <p>
+            假设示范者采了一批示范，碰巧没有示范拿喷壶，可能只是示范还采得不够。做行为克隆预训练，得到的策略就不会表现出这个行为。行为克隆就是直接拟合示范，拟合得再完美，示范没覆盖到正确行为，策略就卡住了。他说他们能从理论上证明这种情况确实会发生，没有展开。
+        </p>
+        <h3>加噪声：探索和性能的权衡</h3>
+        <p>
+            常见的补救办法是给行为克隆策略加噪声：每一步以某个概率执行行为克隆动作，以另一个概率执行别的动作，比如随机动作。写成式子大致是
+        </p>
+        $$a_t = \begin{cases} \pi^{\text{BC}}(s_t, w), & \text{概率 } 1 - \epsilon \\ \text{随机动作}, & \text{概率 } \epsilon \end{cases}$$
+        <p>
+            这样确实可能引出正确行为。但他说可以证明，探索量和策略性能之间有根本的权衡：
+        </p>
+        <ul>
+            <li>探索多：能表现出很多行为，但性能明显下降。他说这是过度探索。示范已经告诉我们应该去熨衣板，在这个早期阶段加探索，就是偏离已知正确的行为，让策略变差。</li>
+            <li>探索少：性能保住了，但表现不出多少新行为。这是探索不足。策略能走到熨衣板，但到了那之后没有足够的表达能力去学新东西。</li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. 按不确定性调整探索</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=1514s" target="_blank">0:25:14</a>–0:27:52</em></p>
+        <h3>思路</h3>
+        <p>
+            他说核心想法是从贝叶斯的角度看预训练，而不只看成行为克隆：量化我们对示范者行为的不确定性，训练一个按这个不确定性调整探索的策略。他说可以从理论上证明，拿同样的示范，不直接用行为克隆拟合，改为拟合一个能估计示范者行为不确定性的策略，这个预训练策略的探索就会和不确定性成比例。知道示范者会怎么做的地方，策略锁定正确行为；不知道的地方，策略保持足够的表达能力。他没有展开细节，也没有说这项工作的论文名。
+        </p>
+        <h3>结果</h3>
+        <p>
+            实验任务是把玉米拿起来放到盘子上（字幕不清，大意如此）。左边是行为克隆策略，右边是按不确定性训练的策略。两者预训练后的表现差不多，都大多失败，不能可靠地完成任务。然后在两者之上跑在线 RL：行为克隆策略改进不上去，卡在 50% 以下；他们的策略能提到 75%。他说普遍情况是，这样训练的策略预训练性能和行为克隆相同，但在线改进后效果好得多。
+        </p>
+        <h3>结论</h3>
+        <p>
+            他总结说，考虑在线 RL、训练会探索的策略时，既要设计好能在线学习和探索的算法，也要重新审视一开始的预训练怎么做、怎样利用已有的知识。两方面都做对，就能更好地让机器人从经验中学习，获得原本得不到的真实世界能力。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=1672s" target="_blank">0:27:52</a>–0:31:32</em></p>
+        <h3>和 π*0.6 比怎么样，价值函数怎么训，要不要用 VLM 做评价器</h3>
+        <p>
+            有学生问：这还是轨迹层面的方法吧？和 π*0.6 相比如何？π*0.6 在同一条轨迹里区分好动作和坏动作，从而超过任何人类示范轨迹。只在同一条轨迹上靠探索改进，对大多数任务够不够？价值函数具体怎么训，是预测未来的稀疏奖励吗？像 π*0.6 那样用 VLM 做评价器是不是更有价值？
+        </p>
+        <p>
+            他说他们没有和 π*0.6 比过，这两篇论文都比那篇早。关于评价器，用不用 VLM 要看目标：如果只是改进单个任务，他认为 VLM 评价器是大材小用；如果要做多任务、语言条件的评价器，VLM 就说得通，π*0.6 那篇做的就是后一种，他们做的是单任务。
+        </p>
+        <p>
+            关于“轨迹层面”，他说没完全听懂这个问题，在某种意义上他们的方法也是轨迹层面的，跑的就是标准 RL，和 π*0.6 一样都在以某种方式训练价值函数。他认为关键区别在于：π*0.6 训练的是一个以优势（advantage，某个动作比平均水平好多少）为条件的单一策略，靠这个条件引导到正确行为；他们训练的是一个标准策略，再用另一个策略去调整它，产生正确的动作。他说哪种方法在什么情况下更有效，还需要很多工作去弄清，可能有些情况下优势条件化更合适，有些情况下直接做 RL 更合适，目前对此没有很好的理解。
+        </p>
+        <h3>策略不能被噪声引导怎么办</h3>
+        <p>
+            另一个学生说，DSRL 只有在行为克隆策略能被初始噪声引导时才有效，而取决于训练方式，有时并不是这样；策略通常对状态更敏感，有没有试过通过状态来引导策略？
+        </p>
+        <p>
+            他说没试过，觉得值得研究。但会有点棘手，因为如果对状态扰动太大，策略可能就直接输出坏动作，需要小心处理。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“to enable learning from experience we need to collect the experience that distinguishes the correct behavior.”<br>要从经验中学习，就得收集到能区分正确行为的经验。· <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=289s" target="_blank">0:04:49</a></li>
+            <li>“conventionally when we think about exploration, it doesn't actually scale to the physical world.”<br>传统意义上的探索，在物理世界里扩展不了。· <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=479s" target="_blank">0:07:59</a></li>
+            <li>“these BC policies we're training sort of most commonly in robot learning we can actually just think of these as simply mappings that are sort of noise to demonstrator actions.”<br>机器人学习里最常训练的这些行为克隆策略，可以简单地看成从噪声到示范动作的映射。· <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=669s" target="_blank">0:11:09</a></li>
+            <li>“by modifying the sampling process, we can now lock onto the correct output behavior.”<br>通过修改采样过程，我们就能锁定正确的输出行为。· <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=908s" target="_blank">0:15:08</a></li>
+            <li>“after only 25 episodes of online interaction, it's already locked onto the correct behavior.”<br>只用 25 个 episode 的在线交互，它就已经锁定了正确行为。· <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=1101s" target="_blank">0:18:21</a></li>
+            <li>“there's a fundamental trade-off between the exploration we'll induce and the performance of this policy.”<br>引出的探索量和这个策略的性能之间有根本的权衡。· <a href="https://www.youtube.com/watch?v=CPmTpXA5azw&t=1434s" target="_blank">0:23:54</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>ETH Zürich Robot Learning 2026 · Guest: Andrew Wagenmaker, Robots That Learn From Experience · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

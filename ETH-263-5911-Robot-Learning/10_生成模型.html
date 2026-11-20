@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>生成模型：VAE、扩散和流匹配 | ETH Robot Learning 2026 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="09_嘉宾_Andrew_Wagenmaker_从经验中学习.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">ETH Robot Learning 目录</a> · 10</span>
+    <span><a href="11_嘉宾_Cheng_Chi_算法之外.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 6 讲：生成模型</h1>
+        <p class="subtitle">为什么机器人策略要学一个动作分布；自编码器、VAE 和重参数化技巧，VQ-VAE 和直通估计；DDPM 的前向加噪、预测噪声的损失和一步到任意噪声层，DDIM 加速采样，无分类器引导；Diffusion Policy 及其后续；流匹配、Rectified Flow 和 π0</p>
+        <div class="author-meta">
+            主讲：Oier Mees（ETH Zürich / Microsoft）<br>
+            课程：Robot Learning: From Fundamentals to Foundation Models（ETH Zürich 263-5911，Week 6，2026 年 3 月 23 日）· 时长：51 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=qd6Ldsuu46I" target="_blank">课堂录像</a>（ETH Zürich 公开，2026 年春季，本文依据录像字幕整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            第 3 讲（模仿学习）已经提出一个问题：从观测到动作的映射在机器人里往往有很多个合理答案，用均方误差训练确定性策略，会得到所有示范的平均，可能平均出一个撞树的动作。这一讲回答“那该怎么表示这种高维、多峰的动作分布”。Oier Mees 依次讲三类生成模型：自编码器一族（自编码器、VAE、VQ-VAE），扩散模型（DDPM、DDIM、引导），流匹配（Flow Matching、Rectified Flow），每一类最后都落到机器人里的用法，包括 Diffusion Policy、Octo、DiT-Block Policy 和 π0。下一篇是同一周的嘉宾讲座，讲者是 Diffusion Policy 的作者 Cheng Chi；第 7 讲接着讲序列建模和 Transformer。
+        </p>
+        <p>
+            按课程页，这一周课上讨论的论文是 Planning with Diffusion for Flexible Behavior Synthesis（Janner &amp; Du et al., 2022）、Implicit Behavioral Cloning（Florence et al., 2021）和 Steering Your Diffusion Policy with Latent Space RL（Wagenmaker et al., 2025）。录像在讲完正课、切到论文讨论时结束。
+        </p>
+        <ol>
+            <li><a href="#t01">为什么需要生成模型</a> · <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">自编码器和它的局限</a> · <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=140s" target="_blank">0:02:20</a></li>
+            <li><a href="#t03">VAE、ELBO 和重参数化技巧</a> · <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=401s" target="_blank">0:06:41</a></li>
+            <li><a href="#t04">VQ-VAE：离散码本</a> · <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=942s" target="_blank">0:15:42</a></li>
+            <li><a href="#t05">扩散模型：DDPM 和 DDIM</a> · <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=1443s" target="_blank">0:24:03</a></li>
+            <li><a href="#t06">条件生成和无分类器引导</a> · <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=2198s" target="_blank">0:36:38</a></li>
+            <li><a href="#t07">机器人里的扩散策略</a> · <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=2411s" target="_blank">0:40:11</a></li>
+            <li><a href="#t08">流匹配、Rectified Flow 和小结</a> · <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=2619s" target="_blank">0:43:39</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 为什么需要生成模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=0s" target="_blank">0:00:00</a>–0:02:20</em></p>
+        <h3>观测到动作是一个分布</h3>
+        <p>
+            他先回顾第 3 讲的结论：机器人里从观测到动作的映射不是一个函数，是一个分布。原因有两个。
+        </p>
+        <ul>
+            <li>随机性和冗余。比如一条 7 自由度（degree of freedom，机械臂能独立转动的关节数）的机械臂，到达同一个目标状态有无穷多种方式。</li>
+            <li>示范者不一致。人采集示范时，同一个任务可能有很多种做法：某天遥操作得快一些，某天心情不同；某天用侧面抓取，另一天用从上往下的抓取。</li>
+        </ul>
+        <p>
+            所以策略（policy，从观测输出动作的模型）应该学一个动作的分布 $\pi(a \mid o)$。他提醒，用行为克隆（behavior cloning，直接拟合示范数据的监督学习）加均方误差训练确定性策略时，数学会逼着模型去找所有示范的平均值，于是在绕树的例子里，示范有的往左绕、有的往右绕，模型却会直直撞到中间的树上。
+        </p>
+        <p>
+            问题就变成：怎样表示这种高维、多峰（multimodal，有好几个分开的高概率区域）的分布。这一讲从三个角度回答：自编码器学一个紧凑的隐表示；扩散模型不显式编码结构，学的是一步步去噪得到干净样本；流模型学一个确定性的可逆变换，把简单的采样分布映到复杂的数据分布。他说这三类都在近几年机器人学习的进展背后。
+        </p>
+        <h3>生成模型的统一定义</h3>
+        <p>
+            为了让大家对“生成模型”有同一个理解，他给的定义是：不管是 VAE、扩散、流还是 GAN，生成模型都是一个学出来的变换，把一个简单、可处理的分布映到复杂的数据分布 $p_{\text{data}}$。通常从标准高斯噪声开始，映到我们关心的目标分布。幻灯片上的例子是猫的图片，对机器人来说就是机器人动作轨迹。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 自编码器和它的局限</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=140s" target="_blank">0:02:20</a>–0:06:41</em></p>
+        <h3>从隐变量模型说起</h3>
+        <p>
+            处理多峰问题的一种办法，在模仿学习那一讲已经提过：隐变量模型（latent variable model）。引入一个隐变量 $z$，可以用它“索引”分布里不同的峰，比如往左走还是往右走，然后让策略以 $z$ 为条件。但那一讲没讲怎么训练，怎样学会把专家的动作压缩进 $z$。这就是自编码器（autoencoder）要做的事。
+        </p>
+        <h3>自编码器的结构</h3>
+        <p>
+            他说想法很简单，大家可能见过：两个网络。编码器 $f_\phi$ 把输入 $x$ 压缩成紧凑的隐表示 $z$，解码器 $g_\theta$ 拿到隐码后尽量把原始输入重建出来，比如用 L2 范数做损失：
+        </p>
+        $$z = f_\phi(x), \qquad \mathcal{L}(\phi, \theta) = \big\| x - g_\theta\big(f_\phi(x)\big) \big\|_2^2 .$$
+        <p>
+            不需要任何额外标签，是自监督的。中间的瓶颈（bottleneck）迫使编码器学会压缩数据，因为想让重建误差低，唯一的办法是保留数据分布里最重要的特征。
+        </p>
+        <h3>朴素自编码器的三个问题</h3>
+        <ul>
+            <li>隐空间没有结构。编码器可以把各个簇放在任何位置，损失里没有任何东西强迫它形成结构。</li>
+            <li>唯一的正则项是瓶颈本身的大小。$z$ 的维度限制了能通过多少信息，但没有规定这些信息怎样组织。</li>
+            <li>它是确定性模型。每个输入映到一个点，没有分布，所以测试时没法采样生成新数据。他说对我们来说这一条最要紧。</li>
+        </ul>
+    </section>
+
+    <section id="t03">
+        <h2>03. VAE、ELBO 和重参数化技巧</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=401s" target="_blank">0:06:41</a>–0:15:42</em></p>
+        <h3>编码到一个分布</h3>
+        <p>
+            变分自编码器（variational autoencoder，VAE）同时解决上面三个问题。做法是编码器不再输出一个点，而是输出 $z$ 上的一个分布。最常见的情况是编码器输出高斯分布的参数，均值 $\mu$ 和方差 $\sigma$，从这个高斯里采样出 $z$ 再交给解码器。为了让隐空间有结构，再加一个正则项，让这个近似后验 $q_\phi(z\mid x)$ 靠近高斯先验 $p(z)$。
+        </p>
+        <h3>证据下界</h3>
+        <p>
+            数学上目标是最大化数据的对数似然 $\log p_\theta(x)$。和第 3 讲说过的一样，这个量通常没法直接算，所以改为最大化证据下界（evidence lower bound，ELBO）：
+        </p>
+        $$\log p_\theta(x) \;\ge\; \underbrace{\mathbb{E}_{z \sim q_\phi(z \mid x)}\big[\log p_\theta(x \mid z)\big]}_{\text{重建项}} \;-\; \underbrace{D_{\mathrm{KL}}\big(q_\phi(z \mid x)\,\|\,p(z)\big)}_{\text{KL 正则}} .$$
+        <p>
+            重建项和朴素自编码器类似，只是 $z$ 不再确定，所以多了一个期望：对给定 $x$ 可能采到的所有 $z$ 取平均，解码器平均能把 $x$ 还原到什么程度。KL 正则惩罚近似后验偏离先验太远。KL 散度（Kullback-Leibler divergence）衡量两个分布差多少，$D_{\mathrm{KL}}(q\,\|\,p) = \mathbb{E}_{q}[\log q - \log p]$，两个分布相同时为零，否则为正。先验 $p(z)$ 一般取标准高斯 $\mathcal{N}(0, I)$，这时 KL 项有闭式解，不用采样就能算。他说主要的好处是，测试时原则上可以从 $p(z)$ 里随便采一个 $z$，解码成有意义的输出，这才算真正有了生成模型。
+        </p>
+        <h3>采样这一步不可微</h3>
+        <p>
+            问题是采样这一步不可导。他说上周推导策略梯度时没机会细讲这一点，现在又碰到了。解决办法是不直接从编码器预测的分布里采 $z$，而是把 $z$ 写成参数和一个外部噪声源的确定性函数：从标准正态分布抽一个随机向量 $\epsilon$，它没有可学习参数，然后令
+        </p>
+        $$z = \mu_\phi(x) + \sigma_\phi(x) \odot \epsilon, \qquad \epsilon \sim \mathcal{N}(0, I),$$
+        <p>
+            其中 $\odot$ 是逐元素乘积。幻灯片下方的计算图显示随机性被挪到了旁边一个分支上，从梯度的角度看，$\mu$ 和 $\sigma$ 就是普通确定性计算里的节点，梯度可以流过去。这就是重参数化技巧（reparameterization trick）。
+        </p>
+        <h3>为什么这样就能求梯度：两种估计量</h3>
+        <p>
+            他接着解释原理。核心难点是：损失对编码器参数 $\phi$ 的梯度不好算，因为损失里有一个期望，而这个期望所依赖的分布本身又依赖 $\phi$。有两种处理方式。
+        </p>
+        <p>
+            第一种是上周见过的得分函数估计量（score function estimator），在 RL 里叫 REINFORCE。用同样的对数导数技巧把梯度挪进期望：
+        </p>
+        $$\nabla_\phi\, \mathbb{E}_{z \sim q_\phi}\big[f(z)\big] = \mathbb{E}_{z \sim q_\phi}\big[f(z)\, \nabla_\phi \log q_\phi(z)\big].$$
+        <p>
+            （背景补充：第 4、5 讲的策略梯度就是这个形式，把 $f$ 换成回报 $R(\tau)$、把 $q_\phi$ 换成策略 $\pi_\theta$，得到 $\nabla_\theta J = \mathbb{E}_{\tau \sim \pi_\theta}[R(\tau)\, \nabla_\theta \log \pi_\theta(\tau)]$。）他指出，这个式子里梯度只作用在 $\log q$ 上，完全忽略了 $z$ 本身怎样随 $\phi$ 变化，所以方差很大：梯度看不到 $f$ 内部。优化器只知道某个样本好或不好，不知道该怎样移动 $\mu$ 和 $\sigma$ 让它变好，等于在猜。
+        </p>
+        <p>
+            第二种就是重参数化。把 $z$ 换成上面的式子后，$p(\epsilon)$ 和 $\phi$ 完全无关，于是可以像上周一样把梯度挪进积分（积分是线性运算，用 Leibniz 法则），挪进去以后再写回对 $\epsilon$ 的期望：
+        </p>
+        $$\nabla_\phi\, \mathbb{E}_{\epsilon \sim p(\epsilon)}\big[f(\mu_\phi + \sigma_\phi \odot \epsilon)\big] = \mathbb{E}_{\epsilon \sim p(\epsilon)}\Big[\nabla_z f(z)\, \frac{\partial z}{\partial \phi}\Big].$$
+        <p>
+            实际操作就是采一个 $\epsilon$，算一次梯度，完事。他要大家记住的是：现在损失对 $\phi$ 的梯度里出现了 $f$ 对 $z$ 的梯度，这一项来自解码器，告诉我们 $z$ 应该往哪个方向移动，也就直接告诉我们编码器参数怎样影响隐变量。
+        </p>
+        <h3>VAE 换来了什么</h3>
+        <p>
+            和朴素自编码器比，VAE 的隐空间更连续、更有结构，而且是生成式的：采一个 $z$，解码器就能产出有意义的输出。测试时生成甚至用不到编码器，直接从先验分布采 $z$ 再用解码器即可。
+        </p>
+        <h3>VAE 的两种常见失败</h3>
+        <ul>
+            <li>后验坍塌（posterior collapse）。解码器容量很大时，原则上它可以直接学 $p(x)$，完全忽略传进来的 $z$。这样模型又退回成确定性模型。</li>
+            <li>先验不匹配（prior mismatch），这个更隐蔽。假设模型在“往左”和“往右”两个峰上训练好了，测试时从高斯先验采到的 $z$ 恰好落在两者中间。解码器从没见过那个区域的隐变量，因为那里没有示范。数学上隐空间是连续的，但解码器在那里会“幻觉”出完全错误的东西。他说在机器人里这是大问题，你不希望机器人幻觉出不安全的动作。</li>
+        </ul>
+    </section>
+
+    <section id="t04">
+        <h2>04. VQ-VAE：离散码本</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=942s" target="_blank">0:15:42</a>–0:24:03</em></p>
+        <h3>用最近邻查找代替高斯</h3>
+        <p>
+            缓解上面问题的一种办法，是把连续的高斯隐变量换成一个由 $K$ 个可学习向量组成的离散码本（codebook），这就是向量量化 VAE（vector quantized VAE，VQ-VAE）。直觉是：有一本“字典”，里面是 $K$ 个学出来的向量。编码器看一张图、输出一个连续向量 $z_e$ 后，不把它直接交给解码器，而是做最近邻查找，找码本里离它最近的那个向量，把这个离散的码交给解码器：
+        </p>
+        $$z_q = e_k, \qquad k = \arg\min_{j \in \{1,\dots,K\}} \big\| z_e - e_j \big\|_2 .$$
+        <p>
+            这样编码器被迫选定一个离散码，不再输出高斯分布，前面说的后验坍塌就消除了。也没有 KL 散度要最小化，解码器也没法忽略 $z$，因为 $z$ 现在是硬性的离散选择。
+        </p>
+        <h3>直通估计</h3>
+        <p>
+            他说这是这一讲反复出现的模式：argmin 查找也不可微。把 $z_e$ 稍微往左或往右推一点，最近邻通常还是同一个；argmin 是分段常数函数，梯度几乎处处为零。
+        </p>
+        <p>
+            实际做法是直通估计（straight-through estimator）：反向传播时假装量化这一步没发生，把梯度直接传过去。直觉是，如果 $z_q$ 和 $z_e$ 在同一个嵌入空间里，按定义它们会很接近，所以“解码器该怎样改 $z_q$ 来降低损失”的梯度，很可能是“编码器当初该怎样改 $z_e$”的好替代。也就是把解码器输入处的梯度直接复制到编码器输出上。公式里用停止梯度算子 $\mathrm{sg}[\cdot]$ 表示，它在前向是恒等映射，在反向梯度为零：
+        </p>
+        $$z_q^{\text{ST}} = z_e + \mathrm{sg}\big[z_q - z_e\big].$$
+        <p>
+            前向时这个值等于 $z_q$，反向时对 $z_e$ 的梯度原样通过。
+        </p>
+        <h3>VQ-VAE 的损失</h3>
+        <p>
+            损失有三项：
+        </p>
+        $$\mathcal{L} = \underbrace{\| x - g_\theta(z_q) \|_2^2}_{\text{重建}} + \underbrace{\big\| \mathrm{sg}[z_e] - e_k \big\|_2^2}_{\text{码本损失}} + \beta\, \underbrace{\big\| z_e - \mathrm{sg}[e_k] \big\|_2^2}_{\text{承诺损失}} .$$
+        <ul>
+            <li>重建损失：编码器和解码器通过直通估计联合训练。</li>
+            <li>码本损失（codebook loss）：把码本向量往编码器输出那边拉，学出一套能代表数据分布的“词表”。</li>
+            <li>承诺损失（commitment loss）：直通估计这个替代梯度要成立，$z_e$ 和 $z_q$ 必须一直靠得近。没有这一项，编码器可能输出离码本向量很远的值。</li>
+        </ul>
+        <h3>怎样用 VQ-VAE 生成新数据：第二阶段训练</h3>
+        <p>
+            这样训练得到一个码本和一个解码器，但测试时怎样生成新数据？还需要第二阶段。训练好 VQ-VAE 后，把整个数据集过一遍，记下编码器选中的码索引序列，相当于把数据集翻译成离散 token 序列。第二阶段在这些码序列上训练一个先验模型，通常是自回归 Transformer，它学的是给定前面几个码，接下来最可能是哪些码。推理时，从这个先验（自回归 Transformer）采样，把索引查回码本向量，再用第一阶段的解码器生成干净样本，比如一张图，或者在我们这里是机器人动作。
+        </p>
+        <h3>三种变体的对比和剩下的问题</h3>
+        <p>
+            他用一张图对比了三种公式下隐空间的样子。VQ-VAE 修掉了前面提到的大部分问题，比如后验坍塌和先验不匹配，但还有别的问题：
+        </p>
+        <ul>
+            <li>码本坍塌（codebook collapse）：训练中很多码一直没被用到，编码器收敛到只用 $K$ 个向量里的一小部分。所以现在有人用 FSQ（finite scalar quantization，有限标量量化）作为更稳健的替代，他说没时间细讲。</li>
+            <li>码本大小要事先定好。</li>
+            <li>即使用了离散码，只要重建损失还是 MSE，输出层面的“求平均”行为仍然存在，比如还是会得到模糊的人脸图片。</li>
+        </ul>
+        <h3>VQ-VAE 在机器人学习里的用处</h3>
+        <p>
+            他总结说，VQ-VAE 把连续信号变成离散 token，让 Transformer 能在统一的 token 空间里处理观测、动作和行为。机器人学习里很多地方用到它：
+        </p>
+        <ul>
+            <li>图像和视频的 tokenizer，比如自动驾驶的 GAIA（字幕作 Gaia）和视频模型 Cosmos。</li>
+            <li>隐动作学习（latent action learning）：LAPA（字幕作 La Pa）和 Genie 用 VQ-VAE 量化游戏画面或第一人称人类视频里相邻帧之间的运动，再把这些隐码转到机器人上。</li>
+            <li>他自己的工作用它量化从“玩耍数据”（play data）里学到的隐计划。</li>
+            <li>有时也用来把连续的机器人动作离散化，给 VLA（vision-language-action model，视觉-语言-动作模型）用。</li>
+        </ul>
+    </section>
+
+    <section id="t05">
+        <h2>05. 扩散模型：DDPM 和 DDIM</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=1443s" target="_blank">0:24:03</a>–0:36:38</em></p>
+        <h3>两个过程</h3>
+        <p>
+            VQ-VAE 还有输出层面用 MSE 带来的求平均问题。扩散模型换一个问法：不学压缩的隐表示再解码，直接对 $x$ 上完整的连续分布建模，不要任何瓶颈。高层上有两个过程。前向过程拿一个干净样本（幻灯片左边那张猫图），反复加高斯噪声，直到信息全部丢失。反向过程训练一个神经网络一步步去噪，从噪声恢复出干净图像。他说这样一来，我们不要求模型一次猜出整张图，只要求它做小的增量修正，这比一步到位容易学得多。
+        </p>
+        <h3>前向过程</h3>
+        <p>
+            下一个状态定义为当前状态和随机噪声的加权和：
+        </p>
+        $$x_i = \sqrt{1 - \beta_i}\; x_{i-1} + \sqrt{\beta_i}\; \epsilon_i, \qquad \epsilon_i \sim \mathcal{N}(0, I).$$
+        <p>
+            第一项是信号衰减，每一步把当前样本缩一点，往零拉近一点。第二项是噪声尺度，$\beta_i$ 叫噪声调度（noise schedule）或方差调度，是一个超参数，决定每一步注入多少噪声。他提醒这里又用了重参数化的写法，把带噪样本写成当前状态加一个固定噪声变量的确定性函数，几页之后会看到好处。
+        </p>
+        <h3>反向过程：预测噪声</h3>
+        <p>
+            真正的反向分布原则上不可处理：无数张干净图都可能产生同一张带噪图，没法知道哪一张是对的。让扩散模型可训练的想法是，不要网络直接预测上一步的图像 $x_{i-1}$（这是一个病态的难问题），而让它预测一个简单得多的东西：这一步加进去的噪声。具体是训练一个网络 $\epsilon_\theta(x_i, i)$，输入带噪图像和时间步，输出那一步加入的噪声。
+        </p>
+        <p>
+            为什么这是更好的学习问题？噪声就是标准高斯的一个样本，是干净、容易的回归目标。前向过程里加了多少噪声我们都清楚，所以可以直接用预测噪声和真实噪声之间的 MSE 训练。而且每一步去噪都是一个小的局部修正。
+        </p>
+        <h3>训练目标：扩展到 T 步的 ELBO</h3>
+        <p>
+            他说训练目标一看就知道还是 VAE 那个 ELBO，只是扩展到了 $T$ 步。有三项：
+        </p>
+        $$\mathcal{L}_{\text{ELBO}} = \underbrace{D_{\mathrm{KL}}\big(q(x_T \mid x_0)\,\|\,p(x_T)\big)}_{\text{先验正则}} + \sum_{i=2}^{T} \underbrace{D_{\mathrm{KL}}\big(q(x_{i-1} \mid x_i, x_0)\,\|\,p_\theta(x_{i-1} \mid x_i)\big)}_{\text{去噪匹配}} \underbrace{-\, \log p_\theta(x_0 \mid x_1)}_{\text{重建}} .$$
+        <ul>
+            <li>先验正则：保证加噪 $T$ 步后结果像高斯先验。前向过程按构造就满足，实际不用学。</li>
+            <li>重建项：之前见过，能把数据恢复到什么程度。</li>
+            <li>中间那一大串求和是去噪匹配项：每个时间步，学出来的反向过程和真实反向过程匹配得有多好。</li>
+        </ul>
+        <p>
+            因为前向和反向分布都是方差相同的高斯，它们的 KL 散度化简成两个均值之间的 L2 距离。稍加推导，就得到 DDPM 论文（Denoising Diffusion Probabilistic Models）里那个更简单的形式。他说那篇论文发现可以扔掉 ELBO 里复杂的加权系数，直接最小化真实噪声和预测噪声之间的均方误差：
+        </p>
+        $$\mathcal{L}_{\text{simple}} = \mathbb{E}_{x_0,\, i,\, \epsilon}\Big[\big\| \epsilon - \epsilon_\theta(x_i, i) \big\|_2^2\Big].$$
+        <h3>一步“传送”到任意噪声层</h3>
+        <p>
+            真要计算这个损失有个小问题：公式要求从干净数据直接“传送”（他的说法是 teleport）到某个任意的噪声状态，比如第 500 步，而不是一步一步走过去，否则复杂度是 $O(T)$。幻灯片上的推导是：为方便先定义信号保留率 $\alpha_i = 1 - \beta_i$，展开 $x_1$ 和 $x_2$，把 $x_1$ 代入 $x_2$，得到一堆根号。两个噪声项来自独立的高斯，两个高斯之和还是高斯，所以两个噪声项可以合成一个噪声样本 $\epsilon$。推广到 $i$ 步，信号系数变成所有 $\alpha$ 的乘积：
+        </p>
+        $$x_i = \sqrt{\bar\alpha_i}\, x_0 + \sqrt{1 - \bar\alpha_i}\, \epsilon, \qquad \bar\alpha_i = \prod_{s=1}^{i} \alpha_s, \quad \epsilon \sim \mathcal{N}(0, I).$$
+        <p>
+            这样一步就能从 $x_0$ 得到任意 $x_i$，训练很快。（这里有学生想提问，他说讲完再统一回答。）
+        </p>
+        <h3>DDPM 采样</h3>
+        <p>
+            用训练好的模型生成样本，第一种是 DDPM 的采样过程：先采高斯噪声 $x_T$，从 $T$ 往下迭代到 1，每一步用幻灯片上的公式：
+        </p>
+        $$x_{i-1} = \frac{1}{\sqrt{\alpha_i}} \Big( x_i - \frac{\beta_i}{\sqrt{1 - \bar\alpha_i}}\, \epsilon_\theta(x_i, i) \Big) + \sigma_i\, z, \qquad z \sim \mathcal{N}(0, I).$$
+        <p>
+            第一部分是预测的均值：拿 $x_i$ 减去缩放后的预测噪声再重新归一化，这是确定性的去噪步，往我们认为 $x_0$ 所在的方向移动。第二部分更有意思：再加一点随机高斯噪声。他说你可能觉得奇怪，明明在去噪，为什么又加噪声回去？这一点细微但重要：如果整个过程纯确定性地跑，从不同 $x_T$ 出发的样本会倾向于坍缩到同一个均值。注入的噪声保持样本多样性，让我们探索整个分布，不会总生成同一个平均输出。
+        </p>
+        <h3>DDIM：更少的步数</h3>
+        <p>
+            实际中 DDPM 去噪一张图要很久，比如大约 1000 步，很慢，所以在需要实时控制的机器人上不好用。DDIM 把训练和推理的去噪迭代次数解耦。做法是不走遍所有时间步，只取一个小子集，比如 1000 步里取 20 步，在它们之间跳。每一步用训练好的噪声预测器做一件更聪明的事：用前面“传送公式”的逆，从当前带噪状态估计干净图像的样子，
+        </p>
+        $$\hat{x}_0 = \frac{x_i - \sqrt{1 - \bar\alpha_i}\; \epsilon_\theta(x_i, i)}{\sqrt{\bar\alpha_i}},$$
+        <p>
+            有了目标的估计后，再给它加回恰好够到子集里下一步的噪声，比如从第 100 步跳到第 80 步：
+        </p>
+        $$x_{j} = \sqrt{\bar\alpha_{j}}\; \hat{x}_0 + \sqrt{1 - \bar\alpha_{j}}\; \epsilon_\theta(x_i, i), \qquad j < i .$$
+        <p>
+            他说要注意少了什么：DDIM 里没有随机噪声项。DDPM 每一步都把噪声加回去保持随机性，DDIM 是确定性的，所以推理时可以用少得多的去噪步数得到干净的图像或机器人动作。小结里他还提到，DDIM 相当于把一个概率流 ODE 离散化。ODE（ordinary differential equation，常微分方程）在这里指一条由速度场决定的确定性轨迹 $\frac{dx}{dt} = v(x, t)$：起点定了，终点就定了。DDPM 每步加随机噪声，对应的是随机微分方程；DDIM 去掉噪声，就变成沿一条确定轨迹走，所以可以大步跳。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 条件生成和无分类器引导</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=2198s" target="_blank">0:36:38</a>–0:40:11</em></p>
+        <h3>从无条件到条件</h3>
+        <p>
+            到这里讲的都是无条件生成：从数据的边缘分布（marginal distribution，不附加任何条件时数据本身的分布）$p(x)$ 采样，对最终出来什么完全没有控制。实际中这几乎从来不是我们想要的。图像生成要以文本提示为条件，机器人要完成某个任务。简单的修法是把条件信息 $c$ 作为噪声预测器的额外输入，$\epsilon_\theta(x_i, i, c)$，整个训练流程不变。
+        </p>
+        <p>
+            听起来简单，但有个细微的问题：和 VAE 一样，模型可能学会忽略条件，照样无条件地去噪，因为那往往是更容易的优化路径。
+        </p>
+        <h3>分类器引导和无分类器引导</h3>
+        <p>
+            文献里第一个解法是分类器引导（classifier guidance），需要在每个噪声级别上另外训练一个分类器 $p(c \mid x)$，代价很高。现在更流行的是无分类器引导（classifier-free guidance，CFG）。训练时以一定概率随机丢掉条件信息，换成一个空 token 之类的东西，逼网络同时学会条件生成和无条件生成。推理时把两种预测混合：从无条件预测出发，加上引导系数乘以条件预测和无条件预测的差，
+        </p>
+        $$\tilde{\epsilon}_\theta(x_i, c) = \epsilon_\theta(x_i, \varnothing) + w \big( \epsilon_\theta(x_i, c) - \epsilon_\theta(x_i, \varnothing) \big).$$
+        <p>
+            这个差就是条件在噪声空间里推动我们的方向，$w$ 是引导系数（guidance scale），控制往这个方向推多用力。以图像生成为例，把引导系数调得很大，图像会更清晰、更贴合提示，代价是多样性下降。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 机器人里的扩散策略</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=2411s" target="_blank">0:40:11</a>–0:43:40</em></p>
+        <h3>Diffusion Policy</h3>
+        <p>
+            第一个案例是 Cheng Chi 2023 年的 Diffusion Policy，他顺带说 Cheng Chi 就是今天的嘉宾讲者。他说这项工作的核心想法其实很简单：前面为图像生成推导的一切直接适用于动作生成，把像素换成机器人动作就行。不去噪一张图，而是去噪一段机器人动作序列 $A_t$。训练目标完全一样：训练用 DDPM 损失，推理用 DDIM 以减少去噪步数。重要的一点是，观测（当前相机图像或机器人状态）作为条件直接注入噪声预测网络。
+        </p>
+        <p>
+            他说最好的一点是，和之前的工作不同，这个方法不需要预测未来状态，不用预测未来的图像之类的东西，所以效率高很多。策略直接输出以当前观测为条件的动作序列。
+        </p>
+        <h3>结构细节</h3>
+        <ul>
+            <li>观测只在 $K$ 步去噪开始之前算一次，不用每一步都重算，这对效率很重要。</li>
+            <li>噪声预测网络用 1D 时间 U-Net，把动作序列当成随时间变化的一维信号。U-Net 是一种先逐层下采样、再逐层上采样、同层之间有跳连的卷积网络，图像扩散模型里最常用；这里的卷积沿时间轴做。</li>
+            <li>观测条件通过 FiLM（feature-wise linear modulation，逐特征线性调制）注入：根据观测嵌入，学着对 U-Net 的激活做平移和缩放。</li>
+            <li>他们也给了一个基于 Transformer 的版本，用交叉注意力让动作去噪以观测 token 为条件。</li>
+        </ul>
+        <p>
+            动作序列 $A_t$ 指的是从当前时刻起的一段未来动作，$A_t = (a_t, a_{t+1}, \dots, a_{t+H-1})$，训练时对整段动作加噪、去噪，损失和图像情形一样是 $\| \epsilon - \epsilon_\theta(A_t^{(k)}, k, o_t) \|^2$，只是多了观测 $o_t$ 作为条件（这里按论文的记号补出）。
+        </p>
+        <p>
+            他说扩散策略处理多峰分布处理得很好，近年进展很大，在真实机器人系统上效果也很好。但有一个挑战：它们是专才模型，拟合单个任务很好，扩展成通才或多任务策略被证明更难。尤其是原版 Diffusion Policy 的 Transformer 版本相当脆弱，对超参数敏感。
+        </p>
+        <h3>后续工作：Octo 和 DiT-Block Policy</h3>
+        <p>
+            有几项后续工作试图解决这些局限，他说讲通用策略那一讲会再展开。
+        </p>
+        <ul>
+            <li>Octo：在 80 万条机器人轨迹上训练一个大容量 Transformer。它定义了 readout token，压缩观测和任务信息，再接一个条件扩散解码头，这个头对汇总了前面信息的 readout token 做注意力。它可以用自然语言或目标图像做条件。</li>
+            <li>DiT-Block Policy（字幕作 “IT block policies”，从上下文看应是这个名字）：主要的结构改动是把用于条件注入的交叉注意力换成自适应层归一化 AdaLN-Zero，这是从图像生成的扩散 Transformer（DiT）文献借来的。不让观测 token 和动作 token 之间做完整的交叉注意力，而是把条件信息直接注入每个 Transformer block 里层归一化的缩放和平移参数。他说这样训练更稳定，扩展性也好得多，能处理切寿司这样的长时程灵巧操作任务。</li>
+        </ul>
+    </section>
+
+    <section id="t08">
+        <h2>08. 流匹配、Rectified Flow 和小结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=2620s" target="_blank">0:43:40</a>–0:51:04</em></p>
+        <h3>走直线</h3>
+        <p>
+            第三个框架是流匹配（flow matching）。他说到目前为止我们一直在用复杂的噪声调度破坏数据，流匹配换个问法：为什么不在噪声和数据之间直接画一条直线？它不预测噪声向量，学的是一个速度场（velocity field），把样本沿连续路径从噪声运送到数据。选的路径是直线：$t=0$ 时是纯噪声，$t=1$ 时是干净数据，
+        </p>
+        $$x_t = (1 - t)\, \epsilon + t\, x_1, \qquad \epsilon \sim \mathcal{N}(0, I),\; t \in [0, 1].$$
+        <p>
+            好处是没有复杂的噪声调度要调，就是一条直的确定性路径。真实速度是一个从噪声直指数据的向量，训练网络在任意时刻 $t$ 预测这个速度：
+        </p>
+        $$\mathcal{L}_{\text{FM}} = \mathbb{E}_{t,\, x_1,\, \epsilon}\Big[\big\| v_\theta(x_t, t) - (x_1 - \epsilon) \big\|_2^2\Big].$$
+        <p>
+            测试时做的是积分，不做概率意义上的去噪：从噪声出发，用 ODE 求解器（比如 Euler 步）沿学到的速度走向数据，
+        </p>
+        $$x_{t + \Delta t} = x_t + \Delta t \cdot v_\theta(x_t, t).$$
+        <h3>和扩散的关系</h3>
+        <p>
+            他指出两者的关系：在线性调度下，流匹配和扩散其实等价。扩散预测噪声，流匹配预测速度，两者通过一个简单的重参数化联系起来。一般来说，流匹配的直线更容易学，需要的积分步数更少，也没有复杂的噪声调度超参数。他说这就是为什么在图像生成和机器人学习里，它一直在取代扩散，成为首选框架。
+        </p>
+        <h3>Rectified Flow：把交叉的路径拉直</h3>
+        <p>
+            流匹配的路径已经比扩散直，但还有一个细微的问题：随机地把噪声样本和数据样本配对时，它们之间的直线可能互相交叉。轨迹一交叉，速度场在空间同一点上就要表示互相冲突的方向，迫使学到的场弯曲，积分就变慢。
+        </p>
+        <p>
+            Rectified Flow 是一个解法，用的是迭代过程：先训练一次流匹配模型，用它生成配对好的噪声-数据对，也就是采一个噪声，跑学到的流得到对应的数据点，这样得到的 $(\epsilon, x_1)$ 被这条流自然地连在一起。然后在这些配对上重新训练。因为配对是由流本身匹配出来的，轨迹会解开，交叉被消除，路径变得更直。幻灯片上有一张可视化对比原始流匹配和 Rectified Flow 的路径。
+        </p>
+        <h3>π0：第一个流匹配 VLA</h3>
+        <p>
+            机器人里，他说据他所知，Physical Intelligence 的 π0 是第一个采用流匹配的模型。具体是把一个 VLM（视觉语言模型）微调成通过流匹配输出动作，据他所知这是第一个流匹配 VLA，现在已经成了大多数 VLA 的标准或默认做法。一个不错的技术细节：训练时流时间 $t$ 不是均匀采样，他们从一个偏移的 Beta 分布（定义在 0 到 1 之间、形状可调的分布）里采样，把重点放在噪声更大、更难的时间步上，也就是动作预测更难、模型需要多预测的地方。他说第 9 讲会更多地讲 VLA 和生成式策略。
+        </p>
+        <h3>小结</h3>
+        <p>
+            他回顾了三类生成模型，每一类回答的是“怎样表示复杂数据分布”的不同侧面：
+        </p>
+        <ul>
+            <li>隐变量模型：自编码器通过重建得到压缩表示；用重参数化得到概率化的隐空间（VAE）；用 VQ-VAE 把它离散化成学出来的码本。</li>
+            <li>扩散模型：DDPM 迭代地在高斯和数据之间加噪去噪；DDIM 把概率流 ODE 离散化，让采样更快且确定；无分类器引导把条件和无条件预测混合来控制生成。</li>
+            <li>流匹配：学一个沿直线运送噪声的速度场；Rectified Flow 把路径进一步拉直，积分步数更少。</li>
+        </ul>
+        <p>
+            对机器人的要点是：我们从一个简单的观察出发，机器人行为和动作预测天然是多峰的，MSE 回归加确定性策略会失败。今天讲的从 VAE 到扩散再到流匹配，都是现在一些最新最好的机器人策略在用的工具。讲完后课堂切到论文讨论，录像结束。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“the mapping from observations to actions is not a function. It's like really a distribution.”<br>从观测到动作的映射不是一个函数，它其实是一个分布。· <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=0s" target="_blank">0:00:00</a></li>
+            <li>“the decoder will in that case like hallucinate you know something that will be completely wrong”<br>（先验不匹配时）解码器会幻觉出完全错误的东西。· <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=922s" target="_blank">0:15:22</a></li>
+            <li>“we are asking it to make small incremental corrections, which is a much easier learning problem than doing everything in one go.”<br>我们让它做小的增量修正，这比一步做完容易学得多。· <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=1503s" target="_blank">0:25:03</a></li>
+            <li>“Everything we just derived for image generation applies directly to action generation. So we just replace pixels with robot actions.”<br>刚才为图像生成推导的一切直接适用于动作生成，我们只是把像素换成机器人动作。· <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=2329s" target="_blank">0:38:49</a></li>
+            <li>“They work very well to fit like a single task, but have proven to be a bit more difficult to scale to learn like more generalist or multitask policies.”<br>（扩散策略）拟合单个任务很好，但事实证明，扩展成更通用或多任务的策略要难一些。· <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=2476s" target="_blank">0:41:16</a></li>
+            <li>“Flow matching instead asks why not just draw a straight line between the noise and the data.”<br>流匹配反过来问：为什么不在噪声和数据之间直接画一条直线？· <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=2619s" target="_blank">0:43:39</a></li>
+            <li>“with MSE regression and deterministic policies this will fail.”<br>用 MSE 回归和确定性策略，这会失败。· <a href="https://www.youtube.com/watch?v=qd6Ldsuu46I&t=3009s" target="_blank">0:50:09</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>ETH Zürich Robot Learning 2026 · Lecture 6: Generative Models · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

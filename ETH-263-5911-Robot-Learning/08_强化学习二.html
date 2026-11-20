@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>强化学习（二）：策略梯度、PPO 和 SAC | ETH Robot Learning 2026 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="07_嘉宾_Aviral_Kumar_复制LLM配方.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">ETH Robot Learning 目录</a> · 08</span>
+    <span><a href="09_嘉宾_Andrew_Wagenmaker_从经验中学习.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 5 讲：强化学习（二）</h1>
+        <p class="subtitle">从直接优化策略出发，推导策略梯度和 REINFORCE，用 reward-to-go、基线和优势函数压方差，用重要性采样复用旧数据，再到熵正则、KL 约束的 TRPO、裁剪比例的 PPO、actor-critic，最后是完全 off-policy 的 SAC</p>
+        <div class="author-meta">
+            主讲：Oier Mees（ETH Zürich / Microsoft）<br>
+            课程：Robot Learning: From Fundamentals to Foundation Models（ETH Zürich 263-5911，Week 5，2026 年 3 月 16 日）· 时长：52 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=AdTGz8YnnlE" target="_blank">课堂录像</a>（ETH Zürich 公开，2026 年春季，本文依据录像字幕整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            上一讲讲的全是基于价值的方法（value-based）：先学每个动作值多少，再取 argmax 得到策略。这一讲换一条路：既然我们最终关心的是策略，那就直接把策略参数化，调网络权重，让它产生能拿到高回报的行为。这类方法叫策略梯度（policy gradient）。讲法是一条线：先推导最原始的 REINFORCE，再一个个修它的毛病，方差太大就加因果性、基线和优势函数；只能用当前策略的数据就引入重要性采样；新旧策略离太远就加熵正则和 KL 约束（TRPO），再简化成裁剪（PPO）；最后到完全 off-policy 的 soft actor-critic（SAC）。整条线的方向，是从很 on-policy 的方法一步步走到更 off-policy、更省样本的方法，因为机器人上采数据很贵。
+        </p>
+        <p>
+            课程网页上本周课堂讨论的论文是：End-to-End Training of Deep Visuomotor Policies（Levine et al., 2015）、Eureka: Human-Level Reward Design via Coding LLMs（Ma et al., 2023）、Latent Plans for Task Agnostic Offline Reinforcement Learning（Rosete-Beas et al., 2022）。录像只有讲授部分，讲到 SAC 的总结就结束了，没有问答。本周嘉宾是 Andrew Wagenmaker，见下一篇。
+        </p>
+        <ol>
+            <li><a href="#t01">回顾：基于价值的方法</a> · <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">直接优化策略：目标和蒙特卡洛估计</a> · <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=89s" target="_blank">0:01:29</a></li>
+            <li><a href="#t03">对数导数技巧和策略梯度</a> · <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=378s" target="_blank">0:06:18</a></li>
+            <li><a href="#t04">REINFORCE，和行为克隆的对比</a> · <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=781s" target="_blank">0:13:01</a></li>
+            <li><a href="#t05">因果性、基线和优势函数</a> · <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=954s" target="_blank">0:15:54</a></li>
+            <li><a href="#t06">重要性采样：复用旧数据</a> · <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=1462s" target="_blank">0:24:22</a></li>
+            <li><a href="#t07">熵正则：别让支撑集变成零</a> · <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=2002s" target="_blank">0:33:22</a></li>
+            <li><a href="#t08">KL 约束和 TRPO</a> · <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=2148s" target="_blank">0:35:48</a></li>
+            <li><a href="#t09">PPO 和 actor-critic</a> · <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=2405s" target="_blank">0:40:05</a></li>
+            <li><a href="#t10">Soft Actor-Critic 和总结</a> · <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=2780s" target="_blank">0:46:20</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 回顾：基于价值的方法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=0s" target="_blank">0:00:00</a>–0:01:29</em></p>
+        <p>
+            Oier 先回顾上周。上周先讲了几个精确方法：值迭代（value iteration）、策略迭代（policy iteration）、Q 迭代（Q-iteration）。他说这些算法很漂亮，靠 Bellman 算子的压缩性保证收敛，但它们假设有动力学模型，而机器人上通常没有。然后讲了表格型 RL，Q-learning 和 SARSA，开始从经验里学，走向无模型（model-free）方法。再往后讨论怎样把它扩展到机器人需要的连续图像输入和连续动作空间，从 DQN 讲到 DDPG 和交叉熵方法。他说最后这一段深度 RL 的内容，核心都是用不同办法去解那个 argmax。
+        </p>
+        <p>
+            上周的方法全部是基于价值的：学每个状态下每个可能动作的价值，再做 argmax 把策略提出来。上周也看到，这在高维空间里不好扩展。所以今天的问题是：能不能跳过学价值函数再推策略这一步，直接参数化策略，调整网络，让它的行为拿到更高的未来回报。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 直接优化策略：目标和蒙特卡洛估计</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=89s" target="_blank">0:01:29</a>–0:06:18</em></p>
+        <h3>RL 目标和轨迹分布</h3>
+        <p>
+            他把上一讲的数学再摆一遍。标准的 RL 目标是最大化回报，用折扣因子 $\gamma$ 权衡今天的奖励和明天的奖励；因为世界是随机的，不能只优化一条轨迹，要优化期望回报：
+        </p>
+        $$J(\theta) = \mathbb{E}_{\tau \sim p_\theta(\tau)}\Big[\sum_{t} \gamma^t\, r(s_t, a_t)\Big]$$
+        <p>
+            轨迹（trajectory）$\tau = (s_0, a_0, s_1, a_1, \dots)$ 的分布是三样东西乘在一起：初始状态分布、每个时间步策略给所选动作的概率、环境的转移概率。
+        </p>
+        $$p_\theta(\tau) = p(s_0)\prod_{t} \pi_\theta(a_t \mid s_t)\, p(s_{t+1} \mid s_t, a_t)$$
+        <h3>先要知道策略有多好</h3>
+        <p>
+            策略用参数 $\theta$ 参数化以后，第一步是知道它有多好，光看网络权重是看不出来的。他用一张图说明：从同一个起始状态出发，有的轨迹好，有的一般，有的差，我们想让策略把更多概率放在好的轨迹上。
+        </p>
+        <p>
+            麻烦是这个期望没法解析地算，因为我们不知道真实世界里所有机器人动作的真实分布。上一讲已经提过，实践里用蒙特卡洛采样（Monte Carlo sampling）：用当前策略 $\pi_\theta$ 让机器人跑 $N$ 次，收集轨迹，算平均回报。
+        </p>
+        $$J(\theta) \approx \frac{1}{N}\sum_{i=1}^{N}\sum_{t} r(s_{i,t}, a_{i,t})$$
+        <p>
+            他提醒这里有一个不太显眼的假设：所有这些数据都来自当前策略。这就是 on-policy（同策略，只能用当前策略自己采的数据）的意思，过去的数据不能用。
+        </p>
+        <h3>梯度为什么不好求</h3>
+        <p>
+            能评估还不够，我们要改进策略，所以要估计梯度。目标是最大化期望回报总和 $J(\theta)$，轨迹从 $p_\theta(\tau)$ 中抽出。问题是 $J(\theta)$ 和 $\theta$ 之间隔着一个采样过程，两者的关系是隐式的。我们没法对“机器人在真实世界里动”这件事求导，因为它依赖世界的动力学，而动力学我们不知道。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 对数导数技巧和策略梯度</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=378s" target="_blank">0:06:18</a>–0:13:01</em></p>
+        <h3>把梯度放进积分</h3>
+        <p>
+            先把期望写成积分，再因为积分是线性运算，把梯度拿进积分里：
+        </p>
+        $$J(\theta) = \int p_\theta(\tau)\, r(\tau)\, d\tau, \qquad \nabla_\theta J(\theta) = \int \nabla_\theta p_\theta(\tau)\, r(\tau)\, d\tau$$
+        <p>
+            他说这看上去还没什么用：仍然是一个想避免直接计算的高维积分，里面仍然有未知的概率。而且现在它还不是一个期望，没法靠采样轨迹来估计，因为积分里是密度的梯度，不是密度本身。策略梯度定理（policy gradient theorem）可以把它改写成更有用的形式，他接着带大家推一遍。
+        </p>
+        <h3>对数导数技巧</h3>
+        <p>
+            用的是对数导数技巧（log derivative trick）。对数的导数是 $1/x$，再用链式法则，得到右上角的恒等式：
+        </p>
+        $$p_\theta(\tau)\,\nabla_\theta \log p_\theta(\tau) = p_\theta(\tau)\,\frac{\nabla_\theta p_\theta(\tau)}{p_\theta(\tau)} = \nabla_\theta p_\theta(\tau)$$
+        <p>
+            他说其实就是乘一个 $p_\theta(\tau)$ 再除一个，相当于乘以 1。把这个式子代回去：
+        </p>
+        $$\nabla_\theta J(\theta) = \int p_\theta(\tau)\,\nabla_\theta \log p_\theta(\tau)\, r(\tau)\, d\tau = \mathbb{E}_{\tau \sim p_\theta(\tau)}\big[\nabla_\theta \log p_\theta(\tau)\, r(\tau)\big]$$
+        <p>
+            现在它是一个期望了，可以用样本来估计。不过里面还是 $\log p_\theta(\tau)$，还不是我们的策略函数 $\pi_\theta(a \mid s)$。
+        </p>
+        <h3>“我们不是说过不能穿过采样求导吗”</h3>
+        <p>
+            他预料到有人会问：上一张幻灯片才说不能穿过采样过程求梯度，这里还是在采样。他说确实还是不能穿过采样求导，但区别在于 $\theta$ 现在出现在期望里面，所以可以对 $\theta$ 求导。他让大家回忆上周讲过的内容：奖励函数本身不可微，但在参数 $\theta$ 上的期望可以是光滑的，当时的例子是车开在山路上。奖励那一项仍然不可微，但不需要它可微。
+        </p>
+        <h3>把 $\log p_\theta(\tau)$ 拆开</h3>
+        <p>
+            乘积的对数等于对数之和。把轨迹分布的公式两边取对数：
+        </p>
+        $$\log p_\theta(\tau) = \log p(s_0) + \sum_{t=1}^{T}\Big[\log \pi_\theta(a_t \mid s_t) + \log p(s_{t+1} \mid s_t, a_t)\Big]$$
+        <p>
+            代回策略梯度、求梯度时，第一项 $\log p(s_0)$ 和 $\theta$ 无关，梯度为零；转移概率那一项也和 $\theta$ 无关，同样消掉。剩下的只有 $\log \pi_\theta(a_t \mid s_t)$，正好是我们能算的。他说这也很好，因为我们本来就没有转移动力学，能把它消掉正合适。
+        </p>
+        <p>
+            这样就得到最原始的策略梯度（vanilla policy gradient）：
+        </p>
+        $$\nabla_\theta J(\theta) \approx \frac{1}{N}\sum_{i=1}^{N}\Big(\sum_{t=1}^{T}\nabla_\theta \log \pi_\theta(a_{i,t} \mid s_{i,t})\Big)\Big(\sum_{t=1}^{T} r(s_{i,t}, a_{i,t})\Big)$$
+        <p>
+            做法是：用策略采样轨迹，对每个动作算 $\nabla \log \pi$，加起来，乘以回报，就得到一个能把策略推向更高回报的梯度。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. REINFORCE，和行为克隆的对比</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=781s" target="_blank">0:13:01</a>–0:15:54</em></p>
+        <h3>REINFORCE 算法</h3>
+        <p>
+            这个完整算法叫 REINFORCE，是 Williams 在 1992 年起的缩写名，是第一个策略梯度方法，有时也直接叫 vanilla policy gradient。步骤很简单：
+        </p>
+        <ol>
+            <li>初始化策略 $\pi_\theta$。</li>
+            <li>用当前策略采样 $N$ 条轨迹 $\{\tau_i\}$，用上面推出的公式估计梯度 $\nabla_\theta J(\theta)$。</li>
+            <li>更新权重 $\theta \leftarrow \theta + \alpha \nabla_\theta J(\theta)$。</li>
+            <li>采新数据，重复。</li>
+        </ol>
+        <p>
+            $N$ 是采的样本数。$N$ 越大，对期望的估计越准；理想情况下样本无穷多，就能得到精确的等式和完美的梯度，但这做不到，在机器人上更做不到。
+        </p>
+        <h3>和行为克隆比一比</h3>
+        <p>
+            要建立直觉，最容易的办法是和几周前讲的行为克隆（behavior cloning，BC，直接用监督学习模仿专家动作）的梯度对比。BC 的梯度只是所采取动作的对数概率之和：
+        </p>
+        $$\nabla_\theta J_{\text{BC}}(\theta) \approx \frac{1}{N}\sum_{i=1}^{N}\sum_{t=1}^{T}\nabla_\theta \log \pi_\theta(a_{i,t} \mid s_{i,t})$$
+        <p>
+            它最大化的是专家数据集里出现过的动作的似然，所有动作权重一样，不管它们带来的结果是好是坏。策略梯度做的是同一件事，区别是每条轨迹按它的总回报加权。直观地说，好的轨迹被往上推，差的被往下压。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 因果性、基线和优势函数</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=954s" target="_blank">0:15:54</a>–0:24:22</em></p>
+        <h3>问题一：好动作也被一起惩罚</h3>
+        <p>
+            推出了 REINFORCE 以后，他开始讲它在真实世界里哪里不行。例子是幻灯片上方的机器人：任务是伸手去抓杯子，但它冲过头了，最后拿到负奖励。REINFORCE 会惩罚这条轨迹里的每一个动作，包括开头那些好的动作。这是错的，前半段也许是好行为，只是后半段差。梯度等于在告诉机器人“永远别往那个方向动”，因为它导致了坏结果，于是要学会这个行为会很难，需要大量样本。
+        </p>
+        <p>
+            他说这违反了因果性（causality）：在物理世界里，时刻 $t$ 的动作只能影响同一时刻或之后的奖励，不可能对已经发生的奖励负责。
+        </p>
+        <h3>修法一：reward-to-go</h3>
+        <p>
+            第一个修法叫 reward-to-go：时刻 $t$ 动作的梯度不再乘以所有奖励之和，只乘以从 $t$ 到 episode 结束的奖励：
+        </p>
+        $$\nabla_\theta J(\theta) \approx \frac{1}{N}\sum_{i=1}^{N}\sum_{t=1}^{T}\nabla_\theta \log \pi_\theta(a_{i,t} \mid s_{i,t})\,\hat{Q}_{i,t}, \qquad \hat{Q}_{i,t} = \sum_{t'=t}^{T} r(s_{i,t'}, a_{i,t'})$$
+        <p>
+            他说这样不改变梯度的期望值，但能明显降低方差，也针对了冲过头那个例子。
+        </p>
+        <h3>问题二：回报大而接近时，信号淹没在噪声里</h3>
+        <p>
+            因果性修好了，REINFORCE 还有一个问题：方差高。设想两条轨迹，一条是冲过头的那条，但奖励是 99；另一条是完美的轨迹，奖励是 101。两种行为在奖励上的真实差别只有 $101 - 99 = 2$，这才是有用的信息量。但 REINFORCE 计算梯度时分别乘以 99 和 101，优化器看到的是巨大的梯度更新，真正的信号只占大约 2%，其余全是噪声，训练会很不稳定。也就是说，原始的 REINFORCE 在回报大而且彼此接近时，分不出好坏轨迹。
+        </p>
+        <h3>修法二：减一个基线</h3>
+        <p>
+            修法很简单：从 reward-to-go 里减去一个基线（baseline）$b$，把奖励居中。公式里只改这一处，现在每个动作的对数概率乘的是 $\hat{Q}_{i,t} - b$：
+        </p>
+        $$\nabla_\theta J(\theta) \approx \frac{1}{N}\sum_{i=1}^{N}\sum_{t=1}^{T}\nabla_\theta \log \pi_\theta(a_{i,t} \mid s_{i,t})\,\big(\hat{Q}_{i,t} - b\big), \qquad b = \frac{1}{N}\sum_{i=1}^{N} r(\tau_i)$$
+        <p>
+            在刚才的例子里取 $b = 100$，即平均值。第一条轨迹的权重变成 $-1$，第二条变成 $+1$。梯度就做了我们想要的事：压低冲过头的行为，强化完美的伸手动作。
+        </p>
+        <p>
+            他说有人可能觉得这像作弊，往公式里塞一个随便的常数。他说这不算作弊：减去一个常数 $b$，原则上完全不改变梯度的期望，是一个零偏差的操作，却能大幅降低方差。
+        </p>
+        <h3>reward-to-go 其实是 Q 函数的噪声估计</h3>
+        <p>
+            他接着问：仔细看，reward-to-go 到底在算什么？它把时刻 $t$ 之后的所有奖励加起来，对当前策略采样的所有轨迹取期望。这就是 Q 函数的定义：在状态 $s_t$ 做动作 $a_t$、之后按策略走，未来奖励之和的期望。
+        </p>
+        $$Q^\pi(s_t, a_t) = \mathbb{E}_{\pi}\Big[\sum_{t'=t}^{T} r(s_{t'}, a_{t'}) \;\Big|\; s_t, a_t\Big]$$
+        <p>
+            所以 reward-to-go 是 Q 函数的一个蒙特卡洛估计，一个带噪声的单样本。我们一直在算的其实是“Q 函数的噪声估计减去基线”。
+        </p>
+        <h3>优势函数</h3>
+        <p>
+            把这个认识和基线结合起来，就得到优势函数（advantage function）：
+        </p>
+        $$A^\pi(s_t, a_t) = Q^\pi(s_t, a_t) - V^\pi(s_t)$$
+        <p>
+            $Q^\pi$ 是在 $s_t$ 做某个具体动作 $a$ 时预期能拿的分，$V^\pi$ 是在 $s_t$ 按当前策略走平均预期能拿的分。优势回答的是：从 $s_t$ 出发选动作 $a$，比平均好多少。代回策略梯度：
+        </p>
+        $$\nabla_\theta J(\theta) \approx \frac{1}{N}\sum_{i=1}^{N}\sum_{t=1}^{T}\nabla_\theta \log \pi_\theta(a_{i,t} \mid s_{i,t})\,A^\pi(s_{i,t}, a_{i,t})$$
+        <p>
+            优势为正，说明这个动作比平均预期好，就提高它的概率；为负说明比平均差，就降低它的概率。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 重要性采样：复用旧数据</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=1462s" target="_blank">0:24:22</a>–0:33:22</em></p>
+        <h3>on-policy 对机器人太浪费</h3>
+        <p>
+            现在这个最完善的策略梯度有了因果性和基线，但还有一个在讲 REINFORCE 时就提到的实际问题：轨迹只有在由当前策略采集时才有效。他说这对做机器人的人很不实用。用真机采数据很贵，机器人会坏，电机会坏。采了一批数据，做一次梯度更新，就得把数据扔掉重新采，效率太低。在模拟器里数据好采也许没问题，但理想情况下我们想更省样本，最好在同一批数据上做多步梯度更新。所以目标是：别扔数据，让策略梯度算法更 off-policy 一些（off-policy，异策略，可以用别的策略或旧策略采的数据来学）。
+        </p>
+        <h3>重要性采样</h3>
+        <p>
+            工具是重要性采样（importance sampling）：当只有另一个分布的样本时，用它来估计某个分布下的期望。在我们这里，想算的是目标分布 $p(x)$（新策略）下的期望，手上只有 $q(x)$（旧策略采的数据）的样本。把期望写成积分，再用前面那个“乘以 1”的技巧，在积分里乘上 $q(x)/q(x)$，整理一下就变成在 $q$ 的样本上的期望：
+        </p>
+        $$\mathbb{E}_{x \sim p(x)}[f(x)] = \int p(x) f(x)\,dx = \int q(x)\,\frac{p(x)}{q(x)}\, f(x)\,dx = \mathbb{E}_{x \sim q(x)}\Big[\frac{p(x)}{q(x)}\, f(x)\Big]$$
+        <p>
+            也就是用比值 $p(x)/q(x)$ 给 $f(x)$ 加权。机器人可以用旧样本，只要按“该样本在新策略下的概率除以在旧策略下的概率”加权。
+        </p>
+        <p>
+            他提醒两点。第一，要保持无偏，$q$ 必须在需要的地方有非零支撑（support），如果 $q(x)=0$，这个除法就没有定义。第二，直观上两个分布离得不太远时重要性采样效果最好，不要像他幻灯片上画的那样差得很远。
+        </p>
+        <h3>放到 RL 目标里</h3>
+        <p>
+            把轨迹分布的公式代进去，新旧两个策略各写一份。两个策略在同一个 MDP 里，初始状态分布和转移概率相同，可以消掉，剩下的只有策略概率之积的比值：
+        </p>
+        $$J(\theta') = \mathbb{E}_{\tau \sim p_\theta(\tau)}\Big[\frac{p_{\theta'}(\tau)}{p_\theta(\tau)}\, r(\tau)\Big], \qquad \frac{p_{\theta'}(\tau)}{p_\theta(\tau)} = \prod_{t=1}^{T}\frac{\pi_{\theta'}(a_t \mid s_t)}{\pi_\theta(a_t \mid s_t)}$$
+        <p>
+            他说这很有用，因为我们不一定有世界的动力学，这样就能算出重要性权重。
+        </p>
+        <p>
+            下一个问题是梯度怎么求，因为原来的梯度公式里还是从新策略采轨迹。用两张幻灯片前推过的重要性采样期望，把各项代进去，关键的变化是期望现在是对旧策略取的，也就是对我们手上已有的数据取的：
+        </p>
+        $$\nabla_{\theta'} J(\theta') = \mathbb{E}_{\tau \sim p_\theta(\tau)}\Big[\Big(\prod_{t=1}^{T}\frac{\pi_{\theta'}(a_t \mid s_t)}{\pi_\theta(a_t \mid s_t)}\Big)\Big(\sum_{t=1}^{T}\nabla_{\theta'}\log \pi_{\theta'}(a_t \mid s_t)\Big)\Big(\sum_{t=1}^{T} r(s_t, a_t)\Big)\Big]$$
+        <h3>连乘会爆炸，所以按时间步近似</h3>
+        <p>
+            这个式子还是有麻烦：权重是关于时间跨度 $T$ 的连乘，是指数级的。假设每个比值都小于 1，$T$ 很长时许多小数相乘，乘积会指数级地趋于 0，方差也会指数级地趋于无穷，梯度会爆炸，很不稳定。
+        </p>
+        <p>
+            实践里常把对轨迹的期望换成对时间步的期望。把联合分布 $\pi(s_t, a_t)$ 分解后，得到一个动作比值和一个状态比值：
+        </p>
+        $$\frac{\pi_{\theta'}(s_t, a_t)}{\pi_\theta(s_t, a_t)} = \frac{\pi_{\theta'}(s_t)}{\pi_\theta(s_t)}\cdot\frac{\pi_{\theta'}(a_t \mid s_t)}{\pi_\theta(a_t \mid s_t)}$$
+        <p>
+            动作比值可以直接从网络算出来，状态比值算不了，因为那又需要知道环境的全局动力学。所以实践中常把状态比值近似成 1，TRPO 和 PPO 这类算法就是这么做的，靠的是强制每次更新都很小。最后的形式里，重要性权重只剩新旧策略的动作概率之比：
+        </p>
+        $$\nabla_{\theta'} J(\theta') \approx \sum_{t=1}^{T}\mathbb{E}_{(s_t, a_t) \sim \pi_\theta}\Big[\frac{\pi_{\theta'}(a_t \mid s_t)}{\pi_\theta(a_t \mid s_t)}\,\nabla_{\theta'}\log \pi_{\theta'}(a_t \mid s_t)\,\hat{A}(s_t, a_t)\Big]$$
+        <p>
+            他再次强调这只是近似，只有两个策略足够接近时才成立。
+        </p>
+        <h3>算法长什么样</h3>
+        <p>
+            完整算法和 REINFORCE 差不多，区别是：以前采一次数据更新一次，现在采一次可以做多步梯度更新。但不能无限做下去，否则新旧分布离得太远，比值就失效了。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 熵正则：别让支撑集变成零</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=2002s" target="_blank">0:33:22</a>–0:35:48</em></p>
+        <p>
+            前面说过，支撑集为零时重要性采样就失效，即新策略 $\pi_{\theta'}$ 给某些状态-动作对分配了概率，而旧策略从来没采过它们。一个简单的办法是在策略梯度目标上加熵奖励（entropy bonus）。想法是不让旧策略变得太确定，以免它给动作空间的某些区域分配零概率；鼓励策略把概率摊开，从一开始就降低碰到零支撑的机会。
+        </p>
+        $$J_{\text{ent}}(\theta) = J(\theta) + \alpha\, \mathcal{H}\big(\pi_\theta(\cdot \mid s)\big)$$
+        <p>
+            温度参数 $\alpha$ 控制熵的权重。$\alpha$ 越大，策略越分散；越接近 0，越贪心。
+        </p>
+        <p>
+            熵（entropy，衡量一个分布有多“分散”）的算法取决于机器人的动作空间。离散动作用标准的 Shannon 熵；连续动作用高斯策略的微分熵，其中 $d$ 是动作空间的维度，比如 7 自由度（7 DOF）的机械臂就是 7：
+        </p>
+        $$\mathcal{H}(\pi) = -\sum_{a}\pi(a \mid s)\log \pi(a \mid s), \qquad \mathcal{H}\big(\mathcal{N}(\mu, \Sigma)\big) = \frac{1}{2}\log\big((2\pi e)^{d}\,\lvert\Sigma\rvert\big)$$
+        <p>
+            他说这里可以讲更多，但为了时间先往下走。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. KL 约束和 TRPO</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=2148s" target="_blank">0:35:48</a>–0:40:05</em></p>
+        <h3>新旧策略离太远会怎样</h3>
+        <p>
+            重要性采样只在新旧策略接近时有效。如果在同一批数据上做多步梯度更新，策略在采新数据之前就变了太多，会怎样？他举了一个具体的失败情况：某个动作在旧策略下概率很低，但拿到了高奖励，于是新策略给它更高的概率，重要性权重变得很大，比如 20。这很糟，梯度估计会爆炸。
+        </p>
+        <h3>用 KL 散度约束更新</h3>
+        <p>
+            一个解法是约束策略，让它在这几步梯度更新里不要变太多。实现方式之一是加 KL 散度（KL divergence，衡量两个概率分布有多接近）约束。如果新策略想给旧策略采过的某个动作分配零概率，就会被惩罚。他说旧策略的数据相当于我们的 ground truth，保证新策略的动作有支撑。
+        </p>
+        <p>
+            这就是 2015 年的 TRPO（Trust Region Policy Optimization，信赖域策略优化）：在前面推出的策略梯度目标上，加一个 KL 约束：
+        </p>
+        $$\max_{\theta'} \; \mathbb{E}_{(s,a) \sim \pi_\theta}\Big[\frac{\pi_{\theta'}(a \mid s)}{\pi_\theta(a \mid s)}\,\hat{A}(s, a)\Big] \quad \text{s.t.} \quad \mathbb{E}_{s}\Big[D_{\text{KL}}\big(\pi_\theta(\cdot \mid s)\,\|\,\pi_{\theta'}(\cdot \mid s)\big)\Big] \le \delta$$
+        <h3>好处和代价</h3>
+        <p>
+            他没细讲推导，只说 TRPO 的主要好处是有理论保证：每次更新都会提高、至少不会降低真实性能 $J(\pi)$。坏处是 KL 约束需要计算 Fisher 信息矩阵（Fisher information matrix），即 KL 散度对策略参数的二阶导数矩阵，计算量很大：内存是 $O(n^2)$，计算是 $O(n^3)$。有共轭梯度（conjugate gradient）等近似，但总体很难扩展，深度网络上还要更多近似，所以现在不太流行。
+        </p>
+        <h3>ETH 的四足机器人例子</h3>
+        <p>
+            不过他说仍然能看到有说服力的机器人应用，就在 ETH：用 TRPO 训练四足机器人的运动，sim-to-real（在模拟器里训练再迁移到真机），零样本泛化的效果很好。视频里四足机器人能在困难地形上行走，跨过障碍，在训练时可能没见过的表面上走。他说它确实管用。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. PPO 和 actor-critic</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=2405s" target="_blank">0:40:05</a>–0:46:20</em></p>
+        <h3>用裁剪代替 KL 约束</h3>
+        <p>
+            TRPO 保证很好，但计算代价让人头疼。问题是能不能不用昂贵的二阶数学也拿到这种稳定性。更流行、也更好实现的算法是 PPO（Proximal Policy Optimization，近端策略优化）。核心想法是：不用 KL 散度去约束重要性比值，直接把它裁剪（clip）掉。记 $r_t(\theta) = \pi_\theta(a_t \mid s_t)/\pi_{\theta_{\text{old}}}(a_t \mid s_t)$：
+        </p>
+        $$L^{\text{CLIP}}(\theta) = \mathbb{E}_t\Big[\min\Big(r_t(\theta)\,\hat{A}_t,\; \operatorname{clip}\big(r_t(\theta),\, 1-\epsilon,\, 1+\epsilon\big)\,\hat{A}_t\Big)\Big]$$
+        <p>
+            比值被限制在一个区间内，再取两项里的较小者。因为现在是简单的一阶方法，复杂度随参数线性增长，和 Adam 这样的标准优化器配合得很好。他说就是这种可扩展性，让 PPO 成为训练大语言模型的主力，用在 RLHF（基于人类反馈的强化学习）上，还有 GRPO 等等。
+        </p>
+        <p>
+            代价是没有了单调改进的保证，而且它仍然接近 on-policy，学 PPO 仍需要相当多的样本。他说 PPO 在很多领域和应用里都很可靠、很稳定，但根本上它仍主要是一个近 on-policy 的方法。
+        </p>
+        <h3>OpenAI 的魔方灵巧手</h3>
+        <p>
+            机器人上 PPO 的一个著名应用是 OpenAI 2019 年的工作：教一只 24 自由度的 Shadow 灵巧手解魔方。这也是 sim-to-real，在模拟器里做了大量域随机化（domain randomization，训练时随机改变模拟器的物理参数和外观，让策略对真机的差异更稳健）。视频里它能扛住很多扰动，连手指被绑在一起也行。他提醒一点：这里 PPO 的输入是状态，没有用相机图像。他们用的是更模块化的做法，先用一个感知网络提取魔方的位置和朝向，再把这些送给 PPO。
+        </p>
+        <h3>PPO 的完整目标</h3>
+        <p>
+            PPO 的完整目标把今天讲的很多东西合在一个式子里，有三项：
+        </p>
+        $$L(\theta) = \mathbb{E}_t\Big[L^{\text{CLIP}}_t(\theta) - c_1\, L^{\text{VF}}_t(\theta) + c_2\, \mathcal{H}\big(\pi_\theta(\cdot \mid s_t)\big)\Big]$$
+        <ul>
+            <li>第一项是刚推出的裁剪替代目标，这是 actor 损失，更新策略参数，在保持重要性比值处于安全范围的前提下最大化优势。</li>
+            <li>第二项是价值函数损失，也就是 critic，同时训练，用来给出更好的优势估计。优势函数需要状态的 $V^\pi$，critic 越好，优势估计的方差越低，策略越稳定。</li>
+            <li>第三项是前面讲的熵奖励，防止策略塌缩成确定性解，保持探索。</li>
+        </ul>
+        <h3>actor-critic</h3>
+        <p>
+            他说这就是 actor-critic 结构（actor 是策略，critic 是价值函数，两者一起训练）。它结合了两边的长处：策略梯度直接优化我们关心的行为，基于价值的方法通过 critic 给出低方差的基线。
+        </p>
+        <p>
+            要注意的是 critic 用 TD 更新（temporal difference，时序差分）来学，也就是从自己对下一时间步的估计做自举（bootstrap），不用等到整条轨迹的回报出来。只用策略梯度时，actor 必须等到 episode 结束，这是一个限制。所以这比蒙特卡洛回报省样本得多，代价是自举带来的一点偏差。
+        </p>
+        <p>
+            对机器人来说还有一点有意思：critic 常可以用特权信息（privileged information）来训练，因为测试时不用 critic。尤其在模拟器里，可以给 critic 额外的状态信息，降低方差，得到更好的优势估计；测试时把 critic 扔掉，不影响部署，但对训练帮助很大。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. Soft Actor-Critic 和总结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=2780s" target="_blank">0:46:20</a>–0:52:23</em></p>
+        <h3>完全 off-policy 的 actor-critic</h3>
+        <p>
+            最后简单讲 soft actor-critic（SAC）。他说它让这条线闭环：从很 on-policy 的方法开始，一路想办法更 off-policy、更省样本、用更多以前的数据，SAC 就是答案。它是完全 off-policy 的 actor-critic 算法，像上一讲的 DQN 一样，在回放缓冲区（replay buffer，存过去所有交互数据的池子）上训练 critic。
+        </p>
+        <p>
+            actor 目标有两项：探索奖励，就是前面的熵项；利用项，回答“如果今天做这个动作，能拿多少分”。两项之间互相拉扯：
+        </p>
+        $$J_\pi(\theta) = \mathbb{E}_{s \sim \mathcal{D},\; a \sim \pi_\theta}\Big[Q_\phi(s, a) - \alpha \log \pi_\theta(a \mid s)\Big]$$
+        <p>
+            critic 损失是标准的 TD 误差：critic 现在认为某个过去的状态-动作对值多少，和它基于实际收到的奖励加上折扣后的下一状态价值应该认为值多少，两者之差的平方。这里也有熵项，意思是我们偏好那些通向更高奖励、同时有很多种达成方式的状态：
+        </p>
+        $$J_Q(\phi) = \mathbb{E}_{(s,a,r,s') \sim \mathcal{D}}\Big[\Big(Q_\phi(s, a) - \big(r + \gamma\,(Q_\phi(s', a') - \alpha \log \pi_\theta(a' \mid s'))\big)\Big)^2\Big], \quad a' \sim \pi_\theta(\cdot \mid s')$$
+        <p>
+            他说关键在这里：actor 从回放缓冲区里取所有状态，但问的是当前策略、而非旧策略，今天在这里会做什么动作。critic 像一个学到的模拟器，估计新动作放在旧状态里会拿多少奖励，哪怕它从来没真正见过这个状态-动作组合。
+        </p>
+        <p>
+            还有一个剩下的问题他没展开：怎样反向传播穿过采样过程。可以用标准的重参数化技巧（reparameterization trick），高斯策略常用，变分推断和 VAE 里也常用。写出来就是把采样写成确定性函数加独立噪声：
+        </p>
+        $$a = \mu_\theta(s) + \sigma_\theta(s)\odot\varepsilon, \qquad \varepsilon \sim \mathcal{N}(0, I)$$
+        <p>
+            他展示了原始论文里 SAC 在真机上的演示，有乐高堆叠、四足机器人和灵巧手。
+        </p>
+        <h3>这一讲的路线回顾</h3>
+        <p>
+            他最后把今天的路线走了一遍：从 REINFORCE 开始，这是直接优化策略的方法；原始版本有局限，于是加上因果性和基线对付高方差；再到优势函数，让奖励变成相对的，不再是绝对的。然后撞上 on-policy 的墙，每一步梯度都要采新数据，于是引入重要性采样，在同一批数据上做多步梯度更新。又加了熵正则，保证机器人一直探索，也让重要性采样保持非零支撑。再看了约束新旧策略变化的办法，一个是 KL 散度，一个是 PPO 简化后的裁剪，限制单次更新里策略能漂多远。最后到 SAC，critic 完全 off-policy，用回放缓冲区训练，和上一讲的 DQN 类似。他说 SAC 在今天讲的所有方法里样本效率最高，这也是它今天在真实机器人上仍然很流行的原因。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“why not just like parameterize our policy and you know, wiggle the the neural networks of our net of our of our network to produce behaviors that will achieve high rewards directly.”<br>为什么不直接把策略参数化，调整网络，让它直接产生能拿到高回报的行为。· <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=99s" target="_blank">0:01:39</a></li>
+            <li>“we cannot simply differentiate through the robot moving in the in the real world.”<br>我们没法对机器人在真实世界里的运动直接求导。· <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=338s" target="_blank">0:05:38</a></li>
+            <li>“an action taken at, time step t can only affect rewards that happen either at the same time or in the future”<br>在时刻 t 采取的动作，只能影响同一时刻或之后发生的奖励。· <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=1018s" target="_blank">0:16:58</a></li>
+            <li>“the reward to go is a Monte Carlo estimate of your Q function.”<br>reward-to-go 是 Q 函数的一个蒙特卡洛估计。· <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=1357s" target="_blank">0:22:37</a></li>
+            <li>“we established that the important sampling breaks down when the support set is zero”<br>（字幕 important sampling 即 importance sampling）我们已经看到，支撑集为零时重要性采样就失效。· <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=2000s" target="_blank">0:33:20</a></li>
+            <li>“this kind of like scalability is exactly why PPO is the backbone for many for training like large language models”<br>这种可扩展性就是 PPO 成为训练大语言模型主力的原因。· <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=2447s" target="_blank">0:40:47</a></li>
+            <li>“you can often train the critic by using privileged information. because you don't use the critic at test time.”<br>critic 常可以用特权信息来训练，因为测试时用不到 critic。· <a href="https://www.youtube.com/watch?v=AdTGz8YnnlE&t=2780s" target="_blank">0:46:20</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>ETH Zürich Robot Learning 2026 · Lecture 5: Reinforcement Learning II · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

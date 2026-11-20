@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 10 讲：具身推理与测试时扩展 | ETH Robot Learning 2026 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="17_嘉宾_Quan_Vuong_pi0.7.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">ETH Robot Learning 目录</a> · 18</span>
+    <span><a href="19_嘉宾_Archit_Sharma_测试时算力.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 10 讲：具身推理与测试时扩展</h1>
+        <p class="subtitle">光靠更多遥操作数据为什么不够；具身思维链（ECoT）怎样在不加机器人数据的情况下把泛化提高约 30%，它为什么有效，怎样训练时用推理、部署时去掉；测试时算力从 AlphaGo 到 LLM；GRPO 让推理从 RL 中涌现；视觉任务里只奖励答案会带来幻觉推理</p>
+        <div class="author-meta">
+            主讲：Oier Mees（ETH Zürich / Microsoft）<br>
+            课程：Robot Learning: From Fundamentals to Foundation Models（ETH Zürich 263-5911，Week 10）· 时长：56 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=CxhrjQuGEuE" target="_blank">课堂录像</a>（ETH Zürich 公开，2026 年春季，本文依据录像字幕整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            前几讲讲了怎样在大数据上训练大模型，讲了 VLA（视觉语言动作模型）。这一讲问的是：继续采遥操作数据、照搬 LLM 的配方就够了吗？Oier 的看法是数据很重要，但缺了推理能力。他先讲自己参与的具身思维链（Embodied Chain-of-Thought，ECoT）工作，再讲为什么它有效、怎样去掉推理带来的延迟，然后转到测试时算力扩展，从 AlphaGo 讲到 LLM 的 RL 推理（GRPO、DeepSeek-R1），再讲推理迁移到视觉时的幻觉问题和他们在 Microsoft 做的 Argos，最后回到机器人。（录像开头他说是第 11 讲，按课程主页这是第 10 周的课。）
+        </p>
+        <p>
+            本周课上讨论的论文是 “In-Context Imitation Learning via Next-Token Prediction”（Fu et al., 2024）、“VOYAGER: An Open-Ended Embodied Agent with LLMs”（Wang et al., 2023）和 “Training Strategies for Efficient Embodied Reasoning”（Chen et al., 2025）。嘉宾讲座是 Google DeepMind 的 Archit Sharma 讲测试时算力，见下一篇。
+        </p>
+        <ol>
+            <li><a href="#t01">只靠数据缺了什么</a> · <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">具身思维链</a> · <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=305s" target="_blank">0:05:05</a></li>
+            <li><a href="#t03">推理太慢，以及它为什么有效</a> · <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=823s" target="_blank">0:13:43</a></li>
+            <li><a href="#t04">推理预训练和推理 dropout</a> · <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=1352s" target="_blank">0:22:32</a></li>
+            <li><a href="#t05">测试时算力扩展</a> · <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=1567s" target="_blank">0:26:07</a></li>
+            <li><a href="#t06">用强化学习让推理涌现</a> · <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=2298s" target="_blank">0:38:18</a></li>
+            <li><a href="#t07">视觉推理和幻觉问题</a> · <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=2799s" target="_blank">0:46:39</a></li>
+            <li><a href="#t08">回到机器人，以及四个要点</a> · <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=3077s" target="_blank">0:51:17</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 只靠数据缺了什么</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=0s" target="_blank">0:00:00</a>–0:05:05</em></p>
+        <p>
+            他先提出一个可能的想法：一直采机器人遥操作数据，照着 LLM 的配方扩展，就够了。他说这有道理，但不是全部。数据当然重要，但数据给你的是对已有行为更好的先验：它把示范的分布压缩进模型权重。缺的是智能的推理。
+        </p>
+        <p>
+            即使造出能做很多任务的机器人，如果它不能聪明地推理，用处也不大。课程到目前讲过的几乎所有模型，哪怕是最强的 VLA，遇到分布外（out-of-distribution，训练数据里没出现过的）情况时，通常没有机制能聪明地走出困境，就会失败。他说这是它们和人类智能的一个差别。
+        </p>
+        <p>
+            他拿 LLM 类比。LLM 的训练数据比现在最大的 VLA 多几个数量级，可即使训练了整个互联网，这些数据也不足以解决我们想让 LLM 解决的所有问题。机器人数据要贵几个数量级，几乎肯定也不够。
+        </p>
+        <p>
+            LLM 的替代办法是专门训练推理。直觉是推理是组合式的：由可复用的逻辑和知识积木组成，可以重新组合，用已有知识解决新问题。这样不必见过某个情况，只要能从第一原理推出来就行。他说机器人也想要同样的能力，让它泛化到训练分布之外。既然课程一直把机器人问题表述为多模态序列建模（输入图像、语言和动作 token），已经从 LLM 和 VLM 迁移了结构、预训练目标、扩展策略等，自然要问：能不能也迁移推理这种大幅提升了 LLM 和 VLM 泛化的算法改进？一个“想得更努力”的机器人会不会做得更好？
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 具身思维链</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=305s" target="_blank">0:05:05</a>–0:13:43</em></p>
+        <h3>核心想法</h3>
+        <p>
+            第一篇论文是具身思维链推理。想法很简单：VLA 不直接从图像和指令映射到动作，而是在中间插入推理步骤。给定一条指令，先让模型生成一个计划，比如“移到西瓜那里”，判断下一步该做的子任务是什么，并把这些落到图像上。他说这就像思维链（chain of thought），只是用在物理世界里。
+        </p>
+        <h3>推理数据从哪来</h3>
+        <p>
+            不能让人工标注员给大型机器人数据集的每条轨迹都标上计划、子任务描述、边界框、夹爪位置等，那不可扩展。办法是用互联网规模的基础模型去标注已有的机器人数据，生成语义上有依据的推理，比如末端执行器（end effector，机械臂末端的夹爪或工具）下一步要交互的物体的边界框，夹爪未来运动的轨迹等。
+        </p>
+        <h3>模型结构</h3>
+        <p>
+            ECoT 训练一个自回归的视觉语言动作模型，在预测动作 token 之前，先预测这些中间的、有依据的推理步骤：任务、计划、运动等。动作 token 以这些辅助推理 token 为条件，相当于强迫模型行动之前先仔细想、仔细看。用概率写，记观测为 $o$，指令为 $\ell$，推理链为 $r$，动作为 $a$，模型按顺序生成：
+        </p>
+        $$p(r, a \mid o, \ell) = p(r \mid o, \ell)\; p(a \mid o, \ell, r).$$
+        <h3>结果</h3>
+        <p>
+            他们在真实世界里很有挑战的分布外场景中评估这个 VLA：干扰物体、空间关系、没见过的物体、没见过的指令和场景，全部是分布外的。结果是 ECoT 比不带推理的同一个模型 OpenVLA 性能提高了 30%，也超过了 Google 大得多的 RT-2-X（550 亿参数），而他们的模型只有 70 亿参数。他强调的结论是：不采任何额外的机器人数据，用同样多的遥操作数据，只靠具身推理，就能把泛化提高约 30%。
+        </p>
+        <h3>可解释、可交互</h3>
+        <p>
+            附带的好处是可解释性和可交互性。推理步骤人能读懂，可以看到它把边界框预测在哪里。测试时如果看到机器人预测了错误的计划，可以在线修改推理链；因为动作 token 以推理 token 为条件，人改了推理链，模型会自然地自我纠正。失败时也能看到为什么失败。
+        </p>
+        <h3>推理能迁移到没见过的机器人</h3>
+        <p>
+            他认为最酷的实验之一是推理能泛化到没见过的机器人。带推理的 VLA 只在一个数据集（WidowX，一种便宜的黑色机械臂）的推理上训练过，然后用在 Open X-Embodiment 里的其他数据集上，让它生成推理。尽管机器人、相机和其他一切都是新的，它生成的推理链依然很合理。他的解释是，很多推理任务和 VLM 的预训练任务很像，VLM 已经有某种世界模型，ECoT 是在释放 VLM 预训练里已有的推理能力。他说这意味着具身思维链可能是一种在不同本体之间迁移推理的原则性方法，不用为每种新机器人形态都采示范、做标注。
+        </p>
+        <h3>后续发展</h3>
+        <p>
+            他总结说，这项工作的核心贡献是一种用具身推理训练 VLA 的新方法，在不加机器人数据的情况下提高泛化、可解释性和可交互性。之后学术界和工业界都采用了，比如 Gemini Robotics VLA 把它作为核心组件，他认为这说明领域在把推理当作机器人策略的一等组件。后续工作很多，比如 MolmoAct 用深度 token 加入空间推理；另一项工作（字幕识别为 Clark et al.）通过把推理训练和动作预测解耦，迁移来自人类数据、不带动作的推理。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 推理太慢，以及它为什么有效</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=823s" target="_blank">0:13:43</a>–0:22:32</em></p>
+        <h3>速度问题</h3>
+        <p>
+            明显的问题是推理慢，因为测试时生成的 token 多了很多。基础模型 OpenVLA 是 70 亿参数，大约每秒 4 个动作；带具身推理的版本要生成完整推理链，变成每个动作 4 秒。他说后来做了一些推理加速，但论文主要作者 Will 和 Michał 在真实 WidowX 机器人上做的第一批测试看着很痛苦，做一个任务要很久。机器人学家要的是实时控制，不想花几小时看机器人像乌龟一样动。所以问题是：能不能得到推理的好处，又不付推理成本？
+        </p>
+        <h3>先问为什么有效</h3>
+        <p>
+            他说在找解法之前，值得先问一个更根本的问题：具身推理为什么有效？他提醒，机器学习领域有一种倾向，看到某个东西有效（比如泛化提高 30%）就很兴奋，然后转去做下一件事。但不明白为什么有效，就不知道它什么时候会失败，也不知道怎样改进，没法在此基础上有原则地往前做。实验失败时我们会严格分析，成功时也应该同样严格。接下来几张幻灯片改编自 Will 的材料，列出了三个听起来都合理的假设。
+        </p>
+        <h3>假设一：更好的表示学习</h3>
+        <p>
+            推理轨迹提供了额外的知识，塑造模型的内部表示：指出某个物体的位置相关、某个动作在这个场景里重要，迫使模型对场景建立更丰富、更有语义依据的表示。如果这是主要原因，那真正起作用的是训练时推理提供的监督信号，测试时不一定要生成推理，模型的表示已经在关注正确的特征。结果会很诱人：用推理训练得到更好的表示，部署时不用推理，恢复低延迟和高频率。
+        </p>
+        <h3>假设二：更好的学习课程</h3>
+        <p>
+            对一个在视觉问答等任务上预训练的 VLM 来说，预测连续的机器人动作是极度分布外的，直接端到端微调到输出连续动作很难，和预训练做的完全不同。具身推理可能提供了一种隐式课程（curriculum，从易到难安排学习内容）：模型先学更简单的中间任务，比如把运动描述映射到动作，再逐步做到从像素到动作的完整预测。如果这是真的，就可以把推理当作训练脚手架：训练时把推理示例放在上下文里但不在它上面算损失，推理时去掉，同样拿到泛化收益而没有推理成本。
+        </p>
+        <h3>假设三：策略表达能力更强</h3>
+        <p>
+            上下文里 token 更多，哪怕没有语义，也会提高 Transformer 预测动作时的表达能力。他说这个假设很有可能成立，因为 LLM 的研究里已有大量记录：他列了两篇参考文献，表明 Transformer 能把中间 token 当成隐藏计算的草稿空间，即使这些 token 没有语义也能提升性能。这就引出一个重要问题：具身推理的好处有多少来自推理的语义内容，有多少只是来自额外 token 提供的计算预算？如果主要是后者，推理的具体内容就没那么重要，就能用便宜得多的办法得到同样的好处，不必用基础模型去生成精细的标注。
+        </p>
+        <h3>ECoT-Lite 的实验</h3>
+        <p>
+            ECoT-Lite 这项工作在 LIBERO-90 基准上把三个机制分别隔离出来做实验。结果：
+        </p>
+        <ul>
+            <li>推理预训练和推理 dropout（下一节讲）都在测试时去掉推理，表现几乎和完整的原始 ECoT 一样好；</li>
+            <li>推理脚手架（推理放在输入上下文里但不算损失）也相当好；</li>
+            <li>“思考 token”实验（用无意义的空 token），比标准 VLA 还略差一点，没有帮助。</li>
+        </ul>
+    </section>
+
+    <section id="t04">
+        <h2>04. 推理预训练和推理 dropout</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=1352s" target="_blank">0:22:32</a>–0:26:07</em></p>
+        <h3>两种做法</h3>
+        <ul>
+            <li>推理预训练（reasoning pre-training）：分两个训练阶段。第一阶段把 VLM 微调成只预测推理，没有动作损失；第二阶段拿这个模型微调去预测连续机器人动作，不再预测推理。迁移的只是第一阶段学到的表示，推理时不用生成完整推理，两者解耦。</li>
+            <li>推理 dropout（reasoning dropout）：和原始 ECoT 一样是单一的联合训练阶段，同时训练预测推理和动作，但训练中以一定概率丢掉推理，让模型也学会在不以推理为条件时输出动作 token。测试时可以选择先生成推理再预测动作，也可以关掉推理。</li>
+        </ul>
+        <h3>真机结果和怎么选</h3>
+        <p>
+            真机实验里，原始 ECoT 在推理时生成完整推理，泛化成功率最高，但推理频率最低。推理预训练和推理 dropout 的泛化稍差一点，但频率基本和标准 VLA 一样。
+        </p>
+        <p>
+            选哪个取决于约束。原始版本对大多数实时场景来说最慢。推理预训练特别适合推理数据和动作数据不配对的情况，比如想从仿真或人类数据这些非机器人数据里迁移推理。推理 dropout 最灵活，一个模型可以按延迟预算开关推理。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 测试时算力扩展</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=1567s" target="_blank">0:26:07</a>–0:38:18</em></p>
+        <h3>让模型在难题上想得更久</h3>
+        <p>
+            到这里讲的都是测试时固定的计算预算。原始 ECoT 训练时有固定数量的推理步骤，比如 7 步，就总是生成 7 步。自然的后续问题是：让模型在难题上想得更久，测试时多花算力能不能换来更好的决策？这是测试时算力扩展（test-time compute scaling），也是这一讲的后半部分。
+        </p>
+        <p>
+            他说你可能会想，这不就是规划吗，几十年前就有 A* 和蒙特卡洛树搜索。他放了一张对比图：从人工指定的结构化离散领域，一直到用神经网络在权重里隐式地做测试时算力扩展、面向语言和编程这类开放任务，每一步都是用显式结构换通用性。
+        </p>
+        <h3>AlphaGo</h3>
+        <p>
+            经典例子是 AlphaGo。Nature 论文里有一张图：不带搜索的原始策略网络大约 3000 Elo，测试时加上蒙特卡洛树搜索，跳到 5000 以上，远超人类。有一条经验法则：提高大约 120 Elo，要么把模型规模翻倍，要么把测试时搜索预算翻倍，两者可以互换。按这个算，从原始网络的 3000 分到 5200 分，不用树搜索的话，模型大约要大 10 万倍。用式子粗算：
+        </p>
+        $$\frac{5200 - 3000}{120} \approx 18 \text{ 次翻倍}, \qquad 2^{18} \approx 2.6 \times 10^{5}.$$
+        <p>
+            （这个粗算是整理时补的，量级和他说的“大约 10 万倍”一致。）他说这些数字可能有些夸大，因为 AlphaGo 是和自己早期的 checkpoint 对弈训练的，真实数字大概没那么高。他还说，据他所知到今天还没有人做出不靠测试时搜索、只靠加大模型就超过人类的围棋模型，所有围棋智能体都用测试时搜索。结论是测试时搜索能带来巨大收益。当然，围棋、扑克这类游戏有完美的验证器和定义清楚的搜索空间。
+        </p>
+        <h3>语言里也成立，但有条件</h3>
+        <p>
+            在更开放的语言任务里是否成立？他说成立，但有细节。Charlie Snell 等人的论文表明，在 FLOPs 相同的比较下，计算最优的测试时扩展胜过一个大约大 14 倍的模型。也就是说，同样的计算预算，往往更好的做法是训练一个小模型、让它推理时多想，而不是训练一个更大的模型。
+        </p>
+        <p>
+            他们的机制是：用一个学到的验证器（verifier，判断答案好坏的模型）监督模型自己的失败尝试，让模型学会在之前错误答案的基础上给出更好的答案；测试时生成多个答案，再用验证器选最好的。他说这里的“思考”有点像在奖励信号引导下，在模型自己的输出分布上搜索。
+        </p>
+        <p>
+            论文里有一张图，在难题上结论反过来了：绿色是简单题，蓝色是中等题，橙色是难题。对难题，有些情况下比直接预训练一个更大的模型最多差 33.7%。直觉是，测试时算力放大的是模型已经知道的东西，如果正确答案根本不在模型自己的分布里，多少搜索都找不回来。
+        </p>
+        <h3>理论解释</h3>
+        <p>
+            他推荐 Li 等人的一篇论文，给了一个理论回答：任何能在 $T$ 个计算步骤内解决的问题，都可以由一个常数大小的 Transformer 通过生成 $O(T)$ 个推理 token 解决。直觉是 Transformer 每次前向传播的计算深度是固定的，受层数限制，一次前向只能执行常数个串行步骤；但通过自回归生成中间 token，模型可以在测试时展开更多计算。不用推理 token，解一个需要 $T$ 个串行步骤的问题就需要大得多的模型；用推理 token，常数大小的模型想得更久就能解。他说这是前面第三个假设（思考 token）在形式上的对应。
+        </p>
+        <h3>思维链的来历</h3>
+        <p>
+            原始的思维链论文很简单：不让模型直接输出答案，而是给它看几个由人写出推理步骤的例子，模型就学会对新问题也这样做。但有个限制：思维链提示在小模型上效果不好。论文里的缩放曲线显示，小模型用思维链反而更差，大约到 1000 亿参数附近突然变好，有时还超过之前最好的监督方法。所以推理是涌现的，需要足够大、足够强的基础模型。现在也可以蒸馏到小模型里，但一般需要强基础模型推理才会出现。
+        </p>
+        <p>
+            原始形式就是少样本的上下文学习：手写几个带推理过程的例子放在提示前面，让模型推广到新问题。这有局限：对提示敏感、脆弱，放什么例子会得到不同甚至差别很大的结果；需要人工挑例子；很可能推广不到所给例子和领域之外。于是问题变成：能不能训练模型去推理，而不只是用人写的提示把推理引出来？
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 用强化学习让推理涌现</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=2298s" target="_blank">0:38:18</a>–0:46:39</em></p>
+        <h3>DeepSeek-R1 的思考过程</h3>
+        <p>
+            他用 DeepSeek 论文里的例子对比：上面是 GPT-4 那种干净、结构化、按提示模板走的思维链；下面是 DeepSeek-R1 的思考过程，会怀疑自己，考虑别的解释，甚至琢磨闰年。他说这可能有点乱，但这就是重点：这是一个在可验证结果上通过强化学习学会推理的模型，不是在模仿人写的例子，所以它的思考过程不一定和人一样。
+        </p>
+        <h3>GRPO</h3>
+        <p>
+            怎样训练模型推理？答案是强化学习，现在很流行的是 GRPO（Group Relative Policy Optimization）。它和几周前讲过的 PPO 很接近。把 PPO 用到语言模型上的一大难点是评价器（critic），也就是价值函数，又贵又难训：需要一个单独的网络，为每一种可能的 token 序列估计期望回报。GRPO 去掉了学出来的价值函数：对一个问题采样一组 rollout，然后相对于这一组计算优势。每个样本的优势就是它的奖励减去组内均值，再除以组内标准差：
+        </p>
+        $$\hat{A}_i = \frac{r_i - \operatorname{mean}(r_1, \dots, r_G)}{\operatorname{std}(r_1, \dots, r_G)}.$$
+        <p>
+            模型通过把自己的输出互相比较来学习。目标函数里有很多 PPO 里见过的项。按 GRPO 论文的标准写法（他在幻灯片上展示，口头只说了和 PPO 相似），目标是
+        </p>
+        $$J(\theta) = \mathbb{E}\left[\frac{1}{G}\sum_{i=1}^{G} \min\Big(\rho_i \hat{A}_i,\; \operatorname{clip}(\rho_i, 1-\epsilon, 1+\epsilon)\,\hat{A}_i\Big) - \beta\, D_{\mathrm{KL}}\big(\pi_\theta \,\|\, \pi_{\text{ref}}\big)\right], \quad \rho_i = \frac{\pi_\theta(o_i \mid q)}{\pi_{\theta_{\text{old}}}(o_i \mid q)}.$$
+        <p>
+            他说关键在 GRPO 里没有的东西：没有人工标注，没有奖励模型，没有价值函数。只用二元的可验证答案，比如数学题对不对，推理就涌现了，因为持续拿到更高奖励、持续答对的唯一办法就是学会认真思考问题。
+        </p>
+        <h3>为什么以前不行</h3>
+        <p>
+            大家在 LLM 上做 RL 已经很多年了，为什么以前没成功？他说社区现在大致接受的答案是：需要一个足够强的基础模型，能在难题上偶尔给出正确答案。如果基础模型太弱，从来产生不了正确的 rollout，就没有东西可以强化。现代 LLM 的变化是，大概在过去一年半左右，它们跨过了能偶尔自己解出难题的门槛，之后 RL 就能接手，系统地放大这种能力。
+        </p>
+        <h3>“wait” 的出现</h3>
+        <p>
+            他认为 DeepSeek 论文里最有意思的一张图显示了推理在训练中怎样出现，完全来自二元正确性奖励。没人告诉模型要说 “wait”，也没人标注哪些推理好、哪些不好。训练前期大约 6000 步之前，模型从不说 “wait”，只是想把答案做对；某个时候它发现停下来重新考虑能提高奖励，“让我们再想想”这类反思性语言的频率就猛涨。模型能自己发现这一点，是因为它有足够强的先验去探索推理策略，而不只是套答案模式。在弱基础模型上，RL 永远过不了第零步，没有好的 rollout 可强化就发现不了任何东西。他认为这是最有说服力的展示之一：强化学习能做到监督学习根本做不到的事，发现没人明确规定过的推理策略。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 视觉推理和幻觉问题</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=2799s" target="_blank">0:46:39</a>–0:51:17</em></p>
+        <h3>Visual-RFT</h3>
+        <p>
+            RL 推理在语言和数学上效果很好，能迁移到视觉吗？他说能，过去一年有很多类似的论文。据他所知 Visual-RFT 是最早的之一，基本就是把 GRPO 用到视觉任务上，只是验证器从数学判分换成了 IoU（intersection over union，预测边界框和真实边界框的交集面积除以并集面积）。模型先在思考块里推理，比如“门在右边，靠近顶部”，再预测边界框，通过这种方式学到更好的推理带来更好的定位，并被强化。
+        </p>
+        <p>
+            他说要点是 GRPO 框架完全不关心验证器是什么，只要有可验证的奖励就能用 RL 训推理。除了 IoU，计算机视觉社区还在用很多其他几何指标，通过 RL 改进 VLM 的定位能力。
+        </p>
+        <h3>只奖励答案的失败模式</h3>
+        <p>
+            把 GRPO 用到视觉这类多模态场景时有一个重要的失败模式：原版 GRPO 只奖励最终答案，推理过程对验证器完全不可见。在数学里问题不大，因为推理错了很难得到正确答案。但在视觉任务里，幻觉推理和正确答案并不互斥：模型可以在思考块里描述一个完全幻觉出来的场景，仍然凭运气或直接从图像做模式匹配，预测出正确的边界框。
+        </p>
+        <h3>Argos</h3>
+        <p>
+            他们在 Microsoft 做的 Argos 想解决这个问题：不只奖励最终答案，也奖励中间推理步骤。做法是按样本自适应地选择不同的验证器（比如不同的基础模型），在 RL 中同时评估最终答案的准确性、相关物体在单张图像或跨视频中的时空定位，以及推理本身的质量。比如可以检查边界框在整段视频里是否一直定位正确，以此奖励那些有依据、正确的推理。这样模型就没法靠幻觉推理蒙到正确答案，因为中间推理在每一步都被检查和奖励，包括视频里的时间定位。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 回到机器人，以及四个要点</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=3077s" target="_blank">0:51:17</a>–0:55:41</em></p>
+        <h3>两层结构</h3>
+        <p>
+            回到具身智能和机器人。他们在这项工作里观察到，测试时推理在高层规划任务上有很大收益，比如 ALFRED 这类仿真任务；在最难的任务上，这种方法比监督思维链模型好 3 到 4 倍。也就是说，通过强化学习学会推理的模型能泛化到难题上，只模仿推理轨迹的模型做不到。
+        </p>
+        <p>
+            但这是高层规划，比如导航。低层的连续控制还是问题：连续动作预测时没法在每一步都生成完整推理链。他们的做法是按 ECoT-Lite 的配方，在 VLA 训练时把推理内化，推理时去掉。他说正在形成的图景是两层结构：高层用 RL 训练的推理做规划和任务分解，低层用 ECoT-Lite 式的推理内化做快速反应的控制。
+        </p>
+        <h3>四个要点</h3>
+        <ol>
+            <li>测试时算力是一条新的扩展轴，在很多情况下比扩展预训练更高效。</li>
+            <li>对连续控制，推理成本不必在推理时付：用推理训练、内化，部署时去掉。重要的是表示，不一定是测试时的 token。</li>
+            <li>RL 能让推理涌现，原因不在于你告诉模型这样做，在于很多情况下推理就是最大化奖励的最好策略。他说这比用监督学习模仿人的思维强大得多。</li>
+            <li>对多模态智能体，验证推理过程和验证答案或结果一样重要。只奖励结果，可能会得到幻觉。</li>
+        </ol>
+        <p>
+            他说这四点合起来是 AI 和机器人学习现在最令人兴奋的研究前沿之一；怎样把它们放进一个能推理、能适应、能改进的机器人策略里，还是开放问题。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“so what is missing I think is intelligent reasoning.”<br>我认为缺的是智能的推理。· <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=47s" target="_blank">0:00:47</a></li>
+            <li>“the key intuition here is that reasoning is compositional.”<br>关键的直觉是，推理是组合式的。· <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=191s" target="_blank">0:03:11</a></li>
+            <li>“in the same scientific rigor we apply when, experiments fail, I believe we should also apply when, things succeed.”<br>实验失败时我们用的那种科学严谨，我认为在事情成功时也应该用上。· <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=968s" target="_blank">0:16:08</a></li>
+            <li>“test time compute amplifies, in essence, what the model already knows.”<br>测试时算力放大的，基本上是模型已经知道的东西。· <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=1944s" target="_blank">0:32:24</a></li>
+            <li>“if your base model is too weak to ever produce a correct rollout, then there is really nothing to reinforce.”<br>如果基础模型弱到从来产生不了正确的 rollout，就没有东西可以强化。· <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=2575s" target="_blank">0:42:55</a></li>
+            <li>“in vision tasks hallucinated reasonings and correct answers are unfortunately not mutually exclusive.”<br>在视觉任务里，幻觉推理和正确答案不幸并不互斥。· <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=2917s" target="_blank">0:48:37</a></li>
+            <li>“The representations are what matter, not like necessarily the tokens at test time.”<br>重要的是表示，不一定是测试时的 token。· <a href="https://www.youtube.com/watch?v=CxhrjQuGEuE&t=3208s" target="_blank">0:53:28</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>ETH Zürich Robot Learning 2026 · Lecture 10: Embodied Reasoning and Test-time Scaling · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模仿学习 | ETH Robot Learning 2026 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="03_嘉宾_Abhishek_Gupta_低成本仿真.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">ETH Robot Learning 目录</a> · 04</span>
+    <span><a href="05_嘉宾_Danfei_Xu_人类数据.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 3 讲：模仿学习</h1>
+        <p class="subtitle">行为克隆的做法和它为什么会失败：分布偏移和 $\epsilon T^2$ 误差上界、DAgger 和人工接管、非马尔可夫行为与因果混淆、多模态动作的几种表示（混合高斯、离散化、扩散、隐变量），最后用 play 数据和隐空间计划做目标条件模仿</p>
+        <div class="author-meta">
+            主讲：Oier Mees（ETH Zürich / Microsoft）<br>
+            课程：Robot Learning: From Fundamentals to Foundation Models（ETH Zürich 263-5911，Week 3，2026 年 3 月 2 日）· 时长：51 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ" target="_blank">课堂录像</a>（ETH Zürich 公开，2026 年春季，本文依据录像字幕整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            上一讲定义了从观测到动作的记号，区分了观测（observation）和状态（state），以及部分可观测和完全可观测的策略。这一讲讲训练这种策略的第一种办法：模仿学习（imitation learning），也就是让策略模仿专家的轨迹。Oier 从最简单的行为克隆讲起，然后用大部分时间讲它会在哪些地方失败、各有什么补救办法，最后用他读博时做的 play 数据工作把这些办法串起来。后面的强化学习（第 4、5 讲）和生成模型（第 6 讲）会接着展开这里提到的工具，扩散模型在这一讲只给了一分钟版本。
+        </p>
+        <p>
+            本周课上的论文讨论（课程页列出）是 Causal Confusion in Imitation Learning（de Haan et al., 2019）、The Surprising Effectiveness of Representation Learning for Visual Imitation（Pari et al., 2021）和 Transporter Networks: Rearranging the Visual World for Robotic Manipulation（Zeng et al., 2020）。同一周的嘉宾讲座是 Danfei Xu 讲人类数据。
+        </p>
+        <ol>
+            <li><a href="#t01">课程安排</a> · <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">行为克隆</a> · <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=145s" target="_blank">0:02:25</a></li>
+            <li><a href="#t03">IID 假设不成立和分布偏移</a> · <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=343s" target="_blank">0:05:43</a></li>
+            <li><a href="#t04">行为克隆为什么还能用：三摄像头的技巧</a> · <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=539s" target="_blank">0:08:59</a></li>
+            <li><a href="#t05">误差上界：为什么是 εT²</a> · <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=875s" target="_blank">0:14:35</a></li>
+            <li><a href="#t06">DAgger 和人工接管</a> · <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=1118s" target="_blank">0:18:38</a></li>
+            <li><a href="#t07">让机器人自己判断何时求助</a> · <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=1314s" target="_blank">0:21:54</a></li>
+            <li><a href="#t08">非马尔可夫行为和因果混淆</a> · <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=1506s" target="_blank">0:25:06</a></li>
+            <li><a href="#t09">多模态行为：混合高斯和离散化</a> · <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=1889s" target="_blank">0:31:29</a></li>
+            <li><a href="#t10">扩散模型和隐变量模型</a> · <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=2226s" target="_blank">0:37:06</a></li>
+            <li><a href="#t11">任务条件和目标条件</a> · <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=2417s" target="_blank">0:40:17</a></li>
+            <li><a href="#t12">案例：从 play 数据学隐空间计划</a> · <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=2563s" target="_blank">0:42:43</a></li>
+            <li><a href="#t13">变分下界和小结</a> · <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=2854s" target="_blank">0:47:34</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 课程安排</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=0s" target="_blank">0:00:00</a>–0:02:25</em></p>
+        <p>
+            开头几分钟是课程事务。根据上周的反馈，周一的论文报告从每次三篇改成两篇，其余挪到周四的讨论课。第一次作业大约 3 天后截止，第二次作业上周已发布，3 月 12 日截止。他还提醒，在自动评分器上很容易看出谁大量用 AI 做题，比如前几题花了好几个小时、后几题 10 分钟就做完，希望大家尽量自己做。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 行为克隆</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=145s" target="_blank">0:02:25</a>–0:05:43</em></p>
+        <h3>模仿学习的设定</h3>
+        <p>
+            模仿学习通常假设手上有一个专家轨迹数据集。这些轨迹由状态和动作组成，是有目的的动作序列，没有随机乱动，例如人开车，或者人遥操作（teleoperation，人用操纵设备远程控制机器人）一只机械臂，成功完成某个目标。还假设这些示范是最优的，或者至少展示了达成目标的最优行为。
+        </p>
+        <p>
+            目标是学一个策略 $\pi_\theta$ 去模仿这些行为。换句话说，要找到神经网络的参数 $\theta$，让机器人看到状态 $s$ 时输出的动作尽量接近专家会做的动作。他用的例子是雪天开车，策略要模仿人类司机在这种情况下的动作。
+        </p>
+        <h3>行为克隆的损失</h3>
+        <p>
+            最直接的实现叫行为克隆（behavior cloning，BC）。他说很多人可能已经熟悉，做法很简单：从专家提供的最优状态动作轨迹出发，对确定性策略（deterministic policy，同一个状态总输出同一个动作），把它当成一个回归问题，最小化专家动作和策略在同一状态下预测的动作之间的差。形式上可以用整个数据集上的均方误差：
+        </p>
+        $$\mathcal{D} = \{(s_i, a_i)\}_{i=1}^{N}, \qquad \min_\theta \; \frac{1}{N}\sum_{i=1}^{N} \big\| \pi_\theta(s_i) - a_i \big\|^2 .$$
+        <p>
+            训练时采样一个 batch，前向传播得到预测动作，算损失，反向传播到网络参数，然后用你喜欢的优化器（比如随机梯度下降）迭代。他说这是这个算法的最朴素版本，接下来要看它在什么时候失败。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. IID 假设不成立和分布偏移</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=343s" target="_blank">0:05:43</a>–0:08:59</em></p>
+        <h3>和监督学习的区别</h3>
+        <p>
+            他说很多问题来自行为克隆和监督学习的差别，前几讲已经提过一点，其中一个是 IID 假设。监督学习假设输入独立同分布（independent and identically distributed）。他的例子是猫图分类：你对图 A 的预测不会改变图 B 的内容。行为克隆里这个假设不成立。
+        </p>
+        <h3>误差会累积</h3>
+        <p>
+            他画了一条要模仿的轨迹，四个状态由动作连接起来。策略从第一个状态出发，犯了一个很小的错误，原因可能是训练没完全收敛，也可能是别的。这个小错误把它带到一个接近 $s_2$ 但不完全相同的状态，稍微偏离了轨道。
+        </p>
+        <p>
+            这个新状态训练时不一定见过，于是下一步的预测很可能也会出错，因为策略“没见过这个状态”。于是误差开始累积（compounding errors），越来越偏离原来的最优轨迹。
+        </p>
+        <p>
+            他强调的一点是：行为克隆里，策略访问到的状态不一定和专家访问过的状态相同。训练策略用的数据集和机器人部署时遇到的测试情况之间，常常存在分布偏移（distribution shift，也叫 covariate shift，训练数据的输入分布和实际运行时的输入分布不一致）。他说这很好理解，可能是光照变化这种小事；以自动驾驶为例，训练数据全是白天采的，部署时却在夜里开；或者天气不同让观测看起来不一样。这些都会影响策略的表现，让它逐渐偏离。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 行为克隆为什么还能用：三摄像头的技巧</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=539s" target="_blank">0:08:59</a>–0:14:35</em></p>
+        <h3>NVIDIA 2016 的端到端驾驶</h3>
+        <p>
+            既然有分布偏移和误差累积，自然要问：行为克隆在真实世界里到底管不管用？他的回答是能用，而且确实在用。他放了 NVIDIA 2016 年的一段自动驾驶视频：训练一个深度神经网络，把单个前向摄像头的原始像素直接映射成方向盘转角。视频里有一句“look, no hands”。他说一开始效果并不好，后来采了更多数据，才让行为克隆跑起来。这是最早在真实世界部署的端到端驾驶原型之一。
+        </p>
+        <h3>车道居中的数据问题</h3>
+        <p>
+            为什么能成功？他用汽车这个简单例子讲了一个技巧。人开车时一般尽量待在车道中央，不会乱拐弯或漂移，所以大部分训练数据都是直着开。
+        </p>
+        <p>
+            有了漂移误差，策略可能因为某个预测不好，开始慢慢偏向路边。这对汽车很危险。问题又被放大：这是一个从没见过的状态，因为训练数据全是直行，策略看到这种画面完全不知道该怎么办。而让人类司机采集这种危险情况的数据也很难，没人愿意把车往路边撞来教模型怎么办。所以这个状态很难出现在训练数据里，也很难从中恢复。
+        </p>
+        <h3>用侧面摄像头造“虚拟动作”</h3>
+        <p>
+            NVIDIA 那篇论文的办法是用三个摄像头代替一个：一个中间的，两边各一个。技巧很简单：用侧面摄像头的画面来扩充数据集。朝左看的摄像头，标签一律标成“向右打方向”；朝右看的摄像头，一律标成“向左打方向”。这相当于造出了虚拟动作。
+        </p>
+        <p>
+            这样就让模型学到了一个恢复策略（recovery policy，偏离之后把自己拉回正轨的行为），而采集数据时人类司机从来不用真的撞车。他说这是一个很好的技巧，用假数据来模拟自我恢复的行为。
+        </p>
+        <h3>苏黎世的无人机穿林</h3>
+        <p>
+            他说这个技巧在苏黎世也用过，他忘了在幻灯片上写论文名和年份，大约是同一时期。（背景补充：一般指 Giusti 等人 2016 年用这套方法让四旋翼沿森林小路飞行的工作。）用的场景是四旋翼无人机穿过茂密的森林。这和开车类似，飞行的数据很难采，因为人类天生不会飞。
+        </p>
+        <p>
+            他们的做法是让人戴着一个头部相机架在森林里走，相当于三个 GoPro。然后用同样的方式得到标签：中间相机标“直飞”，相机朝右看就标“往左飞”，以此类推。视频里展示了相机装置和三个相机各自看到的画面，加上这些虚拟标签后，学出了在这种地形里导航的策略，动作就是直走、右转、左转三种。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 误差上界：为什么是 εT²</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=875s" target="_blank">0:14:35</a>–0:18:38</em></p>
+        <h3>设定</h3>
+        <p>
+            知道了行为克隆可能很差，下一步是量化它能差到什么程度。可以推出一个正式的性能上界。设时间跨度为 $T$，也就是机器人完成任务需要的步数；学到的策略 $\pi_\theta$ 在任意一步犯错的概率是一个小数 $\epsilon$。
+        </p>
+        <p>
+            他说在标准监督学习里，你可能会以为误差是线性的，类似 $\epsilon T$，但行为克隆不是这样。定义一个代价函数：动作和专家一致时代价为 0，不一致时为 1：
+        </p>
+        $$c(s, a) = \begin{cases} 0, & a = \pi^*(s) \\ 1, & \text{otherwise} \end{cases}$$
+        <p>
+            并假设在训练状态上犯错的概率不超过 $\epsilon$：
+        </p>
+        $$\pi_\theta\big(a \neq \pi^*(s) \mid s\big) \le \epsilon, \quad s \sim p_{\text{train}}(s).$$
+        <h3>走钢丝的例子</h3>
+        <p>
+            问题是一旦犯了错，就进入了没见过的状态。他用的类比是走钢丝：要走过钢丝只有一串很特定的动作，一旦偏出去掉下来就很难恢复。他说倒不至于摔死，可以有安全绳之类的，但你手上没有任何示范数据告诉你怎样回到钢丝上。所以在没见过的状态上，犯错的概率没有上界。
+        </p>
+        <h3>二次增长</h3>
+        <p>
+            幻灯片上的动画总结了推导：如果第 1 步就犯错，剩下的 $T$ 步全都要付代价；如果第一次犯错在第 2 步，要付 $T-1$ 步的代价；依此类推。把这些概率加起来，期望总误差随 $T$ 二次增长，没有停在线性：
+        </p>
+        $$\mathbb{E}\Big[\sum_{t=1}^{T} c(s_t, a_t)\Big] \le \epsilon T + (1-\epsilon)\,\epsilon\,(T-1) + \cdots = O(\epsilon T^2).$$
+        <p>
+            他说这很糟。这不等于行为克隆本身就不行，但我们可以界定它的表现：从数学上看，一旦开始偏离专家状态的分布，行为克隆的误差随步数是二次的，不是线性的。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. DAgger 和人工接管</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=1118s" target="_blank">0:18:38</a>–0:21:54</em></p>
+        <h3>DAgger：数据集聚合</h3>
+        <p>
+            既然问题的根源是专家访问的状态和策略访问的状态不同，第一个办法就是让它们相同或相近，把这个分布偏移合上。这就引出 DAgger（Dataset Aggregation，数据集聚合）。核心思路是在训练中做在线 rollout（让当前策略实际跑一遍），让专家分布和策略分布收敛到一起。步骤是：
+        </p>
+        <ol>
+            <li>在真实世界里运行当前策略，看它访问了哪些状态。</li>
+            <li>请人或专家给这些状态打标签：在这个状态下，最优动作是什么。</li>
+            <li>旧数据不扔，把新的纠正性状态动作对加进已有数据集 $\mathcal{D}$。</li>
+            <li>在扩充后的数据集上更新策略，然后重复。</li>
+        </ol>
+        $$\mathcal{D} \leftarrow \mathcal{D} \cup \{(s, \pi^*(s)) : s \sim p_{\pi_\theta}(s)\}, \qquad \theta \leftarrow \arg\min_\theta \sum_{(s,a)\in\mathcal{D}} \big\|\pi_\theta(s) - a\big\|^2 .$$
+        <p>
+            他说可以从数学上证明，这样会收敛到策略实际看到的状态分布，打破前面的二次误差增长，把上界降到线性。
+        </p>
+        <h3>DAgger 的代价</h3>
+        <p>
+            问题是这个过程里询问人类专家很难、很贵，要花很多时间。还有别的麻烦，比如在电脑上事后标注时，机器人的动作空间可能和人的不一样。
+        </p>
+        <p>
+            他接着说了一个看起来矛盾的结论：这意味着，数据里包含更多错误和恢复的过程时，行为克隆反而效果更好。
+        </p>
+        <h3>人工门控的 DAgger</h3>
+        <p>
+            标准 DAgger 事后标注很贵，几千条轨迹都要标，还可能有离散化误差等问题。于是可以换成另一个版本，叫 human-gated DAgger（人工门控的 DAgger），也可以叫在线干预（online intervention）。做法是让机器人在人的监督下在线运行，不再是机器人先采数据、人再事后标注。机器人开始犯错时，人接管过来，给出剩下部分任务的局部示范。
+        </p>
+        <p>
+            他说这更自然也更有效，因为人只在必要时接手，不用标注整条轨迹。他的类比是学车：教练坐在旁边，只在你快撞上路沿时才抓方向盘，不会全程替你开。
+        </p>
+        <p>
+            但这又带来一个新问题：怎么知道什么时候需要干预？他说这个问题微妙，也有难度，特别是你不希望有人一直盯着机器人、决定何时介入，那样也很贵。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 让机器人自己判断何时求助</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=1314s" target="_blank">0:21:54</a>–0:25:06</em></p>
+        <h3>识别自己的不确定性</h3>
+        <p>
+            能不能不靠人类监督者？让机器人学会识别自己的不确定性，在“撞车”之前先问人。他举了一个自动化干预检测的例子，是他读博时的一项较早的工作。
+        </p>
+        <h3>语言指令的歧义</h3>
+        <p>
+            这项工作看的是自然语言指令里的歧义。比如人让机器人“拿桌上那个黄色的东西”，但桌上有好几个黄色物体。理想情况下，机器人应该能识别出指令有歧义，需要反问人来消歧（disambiguation）。
+        </p>
+        <p>
+            怎样检测歧义？他说不展开细节，大意是利用训练理解模型（comprehension model）时用的最大间隔排序损失（max-margin ranking loss），训练数据是物体和语言描述的配对。训练时这个损失保证：每一对正确的句子和物体，得分（这里是一种距离）都比任何错误组合小，并且至少小一个间隔 $M_1$。这样到测试时，如果有多个物体落在这个阈值之内，就把它们都当作可能的目标。
+        </p>
+        <p>
+            除了理解模型，还可以有一个生成模型或生成头，能给这些候选物体生成指代表达（referring expression，能唯一指出某个物体的描述，比如“中间那根香蕉”）。检测到可能有几个黄色物体时，就为每个候选生成描述，再去问人。
+        </p>
+        <h3>演示</h3>
+        <p>
+            视频里先是“Robot, fetch the red thing”，机器人回答“Fetching. What else do you want?”，接着“place it behind the colored dish”。然后是“fetch the yellow stuff”的例子：桌上有三个黄色物体，机器人生成描述后问“Do you mean the middle banana?”，用户回答是，就是那根香蕉，然后可以接着收拾厨房。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 非马尔可夫行为和因果混淆</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=1506s" target="_blank">0:25:06</a>–0:31:29</em></p>
+        <h3>人的决策依赖历史</h3>
+        <p>
+            分布偏移讲完了，行为克隆失败还有别的原因。第一个是非马尔可夫行为（non-Markovian behavior，当前动作不只取决于当前状态，还取决于过去发生的事）。上一讲说过，策略的动作只以当前状态为条件，实际中是以当前观测为条件：
+        </p>
+        $$\pi_\theta(a_t \mid o_t) \quad \text{vs.} \quad \pi_\theta(a_t \mid o_1, \ldots, o_t).$$
+        <p>
+            但人选动作并不总是只看当前状态。同一个场景看到两次，我们不一定做出同样的动作。原因有很多：我们会依赖上下文或历史；情绪状态会影响行为；还有意图，以及过去学到的东西。
+        </p>
+        <p>
+            他的例子是开车看到骑车的人。你会追踪这个人过去 5 秒怎么动，预测他接下来怎么走，这又影响你怎么开。如果机器人只看到一张骑车人的图，它选出的动作会和看过 5 秒运动的情况不同。
+        </p>
+        <h3>人有特权信息</h3>
+        <p>
+            另一个问题是人有时有特权信息（privileged information）。他说遥操作机器人时这一点很明显。他放了一段他读博时遥操作机器人的视频：他直接看着机器人在做什么，而策略实际看到的只是相机画面。相机画面里遮挡多得多，人还能走动、看到更多。这样做出的决策，和只看策略那几个相机画面来遥操作时的决策不同。所以他们遥操作时也可能用最近 $n$ 帧画面。
+        </p>
+        <h3>加历史</h3>
+        <p>
+            示范如果因为历史而是非马尔可夫的，就有问题：机器人两次看到完全一样的视觉状态，却看到专家做了两个不同的动作，它缺少历史上下文，不明白为什么。
+        </p>
+        <p>
+            第一个想法很简单：给策略加上历史。输入从当前时刻的一帧换成最近 5 帧或 10 帧，用你喜欢的序列模型，比如 LSTM、RNN、Transformer，处理最近 $n$ 帧，然后同样用行为克隆训练。
+        </p>
+        <h3>因果混淆</h3>
+        <p>
+            他说这看起来是个好主意，但除了让模型计算更贵，加历史并不总让效果变好，有时反而会差很多。这就是因果混淆（causal confusion），带历史做模仿学习时一个很有名的问题，本周讨论的论文之一就是讲这个。
+        </p>
+        <p>
+            问题在于：给一个高容量模型完整的观测、传感器和动作历史，它往往会学到虚假相关（spurious correlation）。它在找最小化损失的最简单路径，不一定能找出正确的因果路径。
+        </p>
+        <p>
+            他的例子是：示范里每次机器人开抽屉，夹爪抓住把手时传感器都会记录到一个恰好 10 牛的力峰值。模型看到这一点会想：“我不用看抽屉的视觉状态或手臂的位置，只要夹爪力的历史里出现这个 10 牛峰值，就触发拉的动作。”部署到真机上，夹爪稍微打滑，或者有点灰，传感器只读到 2 牛。模型就糊涂了，因为它以为是传感器读数导致了开抽屉的动作，而真正的原因是把手被抓住这一视觉状态。结果拉的指令永远不会被触发。
+        </p>
+        <p>
+            他说这是用历史训练策略时的挑战之一，要做很多正则化，并检查模型确实还在关注正确的视觉状态，学到真正的因果关系。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 多模态行为：混合高斯和离散化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=1889s" target="_blank">0:31:29</a>–0:37:06</em></p>
+        <h3>同一件事有无数种做法</h3>
+        <p>
+            接下来是这一讲剩下大部分时间要讲的问题：即使数据完美，还有一个大问题是数据里的多模态行为（multimodal behavior，同一个状态下有多种不同但都正确的动作，动作分布有多个峰）。
+        </p>
+        <p>
+            他用第一讲提过的关抽屉为例。一方面，如果机器人关节有冗余，末端执行器（end effector，机械臂最末端的夹爪或工具）的同一个姿态可以对应多种关节配置。另一方面，任务本身也有无数种完成方式：侧面抓，抓住把手或不抓，从上往下，90 度，以及中间的任何角度，甚至用手肘推进去。人在采集数据时会自然地展示所有这些行为。
+        </p>
+        <p>
+            这就有了随机性和专家之间的不一致：达成同一目标有多种方式，原则上都有效，因为成功率一样。
+        </p>
+        <h3>均方误差会取平均</h3>
+        <p>
+            这对行为克隆为什么是问题？如果用第一个算法里的均方误差损失，数学上会迫使模型找所有示范的平均值。他的例子是滑雪板：一个专家示范从树左边绕过去，另一个从右边绕过去，两者的平均就是笔直撞上那棵树。
+        </p>
+        <p>
+            作为一行说明：对均方误差，最优的确定性预测是条件均值 $\pi_\theta(s) = \mathbb{E}[a \mid s]$，动作分布有两个峰时，均值可能落在两个峰之间。
+        </p>
+        <p>
+            既然回归到单个点不行，因为平均值和专家数据不一致，就需要一个能表示多个有效动作峰（mode）的策略。
+        </p>
+        <h3>混合高斯</h3>
+        <p>
+            第一个想法是用混合高斯分布（mixture of Gaussians），用一组均值、协方差和权重来表示：
+        </p>
+        $$\pi_\theta(a \mid s) = \sum_{k=1}^{K} w_k(s)\, \mathcal{N}\big(a;\, \mu_k(s),\, \Sigma_k(s)\big), \qquad \sum_k w_k = 1 .$$
+        <p>
+            好处是可以建模多个高斯，也就是任何能用混合高斯表示的分布。要注意的是，通常需要事先定好模式数 $K$，比如 10 个。但如果要控制人形机器人，可能要上千个模式，事情就开始变得棘手。
+        </p>
+        <h3>离散化</h3>
+        <p>
+            如果想表示任意复杂的分布、又不受这个限制呢？一个强大的办法是离散化（discretization）：把连续的动作空间切成网格里的格子（bin），当作分类问题来做。离散化能很好地表示多模态分布，比如前面无人机或汽车的情况。
+        </p>
+        <p>
+            但它很难直接用到高维空间，因为需要的格子数随维度指数增长：每维 $B$ 个格子、$d$ 维动作，就是 $B^d$ 个类别。
+        </p>
+        <h3>逐维自回归离散化</h3>
+        <p>
+            一个解决办法是逐维自回归离散化（autoregressive per-dimension discretization），需要的输出数随维度线性增长。可以用序列模型，比如自回归 Transformer，来分解这个分布。他说最早的一批 VLA（vision-language-action model，视觉语言动作模型，把视觉语言大模型改造成直接输出机器人动作的模型）就是这么做的。
+        </p>
+        <p>
+            做法是自回归地预测每一个动作维度，按链式法则，最后得到的就是给定状态下动作的概率：
+        </p>
+        $$p(a \mid s) = \prod_{i=1}^{d} p\big(a_i \mid s, a_1, \ldots, a_{i-1}\big).$$
+        <p>
+            比如 7 自由度的机械臂，就依次预测 7 个维度。他说这很好，但会迫使你用大的自回归模型，比如 LLM 或 VLM，作为骨干，计算上可能更贵。（有学生想提问，他说问题留到后面，以免超时。）
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 扩散模型和隐变量模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=2226s" target="_blank">0:37:06</a>–0:40:17</em></p>
+        <h3>扩散：一分钟版本</h3>
+        <p>
+            另一种处理多模态的流行办法来自生成模型，特别是扩散模型（diffusion model）。他说大家可能在生成艺术里见过它，模型把随机噪声变成高保真图像。第 6 周会细讲，这里是“一分钟版本”。过程分两部分：
+        </p>
+        <ul>
+            <li>前向过程（forward process）：拿一个干净样本，比如一张猫的图，反复加高斯噪声，直到信息全部丢失，只剩静态噪声。</li>
+            <li>生成的反向过程（backward process）：训练一个神经网络一步一步去噪，学会从噪声恢复数据。</li>
+        </ul>
+        <p>
+            相当于人为造一个训练集：生成带有不同噪声水平的图像，训练去噪网络预测更干净的版本。他特别指出，去噪时网络其实预测的是噪声本身，没有直接预测完整图像，再从当前样本里减掉，迭代地恢复出干净信号。按标准写法（DDPM），前向一步和训练目标是：
+        </p>
+        $$q(x_t \mid x_{t-1}) = \mathcal{N}\big(x_t;\, \sqrt{1-\beta_t}\, x_{t-1},\, \beta_t I\big), \qquad \mathcal{L} = \mathbb{E}_{x_0, \epsilon, t}\big[\| \epsilon - \epsilon_\theta(x_t, t) \|^2\big].$$
+        <p>
+            用到策略上时，$x$ 就是动作，网络还要以观测为条件。他总结说，自回归离散化和扩散都用了某种迭代过程，一个在动作维度上迭代，一个在去噪步骤上迭代。
+        </p>
+        <h3>隐变量模型</h3>
+        <p>
+            处理多模态的最后一类工具是隐变量模型（latent variable model）。他说只要网络够大，原则上可以表示任何分布。在隐变量模型里，网络输出仍然是一个高斯，但除了图像之外，它还多接收一个输入，从先验分布里采样，比如零均值、单位方差的高斯。这相当于给网络一个种子，不同的种子会让网络预测出不同的模式、不同的行为：
+        </p>
+        $$z \sim p(z) = \mathcal{N}(0, I), \qquad a \sim \pi_\theta(a \mid s, z).$$
+        <p>
+            当然，不能随便输入随机数就得到想要的行为，需要训练模型把输入的隐变量和想要的模式联系起来。还是绕树的例子，有往左和往右两个模式，就让解码器以隐变量为条件，告诉它这次是左还是右。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 任务条件和目标条件</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=2417s" target="_blank">0:40:17</a>–0:42:43</em></p>
+        <h3>隐意图和任务指定的区别</h3>
+        <p>
+            他专门澄清了一个常见混淆：隐意图（latent intent）和任务指定（task specification）的区别。任务条件（task conditioning）是一个监督信号，告诉机器人要执行哪个具体行为，比如开抽屉，它定义的是目标。隐变量表示的是在这个目标之下的风格或模式。即使任务 ID 固定，机器人仍然面对无数种完成方式，就像前面开抽屉的例子。
+        </p>
+        <h3>任务的边界说不清</h3>
+        <p>
+            如果要让策略学多个任务，比如任务是“把推拉门往左推”。他说真实世界里任务成功很难定义。他的例子里机器人把推拉门推到大约一半，这算成功吗？如果在课堂上投票，有人会说够了，有人会说应该推到底。
+        </p>
+        <p>
+            他说这是一个内在的问题：我们倾向于把想要的行为看成一组离散任务，比如推门、开门，但很难画出一个任务从哪里开始、在哪里结束的边界。任务通常由更小的子任务和技能组成，而世界是连续的，不是离散的。原则上我们希望机器人学会环境里所有可用的技能。
+        </p>
+        <h3>目标条件</h3>
+        <p>
+            这就引出把到达目标（goal-reaching）作为目标函数：定义一个策略，能从场景里任何初始状态到达任何想要的目标状态。他对比了几种条件方式：
+        </p>
+        <ul>
+            <li>单任务；</li>
+            <li>带任务 ID 的多任务，任务 ID 可以是 one-hot 编码，也可以是一句自然语言；</li>
+            <li>目标条件（goal-conditioned），以两个状态为条件，初始状态和目标状态，写成 $\pi_\theta(a \mid s, s_g)$。</li>
+        </ul>
+        <p>
+            目标条件的好处是，任务是连续的，状态也是连续的，两者对得上。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 案例：从 play 数据学隐空间计划</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=2563s" target="_blank">0:42:43</a>–0:47:34</em></p>
+        <h3>Play 数据</h3>
+        <p>
+            最后他把前面的东西放在一起，讲一个案例：怎样把处理多模态的隐变量模型和任务无关的控制（task-agnostic control）结合起来。
+        </p>
+        <p>
+            一种办法是用无指向、无结构的 play 数据（play data）：让用户遥操作机器人，但不做任何指定任务，随便玩，采下数据。这种数据的多模态程度很高。它不需要重置，开完抽屉不用把环境恢复原样。它也很容易扩展，因为操作者做的是满足自己好奇心的行为。他说想想看，这和孩子开始学习的方式差不多，他们也是在探索、在和环境玩。
+        </p>
+        <h3>目标重标注</h3>
+        <p>
+            怎样用隐变量模型加目标条件从这种数据里学？先从 play 数据里随机采一个窗口，也就是一段序列。然后用一个目标编码器（goal encoder）编码这个窗口的最后一帧，因为要用目标重标注（goal relabeling，把一段轨迹里实际到达的最后状态当作这段轨迹的“目标”）来学控制。也就是说，随机采一段帧，让模型预测这段序列里采取的一串动作，学会怎样模仿、怎样到达那个目标。
+        </p>
+        <h3>条件变分自编码器</h3>
+        <p>
+            窍门在于怎样处理这种自由形式模仿数据里固有的多模态：连接同一个初始状态和目标状态的有效行为可能有很多很多种。办法是用一个序列到序列的条件变分自编码器（conditional variational autoencoder，CVAE），把这些上下文中的示范自编码到一个隐空间计划（latent plan space）里。结构有三部分：
+        </p>
+        <ul>
+            <li>后验（posterior）：输入采样到的整段序列，识别出实际执行的是哪种行为。</li>
+            <li>先验（prior），也叫计划提议器或计划采样器（plan proposal / plan sampler）：输入初始状态和目标状态，输出连接两者的所有可能行为的分布。</li>
+            <li>动作解码器（action decoder），也就是策略，以隐计划为条件输出动作。</li>
+        </ul>
+        <p>
+            训练时最小化这两个编码器之间的 KL 散度，让先验给 play 里实际执行过的行为分配高概率。测试时扔掉后验，用计划采样器预测多模态的计划。
+        </p>
+        <p>
+            他说窍门在于：把这些短时域的目标图像示范喂给一个简单的最大似然模仿目标，就能以完全自监督的方式从多模态 play 数据里学到任务无关的控制。更重要的一点是，让策略（解码器）以隐计划为条件，就把解码器的容量解放出来，它只需要学单模态的行为，多模态交给了隐变量。
+        </p>
+        <h3>换成语言目标</h3>
+        <p>
+            最后一个补充：能不能对语言目标也这么做？前面用的是示范里的目标图像。他说对语言同样可以高效地做，关键的想法是把视觉目标和自然语言目标的嵌入互换使用。这样控制大部分可以从无标注的视觉 play 数据里自监督地学，减少语言标注的负担。
+        </p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 变分下界和小结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=2854s" target="_blank">0:47:34</a>–0:50:37</em></p>
+        <h3>为什么要用变分下界</h3>
+        <p>
+            他说时间不够展开数学细节，只讲高层思路。训练时我们想最大化专家数据的边际似然，但隐变量 $z$ 是连续的，边际化就算不出来，要对无穷多个可能的计划积分：
+        </p>
+        $$\log p(\tau) = \log \int p(\tau \mid z)\, p(z)\, dz .$$
+        <p>
+            通常的解决办法是标准的变分推断技巧：绕开似然本身，去优化一个替代目标，变分下界（variational lower bound，也叫 ELBO）。它有两项：
+        </p>
+        <ul>
+            <li>重建项：隐计划能多好地解释专家行为。</li>
+            <li>正则项：$z$ 离轨迹上的先验分布有多近。</li>
+        </ul>
+        <p>
+            加入目标条件后，有一个上下文变量包含当前状态 $s_c$ 和目标状态 $s_g$，下界正好对应前面架构里的三个组件：后验、先验和动作解码器：
+        </p>
+        $$\log p(\tau \mid s_c, s_g) \ge \mathbb{E}_{q_\phi(z \mid \tau)}\big[\log \pi_\theta(\tau \mid z, s_c, s_g)\big] - D_{\mathrm{KL}}\big(q_\phi(z \mid \tau)\,\big\|\,p_\psi(z \mid s_c, s_g)\big).$$
+        <p>
+            这里 $q_\phi$ 是后验，$p_\psi$ 是先验（计划采样器），$\pi_\theta$ 是动作解码器。他再次强调，这样把问题分解成隐计划，就解放了解码器的容量，让它只学单模态行为。他顺带说，他读博的很多工作都是用 play 数据和这类隐变量模型，有兴趣可以看幻灯片上列的论文。
+        </p>
+        <h3>小结</h3>
+        <p>
+            他最后回顾了这一讲：最简单形式的模仿学习；怎样用 DAgger 和在线干预让专家访问的状态和策略访问的状态更接近；模仿学习的几个常见坑，包括示范者的非马尔可夫行为和多模态行为，以及缓解它们的一些工具。之后进入学生的论文报告环节，录像到此结束。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“this essentially then tricks the model into learning a recovery policy without ever needing a human driver to actually crash the car during data collection.”<br>这实际上骗模型学会了一个恢复策略，而采集数据时根本不需要人类司机真的去撞车。（NVIDIA 的三摄像头技巧）· <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=733s" target="_blank">0:12:13</a></li>
+            <li>“the expected total error doesn't grow linearly, but it actually grows quadratically.”<br>期望总误差没有线性增长，它是二次增长的。· <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=1022s" target="_blank">0:17:02</a></li>
+            <li>“paradoxically, this means that behavior cloning actually works better if the data, contains more mistakes and recoveries.”<br>看似矛盾的是，数据里包含更多错误和恢复时，行为克隆反而效果更好。· <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=1217s" target="_blank">0:20:17</a></li>
+            <li>“adding history, to your policy doesn't always make things better.”<br>给策略加历史并不总能让效果变好。· <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=1744s" target="_blank">0:29:04</a></li>
+            <li>“the average of those will, you know, be like driving straight into the tree.”<br>这两种示范的平均，就是笔直撞上那棵树。· <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=2032s" target="_blank">0:33:52</a></li>
+            <li>“the world is like not discrete, but it's continuous”<br>世界不是离散的，是连续的。（所以很难划定一个任务的边界）· <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=2515s" target="_blank">0:41:55</a></li>
+            <li>“conditioning the policy or the decoder on the latent plan frees up the capacity of the decoder to learn unimodal behavior”<br>让策略（解码器）以隐计划为条件，就解放了解码器的容量，让它去学单模态行为。· <a href="https://www.youtube.com/watch?v=Ef4R5s1LqoQ&t=2756s" target="_blank">0:45:56</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>ETH Zürich Robot Learning 2026 · Lecture 3: Imitation Learning · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

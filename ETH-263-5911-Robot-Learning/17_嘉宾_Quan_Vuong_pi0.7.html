@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quan Vuong：π0.7，一个模型做到专家水平 | ETH Robot Learning 2026 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="16_通用机器人策略.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">ETH Robot Learning 目录</a> · 17</span>
+    <span><a href="18_具身推理与测试时扩展.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>嘉宾讲座 · Quan Vuong：π0.7，一个模型做到专家水平</h1>
+        <p class="subtitle">Physical Intelligence 怎样让一个预训练 checkpoint 在很多任务上追平甚至超过专门微调的专家策略：元数据让低质量数据变得有用，跨机器人迁移叠衣服，开源模型，真实洗衣店和仓库里的部署，以及为什么现在不做家用机器人</p>
+        <div class="author-meta">
+            主讲：Quan Vuong（Physical Intelligence 联合创始人），ETH Robot Learning 课程嘉宾讲座<br>
+            课程：Robot Learning: From Fundamentals to Foundation Models（ETH Zürich 263-5911，Week 9）· 时长：37 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=pzolgvyWEFY" target="_blank">课堂录像</a>（ETH Zürich 公开，2026 年春季，本文依据录像字幕整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            这是第 9 周的嘉宾讲座，接在 Oier Mees 的“通用机器人策略”那一讲后面。主持人介绍说，Quan Vuong 是 Physical Intelligence（下文简称 Pi）的联合创始人，做跨本体机器人模型的大规模预训练；博士在 UCSD 读，导师是 Henrik Christensen 和 Hao Su；加入 Pi 之前在 Google DeepMind 发起并共同领导了 RT-X 和 Open X-Embodiment 项目。（自动字幕把他的名字识别成了别的写法，这里按课程主页写作 Quan Vuong。）
+        </p>
+        <p>
+            他讲的是 Pi 最近发布的 π0.7。核心问题是：能不能用一个模型在很多任务上都达到很高水平，不用为每个任务单独后训练一个专家模型。他讲了架构、和专家策略的对比、数据质量实验、跨机器人迁移、开源和与合作公司的真实部署，后面一半时间是问答，问到了多指灵巧手、数据工厂、π0.6 到 π0.7 的差别、VLA 和世界动作模型的取舍，以及为什么现在不做家用机器人。本周课上讨论的论文之一就是 π*0.6（“a VLA That Learns From Experience”）。
+        </p>
+        <ol>
+            <li><a href="#t01">为什么要一个模型做好很多任务</a> · <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">从 RL token 的图说起，以及 π0.7 的结构</a> · <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=223s" target="_blank">0:03:43</a></li>
+            <li><a href="#t03">一个 checkpoint 对比专家策略</a> · <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=440s" target="_blank">0:07:20</a></li>
+            <li><a href="#t04">数据质量实验：元数据的作用</a> · <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=634s" target="_blank">0:10:34</a></li>
+            <li><a href="#t05">跨机器人迁移和语言指导</a> · <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=746s" target="_blank">0:12:26</a></li>
+            <li><a href="#t06">开源</a> · <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=847s" target="_blank">0:14:07</a></li>
+            <li><a href="#t07">和合作公司一起做真实部署</a> · <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=961s" target="_blank">0:16:01</a></li>
+            <li><a href="#t08">问答</a> · <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=1270s" target="_blank">0:21:10</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 为什么要一个模型做好很多任务</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=0s" target="_blank">0:00:00</a>–0:03:43</em></p>
+        <p>
+            他说今天讲得随意一些，主要是想和 ETH 的机器人学习圈子交流。他认为 π0.7 的主要创新是让单个模型完成很多任务，而且每个任务都做到很高水平。
+        </p>
+        <h3>为什么重要</h3>
+        <p>
+            以前在端到端学习里，想让某个任务做到很高水平，一般做法是拿一个预训练模型（表现还行但不出色），再针对这个任务做后训练（post-training，在预训练模型基础上用特定数据继续训练）。他说一个模型就能高水平完成很多任务，可扩展性好得多：测试时不用操心该用哪个 checkpoint、哪套超参数，要管理的模型越少，越容易规模化。
+        </p>
+        <h3>为什么难</h3>
+        <p>
+            难在不清楚该怎么做，这还是开放的研究问题。他说 π0.7 远没有解决这个问题，但算是一个有意义的进步。
+        </p>
+        <p>
+            他认为机器人领域已经进入规模化时代。说到规模化通常有两个轴：数据和模型。问题是不清楚该扩什么、怎么扩。比如把机器人领域能拿到的所有数据都拿来训练一个模型，结果多半不会很好，比不上针对某个场景精心调优的专家模型。从表面看，这说明数据多不等于模型好。讲座后面大部分内容就是讲 π0.7 怎样做出一个能追平专家表现的单一 checkpoint。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 从 RL token 的图说起，以及 π0.7 的结构</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=223s" target="_blank">0:03:43</a>–0:07:20</em></p>
+        <h3>策略为什么比训练数据还慢</h3>
+        <p>
+            他先展示 Pi 之前一项叫 RL token 的工作里的图。横轴是评估时每个 episode 的长度（完成任务用的时间），纵轴是成功率。
+        </p>
+        <ul>
+            <li>绿色：人类遥操作员控制机器人的速度。遥操作（teleoperation）指人通过操纵设备直接远程控制机器人，用来采集示范数据。</li>
+            <li>粉色：在遥操作数据上训练出的基础策略。它比人类遥操作员还慢。</li>
+            <li>黄色：在线强化学习之后的策略，速度超过了人类，曲线在绿色的左边。</li>
+        </ul>
+        <p>
+            他说粉色比绿色慢这一点很有意思，因为你会以为一个好的模仿学习策略至少能复现训练数据里的速度。由此引出两个问题：为什么在一份数据上训练出的策略会比数据本身还慢？怎样让一个通用策略达到用强化学习训练出来的专家策略的速度？
+        </p>
+        <h3>π0.7 的动作生成部分</h3>
+        <p>
+            他说 π0.7 负责生成动作的部分和之前的工作相比变化不大，和 π0.6、π0.5 很像：用一个语言模型和一个预训练视觉编码器，再接上一个动作专家（action expert），用他的话说是教模型“说机器人的语言”。动作专家是附加在视觉语言模型上的一组参数，专门负责输出连续的机器人动作。
+        </p>
+        <p>
+            模型的输入包括：
+        </p>
+        <ul>
+            <li>任务提示，比如 “clean the kitchen”；</li>
+            <li>可选的子任务指令：完成这个子任务，再完成剩下的子任务，整个任务就完成了；</li>
+            <li>元数据（metadata），标明当前训练的这条 episode 的速度和质量。</li>
+        </ul>
+        <p>
+            π0.7 的另一项创新是目标条件（goal-conditioned）能力，也就是可以给模型一个目标，让它朝目标去做。他说这带来了更好的泛化，后面还会提到。
+        </p>
+        <h3>高层部分</h3>
+        <p>
+            除了动作生成，系统还有一个高层部分。他说要把它理解成这样：高层的指令可以来自人、来自高层策略，或者来自世界模型，这些高层来源本身不能生成底层动作，但能给出计划，由底层去决定执行这些计划要做什么动作。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 一个 checkpoint 对比专家策略</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=440s" target="_blank">0:07:20</a>–0:10:34</em></p>
+        <h3>任务覆盖了不同难点</h3>
+        <p>
+            他放了几段视频，说这些任务在不同方向上考验模型：
+        </p>
+        <ul>
+            <li>叠衣服，要处理几乎无限的状态空间（衣服可以是任何形状）；</li>
+            <li>往机械臂上拧一颗很小的螺丝，要求很精确；</li>
+            <li>折一个纸箱，要求双手配合很精确；</li>
+            <li>倒垃圾，是长时程任务。</li>
+        </ul>
+        <p>
+            他强调，这些视频里的任务全部由 π0.7 预训练得到的同一个 checkpoint 完成。
+        </p>
+        <h3>和专家策略的对比</h3>
+        <p>
+            接着他展示了对比图，不讲细节，只讲结论。图里有三种策略：π0.7 预训练模型，RL 专家（RL specialist）和 SFT 专家（SFT specialist）。专家可以理解为针对某个具体任务专门调优、追求高表现的策略。SFT 是监督微调（supervised fine-tuning）。
+        </p>
+        <p>
+            从图上看，代表 π0.7 的黄色和专家持平，有些还更好。他说至少对 Pi 来说，这是第一次做到用一个 checkpoint 达到和为各个任务专门调优的策略一样的表现。
+        </p>
+        <h3>为什么通用模型有时比专家还好</h3>
+        <p>
+            更有意思的是有几张图里黄色比专家更高。他的解释是：在大规模的机器人评估里，每一次评估其实都是泛化评估。你尽量做对照实验、尽量固定场景，但总有某些因素在变。通用模型对环境里的细微变化更鲁棒，所以能超过专家。他说他们尽量让不同模型能看到的数据保持一致，做到公平对比。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 数据质量实验：元数据的作用</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=634s" target="_blank">0:10:34</a>–0:12:26</em></p>
+        <p>
+            他认为 π0.7 论文里有一张很有意思的图。横轴是训练用的数据比例：越往左用的数据越少，但质量越高；越往右用的数据越多，但加进来的是质量更低的数据。所以沿横轴往右走，就是通过加入低质量数据来扩大数据量。
+        </p>
+        <ul>
+            <li>不带元数据的 π0.7：从 80% 加到 100% 时性能下降，也就是加入最差的那部分数据后反而变差。他说这是开头那个观点的实验证据：数据多不一定更好。</li>
+            <li>带元数据的 π0.7：从 80% 到 100% 时性能大幅上升，同样是加入低质量数据。</li>
+        </ul>
+        <p>
+            他的结论是，只要把信息正确地告诉策略（这里就是标明每条数据的质量和速度），低质量数据也能带来好处，而且收益很明显。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 跨机器人迁移和语言指导</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=746s" target="_blank">0:12:26</a>–0:14:07</em></p>
+        <h3>没见过的机器人上叠衣服</h3>
+        <p>
+            π0.7 的另一个结果是跨本体迁移（cross-embodiment transfer）。本体（embodiment）指机器人的具体硬件形态，跨本体迁移就是在一种机器人上学到的东西用到另一种机器人上。
+        </p>
+        <p>
+            他的例子是：在左边一种双臂机器人上采集叠衬衫的数据。他说叠衬衫是难任务，可能需要成百上千小时的数据，因为它是精细操作，观测空间也很大。用 π0.7，可以把只用这台机器人的叠衬衫数据训练出的 checkpoint，直接放到右边由两台 UR5 机械臂组成的双臂工作站上运行，那台工作站也能叠衬衫。而训练数据里完全没有这台双臂 UR5 工作站叠衬衫的数据。
+        </p>
+        <p>
+            所以这是对没见过的“机器人加任务”组合的泛化。他说这个任务不简单，策略的效果让他们很意外。
+        </p>
+        <h3>用语言一步步指导机器人</h3>
+        <p>
+            接着他讲到 π0.7 的高层规划。视频里有人用语言指令一步步“教练”机器人，系统就能完成从没采集过数据的任务，而且是在完全没见过的环境里、用没见过的物体。他举的例子是一个关于红薯的任务（字幕这里不清，大意是指导机器人用一件厨房电器处理红薯），他说这件电器和红薯都完全不在训练数据里。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 开源</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=847s" target="_blank">0:14:07</a>–0:16:01</em></p>
+        <p>
+            他说 Pi 认为机器人问题离解决还很远，希望尽可能推动整个社区往前走，其中一部分是建设让全世界都能做机器人实验的基础设施。所以 Pi 开源了 π0 和 π0.5。
+        </p>
+        <p>
+            常有人问他：开源的 π0、π0.5 和 Pi 内部研究员用的模型有没有区别？他说没有区别，开源的 checkpoint 就是 Pi 研究员日常工作用的那个。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 和合作公司一起做真实部署</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=961s" target="_blank">0:16:01</a>–0:21:10</em></p>
+        <h3>“physical intelligence layer” 这篇博客</h3>
+        <p>
+            他介绍了 Pi 的一篇博客，标题大意是“physical intelligence layer”。博客想回答的问题是：如果 Pi 做出了很好的机器人模型，怎样把这种智能交给外界使用？为了弄清这一点，Pi 和想在今天就部署机器人的公司紧密合作，看双方一起搭的系统够不够用于真实任务。
+        </p>
+        <h3>洗衣店叠衣服</h3>
+        <p>
+            博客里第一个视频是 Weave Robotics 的机器人在一家真实的洗衣店里叠衣服，地点在旧金山的 Mission 区，Pi 和 Weave 都在那里。他说这件事有意思，一是衣物完全没见过，二是在给真实顾客的订单叠衣服。博客里还有一些需要机器人有一定智能的场景，比如从错误中恢复，或者叠很复杂的衣物。他举了很长的牛仔裤，两条裤腿容易缠在一起，很难叠。
+        </p>
+        <h3>仓库打包</h3>
+        <p>
+            第二个例子是打包。他说在美国从 Amazon 买东西，有时会装在一个小软袋里寄来。任务是：托盘上有各种物品，机器人要把它们拿起来，从很窄的开口塞进打包机；袋子封好后，再把包裹拿起来放到待发货的位置。
+        </p>
+        <p>
+            他说难点有两个。一是物品种类很多，有些是可变形的。二是这个任务很难用经典的机器人技术栈自动化，因为会出错，而袋子本身就是一个小的可变形物体。
+        </p>
+        <p>
+            他说他喜欢这段视频的一点是：开头是白天，早上机器人开始运行；拖到视频结尾已经是晚上。这是一个在真实仓库里给真实顾客订单打包、跑满一整天工作量的系统，大部分时间是自主运行的。他说让他意外的是，达到这种自主程度并不需要太多数据。
+        </p>
+        <h3>部署时看什么</h3>
+        <p>
+            他说把模型交给外界的一种方式，就是和想现在部署机器人、扩大部署规模的公司紧密合作，像一个团队一样，信息完全互通，看双方一起做的系统能不能部署。部署中很关键的一点是允许犯错，系统出错时能远程干预，让系统恢复。核心问题是：能不能做到自主程度足够高、不需要那么多远程干预，在财务上打平，从而可以扩大部署。他说在和合作公司做的一些任务上，他们基本已经到了这个点。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=1270s" target="_blank">0:21:10</a>–0:36:59</em></p>
+        <h3>要不要换成多指灵巧手</h3>
+        <p>
+            有学生问：Sergey Levine 说过用夹爪就能走很远，但现在你们也在用人类数据，是不是该换更灵巧的手了？
+        </p>
+        <p>
+            他说这取决于你是想造硬件还是想研究智能。想研究智能就需要规模，他们相信规模是智能行为出现的前提。硬件要支持规模，需要三点：便宜、可靠、容易运维。他说今天的多指手三点只能占两点：可靠又好运维的不便宜，一只多指手的钱大概能买六七套带两指夹爪的机器人系统；便宜又好运维的不可靠，坏得太频繁，你会怀疑自己为什么要这么做。所以他认为如果关注的是智能问题，今天用多指手研究有点分散精力。这不是说多指手不重要，等硬件满足这三条，他们会考虑。另一个原因是，Pi 到现在大概做过成千上万个任务，而且都是很现实的任务，他们没见到多少任务真的需要比两指夹爪更多的机构。
+        </p>
+        <h3>为什么不建大规模数据工厂、直接进家庭</h3>
+        <p>
+            有学生问：你们的论文里有不错的跨本体泛化，硬件也已经很便宜了，为什么不建一个几千人采集多任务数据的数据工厂，训练一个能部署到任何家庭的模型？有没有明显的瓶颈？
+        </p>
+        <p>
+            他先回答家庭部署。他说他想在某个时候做家用机器人，但这很难，现在可能不是该做的时候。从科学角度说，家用机器人到了极限就相当于“物理 AI 完全”的任务，如果家用机器人做成了，物理智能也就解决了。从经济角度说，消费级机器人很难，做一个有吸引力、便宜、安全、能卖进家庭的产品很难。他们认为今天机器人的瓶颈在模型能力上，所以先专注研究问题。
+        </p>
+        <p>
+            关于数据工厂，他说 Pi 也在扩大数据采集，世界上很多公司也在做。关键问题是扩什么，因为有很多轴：是很多任务每个任务少量数据，还是任务不多但每个任务很多数据？人类视频要不要大量采？UMI（一种手持采集设备）呢？机器人本体呢，是很多种机器人每种少量数据，还是少数几种平台每种大量数据？物体怎么更换？在什么环境里采？他说这些问题今天都没有答案，需要用实验验证哪些有用，他们想做好的科学家，通过实验研究怎样规模化。
+        </p>
+        <h3>π0.6 到 π0.7：干预次数和训练效率</h3>
+        <p>
+            有学生问：π0.6 的论文讲了很多训练时人工干预和人类反馈的问题，π0.7 在评估时的干预减少了多少？训练效率提高了多少？
+        </p>
+        <p>
+            他说具体数字记不清，应该在论文里，他们一般衡量整个系统的吞吐量，论文里也有干预次数。他的概括是：有些任务 π0.7 能高水平完成，π0.6 根本做不了，比如往机械臂上拧很小的螺丝，π0.6 不做专门的专家后训练就完全做不了。他前面展示的图里，π0.7 在吞吐量上超过了 π0.6 的专家，因为模型对环境变化更鲁棒，泛化更好，比如光照变了、物体变了、物体摆放方式变了。
+        </p>
+        <p>
+            训练效率有多种定义，他最常想的是训练用了多少算力。他说 π0.6 和 π0.7 的训练算力大致相当，这一点很好，因为不需要大幅增加算力就得到了表现好得多的模型。
+        </p>
+        <h3>VLA 和世界动作模型怎么取舍</h3>
+        <p>
+            有学生问：听说 π0.7 用了一个小型世界模型做目标条件，这让他想到 DreamZero 这类完整的世界动作模型（world action model，同时预测未来画面和动作的模型）。两者有什么差别和取舍？未来会更偏向世界动作模型，还是因为推理成本、训练成本和数据采集而不需要？VLA 有没有碰到只有世界模型才能解决的根本瓶颈？
+        </p>
+        <p>
+            他说这个问题今天没有确定答案，都还是开放研究问题，Pi 在探索一部分，社区也在探索一部分。他考虑这个问题时看两点：
+        </p>
+        <ul>
+            <li>模型能力。要长上下文，要模型耐用，要容量足够大，能吸收很大的数据集。他认为 VLA 和视频模型都能做到，但训练方式可能很不一样。</li>
+            <li>推理时间约束。他说提这一点是因为他觉得这是很可解决的问题：如果有一天有了足够聪明、能高水平完成任务的大模型，剩下的障碍只是让推理更快，那是很能解决的问题，能到那一步就很好了。</li>
+        </ul>
+        <p>
+            他说现在需要把模型做大。目前模型是几十亿参数（single digit billions），他毫不怀疑今年 Pi 和社区会做到一两百亿参数（low double digit billions），然后是四五百亿（mid-range），再到七八百亿以上（high-range double digit billions）。模型规模会继续增长，他认为规模增大后会看到更多有意思的涌现能力。至于 VLA 和视频动作模型哪个扩展得更好，两个都要试着做大，他说还没在社区里看到足够的结果能说明哪一个明显更好。
+        </p>
+        <h3>为什么现在不做家用机器人</h3>
+        <p>
+            最后一个问题：你们的公开演示经常在家里采数据、做家务任务，有时还能泛化到新厨房。是担心成功率不到 100% 消费者不买，还是担心安全？提问的学生认为消费者能接受装洗碗机、叠衣服成功率 60% 的机器人，因为很有用也很好玩，而且不像商业场景那样和经济产出挂钩。
+        </p>
+        <p>
+            他说家用机器人的梦想是真实的，他也很想在某个时候做。然后分几点回答：
+        </p>
+        <ul>
+            <li>为什么演示多是家务。发布 π0 时社区以为 Pi 是一家洗衣公司，因为太多任务和洗衣有关。他们选家务任务有明确的理由：它是很好的研究测试平台，开放环境的全部复杂性都在里面；它也便于传达研究进展，因为任务容易引起共鸣。如果给普通人看一个精密装配任务，他们很难体会有多难、多厉害；看到叠衣服的机器人，他们大概能感觉到这事很难，将来会对自己有用。</li>
+            <li>为什么现在不做。他认为模型还不够好。你可能能接受 60% 成功率的洗碗机器人，别人不一定；有人更在意人机交互，有人在意机器人别占太多地方、别挡路。他说人的偏好差异很大，是消费机器人难做的原因之一。他们认为做出好的家用机器人的瓶颈是模型能力，所以先解决这一环。他不认为拿今天的模型去做家用机器人会很成功，他认为还需要多项科学突破。</li>
+            <li>Pi 的策略是明确的通用机器人路线。他拿语言模型类比：语言模型不需要先把语言问题彻底解决才变得有用。他们希望成功的“面”足够大：在一些任务和环境里模型今天已经够好、可以部署，就去做这些，同时继续提升模型能力，让这个面越来越大，最终家用机器人会成为模型能胜任的事情之一。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“if you look at face value, what that means is more data doesn't equal more performing model.”<br>从表面看，这意味着数据更多不等于模型更好。· <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=196s" target="_blank">0:03:16</a></li>
+            <li>“in large-scale robotic evaluation, really every evaluation is a generalization evaluation.”<br>在大规模机器人评估里，每一次评估其实都是泛化评估。· <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=594s" target="_blank">0:09:54</a></li>
+            <li>“by representing information to your policy properly, you can actually benefit from lower quality data and benefit in a pretty dramatic way.”<br>只要把信息正确地告诉策略，低质量数据也能带来好处，而且好处很明显。· <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=693s" target="_blank">0:11:33</a></li>
+            <li>“the checkpoint that we open source for Pi 0 and Pi 05 are also the checkpoint that researcher at Pi uses for their daily work.”<br>我们开源的 π0 和 π0.5 的 checkpoint，也就是 Pi 研究员日常工作用的 checkpoint。· <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=901s" target="_blank">0:15:01</a></li>
+            <li>“the critical question is really what do you scale?”<br>真正关键的问题是扩什么。· <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=1532s" target="_blank">0:25:32</a></li>
+            <li>“I think that multiple scientific breakthroughs need to happen for that to be true.”<br>我认为要让这件事成立，还需要好几项科学突破。（指用今天的模型做家用机器人）· <a href="https://www.youtube.com/watch?v=pzolgvyWEFY&t=2119s" target="_blank">0:35:19</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>ETH Zürich Robot Learning 2026 · Guest: Quan Vuong, π0.7, A Generalist Model with Emergent Capabilities · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

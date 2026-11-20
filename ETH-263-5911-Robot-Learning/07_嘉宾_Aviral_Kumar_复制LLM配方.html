@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aviral Kumar：怎样把 LLM 的训练配方搬到机器人上 | ETH Robot Learning 2026 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="06_强化学习一.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">ETH Robot Learning 目录</a> · 07</span>
+    <span><a href="08_强化学习二.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>嘉宾讲座 · Aviral Kumar：怎样把 LLM 的训练配方搬到机器人上</h1>
+        <p class="subtitle">LLM 的预训练、中训练、后训练三段式在机器人上缺了什么；用“恢复与纠正”数据做机器人的中训练（RaC），恢复次数和成功率的线性关系；用 policy-agnostic RL 在真机上微调 OpenVLA 和 diffusion policy；以及问答里讲的 HG-DAgger 区别和“状态体积”论证</p>
+        <div class="author-meta">
+            主讲：Aviral Kumar（Carnegie Mellon University 助理教授、Google DeepMind 研究员），ETH Robot Learning 课程嘉宾讲座<br>
+            课程：Robot Learning: From Fundamentals to Foundation Models（ETH Zürich 263-5911，Week 4，2026 年 3 月 9 日）· 时长：36 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=fHHLmTu9sFk" target="_blank">课堂录像</a>（ETH Zürich 公开，2026 年春季，本文依据录像字幕整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            这是第 4 周的嘉宾讲座，接在 Oier Mees 的“强化学习（一）”后面。主持人介绍说，Aviral Kumar 是 CMU 计算机系和机器学习系的助理教授，同时在 Google DeepMind 做 Gemini 基础模型的强化学习。他 2023 年在 UC Berkeley 博士毕业，导师是 Sergey Levine，最出名的工作是离线强化学习算法 CQL（Conservative Q-Learning）。他在 CMU 的实验室研究范围从 RL 核心算法、RL 的扩展、基础模型一直到真实机器人。
+        </p>
+        <p>
+            他的问题是：如果想把 NLP 和视觉里“扩大模型、扩大数据”的配方搬到机器人上，机器人这边应该做得有什么不同。他先拆 LLM 的配方，指出机器人目前只抄了表面，缺了中训练（mid-training）这一段，后训练也只用了人类示范。然后讲两项工作：一是用恢复与纠正数据做机器人的中训练，二是用 policy-agnostic RL 做机器人的后训练。他说会讲得比较高层，细节看论文。时间很紧，他自己说这是一次“很赶的”报告，第二项工作只讲了几分钟，最后有三个学生提问。
+        </p>
+        <ol>
+            <li><a href="#t01">开场和动机</a> · <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">LLM 配方在机器人上缺了什么</a> · <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=132s" target="_blank">0:02:12</a></li>
+            <li><a href="#t03">机器人的中训练：恢复与纠正数据（RaC）</a> · <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=435s" target="_blank">0:07:15</a></li>
+            <li><a href="#t04">实验结果：数据效率和“机器人的测试时扩展”</a> · <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=966s" target="_blank">0:16:06</a></li>
+            <li><a href="#t05">后训练：policy-agnostic RL</a> · <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=1333s" target="_blank">0:22:13</a></li>
+            <li><a href="#t06">总结和问答</a> · <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=1656s" target="_blank">0:27:36</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场和动机</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=0s" target="_blank">0:00:00</a>–0:02:12</em></p>
+        <p>
+            Aviral 先说，看到一门机器人学习课排了这么多嘉宾讲座，他觉得挺好。然后说明角度：现在机器人学习里有大量工作在扩大数据、扩大模型，但他的实验室也做很多 LLM 和基础 RL 算法的研究。他的感觉是，LLM 的配方里有不少环节，机器人学习还没想清楚，或者在机器人这边根本没有对应物。这一讲就讲他们为了补这个缺口做的工作。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. LLM 配方在机器人上缺了什么</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=132s" target="_blank">0:02:12</a>–0:07:15</em></p>
+        <h3>大家通常理解的配方</h3>
+        <p>
+            多数人认为 LLM 好用的原因是：先在互联网上多样的文本数据上训练，得到一个模型；再在某个任务的有限数据上做后训练（post-training）或微调，让这个通用模型学会遵循指令、解难的数学题、在网页上做事等等。
+        </p>
+        <p>
+            机器人这边照着这个配方做出来的样子是：在大量多样的机器人数据上训练一个 VLA（vision-language-action，视觉-语言-动作）策略，这叫预训练；然后用少量任务相关的示范微调，这叫后训练。他说表面上看都对得上，但搬过来的时候漏掉了很多细节。
+        </p>
+        <h3>LLM 的配方其实有三段</h3>
+        <p>
+            他说 LLM 的配方本身就更细，推理模型出现以后这一点更明显。顺序是：
+        </p>
+        <ul>
+            <li>预训练（pre-training）：在大规模文本语料上训练，和以前一样。</li>
+            <li>中训练（mid-training）：在预训练和后训练之间，给模型灌进一些对下游解题有用的行为。现在 LLM 生成的长链式思维（chain of thought），是互联网上基本见不到的文本，就是靠这个阶段灌进去的。它通常用来教模型怎样在一个问题的多个候选解法之间搜索。</li>
+            <li>后训练（post-training）：现在也用强化学习做。</li>
+        </ul>
+        <p>
+            机器人这边没有中训练阶段的对应物，后训练目前也只是用人类示范数据做纯微调。
+        </p>
+        <h3>机器人的“预训练”更像 LLM 的指令微调</h3>
+        <p>
+            他还说，他认为机器人现在的预训练方式“不太对”，这一讲不展开，但讲了原因。语言模型的预训练是从互联网上任意的数据里学，学的是“互联网上的文本是怎么生成的”，这个模型并不代表一个最优策略，也就是给定前缀后下一个 token 的最优分布。机器人的预训练却是在专家数据上训练机器人，用最优的方式完成多种语言指令描述的多种任务，因为机器人用的数据全是专家数据集。放到 LLM 的语境里，这更像指令微调（instruction fine-tuning），属于后训练的一部分。所以机器人配方在这一步已经和 LLM 很不一样，能不能行要打个问号，他实验室有一些在做的工作碰这个问题。
+        </p>
+        <h3>中训练和后训练在机器人上该是什么样</h3>
+        <p>
+            LLM 中训练的目的是让模型带上某些行为或技能，帮助它在后训练阶段自主改进，语言那边常把这叫做“改进探索”。LLM 的后训练靠自主 rollout：让模型自己去做某个 prompt 或问题，常常为此专门做模拟器，或者直接把模型部署到真实世界，从得到的反馈里学，也就是通过和目标环境交互来学有用的行为。
+        </p>
+        <p>
+            这一讲的两部分就是：第一，机器人中训练。换一种方式收集数据，让模型带上有用的技能，部署时表现更好。他说这样做能看到语言模型里中训练带来的那些好处，类似测试时扩展、“想得更久”的现象，数据效率更高，泛化更好。第二，机器人的高效后训练。把现成的通用机器人策略部署到真机上，让它从自己采的数据里学。他们的算法叫 policy-agnostic RL，方法很简单，可以在线、样本高效地改进预训练好的策略，并拿到了最早一批在真实世界里微调通用 VLA 的结果。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 机器人的中训练：恢复与纠正数据（RaC）</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=435s" target="_blank">0:07:15</a>–0:16:06</em></p>
+        <h3>现在的数据收集方式</h3>
+        <p>
+            训练大型通用策略时，现在的数据收集协议是：请人遥操作（teleoperation，人通过控制设备直接操纵机器人）机器人，演示怎样完成任务，然后收集大量这样的数据。他举了 ALOHA Unleashed 论文里的任务：双臂机器人把东西放进 Ziploc 袋并把袋口封上。他们自己重点做的任务是挂衬衫：他的学生遥操作一套双臂装置，把衣架塞进 T 恤里。这些都是完全遥操作得到的示范，策略在上面做模仿，学着复现看到的每个动作。
+        </p>
+        <h3>专家示范对泛化不够</h3>
+        <p>
+            他说这种协议不错，但对泛化来说是次优的。类比到 LLM，专家数据相当于只给你看某道数学题的最优解。如果希望机器人足够稳健，能应对不同的 T 恤、不同的摆放朝向，以及自己执行时会遇到的失败，策略就得学会从这些情况里恢复。LLM 里也有恢复的概念：推理模型不会直接跳到答案，它们会去探索、在不同的解法分支之间搜索，再得出正确答案。
+        </p>
+        <p>
+            所以他们的做法是：通过人类干预的过程，大规模收集某种意义上的反事实数据，也就是恢复（recovery）和纠正（correction）。流程是先用一些专家示范训练一个基础策略，部署这个基础策略，按论文里规定的协议收集恢复和纠正数据。他说这类数据可以看作 LLM 里回溯（backtracking）和自我纠正（self-correction）风格的数据，策略在上面训练后，对目标任务会更稳健。这个方法叫 RaC（Recovery and Correction，字幕里写作 rack）。
+        </p>
+        <h3>视频里的一次干预</h3>
+        <p>
+            他放了一段视频。先是一个只用有限示范训练的自主策略在执行，动作偏慢，不如人那么流畅灵活。它尝试完成任务，结果把衣架放到了 T 恤前面。这时人接管：先把机器人从策略正在走向的分布外状态（out-of-distribution state，训练数据里没出现过的状态）退回来，再演示正确做法，然后结束干预。他说只要从犯错的那个状态（衣架在 T 恤前面）退回来，再演示正确的做法，就足以教会策略怎样回溯。
+        </p>
+        <p>
+            整体流程是：模仿学习得到预训练策略，然后在这类恢复与纠正数据上做中训练。
+        </p>
+        <h3>核心观察：恢复比正确完成任务容易</h3>
+        <p>
+            他说让这个方法成立的主要洞察是：对很多我们关心的任务，<strong>恢复比正确完成任务要容易</strong>，语言模型里也是这样。
+        </p>
+        <p>
+            他画了一张示意图。像挂衬衫这样的长时程任务（long-horizon task，要连续完成很多步的任务），初始状态可以在场景里任何地方，所以起点是一个面积很大的圆盘。随着任务推进，会访问到的状态范围越来越窄，形成一个漏斗，表示好的示范所覆盖的状态集合在收缩。漏斗上标着子任务：从架子上拿衣架、把衣架一边塞进领口、再塞另一边等等。
+        </p>
+        <p>
+            如果策略偏离了好的示范数据（图上的黑线），你希望人演示怎样回到漏斗里的分布内流形（in-distribution manifold），再从那里把任务做对。恢复是退回到一个更宽的状态集合，所以是比较容易学的行为，用有限的数据也能学会。训练好以后部署，策略会频繁地恢复、自我纠正，最终成功率高很多。思路就是把恢复和纠正这两种行为做大规模。
+        </p>
+        <h3>p 的 K 次方模型</h3>
+        <p>
+            他提到论文里有一个简单的数学模型，他叫它“P to the K”模型，没有时间细讲。设机器人尝试完成一个子任务，成功概率是 $p$。在失败的那 $1-p$ 里，如果它能恢复到某个分布内的点，就能再试一次，而重试能减少整次 rollout 里累积的误差（compounding error）。他用 LLM 打比方：模型用某种方法攻一道题失败了，可以回头换一种方法，这样总的错误会减少；如果只是克隆正确答案，一旦失败就再也回不来。
+        </p>
+        <p>
+            按名字理解，一个有 $K$ 个子任务、每步只能一次做对的任务，整体成功率是
+        </p>
+        $$P_{\text{success}} = p^K$$
+        <p>
+            $K$ 一大，这个数会很快变小；能恢复重试就相当于把每个子任务的成功率往上抬。（这一行是整理者按他的描述做的直白解释，具体推导在论文里。）
+        </p>
+        <p>
+            他说这是一种放大模型解长时程任务能力的简单办法：在对的时候恢复，在对的时候继续，用对的方式探索。另外这些数据覆盖了状态空间里一些没见过的区域，这些行为策略执行时可能会遇到，但人类遥操作员自己操作时永远不会遇到。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 实验结果：数据效率和“机器人的测试时扩展”</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=966s" target="_blank">0:16:06</a>–0:22:13</em></p>
+        <h3>恢复重试就像机器人的测试时扩展</h3>
+        <p>
+            他说因为有了恢复和重试，机器人上出现了相当于测试时扩展（test-time scaling）的现象。在语言模型里，测试时扩展通常指用更长的链式思维、想得更久，OpenAI 的 o1、o3 都是这样，他说现在基本每个 LLM 都是会“思考”的，给答案前要做大量计算。RaC 给机器人的是类似的能力，只是发生在底层的动作空间里，不在语言空间或“思维”空间里：策略可以随着时间做更多动作，提高在任务上的成功率。
+        </p>
+        <h3>数据量对比</h3>
+        <ul>
+            <li>RaC 用的是一个不大的 flow matching Transformer 策略（flow matching 是一种生成模型训练方法，用来生成连续动作）。只用了 5 小时的数据采集，扩大了恢复与纠正数据的比例，挂衬衫任务的成功率就和这个任务上此前最好的结果相当。</li>
+            <li>此前最好的结果来自 ALOHA Unleashed，策略更小，但用了 89 小时的数据，全是纯专家数据。他说 RaC 的数据效率大约高一个数量级。</li>
+            <li>他还对比了 ByteDance 的一个结果：一个 4B 参数的 VLA 模型，做了大量预训练，用的数据也比 RaC 多很多，成功率却低得多。</li>
+        </ul>
+        <p>
+            他说 RaC 在数据和参数上都更高效，能推理的 LLM 也有同样的特征。
+        </p>
+        <h3>恢复次数和成功率的线性关系</h3>
+        <p>
+            他提到 2024 年 o1 发布时 OpenAI 博客里那张图：性能随链式思维长度，或者说测试时算力，上升。他们给机器人画了类似的图：横轴是策略在一次部署 rollout 里做了多少次恢复，纵轴是成功率，可以拟合出一条直线。他说很有意思的一点是，LLM 里链式思维长度和 RL 的关系可以类比到机器人策略上，这里链式思维的长度换成了一个 episode 里的恢复次数。
+        </p>
+        <h3>三种策略的对比视频</h3>
+        <p>
+            他放了三种策略做同一个挂衬衫任务的视频，三列是左夹爪、右夹爪和第三人称三个相机视角，都是 1 倍速：
+        </p>
+        <ul>
+            <li>RaC 策略：在恢复与纠正数据上训练。</li>
+            <li>HG-DAgger 策略（字幕里是 edgy dagger）：也是在 rollout 中让人干预，但干预没有按“恢复、再纠正”的结构组织，没有回溯，人想什么时候介入就什么时候介入。DAgger 是一类让专家在策略自己访问到的状态上给出标注的模仿学习方法，HG-DAgger 是由人决定何时接管的版本。</li>
+            <li>全示范策略：在纯专家数据上训练的 BC（behavior cloning，行为克隆）策略。</li>
+        </ul>
+        <p>
+            结果是：第一边领口大部分策略都还行。RaC 策略做错后会自己重试，最终成功，他说它“有韧劲”，这是好事。HG-DAgger 策略会做一些纠正的尝试，因为它见过一些干预数据，但泛化不好，最后失败。BC 策略在最下面一行，直接卡住，不知道怎么继续。RaC 策略一旦进入奇怪的状态，就会退回去重来。他说这不是挑出来的例子，他们的工作里有很多这样的情况。论文网站上还有很多别的任务的视频，都是需要很多数据才能训练的较长时程任务，在这些任务上恢复与纠正行为都帮了很大的忙。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 后训练：policy-agnostic RL</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=1333s" target="_blank">0:22:13</a>–0:27:36</em></p>
+        <h3>为什么通用策略难用 RL 微调</h3>
+        <p>
+            他说只剩两三分钟，快速讲第二项工作：policy-agnostic RL（PA-RL），由他在 CMU 的学生 Max 主导。动机很标准：最终我们想拿通用策略，在真机上通过真实交互快速微调。目前很少有工作在通用策略上大规模这样做；有很多工作（包括他读博时的工作）在单任务策略上做在线 RL 微调，但通用策略上几乎没有。
+        </p>
+        <p>
+            问题在于，过去几年搭起来的 RL 工具，真正稳定的只有参数较少的高斯策略（Gaussian policy，输出一个高斯分布来采样动作的策略）。他说到今天也是这样：有很多工作在做 flow matching 策略、diffusion 策略的 RL，但真放到机器人上跑往往很不稳定。这项工作大约是一年前的，那时这些工作还都不存在，但直到现在，微调通用策略的工作总体上仍然很脆弱。他们想做的是：能改进任意策略类别（diffusion policy、Transformer 策略、flow matching 策略等）的稳定配方。
+        </p>
+        <h3>难点：要对策略输出求梯度</h3>
+        <p>
+            为什么微调现成策略难？做 RL 时通常要提高策略所给动作上的某个价值函数（value function）或 Q 函数（Q-function，在状态 $s$ 下做动作 $a$、之后按策略走能拿到的期望回报），也就是训练策略去最大化
+        </p>
+        $$\max_\phi \; \mathbb{E}_{s}\big[\, Q\big(s, \pi_\phi(s)\big) \big]$$
+        <p>
+            这类目标需要计算策略预测对自身参数的梯度 $\nabla_\phi \pi_\phi(s)$。他说这对很多策略都很麻烦：diffusion policy 要反向传播穿过整个扩散过程，flow matching 策略也一样；Transformer 策略往往根本算不了，因为动作是采样出来的，中间没有可微的连接，只能依赖 REINFORCE 式的目标，而那对策略来说是一个很难优化的损失函数。
+        </p>
+        <h3>拆成两步：先优化动作，再蒸馏回策略</h3>
+        <p>
+            他们的主要想法是把策略改进拆成两步：
+        </p>
+        <ol>
+            <li>直接在动作“粒子”上做优化。先不更新策略参数，只问：如果想让 Q 值最大，动作向量本身应该怎样改。得到的叫优化后的动作（optimized actions）。</li>
+            <li>用标准的最大似然损失，把这些优化后的动作蒸馏回策略。</li>
+        </ol>
+        <p>
+            第二步之所以可行，是因为大多数生成模型和机器学习模型本来就是用最大似然训练的，把一些动作蒸馏进模型就是最大化似然，至少对大多数策略都能做到。真实算法更复杂一点，但大意是：用基础策略产生不同的动作，对这些动作做非参数的优化，再把它们行为克隆进基础策略。写成式子大致是
+        </p>
+        $$\max_\phi \; \sum_{(s,\,a^\ast)} \log \pi_\phi(a^\ast \mid s)$$
+        <p>
+            其中 $a^\ast$ 是优化后的动作。因为所有优化、所有 RL 都发生在动作上，和策略本身无关，所以方法对策略类别是不可知的（agnostic），这也是名字的来源。
+        </p>
+        <p>
+            他说这个想法其实已经存在一段时间了，他们这次发现的好处是：给一种策略类别定下的同一套超参数、算法设计选择，换到别的策略类别、别的在线微调算法上也好用。
+        </p>
+        <h3>结果：40 分钟在真机上微调 OpenVLA</h3>
+        <p>
+            他说这项工作是一年前做的，任务还很简单，他们现在在做用更新的策略和价值函数的版本。当时的结果是：他知道的第一个这样的结果，在真机上微调当时最先进的 VLA 模型 OpenVLA，不需要任何示范，完全自主地在线学，只用了 40 分钟。他说在一台很差的机器人（WidowX）上，40 分钟在线交互很容易做到；现在机器人好多了，VLA 也好多了，用对方法的话这个时间大概能降到 10 分钟。
+        </p>
+        <p>
+            他们也有单任务策略上的结果。OpenVLA 是 Transformer 策略，另一组用的是 diffusion policy，同一种方法、同一组超参数在两类策略上都能工作。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 总结和问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=1656s" target="_blank">0:27:36</a>–0:36:05</em></p>
+        <h3>他的结论</h3>
+        <p>
+            他说希望大家带走的是：要很仔细地想，怎样把通用模型的训练配方真正落到机器人上。预训练在他看来仍是一个大的开放问题，他不认为我们现在把预训练做对了。但中训练（也就是用对的方式扩大数据）和用对的方式做后训练，都能走很远。想清楚哪些经验能从一边搬到另一边，会很有帮助。
+        </p>
+        <h3>问：机器人预训练哪里不对？RaC 和 HG-DAgger 的干预有什么区别？</h3>
+        <p>
+            第一个学生问了两个问题：他几次说现在机器人基础模型的预训练不对，能不能高层地说说，有没有实验室的替代方案；以及 RaC 的干预和 HG-DAgger 有什么区别，为什么效果更好。
+        </p>
+        <p>
+            他先答第二个。他在屏幕上的示意图上画：RaC 在策略跑出漏斗之后，先恢复，再纠正，也就是先退回去再改正自己。HG-DAgger 会直接从当前状态出发把任务做完。他说 HG-DAgger 在文献里其实没有给出人到底该怎样干预的具体配方，但通常的理解是：如果稍微跑出分布了，就从那里直接把任务做完。RaC 则退回去，从那里重新做。拿挂衬衫举例：开始犯错时，HG-DAgger 的做法是直接把衣架塞进 T 恤；RaC 要先回到之前的某个状态，在这个例子里不太明显，但在别的示范里很清楚，比如先把机械臂从 T 恤那里挪开很远，再重新去塞。他说 HG-DAgger 里没有“恢复”是主要问题，也是收益的来源：如果只是试着直接纠正，你未必知道怎样马上纠正，而恢复严格来说更容易。
+        </p>
+        <p>
+            关于预训练，他说还没有发表的工作，希望在接下来一两个月放出一些东西。大致的想法是：LLM 预训练是在建模所有可能文本的分布，但我们训练 VLA 时，并没有让它覆盖机器人可能做的所有动作，只用了人类遥操作员演示出来的那一小片“最优”或者说专家式的动作。所以也许该重新想，VLA 在预训练里到底该建模什么，该用什么数据。也许不该只用专家数据、只建模一种行为模式，应该建模多种行为模式，因为 LLM 建模的就是多种模式。他说这还只是粗略的直觉，相关工作在进行中，他觉得社区里想这个问题的人不多。
+        </p>
+        <h3>问：为什么学恢复比直接学到达后面的状态更好？</h3>
+        <p>
+            第二个学生问：它比 DAgger 好，是不是因为在动作跑出分布时学会了恢复本身；人把它推回之前的状态，它到底怎样学到恢复行为；为什么学恢复比直接学一个能到达更后面状态的策略更好。
+        </p>
+        <p>
+            他说它确实学到了恢复行为，学的是退回去，不会从已经到达的地方硬做下去。至于为什么更好，他说可以从理论上说明：对大多数自然的机器人任务，可以恢复到的状态体积，通常远大于从当前位置往后能看到的状态体积。如果处在一个分布外状态，想往前回到漏斗所表示的好状态流形上，是比较难的，因为从那里往后仍然有效的状态很少；往回退则容易，可以退到的状态多得多，然后从那里继续。如果模仿的是“怎样纠正自己”的数据，最终要命中的是一个很窄的状态空间，模仿纠正那一段时的任何误差都会出问题；如果只需要学恢复，因为是在任务里往回走，可恢复到的、仍然在好示范状态内的状态多得多，就可以从那里重来并成功得多。他说大致就是一个体积论证。
+        </p>
+        <h3>问：微调里的全局优化和局部优化怎么做？</h3>
+        <p>
+            他说自己得赶去参加别人的考试，这是最后一个问题，其他问题可以发邮件。第三个学生问 PA-RL 微调里的局部优化和全局优化具体怎么做。他说：
+        </p>
+        <ul>
+            <li>全局优化：从策略里采样若干个动作（幻灯片上是 $k$ 个），在 Q 函数上比较，保留 Q 值最高的 $m$ 个，把 Q 值不够高的过滤掉。</li>
+            <li>局部优化：对保留下来的动作，相对 Q 函数做一步梯度更新，让动作朝着使 $Q(s,a)$ 变大的方向移动。</li>
+        </ul>
+        $$a \leftarrow a + \eta \, \nabla_a Q(s, a)$$
+        <p>
+            他说就是这么简单的做法。（式子里的步长 $\eta$ 是整理者补的记号。）
+        </p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“recipe that we haven't figured out in robot learning or that have no analog in robot learning right now.”<br>（接上句 a lot of missing pieces from the LLM）LLM 配方里有很多环节，机器人学习还没想清楚，或者目前在机器人学习里没有对应物。· <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=97s" target="_blank">0:01:37</a></li>
+            <li>“recovery is actually easier than correctly solving the task for many tasks we care about.”<br>对很多我们关心的任务，恢复比正确完成任务更容易。· <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=765s" target="_blank">0:12:45</a></li>
+            <li>“here the length of a coot is replaced by number of recoveries in an episode”<br>（字幕 coot 即 CoT）这里链式思维的长度换成了一个 episode 里的恢复次数。· <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=1102s" target="_blank">0:18:22</a></li>
+            <li>“all of the optimization or all of the RL is happening on actions and not on the policy itself.”<br>所有优化、所有 RL 都发生在动作上，和策略本身无关。· <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=1539s" target="_blank">0:25:39</a></li>
+            <li>“pre-training is still a big open question in my mind I don't think we are doing pre-training correctly right now”<br>在我看来预训练仍是一个大的开放问题，我不认为我们现在把预训练做对了。· <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=1636s" target="_blank">0:27:16</a></li>
+            <li>“We don't train blas on possible actions that a robot could ever take.”<br>（字幕 blas 即 VLAs）我们训练 VLA 时，并没有覆盖机器人可能做的所有动作。· <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=1881s" target="_blank">0:31:21</a></li>
+            <li>“So it's just a volume argument roughly.”<br>大致就是一个体积论证。· <a href="https://www.youtube.com/watch?v=fHHLmTu9sFk&t=2076s" target="_blank">0:34:36</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>ETH Zürich Robot Learning 2026 · Guest: Aviral Kumar, How to Replicate the LLM Recipe in Robot Learning · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

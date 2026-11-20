@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 9 讲：通用机器人策略 | ETH Robot Learning 2026 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="15_嘉宾_Scott_Reed_具身智能的骨干.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">ETH Robot Learning 目录</a> · 16</span>
+    <span><a href="17_嘉宾_Quan_Vuong_pi0.7.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 9 讲：通用机器人策略</h1>
+        <p class="subtitle">通用机器人策略的三样东西：数据（Open X-Embodiment 把各实验室的数据汇到一起）、建模（Octo、CrossFormer、TRI 的多任务预训练研究、从 VLM 微调成 VLA、π0.5 与知识隔离的配方）和评测（SIMPLER 的相关性仿真评测）；中间穿插训练 VLA 的实用技巧：收敛判断、异构 batch、sequence packing、数据加载、不同动作空间</p>
+        <div class="author-meta">
+            主讲：Oier Mees（ETH Zürich / Microsoft）<br>
+            课程：Robot Learning: From Fundamentals to Foundation Models（ETH Zürich 263-5911，Week 9）· 时长：1 小时 3 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=dtofzDY9zuo" target="_blank">课堂录像</a>（ETH Zürich 公开，2026 年春季，本文依据录像字幕整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            前几讲的 ACT、diffusion policy 擅长灵巧、高频、多模态的单任务控制，但它们是专才模型，换一个机器人或任务往往要重新训练。这一讲讲的是机器人学习领域的“北极星”：一个模型控制很多机器人、在很多环境里做很多任务。Oier 说这是他自己过去几年做过不少研究的方向，他把问题拆成三样东西：数据从哪来，怎样对高度异构的数据建模，怎样评测。讲建模时他穿插了很多训练 VLA 的实用经验，给正在做小组项目的同学参考。
+        </p>
+        <p>
+            本周课上讨论的论文是 “Language Conditioned Imitation Learning over Unstructured Data”（Lynch et al., 2021）、“A Generalist Agent”（Gato，Reed et al., 2022）和 “π*0.6: a VLA That Learns From Experience”（Physical Intelligence, 2025）。嘉宾讲座是 Physical Intelligence 联合创始人 Quan Vuong 讲 π0.7，见下一篇；讲座里 Oier 也提到 Quan 当年在 Google 帮他们做过 Octo 的评测。
+        </p>
+        <ol>
+            <li><a href="#t01">目标，以及和 NLP 的三个差别</a> · <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">数据：Open X-Embodiment</a> · <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=440s" target="_blank">0:07:20</a></li>
+            <li><a href="#t03">把机器人看成多模态序列建模：Octo 的结构</a> · <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=683s" target="_blank">0:11:23</a></li>
+            <li><a href="#t04">Octo 的评测和微调</a> · <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=1158s" target="_blank">0:19:18</a></li>
+            <li><a href="#t05">跨具身：CrossFormer</a> · <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=1503s" target="_blank">0:25:03</a></li>
+            <li><a href="#t06">多任务预训练对后训练有没有帮助（TRI）</a> · <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=1839s" target="_blank">0:30:39</a></li>
+            <li><a href="#t07">从 VLM 到 VLA，以及怎样判断收敛</a> · <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=2037s" target="_blank">0:33:57</a></li>
+            <li><a href="#t08">异构数据怎样组 batch：padding 和 sequence packing</a> · <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=2331s" target="_blank">0:38:51</a></li>
+            <li><a href="#t09">训练时怎样加载数据</a> · <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=2527s" target="_blank">0:42:07</a></li>
+            <li><a href="#t10">不同的动作空间，模型怎么知道控制哪个机器人</a> · <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=2722s" target="_blank">0:45:22</a></li>
+            <li><a href="#t11">当前 VLA 的训练配方：π0.5 和知识隔离</a> · <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=3064s" target="_blank">0:51:04</a></li>
+            <li><a href="#t12">评测：SIMPLER 和收尾</a> · <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=3260s" target="_blank">0:54:20</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 目标，以及和 NLP 的三个差别</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=0s" target="_blank">0:00:00</a>–0:07:20</em></p>
+        <h3>专才模型和通用模型</h3>
+        <p>
+            他先回顾前面讲过的 ACT 和 diffusion policy：演示很惊艳，灵巧、高频控制，多模态行为处理得很好。但这些方法最适合拟合单任务策略，是专才模型，难以扩展到通用的多具身（multi-embodiment，具身指机器人的身体形态：机械臂、四足、人形等）策略，换新的机器人或新任务往往要重新训练。
+        </p>
+        <p>
+            机器人学习社区的北极星，是造出通用机器人策略（generalist robot policy）：一个模型控制很多机器人，在很多环境里执行很多任务，和人一起工作。他说这是机器人学习的“圣杯”，随之而来的问题有：训练数据从哪来，怎样对超大规模、高度异构的数据分布建模，怎样泛化到真实世界的非结构化环境。目标是这样一个未来：你在网上下载最喜欢的“机器人大脑”，装上后你的机器人开箱就能表现出合理的、最好是智能的、对你这台机器人有用的行为。
+        </p>
+        <h3>NLP 的配方</h3>
+        <p>
+            这受 NLP 和计算机视觉进展的启发。NLP 里开发基础模型的标准流程，是在包含很多任务（代码补全、翻译、问答等）的大规模多样数据集上训练，这种模型通常胜过只针对单一任务的专才模型。过去大家分别为目标检测、翻译、图像描述开发专门模型，后来被在多样数据上训练的大模型超过。机器人学习想在机器人上看到同样的好处。
+        </p>
+        <h3>照搬到机器人上的三个差别</h3>
+        <ul>
+            <li>数据少：机器人领域没有可与 NLP、视觉前沿模型训练数据相比的大规模数据集。机器人数据稀缺又贵，他说大家现在用 SO-101 采了第一批遥操作示范，应该能想象要采到前沿模型那种量级有多难。</li>
+            <li>数据异构：机器人数据是多模态的，有多种传感模态，因为和真实世界交互是多感官的；每种具身的观测空间和动作空间都不同。另外机器人要实时控制，不能向 ChatGPT 发个请求，等它的 API 一分钟后再告诉你下一个动作。</li>
+            <li>评测贵：通用策略能做很多任务、在很多环境里工作，评测成本会急剧上升，需要更可扩展或更好的评测方式。</li>
+        </ul>
+        <p>他说这一讲就围绕这三样东西：数据、建模、评测。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 数据：Open X-Embodiment</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=440s" target="_blank">0:07:20</a>–0:11:23</em></p>
+        <p>
+            不管什么具身，遥操作（teleoperation，人通过手柄、主从臂或 VR 设备远程控制机器人来采示范）一台机器人教每一个新任务都很贵。他放了自己读博时在 Franka 机械臂平台上遥操作采数据的视频，说可以以经验作证。
+        </p>
+        <p>
+            让第一批通用机器人策略成为可能的关键想法，是利用已有的数据来源。社区之前也有采数据集的努力，但通常没有做成能互相联合训练（co-training）的形式。他的观察是，不管研究什么，世界上每个机器人实验室都会采某种数据，比如研究触觉的实验室会采带触觉传感器的遥操作数据。这些数据通常规模很小，只为支撑自己的研究和论文，所以大家往往不会想到放到网上，或者觉得别人不感兴趣。但加起来，世界上已有的机器人数据很多。
+        </p>
+        <p>
+            他读博快结束时和 Google 合作了 Open X-Embodiment 数据集项目：去问世界各地实验室的朋友有没有可用的机器人数据，汇总起来，转换成能联合训练的统一格式。最后得到超过一百万条真实机器人 episode，比之前任何机器人数据集都多得多，而且有二十多种机器人具身，很多实验室参与。
+        </p>
+        <p>
+            结果上，他说这是第一次看到“火花”：一个在多个机器人数据集上训练的单一模型，超过了之前针对特定平台调好的最好方法。他自己在模型开发过程中，用读博时在德国搭的机器人平台持续做评测。他说这篇论文影响很大，因为它第一次让人能在一百多万条多样的跨具身轨迹上训练，推动了通用策略建模方面的算法进展；这一讲后面很多工作都建立在这个数据集上。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 把机器人看成多模态序列建模：Octo 的结构</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=683s" target="_blank">0:11:23</a>–0:19:18</em></p>
+        <h3>换个角度看机器人策略</h3>
+        <p>
+            有了数据，第二个问题是怎样建模。说起来容易做起来难：机器人的任务描述、传感器类型、相机数量（有的一个，有的三四个）、动作空间都很不同，怎样在看起来这么不一样的机器人之间共享知识很有挑战。
+        </p>
+        <p>
+            从一个基本例子说起。训练机器人策略时，模型输入当前观测（一张图像）和任务描述（现在常用自然语言），预测一串末端执行器（end effector，机械臂末端的夹爪或工具）位姿来完成任务。把机器人图像换成普通互联网图片，把指令换成“描述这个场景”，模型回答“图里是自由女神像”，这就很像一个视觉语言模型了。很多通用策略工作的基础想法，就是把机器人问题看成类似的多模态序列建模问题：学一个从图像和文本映射到答案的强大模型，只不过机器人的“答案”是动作。这样语言 token、图像 token 和动作 token 并列，NLP 和视觉在多模态序列建模上的进展就能搬到机器人上。
+        </p>
+        <h3>Octo</h3>
+        <p>
+            第一步，他们做了 Octo，他说这是第一个开源的通用策略：一个基于 Transformer 的大策略，在 Open X-Embodiment 的 80 万条机器人轨迹上训练。和上周 Scott Reed 讲的 Gato 类似，主要想法是把各种异构的输入和动作输出都 token 化，训练一个大 Transformer。结构相对直接：
+        </p>
+        <ul>
+            <li>语言编码器：预训练的 T5，把语言输入变成 token。</li>
+            <li>观测 tokenizer：把图像切成 patch，过一个浅层 CNN，得到图像 token。</li>
+            <li>把任务 token 和观测 token 拼起来，送进一个和普通 ViT 很像的 Transformer。</li>
+            <li>Transformer 是分块因果（block-wise causal）结构：任务 token 之间可以互相注意，但不能看观测 token（字幕这里说得有些乱，按上下文整理）；某个时间步的观测 token 能看自己和任务 token，但看不到未来时间步。</li>
+            <li>动作部分用紫色的 readout token：占位 token，汇总嵌入后送进动作头。</li>
+        </ul>
+        <p>
+            训练目标是目标条件行为克隆（goal-conditioned behavior cloning）：给定当前状态，预测到达目标状态的一串动作。他说这个形式很灵活，目标可以是目标图像，也可以是自然语言指令。写成损失大致是：
+        </p>
+        <p>$$\mathcal{L}(\theta) = -\,\mathbb{E}_{(o_t, g, a_{t:t+k}) \sim \mathcal{D}} \big[\log \pi_\theta(a_{t:t+k} \mid o_{\le t}, g)\big]$$</p>
+        <p>
+            其中 $g$ 是目标（图像或语言），$a_{t:t+k}$ 是一段动作。因为是序列模型，任务、观测和 readout 块会在多个时间步上展开。动作头用的是扩散解码头，他说实验发现它处理多模态行为比其他方式好得多。
+        </p>
+        <h3>几个设计决定</h3>
+        <ul>
+            <li>算力都投在 Transformer 里。之前的设计常给每张图单独配一个较大的 ResNet 编码器，再晚融合（late fusion）。</li>
+            <li>当时觉得数据这么多，可以全部从零训练。他说事后看可能不是最好的主意，但当时就是这么想的。</li>
+            <li>没有对齐各数据集的坐标系，这是为了可扩展性的取舍；但对齐了夹爪维度。早期很多失败和夹爪有关，比如过早抓取，所以统一了夹爪语义：1 表示张开，0 表示闭合。各数据集控制夹爪的方式五花八门，有绝对、相对、连续等，这是他们在所有数据集上唯一做了对齐的地方。</li>
+        </ul>
+    </section>
+
+    <section id="t04">
+        <h2>04. Octo 的评测和微调</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=1158s" target="_blank">0:19:18</a>–0:25:03</em></p>
+        <h3>零样本评测</h3>
+        <p>
+            评测分零样本和微调两类，跨多个实验室和机构，用同一套微调配方把 Octo 适配到新的传感和动作空间。总的发现是 Octo 开箱就能控制多种机器人具身，超过了 Google 在类似数据上训练的模型 RT-1-X（为 Open X-Embodiment 项目训练的），也追平了 RT-2-X。RT-2-X 是 Google 闭源的 550 亿参数 VLA，他说那算是第一个 VLA。
+        </p>
+        <p>
+            他放了一段视频，说是他们第一次看到 Octo 在 Google 机器人上抓取成功，模型通过远程服务器调用。视频里能听到“Bam! Woo! One success.”。视频左边的人是 Quan，就是当天的嘉宾，当时在 Google 帮他们做评测。他说机器人评测本来就难，人不在机器人旁边、只能靠别人帮忙就更难。这些在 Mountain View 的评测对他们的模型来说相当分布外（out-of-distribution，训练时没见过的情况）：虽然训练用到了 Google 采的数据，但那些数据是在另一栋楼里采的，Google 后来搬了楼。所以简单任务还能成功，让他们很兴奋，他说那是他们的“Eureka 时刻”。
+        </p>
+        <h3>可适配性</h3>
+        <p>
+            他强调通用策略的另一个方面是可适配性：即使模型没在你的机器人上预训练过，它也应该对你有用，是后训练到你的具身上的好起点。你可能有一台新机器人，或者这个任务要加新的传感模态，比如力/力矩传感，或者换相机数量，或者换动作空间，比如从笛卡尔空间控制（控制末端在空间里的位置姿态）换成关节控制（直接控制每个关节的角度）。Octo 的做法是：有新输入，比如力/力矩读数，就用几个 token 把它插进去，然后微调。因为大部分参数在 Transformer 里，微调时能保留大部分知识。
+        </p>
+        <p>
+            在多个实验室不同的微调设置下，他们发现从通用机器人策略（他也叫它机器人基础模型，robot foundation model，RFM）微调，效果比任何其他最先进的视觉表示学习骨干都好得多。他说这是关键信息，也适用于很多当前最先进的模型。Octo 推出后挺受欢迎，世界各地的研究者拿它微调到自己的具身上。他举了两个例子：一个是在 Twitter 上看到的，有研究者把它微调到没见过的 Spot 机器人上；另一个是一家日本公司把它微调到自己的人形机器人上。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 跨具身：CrossFormer</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=1503s" target="_blank">0:25:03</a>–0:30:39</em></p>
+        <h3>为什么要跨具身</h3>
+        <p>
+            到这里讲的是在一堆单臂操作任务的多样数据上从零训练通用策略。可如果它只能控制 7 自由度机械臂，算什么通用？理想情况下不管什么具身都应该能用。他说这也是机器人的有趣之处：有为不同任务设计的各种具身，会飞的无人机、四足、自动驾驶汽车、人形等。如果方法能从所有这些具身学习，能用的数据也就扩大了。他说机器人领域的数据比我们以为的多，难处在于它的异构性，要有方法在具身之间迁移相关的知识。比如导航数据可以把避障行为迁移到无人机上，因为不管是 Roomba 这种导航机器人还是室内无人机，避障都是共同的行为。
+        </p>
+        <p>
+            理想是一个很可扩展的方法，能从任何具身学习，没有任何约束，不用手工对齐动作空间：把数据送进 Transformer，让模型自己想办法组合。
+        </p>
+        <h3>CrossFormer 的做法</h3>
+        <p>
+            CrossFormer 在训练 Octo 的数据之外加入了更多具身，比如双臂操作、导航和行走（locomotion），总共 90 万条机器人轨迹，训练一个大 Transformer，配上具身专属的动作头：一个头控制单臂，一个头控制四足，等等。模型接受可变的观测输入、预测可变的动作输出。这很重要，因为要预测不同长度的动作块（action chunk，一次预测接下来多步的动作）：做这种极端跨具身学习时，各具身的控制频率差别很大，比如 WidowX 是 5 Hz 控制，双臂灵巧操作机器人是 50 Hz，模型要预测的动作块长度也就差别很大。用不同的头是一种处理办法，这样也不用做动作空间对齐。
+        </p>
+        <p>
+            为了最大化具身之间的迁移，要尽量共享参数，比如同一类型的相机视角共享图像编码器权重。
+        </p>
+        <h3>结果</h3>
+        <p>
+            评测很多样：中间的四足，Franka 单臂操作，室内外导航，还有之前提过的切寿司，那是一个双臂灵巧、很长时程的任务。他强调看到的所有 rollout 片段都由同一个模型产生，是一个 checkpoint 控制所有这些具身，没有为某台机器人挑最好的 checkpoint，是同一套神经网络权重。定量结果上，这个跨具身策略追平或超过了针对特定具身调好的专才策略。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 多任务预训练对后训练有没有帮助（TRI）</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=1839s" target="_blank">0:30:39</a>–0:33:57</em></p>
+        <p>
+            CrossFormer 回答的是通用策略能不能控制多种具身并超过专才。TRI（Toyota Research Institute）的一项工作回答另一个问题：多任务预训练对后训练有没有帮助？他说社区里很多人相信是有的，但在机器人领域确定这一点不简单，推荐大家读这篇，因为研究做得很严谨。
+        </p>
+        <ul>
+            <li>他们评测的是扩散 Transformer 策略，在约 1,700 小时的预训练数据上训练，包括 OXE（Open X-Embodiment）数据集；然后在他们的 Franka 上微调到单个双臂任务，仿真和真实都做了。</li>
+            <li>为了统计显著性下了很大功夫：在真实世界里做盲测 A/B 测试，打分的操作员不知道当时评的是哪个策略。</li>
+            <li>任务很灵巧，比如切苹果，时程很长，他记得大概有 2 分钟。</li>
+        </ul>
+        <p>他强调的几个结果：</p>
+        <ul>
+            <li>预训练确实有帮助，让单任务后训练的样本效率提高到 3 倍或 5 倍（字幕原话是 “up to three times or five times”）。</li>
+            <li>收益在后训练数据少的时候最大。如果没多少数据微调到新任务，这时受益最多。</li>
+            <li>他觉得有意思的一点：怎样归一化数据之类的事，对下游性能的影响经常比架构或算法改动大得多。他说这也说明了机器人学习为什么难，能调的旋钮太多，有时归一化这么简单的事就很重要。</li>
+        </ul>
+    </section>
+
+    <section id="t07">
+        <h2>07. 从 VLM 到 VLA，以及怎样判断收敛</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=2037s" target="_blank">0:33:57</a>–0:38:51</em></p>
+        <h3>互联网先验能不能迁移到机器人控制</h3>
+        <p>
+            到这里讲的都是在机器人数据上从零训练。他说做 Octo 时大家觉得数据很多，但 OXE 和训练 LLM、VLM 的数据比起来微不足道。所以很自然要问：VLM 这类互联网规模的先验能不能迁移到下游机器人控制？怎么做？
+        </p>
+        <p>
+            第一个思路和几周前讲 VLM 时的 LLaVA 架构类似。LLaVA 的做法是把图像 token 放在文本前面，LLM 对这个统一序列做标准的自注意力，不改注意力机制。大家问：能不能像 LLaVA 对待图像 token 那样对待机器人动作？最早的 VLA 就是这样从 VLM 微调来的：把机器人动作 token 化，注入 LLM 的词表。一种常见做法是用新的动作 token 覆盖词表里最不常用的那些 token，这样 LLM 就能把动作 token 当成词表的一部分来预测，用同样的交叉熵损失做下一个 token 预测：
+        </p>
+        <p>$$\mathcal{L}(\theta) = -\sum_{i} \log p_\theta\big(y_i \mid y_{&lt;i},\, \text{image},\, \text{instruction}\big)$$</p>
+        <p>
+            其中 $y_i$ 是动作 token。动作 token 化前面讲过，这里只回顾：RT-2、OpenVLA 这类最早的方法用的是很简单朴素的离散化，每个动作维度、每个时间步单独分箱（binning）。比如把某一维动作的取值范围均匀分成 256 个区间，每个区间对应一个 token（区间数是常见设置，他这里没讲具体数字）。
+        </p>
+        <h3>怎么知道模型收敛了</h3>
+        <p>
+            他说很多同学要为小组项目训练 VLA，所以分享一些技巧，其中很多对世界模型等其他大规模机器人策略训练也适用。第一个问题是开始训练 OpenVLA 之类的模型时，怎么知道它收敛了？
+        </p>
+        <ul>
+            <li>对自回归 VLA，他们的经验法则是等动作 token 准确率到大约 95%。注意这个准确率是在 teacher forcing（每一步都喂真实的前文，而不是模型自己的预测）下算的，不代表真实 rollout 的表现；但在到 95% 之前，大概不该做真实世界 rollout，效果不会好。它衡量的是在离散化方案下，有没有选中正确的动作区间（bin）。</li>
+            <li>还要跟踪 L1 和 L2 动作误差：把动作 token 去 token 化、反归一化回连续值，和真值动作比较，看预测的连续动作离真值有多远。</li>
+        </ul>
+    </section>
+
+    <section id="t08">
+        <h2>08. 异构数据怎样组 batch：padding 和 sequence packing</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=2331s" target="_blank">0:38:51</a>–0:42:07</em></p>
+        <p>
+            另一个设计选择是怎样把异构数据组成 batch。他说这对同学们可能没那么相关，大家多半是在自己那一台机器人上微调；但预训练时数据来自很多具身，问题就变得重要。比如一个具身只有一个第三人称相机，另一个多了两个腕部相机，一共三个，就没法直接把它们堆成一个 batch。
+        </p>
+        <h3>padding</h3>
+        <p>
+            最简单的办法是补齐（pad）到观测输入最多的那个数量，再相应地对注意力做掩码。Octo 和 CrossFormer 就是这么做的。实现很容易，可以先从这个开始。但要明白取舍：观测很异构时，batch 里可能一半都是零，浪费大量算力，推过 GPU 的很多是零。
+        </p>
+        <h3>sequence packing</h3>
+        <p>
+            另一种方式是在数据加载管线里用 sequence packing，这是专门为 Transformer 处理变长输入设计的技术。把所有样本拼成一个长向量，不再补零浪费算力，最大化 GPU 吞吐，每个样本只贡献它实际有的 token。为了记录每个样本在长向量里从哪开始、到哪结束，要维护一个累积序列长度变量（cumulative sequence length，常见实现里叫 cu_seqlens）。比如三个样本长度为 3、5、2，累积长度就是：
+        </p>
+        <p>$$\text{cu\_seqlens} = [0,\ 3,\ 8,\ 10]$$</p>
+        <p>代价是实现复杂度，他讲了两个具体的坑：</p>
+        <ul>
+            <li>要用块对角（block diagonal）注意力掩码，不同样本的 token 不能互相注意，每个样本的 token 只能注意自己样本内的 token。</li>
+            <li>在每个样本边界重置位置编码，否则位置会一直往上涨。</li>
+        </ul>
+    </section>
+
+    <section id="t09">
+        <h2>09. 训练时怎样加载数据</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=2527s" target="_blank">0:42:07</a>–0:45:22</em></p>
+        <p>他说这是一个实用但常被忽略的话题，比你想象的重要。主要有两种策略。</p>
+        <h3>顺序读取加 shuffle buffer</h3>
+        <p>
+            Octo 用的、OpenVLA 也用的方式：从数据分片（shard）里顺序读数据流进一个缓冲区，从缓冲区里采样一个 batch。要点是 shuffle buffer 太小，batch 之间会相关，随机程度和 shuffle buffer 的大小成正比。
+        </p>
+        <p>
+            他说这是他们训练 Octo 时吃了苦头才学到的。一开始 shuffle buffer 只有 2 万个样本，再加上按轨迹交错（trajectory-level interleaving），泛化表现很差。解决办法是在解码图像之前，就对来自不同轨迹的帧做打乱和交错，这样 shuffle buffer 能扩大到 50 万个样本。他说这对模型性能影响很大，其他什么都没变，数据配比完全一样。
+        </p>
+        <h3>真随机读取</h3>
+        <p>
+            另一种是基于真随机读取的方案：对整个数据集维护一个扁平索引，每个 batch 都做随机寻址（random seek）。随机性更精确、无偏，但快速 IO 很重要，因为一般没法把整个数据集读进内存。
+        </p>
+        <p>
+            两者有取舍，也有试图兼顾的方案，比如按块随机读取，不只是读单张图像。他说一旦开始在异构的大数据集上预训练，数据加载就成了一个关键的架构选择，会通过随机性等途径影响策略的性能。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 不同的动作空间，模型怎么知道控制哪个机器人</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=2722s" target="_blank">0:45:22</a>–0:51:04</em></p>
+        <h3>两种做法</h3>
+        <p>
+            训练通用策略时另一个实际问题：不同机器人的动作空间不同，一个数据集是 7 自由度单臂，另一个是 14 自由度双臂。比较流行的有两种做法：
+        </p>
+        <ul>
+            <li>CrossFormer 式：共享的 Transformer 骨干处理观测，再路由到各具身专属的动作头。好处是容易支持变长输出，适应不同的控制频率；缺点是要加新具身时，得加一个新头，可能还要微调。</li>
+            <li>π0 式：仍是共享骨干，后面接一个单一的动作专家（action expert），输出到统一的补齐动作空间。取所有具身里最大的动作维度，每个机器人的动作都补零到这个维度。架构上简单得多。一个注意点是，不管控制频率如何，通常对所有具身都预测固定长度的动作块。</li>
+        </ul>
+        <h3>课堂问题</h3>
+        <p>
+            他给大家 20 秒和邻座讨论：测试时，这两种方案的 VLA 怎么知道该为哪个具身产生动作？比如是 7 自由度还是 14 自由度的机械臂。学生们给了几种回答，他说答案是大家回答的混合：
+        </p>
+        <ul>
+            <li>CrossFormer 式由用户显式处理，在提示或配置里指定用哪个头，比如“用双臂头”或“用四足头”，路由是用户写死的。</li>
+            <li>π0 式的单一动作专家通常没有显式选头，模型要从观测里隐式推断具身。相机视角会提供线索，不同类型的相机画面能透露这大概是哪种机器人；本体感觉（proprioception，机器人自身关节角度等读数）也输入动作头，是很强的提示；语言指令往往也是线索，因为不是所有具身都能做同样的任务，让一台 Roomba 切寿司多半不行。骨干要学会抓住这些线索，再把信息相应地传给动作专家。</li>
+        </ul>
+    </section>
+
+    <section id="t11">
+        <h2>11. 当前 VLA 的训练配方：π0.5 和知识隔离</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=3064s" target="_blank">0:51:04</a>–0:54:20</em></p>
+        <p>
+            作为 VLA 部分的结尾，他讲当前很多最先进 VLA 的训练思路，主要基于 π0.5 和知识隔离（knowledge insulation）两篇论文。他说后续工作很多，不想全讲，Quan 稍后会讲最新的模型；但这是一个相当可靠的配方，很多实验室都采用了或成功复现了。
+        </p>
+        <h3>第一部分：VLM 骨干</h3>
+        <p>
+            VLM 骨干用下一个 token 预测训练，数据是 FAST token 化的机器人动作和网页数据的混合。和网页数据联合训练有助于保留 VLM 骨干的能力，避免灾难性遗忘（catastrophic forgetting，学新东西时把原来学会的能力丢掉）。FAST token 对表示学习也有好处。FAST token 化前几讲讲过（补充背景：它用离散余弦变换把一段动作压缩成更少的 token）。
+        </p>
+        <h3>第二部分：动作专家</h3>
+        <p>
+            动作专家用流匹配头训练，这就是前面那个为所有具身预测动作的单一动作专家，用流匹配产生连续动作。流匹配的常见形式（他这里没写公式，下面是补充的标准写法）是：从噪声 $\epsilon$ 和真实动作块 $A$ 之间插值，让网络预测速度场：
+        </p>
+        <p>$$A^\tau = \tau A + (1-\tau)\,\epsilon, \qquad \mathcal{L} = \big\| v_\theta(A^\tau, o) - (A - \epsilon) \big\|^2$$</p>
+        <p>
+            除了不注意 FAST token 之外，动作专家还做了 stop gradient（停止梯度）：动作专家读 VLM 骨干的表示，但梯度不回传去更新骨干，把骨干“隔离”起来，保留它的 VLM 语义能力。他说这也有助于收敛和训练速度。更多细节见 Danny Driess 等人的知识隔离论文。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 评测：SIMPLER 和收尾</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=3260s" target="_blank">0:54:20</a>–1:03:28</em></p>
+        <h3>真机评测为什么累</h3>
+        <p>
+            他问有没有人已经在 SO-101 上做过 rollout，有学生说当天早上最后一次成功了。他说等你做上一个月，可能就再也不想看这台机器人了，真机评测又贵又累：
+        </p>
+        <ul>
+            <li>第三人称相机被人碰了一下，位置变了，就分布外了，策略不工作，可能要重新采数据、微调。</li>
+            <li>硬件故障。他问多少人遇到过，很多人举手。如果策略有本体感觉输入，你给机器人“做手术”换了电机，读数就和采数据、训练时不同。</li>
+            <li>耗时长。控制频率低，动作慢，等两分钟看它抓没抓到。</li>
+        </ul>
+        <h3>SIMPLER</h3>
+        <p>
+            一个办法是用仿真：没有同样机器人平台的人也能做研究，也更可复现，不会有碰到相机、本体感觉读数变化之类的风险。所以开发 Octo 的同时，他们启动了一个平行项目 SIMPLER，和 Quan 以及几周前来做嘉宾讲座的 Ted Xiao 合作，两人当时都在 Google。
+        </p>
+        <p>
+            这个项目要给只在真实数据上训练的策略做 real-to-sim 评测。希望是：如果能在仿真里评测真实世界的策略，并且结果能告诉我们它在真实世界的表现，就可以轻松地在仿真里跑大量评测。高层上，仿真和真实的成功率是相关的，对不同模型都成立（Google 的几个模型和 Octo），对不同的分布偏移（纹理、相机位姿、干扰物）也成立。做法分两步：
+        </p>
+        <ol>
+            <li>缩小控制差距：保证策略的动作在仿真里执行的结果和真实机器人末端执行器上的结果一样。办法是用少量在真实世界采的样本做系统辨识（system identification，根据实测数据估计机器人动力学参数，让仿真里的控制器行为和真机一致）。简单说，真实世界和仿真里的底层控制器应该给出差不多的输出。</li>
+            <li>缩小视觉分布偏移：让仿真画面接近真实。他说做法很简单，远没有 NVIDIA Isaac Lab 那么逼真。第一步是绿幕（green screening）：把可交互的仿真物体分割出来，叠加到真实世界的背景上。第二步是纹理匹配：把真实物体的纹理投影到仿真物体上，比如把真实可乐罐的纹理贴到仿真可乐罐上。</li>
+        </ol>
+        <p>
+            他提醒，SIMPLER 给出的是相关的性能，不是绝对值。仿真里抓可乐罐成功率 50%，不代表真实世界也是 50% 左右。它不告诉你真机上绝对的 rollout 成功率，只能做两两比较：如果在 SIMPLER 里策略 A 比策略 B 好，在真实世界里也会成立。论文里有用排名等方式衡量这一点的方法。后续有一些改进这类 real-to-sim 评测相关性的工作，比如 Polaris、Robot Arena Infinity（按字幕原样）和 RoboLab，他说可能还有他不知道的。他认为这让世界各地的研究者和工程师都能做通用策略研究，一定程度上不必拥有所有这些机器人平台，也能检验自己的通用策略是不是真的通用。
+        </p>
+        <h3>收尾</h3>
+        <p>
+            他回顾三样东西：把已有的离线机器人数据汇总、转换成统一格式以便联合训练；在这些数据上从零训练通用策略和跨具身策略，以及利用 VLM 这类互联网规模先验训练 VLA；最后是社区在探索的一种让评测更可扩展的方式，即在仿真里做相关性评测。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“you can download your favorite robot brain online and then out-of-the-box your robot should start showing reasonable or ideally intelligent behavior”<br>你可以在网上下载最喜欢的机器人大脑，然后开箱即用，你的机器人就应该表现出合理的、最好是智能的行为。· <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=149s" target="_blank">0:02:29</a></li>
+            <li>“this was really the first time where we saw sparks”<br>这是我们第一次看到火花。· <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=586s" target="_blank">0:09:46</a></li>
+            <li>“It's like a single checkpoint that's controlling all this robot embodiments.”<br>这是一个 checkpoint 在控制所有这些机器人具身。· <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=1791s" target="_blank">0:29:51</a></li>
+            <li>“things like how you normalize your data often impacted downstream performance much more than architectural or algorithmic changes.”<br>像怎样归一化数据这样的事，对下游性能的影响经常比架构或算法上的改动大得多。· <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=1986s" target="_blank">0:33:06</a></li>
+            <li>“wait until your action token accuracy reaches around 95%.”<br>等动作 token 准确率到大约 95%。· <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=2232s" target="_blank">0:37:12</a></li>
+            <li>“something we learned the hard way when we started training Octo.”<br>这是我们开始训练 Octo 时吃了苦头才学到的。· <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=2576s" target="_blank">0:42:56</a></li>
+            <li>“It doesn't tell you anything about the absolute rollout success rate performance of your robot in the real world.”<br>它完全不告诉你机器人在真实世界里绝对的 rollout 成功率。· <a href="https://www.youtube.com/watch?v=dtofzDY9zuo&t=3650s" target="_blank">1:00:50</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>ETH Zürich Robot Learning 2026 · Lecture 9: Generalist Robot Policies · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

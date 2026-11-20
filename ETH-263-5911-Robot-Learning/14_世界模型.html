@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 8 讲：世界模型 | ETH Robot Learning 2026 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="13_嘉宾_Ted_Xiao_机器人学习三个时代.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">ETH Robot Learning 目录</a> · 14</span>
+    <span><a href="15_嘉宾_Scott_Reed_具身智能的骨干.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 8 讲：世界模型</h1>
+        <p class="subtitle">世界模型和策略问的是不同的问题；从像素空间的光流预测（Visual Foresight）到潜空间的 World Models、RSSM 和 Dreamer 系列；视频怎样分词；动作放在输入还是输出（WAM 与 VAM）；为什么用视频骨干替代 VLM 骨干；不重建像素的 JEPA 路线</p>
+        <div class="author-meta">
+            主讲：Oier Mees（ETH Zürich / Microsoft）<br>
+            课程：Robot Learning: From Fundamentals to Foundation Models（ETH Zürich 263-5911，Week 8）· 时长：1 小时 12 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=cTTmUZlOF2s" target="_blank">课堂录像</a>（ETH Zürich 公开，2026 年春季，本文依据录像字幕整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            上一讲讲序列建模和 Transformer，再往前讲了 VLA（视觉语言动作模型）和生成模型。这一讲换一个问题：机器人能不能先在脑子里预测自己的动作会带来什么后果，再决定怎么做？能做这种预测的模型就叫世界模型（world model）。Oier 按时间顺序讲了几条路线：直接在像素空间预测下一帧（Chelsea Finn 2016、Visual Foresight），把观测压进潜空间再做动力学和规划（Ha 与 Schmidhuber 的 World Models、PlaNet 的 RSSM、Dreamer V1 到 V4、DayDreamer），再扩展到互联网规模的视频生成模型（视频分词、WAM 和 VAM、他参与的 mimic-video、DreamZero），最后是根本不预测像素的 JEPA 一族。
+        </p>
+        <p>
+            本周课上讨论的论文是 “Learning Universal Policies via Text-Guided Video Generation”（Du et al., 2023）、“Training Agents Inside of Scalable World Models”（Hafner et al., 2025）和 “World Action Models are Zero-shot Policies”（Ye et al., 2026）。嘉宾讲座是 NVIDIA GEAR Lab 的 Scott Reed，他是 DreamZero 的合作者之一，见下一篇。
+        </p>
+        <ol>
+            <li><a href="#t01">期中反馈和五个小组项目</a> · <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">什么是世界模型</a> · <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=731s" target="_blank">0:12:11</a></li>
+            <li><a href="#t03">像素空间的世界模型：光流预测和 Visual Foresight</a> · <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=1213s" target="_blank">0:20:13</a></li>
+            <li><a href="#t04">潜空间世界模型：World Models（2018）</a> · <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=1505s" target="_blank">0:25:05</a></li>
+            <li><a href="#t05">想象中的漂移，RSSM 和 Dreamer V1</a> · <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=1945s" target="_blank">0:32:25</a></li>
+            <li><a href="#t06">DayDreamer、Dreamer 系列和领域局限</a> · <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=2382s" target="_blank">0:39:42</a></li>
+            <li><a href="#t07">视频生成模型和视频分词</a> · <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=2777s" target="_blank">0:46:17</a></li>
+            <li><a href="#t08">动作放在哪里：WAM 和 VAM，为什么用视频骨干</a> · <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=3116s" target="_blank">0:51:56</a></li>
+            <li><a href="#t09">mimic-video 的 oracle 实验和 DreamZero</a> · <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=3554s" target="_blank">0:59:14</a></li>
+            <li><a href="#t10">几种范式的对比、JEPA 和收尾</a> · <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=3945s" target="_blank">1:05:45</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 期中反馈和五个小组项目</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=0s" target="_blank">0:00:00</a>–0:12:11</em></p>
+        <h3>期中反馈</h3>
+        <p>
+            开头他回顾期中反馈：主课和嘉宾讲座评价好；周一的论文报告太赶、不好跟；大家希望中间有休息；有人觉得学分配不上工作量，他说他向 ETH 申请过更多学分，学校没同意。调整是把周一的一个论文报告挪到周四，主课多留时间，主课讲完、第一篇论文报告前休息一次。
+        </p>
+        <h3>小组项目</h3>
+        <p>
+            两周前大家装好了课程用的机械臂（SO-101），接下来要在上面训练策略。一共五个项目和比赛，5 月 21 日在主楼办 demo day，每个项目有评分标准；每个项目的最佳队伍 5 月 29 日再做一次展示，观众是来 ETH 参加一个研讨会的机器人学习领域的知名学者，他提到 Yann LeCun、Jitendra 等人（字幕里的名字有误听），说不能保证都来，但可能性很高。NVIDIA 赞助了大约 12,500 个 H100 小时，每队约 277 个 H100 小时。他说五个项目大致一个项目对应课上一个主要范式：
+        </p>
+        <ul>
+            <li><strong>训练 VLA</strong>：先是单个物体（比如塑料香蕉）的抓取放置；再是需要理解指令的组合任务，比如把香蕉放进从左数第几个碗里，要用上 VLM 的理解能力；第三项是 RT-2 论文里有名的 “move Coke can near Taylor Swift” 的变体，测试时用什么图片事先不告诉大家；最小的模型有效率加分。</li>
+            <li>世界模型：推物体，因为推是学习“施加动作后物体怎么动”的好方式。先把小物体沿直线推（SO-101 的工作范围不大，所以物体是迷你的），再是中间有障碍物、要绕过去推到目标，再是推一个没见过的物体；加分给推的步数最少的策略。</li>
+            <li>强化学习：参考课上一篇论文里的 singulation（把挤在一起的物体分开）任务。先学一个把木块抓起放进碗里的策略，可以用 BC（行为克隆）起步，不必从零 RL；然后学把挤在一起的四个木块分开，更难的是比四个更多；加分给最快的策略。</li>
+            <li>键盘打字：更偏向 code-as-policies 这类方法，可以用 LLM 写提示、调用预定义的运动原语。先学移动到纸上四个预定义点，再学按笔记本键盘上指定的键（夹爪上要装个东西才能按），再是在没见过的键盘上打单词；最快拼完单词的有加分。</li>
+            <li>叠衣服：他说大家可能会想参考课上讲的 diffusion policy。里程碑是抓住一个边、折一次、再继续折；完整叠完和最快的策略有加分。</li>
+        </ul>
+        <p>报名方式和算力使用方法由助教当天发邮件。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 什么是世界模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=731s" target="_blank">0:12:11</a>–0:20:13</em></p>
+        <h3>棒球的例子</h3>
+        <p>
+            他用棒球开头。快球从投手到本垒大约 400 毫秒，视觉信号从眼睛传到大脑大约 100 毫秒，只剩约 300 毫秒去处理场景、决定挥棒并执行，按理不够用。可击球手能打中时速约 160 公里的球。他的解释是人有内部的世界模型，下意识地预测球会去哪，然后根据预测而非单纯的感知启动挥棒。有了好的世界模型，就能在视觉信息到达之前提前行动。机器学习想要的就是这个能力：智能体如果有好的世界模型，就能模拟自己动作的后果，提前规划，更高效地行动。
+        </p>
+        <h3>世界模型和策略的区别</h3>
+        <p>
+            策略（policy），比如上一讲的 VLA，问的是：给定我现在的状态和目标，我该做什么动作？它把状态和目标直接映射到动作序列：
+        </p>
+        <p>$$a_t \sim \pi(a_t \mid s_t, g)$$</p>
+        <p>
+            世界模型问的是另一个问题：给定现在的状态和一个动作，接下来最可能发生什么？它建模的是转移动力学（transition dynamics），输出下一状态的分布：
+        </p>
+        <p>$$p(s_{t+1} \mid s_t, a_t)$$</p>
+        <p>
+            他说这个区别很重要。普通策略和 VLA 对物理因果是“有点盲”的：它不一定有内部表示去说明为什么某个动作会带来好结果，或者一个动作的物理后果是什么，没有关于世界的时间模型。
+        </p>
+        <h3>为什么机器人需要世界模型</h3>
+        <p>
+            学到了动力学模型，就能用它想象未来。不必马上执行某个动作，可以先在世界模型里跑很多条 rollout（从当前状态按一串动作往前推演出的轨迹），给每条打分，只在真实世界执行最好的那条。这样用一条真实轨迹的成本就能探索很多条假设轨迹。
+        </p>
+        <h3>它和仿真器有什么不同</h3>
+        <p>
+            听起来很像仿真器：为什么不直接用 MuJoCo？他说可以把世界模型类比成“学出来的仿真器”，是手工物理引擎的数据驱动替代品。物理仿真器由专家搭建，要遵守刚体动力学、摩擦、碰撞几何等物理规律，确定、快，但只对显式建模过的东西准确。没建模的东西，比如可变形物体、生物组织，就不行，前面几讲也看到有些东西就是太难建模。世界模型反过来：不手写物理，直接从真实交互数据（机器人轨迹、YouTube 视频等）里学转移分布，数据里有什么动力学就学到什么，不用任何人显式指定。所以原则上它能泛化到任何能拍成视频的东西；代价是受限于训练数据，学物理可能要大量数据，而有些物理我们本来就有闭式解。他说这就是取舍。
+        </p>
+        <h3>定义</h3>
+        <p>
+            他说现在“世界模型”这个词被炒得很热，谁都把自己的方法叫世界模型，所以给了一个定义：以当前状态、所做动作和过去的记忆为条件，对下一状态的分布建模。记忆记为 $h_t$：
+        </p>
+        <p>$$p(s_{t+1} \mid s_t, a_t, h_t)$$</p>
+        <p>
+            记忆不只是为了应对部分可观测（partial observability，单帧看不到全部状态），也提供运动所需的上下文：一帧能告诉你东西在哪，历史才能告诉你它们往哪走。他强调世界模型一般要以动作为条件。只根据文本生成视频的视频模型，严格说不算世界模型。有用之处在于智能体能查询：在这个状态做这个动作，我会到哪个状态？这才能用于规划和控制。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 像素空间的世界模型：光流预测和 Visual Foresight</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=1213s" target="_blank">0:20:13</a>–0:25:05</em></p>
+        <h3>预测像素怎么移动</h3>
+        <p>
+            第一个例子是 Chelsea Finn 等人 2016 年的工作，一个直接在像素空间工作、以动作为条件的世界模型。想法是预测一个流场（flow field），把当前图像变形（warp）成下一帧，省去从零预测完整下一帧这个很难的生成建模问题。模型学的是：给定当前图像和我要做的动作，每个像素会怎么移动。结构上用了卷积 LSTM 这类当时流行的架构。他说重点是：预测流而非完整像素，学起来容易得多，因为只建模运动比持续一致地生成物体像素简单，结构更强，也更不容易产生幻觉。
+        </p>
+        <h3>Visual Foresight：在像素空间做 MPC</h3>
+        <p>
+            怎么用于机器人？后续工作 Visual Foresight 做的是 visual MPC。MPC（model predictive control，模型预测控制）指每一步用模型往前推演、优化一段动作序列，只执行第一步，然后重新规划。这里整个过程在像素空间进行。用户可以用不同方式指定目标，比如点击一个像素，告诉策略“把这个物体从这个像素移到那个像素”，或者用一个图像分类器。规划器用前几讲讲过的交叉熵方法（cross-entropy method，CEM：采样一批动作序列，挑出得分最高的一部分，用它们重新拟合采样分布，反复迭代）来采样和改进动作序列。
+        </p>
+        <p>
+            值得记的一点是，所有训练数据都是机器人自主采集的，基本是随机交互。又因为模型学的是光流，论文显示它对没见过的物体泛化更好：泛化运动比泛化特定物体的任务容易。
+        </p>
+        <h3>优点和局限</h3>
+        <p>优点是完全自监督，不要人工标注；运动目标与物体无关，有助于泛化到新物体。局限在于直接在像素空间工作：</p>
+        <ul>
+            <li>他们用 L2 损失，导致视频预测模糊，因为模型会在不确定性上取平均，不会给出一个清晰的结果，前几讲也讲过这个问题。</li>
+            <li>在较长的时间范围上滚动推演，预测会漂移，误差累积。</li>
+            <li>模型学的是流，visual MPC 却在像素空间里规划，测试时要为每个候选动作评估完整的图像序列，计算很贵。</li>
+        </ul>
+    </section>
+
+    <section id="t04">
+        <h2>04. 潜空间世界模型：World Models（2018）</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=1505s" target="_blank">0:25:05</a>–0:32:25</em></p>
+        <h3>为什么换到潜空间</h3>
+        <p>
+            于是有了另一种范式：先把观测压缩成紧凑的潜在表示（latent representation），动力学和规划都在潜空间里做，不再在像素空间用 CEM 规划。直觉是原始图像里大部分信息和控制无关，比如很多背景像素，做操作任务的最优决策不需要建模或重建它们。
+        </p>
+        <h3>一般结构</h3>
+        <p>
+            以动作为条件的潜空间世界模型的一般结构：观测被编码成紧凑的潜码 $z_t$；动力学模型完全在潜空间里运行，维护一个循环隐状态 $h_t$ 作为记忆，预测下一个潜状态，也预测一个想象的奖励；策略以记忆和潜码为输入，输出动作。这一切都在潜空间里完成，不和真实环境交互。有了好的世界模型，就能完全在想象中训练策略，比采大量真实交互便宜。
+        </p>
+        <h3>V、M、C 三个模块</h3>
+        <p>
+            他说这是“最初的”潜空间世界模型论文（Ha 与 Schmidhuber 的 World Models，他口头上说如果想争论到底谁发明了什么，可以直接去问 Schmidhuber）。架构有三部分，分别负责感知、时间预测和控制：
+        </p>
+        <ul>
+            <li>视觉模型 V：一个 VAE（变分自编码器，前面讲过），把观测编码成 $z_t$。重建结果看着还行，不完美，但抓住了场景结构。他说这类潜空间方法不需要像素级完美的重建，只要 $z$ 里包含足够让控制器行动的信息。</li>
+            <li>记忆模型 M：一个带混合密度网络（mixture density network，MDN）的 RNN，把潜码随时间整合。混合高斯可以处理多模态：环境里有随机因素时，下一个状态可能有好几种合理结果，单个高斯会把它们平均掉。M 的任务有两个：用隐状态追踪过去发生了什么，以及把下一个潜状态预测成一个分布。</li>
+            <li>控制器 C：很小，就是一个全连接层，把 $z_t$ 和 $h_t$ 映射成动作。</li>
+        </ul>
+        <p>用公式写：</p>
+        <p>$$z_t = \mathrm{Enc}(o_t), \qquad p(z_{t+1} \mid z_t, a_t, h_t) = \sum_k \pi_k\, \mathcal{N}(z_{t+1};\, \mu_k, \sigma_k^2), \qquad a_t = W_c\,[z_t;\, h_t] + b_c$$</p>
+        <p>
+            控制器这么小，直觉是表示层面的重活都应由世界模型来做，控制器就不需要表达力。他说后面更现代的工作里也能看到这个思路。
+        </p>
+        <h3>控制器不用反向传播训练</h3>
+        <p>
+            有意思的是，控制器没有用反向传播训练，用的是黑盒的进化优化算法，他说它和前面讲的交叉熵方法很像。用无梯度方法是因为世界模型的 rollout 里有随机采样步骤，端到端求导比较麻烦，所以干脆把世界模型当黑盒，直接针对它优化控制器参数。
+        </p>
+        <h3>结果</h3>
+        <p>
+            训练时的“潜在梦境”看起来模糊、有点抽象，不是清晰的环境重建，但足够让控制器学习，小车在想象的世界里大多在赛道内行驶。消融实验里去掉记忆模块，小车几乎马上开出赛道：它能看到自己现在在哪，但没有记忆就没有速度和弯道曲率的感觉，无法预判转弯。评测环境有两个：赛车（car racing）和第一人称射击游戏 VizDoom。他说 VizDoom 视觉上复杂得多，有很多敌人在动，感知比赛车难得多；VAE 能把数据压成对控制有用的潜码，RNN 能在这个空间里预测得足够好，让控制器训练出来，这在 2018 年是很强的结果。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 想象中的漂移，RSSM 和 Dreamer V1</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=1945s" target="_blank">0:32:25</a>–0:39:42</em></p>
+        <h3>没有先验就会漂移</h3>
+        <p>
+            他说这个方法有一个值得仔细理解的根本问题：没有先验就很容易漂移。训练时 VAE 把真实观测编码成 $z_t$，RNN 是在这些真实潜码上训练的。到了想象阶段，没有真实观测，RNN 只能把自己幻觉出来的潜码当作下一步输入喂回自己。这里有训练和测试的分布不匹配，原因之一是 VAE 和 RNN 是分开训练的，VAE 编码的是观测，而不是模型的信念。要修正这一点，需要学一个先验：以确定性隐状态 $h_t$ 为条件、关于当前潜码 $z_t$ 的分布 $p(z_t \mid h_t)$。
+        </p>
+        <h3>RSSM：把状态拆成两部分</h3>
+        <p>
+            PlaNet 论文提出的循环状态空间模型（recurrent state space model，RSSM）直接解决这个问题。设计是把潜状态拆成两部分：
+        </p>
+        <ul>
+            <li>确定性的 $h_t$，经过 RNN 传递，从不采样，负责跨时间携带记忆；</li>
+            <li>随机的潜变量 $z_t$，刻画关于当前状态的不确定性。</li>
+        </ul>
+        <p>
+            训练时从真实观测推断 $z_t$，这是后验（posterior）；想象时从学到的先验（prior）里采样 $z_t$，先验只需要 $h_t$，不需要真实观测，就是刚才说 Schmidhuber 那篇缺的东西。为了训练先验，用 KL 损失让它在训练时贴近后验，这样想象出的潜码会停留在模型真正理解的区域：
+        </p>
+        <p>$$h_t = f(h_{t-1}, z_{t-1}, a_{t-1}), \qquad q(z_t \mid h_t, o_t)\ \text{(后验)}, \qquad p(z_t \mid h_t)\ \text{(先验)}$$</p>
+        <p>$$\mathcal{L}_{\mathrm{KL}} = D_{\mathrm{KL}}\big(q(z_t \mid h_t, o_t)\,\|\,p(z_t \mid h_t)\big)$$</p>
+        <h3>想象中的闭环推演</h3>
+        <p>
+            想象时的闭环推断：每一步策略读当前的 $h_t$ 和 $z_t$，输出动作；世界模型往前走一步，RNN 更新隐状态，下一个潜码从以新隐状态为条件的先验里采样。整个循环不需要任何真实观测。想象出的奖励沿 rollout 累加，策略就针对它优化。随机部分 $z_t$ 每一步从先验重新采样，而确定性的 $h_t$ 不会被破坏。他说这个设计让它在实践中可用：世界模型足够稳定，可以推演很长的行为，并得到有意义的训练信号。
+        </p>
+        <h3>从 PlaNet 到 Dreamer V1：把规划摊销进策略</h3>
+        <p>
+            PlaNet 在每个时间步还是从头跑交叉熵方法：采几千条动作序列，推演，重新拟合高斯，测试时很贵。Dreamer V1 问的是：为什么不把规划摊销（amortize）进一个学出来的策略？做法是训练时跑想象 rollout，通过可微的 RSSM 动力学反向传播，训练一个 actor-critic（同时学策略和价值函数的方法），让它内化以前测试时由 CEM 做的事。这样部署时只运行策略，不再需要规划循环。训练仍分两步：先在真实数据上训练世界模型；然后冻结世界模型，在潜空间里推演想象轨迹，通过冻结的动力学反向传播来训练 actor-critic。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. DayDreamer、Dreamer 系列和领域局限</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=2382s" target="_blank">0:39:42</a>–0:46:17</em></p>
+        <h3>DayDreamer：搬到真实机器人上</h3>
+        <p>
+            DayDreamer 把 Dreamer 直接用在真实机器人上，同样的算法、同样的超参数。关键数字在四足机器人上：1 小时真实交互就够从零学会走路。世界模型让你用这一小时的真实数据，在想象中训练相当于好几天的量。他说这是这个范式最吸引人的性质之一。论文还有几个让 Dreamer 能在真实硬件上工作的贡献，比如训练和推断异步：策略按控制频率实时运行，世界模型在后台训练。
+        </p>
+        <p>
+            他用电影《黑客帝国》里的一幕来概括：Neo 在梦里练功夫，积累了几年的经验，完全在想象中学会了功夫。他说这就是世界模型的梦想：不要花几个小时看机器人在真实世界里失败，造一个足够好的模型，在想象中训练，再迁移。
+        </p>
+        <h3>Dreamer 系列小结</h3>
+        <ul>
+            <li>Schmidhuber 那篇（2018）：概念验证，他认为是第一个完全在想象中训练的智能体。</li>
+            <li>PlaNet（2019）：提出 RSSM。</li>
+            <li>Dreamer V1：用 actor-critic 策略取代交叉熵方法。</li>
+            <li>Dreamer V2、V3：训练上的改进，比如类别型潜变量（categorical latents）、KL balancing 等。他说 V3 很惊艳，是第一个从像素出发在 Minecraft 里拿到钻石的，他记得这需要智能体做两万多个动作。</li>
+            <li>Dreamer V4（去年）：重复了拿钻石的结果，但完全离线，没有任何在线交互。</li>
+        </ul>
+        <h3>Dreamer V4 的两个变化</h3>
+        <p>他说 V4 有两个值得理解的变化，也正好引出下一种框架：</p>
+        <ol>
+            <li>动力学模型先在没有动作标签的视频上预训练，用流匹配（flow matching，一种生成模型训练方法，学习把噪声沿一条速度场“流”到数据）对潜变量的历史建模；然后再用带动作的数据微调，得到以动作为条件的模型。这种解耦的好处是可以利用没有动作标签、规模更大的视频数据。</li>
+            <li>用 Transformer 的 KV cache 取代 RNN 隐状态，记忆比固定大小的 RNN 隐状态更有表达力、范围更长。</li>
+        </ol>
+        <p>
+            他提到 Danijar（Hafner，Dreamer 系列作者）他们也用他参与的 SOAR 论文的数据（为另一个项目自主采集的机器人数据）做了展示，说明它也能对真实机器人视频建模。
+        </p>
+        <h3>领域局限</h3>
+        <p>
+            到目前讲的所有方法都有一个根本限制：Dreamer 这类世界模型学出的潜空间通常只针对一个领域，Minecraft、DM Control 或某个特定机器人。潜码紧凑有用，但绑定在目标环境上，难以迁移。如果想要一个理解一般视觉世界的世界模型，什么都能喂给它，互联网视频、机器人数据、Minecraft，小的领域专用模型就不够了。这引出讲座下一部分：生成式视频模型。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 视频生成模型和视频分词</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=2777s" target="_blank">0:46:17</a>–0:51:56</em></p>
+        <h3>朴素分词的上下文爆炸</h3>
+        <p>
+            问题变成：如果把世界模型从单一领域的紧凑潜空间模型扩展到互联网规模的视频，能不能学到一个关于视觉世界怎么运作的更一般的模型。要用基于 Transformer 的生成模型处理视频，先得考虑怎么分词（tokenize）。最直接的想法是把每一帧都过一遍 ViT。但这会让上下文长度爆炸：256×256 的图像用前面讲的 16×16 patch，每帧约 256 个 token；10 秒、20 FPS 的片段有 200 帧，总数就是：
+        </p>
+        <p>$$256 \times 200 = 51{,}200 \ \text{个 token}$$</p>
+        <p>
+            他说这差不多到了 GPT-4 上下文长度的上限，而这只是一个 10 秒的片段。所以要找到一种有时间意识、足够紧凑的视频分词方式，才能把它放进合理的上下文窗口，这是做任何有用规模的视频生成模型之前要先解决的。
+        </p>
+        <h3>三条压缩轴</h3>
+        <p>
+            他说视频分词能单独讲一整节课，这里只讲要点。核心问题是视频极度冗余，相邻帧高度相关，朴素分词完全忽略了这点。压缩视频 token 有三条主要的轴，一般相互独立，可以组合：
+        </p>
+        <ul>
+            <li>空间压缩：最直接，用更深的编码器、更大的步长，用前面讲过的 VQ 类编码器。</li>
+            <li>时间压缩：把多帧合并成一个 token。可以非因果地做，比如把一段图像当成一个 3D patch（tubelet）；也可以因果地做，在逐帧解码时把过去的帧聚合成一个 token。要用于流式处理或控制，想要的是因果版本。Dreamer V4 和 Cosmos 模型都用了某种因果视频分词器。</li>
+            <li>自适应压缩：按画面复杂度分配 token。简单静止、没什么变化的帧用更少的 token；复杂动态的场景，比如机器人正在抓取放置，分配更多 token，保留更细的细节。</li>
+        </ul>
+        <p>
+            这些轴可以组合。Cosmos 有几种分词器，其中一种在空间上做 8 倍压缩，时间上也做 8 倍压缩。他说这样原来逐帧 ViT 得到的五万多个 token，同一个 10 秒片段能压到大约 100 个 token。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 动作放在哪里：WAM 和 VAM，为什么用视频骨干</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=3116s" target="_blank">0:51:56</a>–0:59:14</em></p>
+        <h3>动作是输入还是输出</h3>
+        <p>
+            扩展到互联网视频后，又有一个问题：动作放在哪里？前面讲的以动作为条件的世界模型里，动作是模型的显式输入：喂进观测和未来动作，得到未来状态。这需要带动作标签的数据，而互联网规模上这种数据很少。所以有两种替代范式，可以统称为基于视频的动作预测模型：
+        </p>
+        <ul>
+            <li>世界动作模型（world action model，WAM）：一个模型端到端地同时预测视频和动作。和 Dreamer 系列不同，动作在这里是输出：模型生成一段未来视频，同时预测产生这段视频的动作。另一个区别是它通常从一个通用的预训练视频骨干初始化，世界知识来自预训练骨干，不只来自机器人交互数据。DreamZero 是一个例子。</li>
+            <li>视频动作模型（video action model，VAM）：冻结一个在互联网视频上预训练好的视频骨干，提取视频特征，在上面只用机器人数据训练一个轻量的逆动力学模型（inverse dynamics model，IDM：给定前后两个状态，推出中间做了什么动作）。mimic-video 是这种做法。视频骨干负责动力学的重活，动作头只需要学从视觉特征到机器人动作的映射，需要的数据少得多。</li>
+        </ul>
+        <p>他说动作放在哪里，决定了数据需求、可扩展性，以及世界模型和控制耦合得多紧之间的取舍。</p>
+        <h3>视频那么贵，为什么还要视频骨干</h3>
+        <p>
+            前面刚说视频很吃 token、计算贵，为什么还要用视频骨干？他让大家回想到目前为止 VLA 的标准做法：拿一个在图像描述、视觉问答等任务上预训练好的 VLM，用大规模机器人遥操作数据微调。VLM 带来语义知识，比如它知道“切胡萝卜”是什么意思，但它是在静态的图文对上训练的，没有对时间动力学的理解，不知道动作怎样改变状态，也没有物理因果。所以要收集大量遥操作数据，让模型去理解接触物理、抓东西时会发生什么，这些都不来自 VLM 预训练。他说你在付很高的数据成本，去弥补一个从来不是为控制设计的表示。
+        </p>
+        <p>
+            如果改在预训练视频骨干上搭，就能把配方翻过来：起点换成在互联网规模视频上预训练的视频模型，不再指望机器人数据去教一个静态图文 VLM 学会动力学。它除了知道切胡萝卜是什么意思，还从一开始就带着视觉动力学，知道东西怎么动、动作怎样引起视觉世界的变化。这样机器人微调任务就简单得多，只需要学控制，也就是从视觉特征到机器人动作的映射，不必从零教模型物理，后训练更高效，得到好的 VLA 需要的数据少得多。
+        </p>
+        <p>
+            他说这就是他们在 mimic-video 论文里发现的。这篇是他和两位助教（字幕里听起来是 Yonas 和 Liam，他们当时在 Microsoft 跟他实习）合作的，他们把这类模型命名为视频动作模型，发现相比 π0.5 风格的 VLA，样本效率有提升，字幕里的说法是 “10% boost”（字幕不清，可能是 10 倍）。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. mimic-video 的 oracle 实验和 DreamZero</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=3554s" target="_blank">0:59:14</a>–1:05:45</em></p>
+        <h3>为什么视频骨干有效：oracle 实验</h3>
+        <p>
+            直觉是视频模型同时学到图像语义、物理动力学和视觉上的动作计划。如果这是真的，解码器的工作就应该很简单，几乎是平凡的：只是把视频表示里已经隐含的视觉计划翻译成低维的机器人轨迹。他们做了一个 oracle 实验，在不同的视频表示上训练动作解码器。如果给它从未来真实帧（真实发生的事）里提取的真值潜变量，成功率接近完美，而且不论骨干有没有在机器人数据上微调过都是这样。这说明预训练视频骨干本身提供的表示已经足够丰富，用很少的机器人数据就能完美解码出动作。
+        </p>
+        <p>
+            oracle 性能和用预测帧解码动作的性能之间的差距，指出了瓶颈在哪：在视频预测质量，不在动作解码。所以在这个范式里，提高机器人性能的路很直接，就是做更好的视频模型。视频模型越接近 oracle，下游性能就越好。
+        </p>
+        <h3>mimic-video 的结构</h3>
+        <p>
+            他说时间不多，讲快一点。视频骨干用的是预训练生成模型 Cosmos Predict 2。一个有意思的地方是推断时只做部分去噪（partial denoising）：视频骨干只往前跑到一个中间的流时间（flow time），从那里提取潜在的视觉计划，作为动作解码器的条件。另一个设计选择是视频和动作两部分都用流匹配训练，各自有独立的流调度（flow schedule）。测试时不需要重建视频，演示里的视频只是为了可视化。
+        </p>
+        <h3>DreamZero：一个模型同时预测视频和动作</h3>
+        <p>
+            DreamZero 走的是前面讲的世界动作模型路线，把视频和动作的联合预测放进一个模型，没有单独的 IDM 解码器。他说当天的嘉宾 Scott Reed 是这篇论文的合作者之一。
+        </p>
+        <ul>
+            <li>架构是一个因果的 DiT（diffusion transformer），输入视频潜变量、加了噪声的动作 token、本体感觉（proprioception，机器人自身关节角度等读数）和语言，用流匹配同时对视频和动作去噪，训练时用 teacher forcing。世界模型和策略之间没有真正的分隔，是一个模型同时预测两者。</li>
+            <li>推断时自回归运行，一块一块地生成未来帧和对应的动作，用 KV cache 提高效率。</li>
+            <li>他说这类方法的一个好处是，和纯视频生成不同，这是闭环设置：每执行完一个动作，可以用真实观测替换 KV cache 里生成的帧，从而绕开纯自回归视频生成固有的误差累积。</li>
+            <li>他们还有很多工程贡献，让一个 14B 参数的模型能实时运行。</li>
+        </ul>
+        <p>
+            结果显示在人形机器人上有很强的泛化，也有不错的少样本适应能力。不是所有任务都完美，叠衣服、拿起记号笔在书上画圈还不完美，但很多任务，比如系鞋带，他说相当惊艳。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 几种范式的对比、JEPA 和收尾</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=3945s" target="_blank">1:05:45</a>–1:11:48</em></p>
+        <h3>对比</h3>
+        <p>
+            他放了一张小的对比表，比较以动作为条件的世界模型和基于视频的动作模型在几条轴上的差别（这一段字幕里几种模型的称呼有些混，下面按上下文整理）：
+        </p>
+        <ul>
+            <li>数据：以动作为条件的世界模型占优，任何数据都能用，成功、失败、play data（无特定任务的自由操作数据）都可以，范围比 WAM 广得多。WAM 需要更多任务标签做指令条件，如果用 play data，就要大规模做事后重标注（hindsight relabeling）。</li>
+            <li>跨具身：基于视频的模型有优势，视频骨干和机器人无关，只有动作解码器需要特定机器人的数据。对以动作为条件的世界模型，跨具身学习还是开放问题。</li>
+            <li>保留预训练能力：视频动作模型更好。以动作为条件的模型要从零学动作条件，可能部分破坏模型的预训练知识。</li>
+            <li>超越模仿：以动作为条件的世界模型至少目前可以在想象中做 RL，超越纯模仿；另一种范式里还没看到这个。</li>
+        </ul>
+        <h3>JEPA：不预测像素</h3>
+        <p>
+            他说到目前讲的 Dreamer、DreamZero、mimic-video 等方法，都在某处有一个解码器，把表示映射回像素做重建，位置各有不同。第四类算法问：到底需不需要预测像素？这就是 JEPA 框架。想法是只预测下一帧的嵌入（embedding）长什么样，不预测下一帧本身长什么样：编码当前帧，给定动作预测下一个潜变量，再用同一个编码器编码真实的下一帧，最小化两个潜变量的距离。没有重建，没有解码器，没有像素损失：
+        </p>
+        <p>$$\mathcal{L} = \big\| P_\phi\big(E_\theta(o_t),\, a_t\big) - E_\theta(o_{t+1}) \big\|^2$$</p>
+        <p>
+            好处很明显：在潜空间里预测更便宜，也不会浪费容量去建模所有像素。问题是，如果编码器把每一帧都映射到同一个向量，预测损失就平凡地等于零，这就是表示坍缩（representation collapse）。他说这是 JEPA 一族这些年一直在解决的核心问题，也是所有不重建输入的自监督方法的根本难题。几种解决办法：
+        </p>
+        <ul>
+            <li>V-JEPA 2 用 EMA 目标编码器，也就是编码器的一个缓慢移动的副本，让预测器去追它。</li>
+            <li>DINO 世界模型（DINO-WM）用预训练编码器，不做端到端学习。</li>
+            <li>最新的一项工作（字幕不清）用高斯正则项，强制潜变量的分布散开，让“输出常数向量”这种解不可能出现。</li>
+        </ul>
+        <h3>收尾</h3>
+        <p>
+            他回到开头的公式：给定当前状态、动作和记忆，预测下一状态。今天讲的所有方法都是对同一个问题给出的不同回答，区别在于怎样表示状态、动作放在哪里、能用什么数据。他说自己已经超时很多，就讲到这里。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“with a good world model what you can do is essentially you can act ahead of the information that arrives from like the visual input.”<br>有了好的世界模型，你可以在视觉输入的信息到达之前就行动。· <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=830s" target="_blank">0:13:50</a></li>
+            <li>“you can explore many hypothetical trajectories for the cost of a single real one in the real world.”<br>你可以用真实世界里一条轨迹的成本，探索很多条假设的轨迹。· <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=973s" target="_blank">0:16:13</a></li>
+            <li>“in general it needs to be action conditioned”<br>一般来说，它要以动作为条件。· <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=1167s" target="_blank">0:19:27</a></li>
+            <li>“1 hour of real interaction is enough to learn walking on the quadruped from scratch.”<br>1 小时的真实交互就足以让四足机器人从零学会走路。· <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=2382s" target="_blank">0:39:42</a></li>
+            <li>“video is essentially very fundamentally extremely redundant.”<br>视频从根本上是极度冗余的。· <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=2872s" target="_blank">0:47:52</a></li>
+            <li>“the path to better robot performance in this family or in this paradigm is very straightforward, like it's just to build better video models.”<br>在这一类范式里，提高机器人性能的路很直接，就是做更好的视频模型。· <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=3650s" target="_blank">1:00:50</a></li>
+            <li>“do we even need to predict the pixels at all?”<br>我们到底需不需要预测像素？· <a href="https://www.youtube.com/watch?v=cTTmUZlOF2s&t=4090s" target="_blank">1:08:10</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>ETH Zürich Robot Learning 2026 · Lecture 8: World Models · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

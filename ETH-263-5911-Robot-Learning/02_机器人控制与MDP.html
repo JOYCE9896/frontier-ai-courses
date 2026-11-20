@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>机器人控制与 MDP | ETH Robot Learning 2026 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="01_机器人学习导论.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">ETH Robot Learning 目录</a> · 02</span>
+    <span><a href="03_嘉宾_Abhishek_Gupta_低成本仿真.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 2 讲：机器人控制与马尔可夫决策过程</h1>
+        <p class="subtitle">刚体和 SE(2)/SE(3)、齐次变换矩阵和坐标系链，关节、末端执行器和自由度，构型空间、工作空间、任务空间，正逆运动学和基于优化的逆运动学，线性插值和五次样条，PID 控制，然后转到决策：策略、状态和观测、马尔可夫性质、MDP 四元组、轨迹概率、时间范围和折扣，以及强化学习的目标</p>
+        <div class="author-meta">
+            主讲：Oier Mees（ETH Zürich / Microsoft）<br>
+            课程：Robot Learning: From Fundamentals to Foundation Models（ETH Zürich 263-5911，Week 2 (Feb 23)）· 时长：46 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ" target="_blank">课堂录像</a>（ETH Zürich 公开，2026 年春季，本文依据录像字幕整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            第一讲说，前半学期先打基础。这一讲就是基础的第一块，分两半。前一半是机器人控制的速成课：四足机器人、灵巧手、无人机看起来各不相同，怎样用同一套语言描述它们，怎样从"末端执行器要到哪里"算出"每个关节转多少"，再怎样让电机平稳地跟上这条轨迹。后一半转到决策：机器人在嘈杂、不可预测的世界里完成长时程任务，需要一个策略来决定下一步做什么，而描述这件事的数学框架就是马尔可夫决策过程（MDP）。这套记号会贯穿后面的模仿学习（第 3 讲）和强化学习（第 4、5 讲）。
+        </p>
+        <p>
+            本周课上讨论的论文：Simple random search provides a competitive approach to RL（Mania et al., 2018）；Deep RL Doesn't Work Yet（Irpan, 2018）；Curiosity-driven Exploration by Self-supervised Prediction（Pathak et al., 2017）。本周的嘉宾讲座是 Abhishek Gupta（University of Washington），见下一篇。
+        </p>
+        <ol>
+            <li><a href="#t01">刚体、SE(2)/SE(3) 和齐次变换矩阵</a> · <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">坐标系链、关节机器人、末端执行器和关节类型</a> · <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=336s" target="_blank">0:05:36</a></li>
+            <li><a href="#t03">自由度、构型空间、工作空间和任务空间</a> · <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=636s" target="_blank">0:10:36</a></li>
+            <li><a href="#t04">正运动学和逆运动学</a> · <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=1159s" target="_blank">0:19:19</a></li>
+            <li><a href="#t05">轨迹插值和 PID 控制</a> · <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=1341s" target="_blank">0:22:21</a></li>
+            <li><a href="#t06">从控制到决策：策略、状态和观测</a> · <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=1675s" target="_blank">0:27:55</a></li>
+            <li><a href="#t07">马尔可夫决策过程的组成</a> · <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=2206s" target="_blank">0:36:46</a></li>
+            <li><a href="#t08">轨迹、时间范围、折扣和学习目标</a> · <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=2510s" target="_blank">0:41:50</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 刚体、SE(2)/SE(3) 和齐次变换矩阵</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=0s" target="_blank">0:00:00</a>–0:05:36 · 对应章节：Course introduction · Robot morphology basics · Rigid body motion</em></p>
+        <p>
+            开头简单交代了课务：第一周收到反馈说第一次作业偏难，截止日期已经延后；开了一个 Moodle 论坛，可以提问、看别人有没有问过同样的问题，助教也会在上面回答；幻灯片和录像已经上线。
+        </p>
+        <h3>同一个问题：从目标到电机扭矩</h3>
+        <p>
+            他说机器人学习现在最让人兴奋的一点是硬件的多样：四足机器人在野外地形上走、灵巧手转魔方、无人机在飞。远看这些像完全不同的控制问题，每种机器人的关节、执行器和物理特性都不一样，但它们有同一个基本约束：要把某个高层目标，翻译成这种具体形态（morphology）所需要的电机扭矩。要做机器人的通用基础模型，就不能只为一种机器人解决问题，要理解适用于所有机器人的控制框架。
+        </p>
+        <h3>刚体</h3>
+        <p>
+            怎样找一种共同的语言来描述它们在做什么？他说几乎所有机器人都可以描述成一组在空间中变换、移动的刚体（rigid body）。在这个数学框架里假设机器人是刚体，意思是机器人上任意两点的距离保持不变，运动时不会被挤压或拉伸。好处是只需要跟踪机器人上的一个点，不用跟踪很多个。
+        </p>
+        <ul>
+            <li>平面运动：比如在地面上走的车或机器人，主要用 $x, y$ 位置加一个朝向角表示，用 SE(2) 群描述，也就是二维的特殊欧几里得群（special Euclidean group）。他说这很简单，但它是地面运动的基础。</li>
+            <li>空间运动：无人机生活在完整的三维世界里，用 SE(3) 描述。这时多了表示高度的 $z$，还有三个转动轴：横滚（roll）、俯仰（pitch）、偏航（yaw）。</li>
+        </ul>
+        <h3>齐次变换矩阵</h3>
+        <p>
+            代码里用齐次变换矩阵（homogeneous transformation matrix）表示这些运动。他说这对多数人可能很熟悉，但为了大家在同一起点上，还是过一遍。左边是平面情况，3 个自由度：$x$、$y$ 和角度 $\theta$，旋转矩阵由正弦和余弦组成，再加一个平移向量（录像里他口头说成了 SE3，从内容看指的是 SE(2)）：
+        </p>
+        $$T_{SE(2)} = \begin{bmatrix} \cos\theta & -\sin\theta & x \\ \sin\theta & \cos\theta & y \\ 0 & 0 & 1 \end{bmatrix}$$
+        <p>
+            右边是无人机所在的 SE(3)，扩展到 6 个自由度，3 个平移、3 个旋转（录像里他说成"六个平移值、三个旋转值"，应为口误）：
+        </p>
+        $$T_{SE(3)} = \begin{bmatrix} R & p \\ 0^\top & 1 \end{bmatrix}, \quad R \in \mathbb{R}^{3\times 3},\; p \in \mathbb{R}^3$$
+        <p>
+            他提醒检查一下数学：要成为合法的旋转矩阵，$R$ 要满足两个性质。第一，正交，转置等于逆；第二，行列式为 1。
+        </p>
+        $$R^\top R = I \;(\text{即 } R^\top = R^{-1}), \qquad \det R = 1$$
+        <p>
+            他说这保证了机器人转动时不会意外被拉伸，仍然是一个真正的刚体。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 坐标系链、关节机器人、末端执行器和关节类型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=336s" target="_blank">0:05:36</a>–0:10:36 · 对应章节：Chaining coordinate frames · Articulated robot bodies · End-effectors and joints</em></p>
+        <h3>坐标系的层级</h3>
+        <p>
+            为什么要关心这些矩阵？因为真实机器人通常有一整套层级的坐标系（frame）。他举自动驾驶汽车的例子：车有一个基座坐标系（base frame），位于重心，用来做控制、给电机发指令；车顶上还有激光雷达或摄像头这样的传感器。传感器看到路上的行人时，得到的是行人在传感器自己的局部坐标里的位置。为了决定不撞上这个行人，要把它变换回做控制的基座坐标系。好处是可以把这些齐次变换矩阵连乘起来，直接把"行人在传感器坐标系里的位置"换算成"在基座坐标系里的位置"：
+        </p>
+        $$p^{\text{base}} = T_{\text{base}\leftarrow\text{sensor}} \; p^{\text{sensor}}$$
+        <p>
+            他补充，传感器坐标系到基座坐标系之间的变换要靠传感器标定（sensor calibration）得到，这一讲不讲。
+        </p>
+        <h3>关节式刚体</h3>
+        <p>
+            前面把机器人当成一整块刚体在世界里移动。现实中的机器人更复杂，比如人形机器人 LOLA，要定义成关节式刚体（articulated rigid bodies），有三个组成部分：
+        </p>
+        <ul>
+            <li>连杆（link）：一个个单独的刚体；</li>
+            <li>关节（joint）：连接连杆；</li>
+            <li>末端执行器（end effector）：比如夹爪，用来和世界交互的那一端。</li>
+        </ul>
+        <p>
+            他说要记住的一点是，关节式机器人就是一条坐标系链。刚才讲的变换矩阵连乘，可以用来算出比如人形机器人的手相对于机器人基座在哪里。机械臂的例子是 Franka，一个很流行的 7 自由度机械臂，以及后面小组项目要用的 SO-101。右边的 SO-101 简单得多，但从数学上看两者的定义几乎一样。
+        </p>
+        <h3>三种末端执行器</h3>
+        <p>
+            手臂的运动最后要变成和真实世界的交互，这发生在末端执行器上。他挑了三种常见的：
+        </p>
+        <ul>
+            <li>吸盘夹爪（suction gripper）：从学习的角度看动作空间很干净，是二值的，真空开或关，不用操心额外的几何。常用于工业拣选（pick and place）。</li>
+            <li>平行夹爪（parallel gripper）：大多数工业机器人，包括 Franka 和课上要用的 SO-101，用的都是这种。它是 1 个自由度的动作，要考虑物体宽度，和物体交互需要更高的精度。</li>
+            <li>灵巧手（dexterous hand）：复杂得多，不是一两个自由度，可能超过 20 个。</li>
+        </ul>
+        <p>
+            他说后面讲 MDP 时会看到，末端执行器的选择决定了动作空间（action space）长什么样。
+        </p>
+        <h3>关节类型</h3>
+        <p>
+            关节在数学上是一种约束，限制两个刚体之间的相对运动，这样才能控制它们。他放了 Modern Robotics 教材里的一张图，列出各种关节的标准名称。他说老实讲，最常用、大家要用的就是转动关节（revolute joint），绕单个轴转动，像人的肘关节。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 自由度、构型空间、工作空间和任务空间</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=636s" target="_blank">0:10:36</a>–0:19:19 · 对应章节：Degrees of freedom · Configuration and workspace · Motion planning · Task space representation · Kinematics and redundancy</em></p>
+        <h3>自由度</h3>
+        <p>
+            他说讲到自由度，就开始触及机器人学习为什么这么难的核心。机器人的自由度（degrees of freedom，DoF）是在任意时刻确定机器人确切状态所需要的独立参数个数。幻灯片上列了不同类型关节各自的自由度。要算一个机器人总共有几个自由度，可以用 Kutzbach 公式（一般叫 Grübler–Kutzbach 公式）：从刚体所有可能的维度总数出发，减去每加一个关节带来的约束。它的标准形式是：
+        </p>
+        $$\text{dof} = m(N - 1 - J) + \sum_{i=1}^{J} f_i$$
+        <p>
+            其中 $m$ 是单个刚体的自由度（平面为 3，空间为 6），$N$ 是连杆数（含地面），$J$ 是关节数，$f_i$ 是第 $i$ 个关节允许的自由度。（录像里他只做了文字说明，公式按教材写出。）
+        </p>
+        <h3>构型空间</h3>
+        <p>
+            这些参数所在的空间叫构型空间（configuration space，C-space），就是机器人所有可能构型的集合。他指着表格说，这个空间的形状完全取决于关节类型。平面上的一个点，构型空间就是欧几里得空间；但一个有两个转动关节的"2R"机械臂，构型空间是弯曲的，是一个环面（torus）。
+        </p>
+        <p>
+            他说这很重要，因为训练神经网络策略时，网络要尊重构型空间的拓扑。在环面上，两点之间的距离不总是一条直线：如果现在在 356°，想去 1°，最短的路是转 5° 左右（字幕里他说的是"2°"），而不是倒着转 350°。
+        </p>
+        <h3>工作空间和障碍物</h3>
+        <p>
+            工作空间（workspace）是机器人在物理世界里能到达的所有点的集合。之所以要区分，是因为机器人学习里的智能体同时生活在两个世界：它在工作空间里感知任务，比如看到桌上的杯子；但要在构型空间里执行动作，转动关节。这个映射并不简单。比如在简化的机械臂例子里，工作空间里一个蓝色圆形障碍物，映射到构型空间里会变成一块形状复杂的禁区，关节不能进入。
+        </p>
+        <p>
+            他说 90 年代机器人做运动规划（motion planning）就是这么做的：显式构造构型空间，把障碍物换算进去，然后在自由空间里搜一条路径。但这种方法扩展性差，机器人维度越高，计算就越难以处理。现代机器人学习不想预先算好所有形状和障碍物、维护一个完美的结构化世界状态，它想要的是一个策略，能隐式地"感觉"到障碍物在哪，自动认识到某些动作会通向坏结果的区域。他说这就是手写几何和学出来的表征之间的根本区别，学期剩下的时间都会围绕后者。
+        </p>
+        <h3>任务空间</h3>
+        <p>
+            任务空间（task space）是任务目标自然定义所在的流形，和机器人的具体形态无关。比如任务是擦白板，任务空间就是白板表面上的所有点；不管来擦的是人形机器人、带单臂的移动机器人，还是无人机。
+        </p>
+        <h3>课堂练习：Franka 的三个空间</h3>
+        <p>
+            他请大家和邻座花半分钟讨论 Franka 机械臂的构型空间、工作空间和任务空间。时间不够，他直接给了答案：构型空间是 7 自由度的流形；工作空间是所有在物理上可达的 $xyz$ 位置；任务空间是末端执行器的六维位姿。
+        </p>
+        <p>
+            因为任务空间（6 维）比构型空间（7 维）小，就出现了冗余（redundancy）和零空间运动（null space motion）。他的例子是：机器人端着一杯咖啡完全不动，手肘仍有很多种动法，末端执行器在空间里的位置保持不变。这也可以用来绕开障碍物。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 正运动学和逆运动学</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=1159s" target="_blank">0:19:19</a>–0:22:21 · 对应章节：Forward and inverse kinematics</em></p>
+        <h3>正运动学</h3>
+        <p>
+            定义完空间，接下来是怎样在它们之间转换。最基本的映射叫正运动学（forward kinematics）：已知机械臂所有关节的值，求末端执行器在哪。比如给定三个关节角，末端在哪里。这是确定性的，只有一个答案：
+        </p>
+        $$x = f(q)$$
+        <p>
+            其中 $q$ 是关节角向量，$x$ 是末端执行器的位姿。但这个映射不是双射，可能有很多不同的构型对应同一个末端位置。
+        </p>
+        <h3>逆运动学</h3>
+        <p>
+            所以逆运动学（inverse kinematics，IK）难得多。他说这是课上主要关心的问题：策略可能预测出末端执行器的一个新目标位姿，我们要找到哪组关节角 $q$ 能到达那里。逆运动学的解往往不唯一，幻灯片上两组差别很大的关节角，能让末端到达完全相同的位置。对很多复杂机器人，可能根本没有解析解。
+        </p>
+        <h3>基于优化的逆运动学</h3>
+        <p>
+            实践中常用基于优化的逆运动学：定义一个代价函数，比如当前位姿和目标位姿的距离，再加上一些次要约束，比如远离障碍物，然后用梯度下降求解。他说不细讲，只讲最基本的形式：当前位姿和目标位姿之间有一个误差，要把它最小化，比如用误差的 L2 范数平方：
+        </p>
+        $$e(q) = x_{\text{target}} - f(q), \qquad \min_q \; \tfrac{1}{2}\,\| e(q) \|_2^2$$
+        <p>
+            然后迭代地用雅可比（Jacobian）方法更新。雅可比矩阵 $J(q) = \partial f / \partial q$ 告诉我们每个关节角的微小变化会怎样影响末端执行器在真实世界里的位置，据此一点点推动关节，直到末端到达目标。一种常见的写法是：
+        </p>
+        $$q \leftarrow q + \alpha \, J(q)^{+} \, e(q)$$
+        <p>
+            其中 $J^{+}$ 是伪逆，$\alpha$ 是步长。（幻灯片上具体用的是伪逆还是转置，字幕里听不出来，这里写的是常见形式。）
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 轨迹插值和 PID 控制</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=1341s" target="_blank">0:22:21</a>–0:27:55 · 对应章节：Trajectory generation · PID control fundamentals</em></p>
+        <h3>线性插值的问题</h3>
+        <p>
+            假设优化已经跑完，找到了一组能到达目标的关节角。机器人不会从一个位置瞬移到下一个，要怎样变成实际的运动？他以 SO-101 为例：想让它沿 $y$ 方向侧移 1 cm，就要插值，不能一步跳过去，生成一串细小的路点（waypoint），让末端逐步到达目标。
+        </p>
+        <p>
+            最简单的做法是线性插值：把关节空间里的路径当成一条直线，再定义给控制器多长时间到达终点，算出需要多少个离散步，然后插值：
+        </p>
+        $$q(t) = q_0 + \frac{t}{T}\,(q_T - q_0), \quad 0 \le t \le T$$
+        <p>
+            他说关心这件事，是因为后面策略输出目标位姿之后，也要用某种路点生成方法插值过去。线性插值简单好写，但对机器人很不好：第一个时间步就直接到满速，最后一步从最高速瞬间降到零，加速度出现无穷大的尖峰，给硬件带来很大应力。
+        </p>
+        <h3>五次样条</h3>
+        <p>
+            所以大多数控制器用更讲究的多项式方法，比如五次样条（quintic spline）。思路是把每个关节的轨迹表示成一个五次多项式：
+        </p>
+        $$q(t) = a_0 + a_1 t + a_2 t^2 + a_3 t^3 + a_4 t^4 + a_5 t^5$$
+        <p>
+            再加上 6 个边界条件保证运动平滑，也就是起点和终点的速度、加速度都为零（加上起止位置本身）：
+        </p>
+        $$q(0)=q_0,\; q(T)=q_T,\; \dot q(0)=\dot q(T)=0,\; \ddot q(0)=\ddot q(T)=0$$
+        <p>
+            这样的运动起步更柔和，收尾也更平缓，狄拉克 δ 那样的加速度尖峰消失了。他说 Franka 这样的工业机器人很多路点生成方法就是这么做的。
+        </p>
+        <h3>PID 控制</h3>
+        <p>
+            关于控制的最后一点：即使有了关节构型和平滑插值的路点，真实机器人也不会因为你下了指令就完美跟随，摩擦、重力、空气阻力等都会让它偏离。所以通常用 PID 控制器让机器人尽量跟住这串路点。他说很多人在别的课上学过，不细讲，但他做了可视化，展示跟踪轨迹时各部分的作用：
+        </p>
+        $$u(t) = K_p\, e(t) + K_i \int_0^t e(\tau)\, d\tau + K_d\, \frac{de(t)}{dt}$$
+        <ul>
+            <li>比例项（P）：和期望轨迹与当前轨迹之间的误差成正比，偏得越远，往回拉得越用力。</li>
+            <li>积分项（I）：补偿比如重力这样的持续偏差，机器人很重、一直往下坠，它会起作用把它拉回来。</li>
+            <li>微分项（D）：比如冲过头时，帮助阻尼、回到轨迹上。</li>
+        </ul>
+        <p>
+            他说这是关于怎样让机器人和末端执行器动起来的一堂速成课，只是很基本的运动。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 从控制到决策：策略、状态和观测</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=1675s" target="_blank">0:27:55</a>–0:36:46 · 对应章节：Introduction to robot learning · Policy representation · Markov decision processes</em></p>
+        <h3>为什么还不够</h3>
+        <p>
+            那是不是就做完了？他说显然没有。真实世界里机器人要做的远不止沿直线走，它最好能决定采取哪个动作，去实现某个复杂的长时程（long horizon）目标，尤其是在世界不可预测、充满噪声、没有地图的时候。前面讲的是机器人学里控制的部分，这门课更关心机器学习的部分，也就是决策：为了实现复杂的长期目标，下一个动作该是什么。（这时有学生举手，他说问题留到最后。）
+        </p>
+        <p>
+            他放了自己以前的一项工作：用双臂 ALOHA 机器人切寿司。这是一个很长时程的任务：一只手先抓起刀，移到合适位置，再用另一只手抓住，然后要准确地切进去。他说寿司是玩具做的，不是真的；视频画面还有点抖。这要求很高的精度，对机器人很难。这个系统有 14 个自由度（两只手臂），控制频率很高，策略每个时刻都要预测大量动作；底下还有 PID 之类的低层控制器保证电机真的照策略的预测去动。接下来讲的，是让策略能从数据里学会这种长时程灵巧任务的基本数学框架。
+        </p>
+        <h3>策略的记号</h3>
+        <p>
+            怎样表示从观测到动作的映射？他说这和图像分类器差别不大：分类器用神经网络把输入 $x$（比如一只猫的图）映射成输出 $y$。策略把观测 $o$（比如汽车在雪地道路上的摄像头画面）映射成输出 $a$，这里可以是让车直行、左转、右转或倒车的动作。符号上没什么变化：用 $\pi$ 表示策略，下标 $\theta$ 表示策略神经网络的权重。
+        </p>
+        <p>
+            决策问题有时间维度：在时刻 $t$，看摄像头观测 $o_t$，据此做出决策 $a_t$；下一步是 $t+1$，以此类推。课上用从 0 开始的整数时间步，真实世界里也可能是连续时间，比如以毫秒计。数学上，策略就是给定观测下动作的条件概率分布：
+        </p>
+        $$a_t \sim \pi_\theta(a_t \mid o_t)$$
+        <p>
+            他强调有一个大区别：分类时把猫错标成狗，猫不会变；机器人里策略选错了动作，世界的状态就变了，车左转开进沟里，网络看到的下一个观测会完全不同。
+        </p>
+        <p>
+            一般情况下策略给出的是动作上的分布，为每个动作分配一个概率，叫随机策略（stochastic policy）。特例是确定性策略（deterministic policy），把概率 1 给一个动作，其余为 0。
+        </p>
+        <h3>状态和观测</h3>
+        <p>
+            策略看的是什么？这里要区分状态（state）和观测（observation）。还是汽车的例子：状态是真实情况，比如车在地图上的确切位置、速度、朝向；观测由状态产生，是一种有损的映射，比如摄像头画面。他说要点是，不管天气和能见度如何，从晴空万里到雪夜行车，观测里能获取的信息量会变，但状态不变，始终是同一个。这很重要，因为机器人通常靠观测工作，比如相机图像，只能拿到世界状态的部分信息。
+        </p>
+        <h3>图模型和马尔可夫性质</h3>
+        <p>
+            用概率图模型的语言描述：策略 $\pi$ 给出 $a$ 在 $o$ 下的条件分布，状态和动作一起给出下一个状态的概率分布，这叫转移函数（transition function）或动力学（dynamics）：
+        </p>
+        $$s_{t+1} \sim p(s_{t+1} \mid s_t, a_t)$$
+        <p>
+            他说这里有一个很重要的东西，马尔可夫性质（Markov property）：如果要确定 $s_3$，已经知道 $s_2$，那么知道 $s_1$ 不会提供任何额外信息：
+        </p>
+        $$p(s_3 \mid s_2, s_1) = p(s_3 \mid s_2)$$
+        <p>
+            这说得通，因为状态已经包含了关于世界所需的全部信息，知道过去不会帮你更好地确定未来。不过即使知道状态，由于随机性，预测未来仍可能很难。
+        </p>
+        <h3>两套记号</h3>
+        <p>
+            他说为了让大家更"困惑"一点：这门课主要用 $s$ 表示状态、$a$ 表示动作，这套记号来自 50、60 年代 Bellman 等人的动态规划；但大家也会看到，比如他前面讲 PID 时，有人用 $x$ 表示状态、$u$ 表示动作，这来自最优控制理论。两者说的是同一件事，唯一要知道的是：强化学习里讲奖励（reward），要最大化；最优控制里讲代价（cost），要最小化，两者是相反关系。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 马尔可夫决策过程的组成</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=2206s" target="_blank">0:36:46</a>–0:41:50 · 对应章节：MDP components · Transitions and uncertainty · Reward functions</em></p>
+        <h3>MDP 四元组</h3>
+        <p>
+            马尔可夫决策过程（Markov decision process，MDP）是把前面所有内容，从电机扭矩到高层目标，概括起来的正式框架，由一个元组定义：状态空间、动作空间、转移概率、奖励函数：
+        </p>
+        $$\mathcal{M} = (\mathcal{S}, \mathcal{A}, \mathcal{T}, r)$$
+        <p>
+            他说 MDP 之所以重要，是因为它给出统一的数学框架，让我们能把复杂的物理机器当成任何其他计算智能体来处理，于是可以把同样的学习算法用在 27 自由度的人形机器人上，也可以用在下棋上。
+        </p>
+        <h3>状态空间</h3>
+        <p>
+            状态空间分离散和连续两类。离散的比如国际象棋，格子之间没有"一半"，所有东西都看得到。连续状态空间是机器人里主要用的，比如关节角，用实数定义。这对机器人学习有影响：离散世界里智能体可以靠把状态空间里每个"格子"都试一遍来探索；连续世界里状态可能有无穷多个，没法为每个状态和它的价值建一张表，要用函数逼近器和神经网络去覆盖这些无穷的可能。
+        </p>
+        <h3>动作空间</h3>
+        <p>
+            动作空间同样分离散和连续。在仿真里用键盘控制机器人，是离散动作空间；用 VR 动作控制器遥操作，就是连续的、平滑得多的动作空间。
+        </p>
+        <h3>转移模型</h3>
+        <p>
+            理想世界里转移模型是确定性的：命令车把方向盘转整整 5°，车就沿着一条完全可预测的弧线走。现实里有随机性：路面可能湿滑、结冰，轮胎可能磨损，得不到那样精确可预测的行为。所以机器人里常用随机的转移模型。机械臂也一样，电机可能冲过头，传感器噪声带来不确定性，机器人不会百分之百按预测的轨迹走。
+        </p>
+        <h3>奖励函数</h3>
+        <p>
+            MDP 里还定义奖励函数，它塑造策略的行为，主要用在强化学习里。大家可能熟悉两种：
+        </p>
+        <ul>
+            <li>稀疏奖励（sparse reward）：只在回合结束、或满足某个条件时给，比如机器人把物体举起来给 1，否则给 0。</li>
+            <li>稠密奖励（dense reward）：比如末端执行器到要抓物体那个点的欧氏距离，能大大加快学习。</li>
+        </ul>
+        $$r_{\text{sparse}} = \mathbb{1}[\text{object lifted}], \qquad r_{\text{dense}} = -\,\| p_{\text{ee}} - p_{\text{obj}} \|_2$$
+        <p>
+            他放了自己读博时的两段视频（播不出来，他口头描述）：用强化学习教智能体做拣选。用稀疏奖励的那个失败得很彻底，用稠密奖励的能把物体拿起来放好。他说如果稀疏奖励那个训练得更久，也许最后也能学会。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 轨迹、时间范围、折扣和学习目标</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=2510s" target="_blank">0:41:50</a>–0:46:10 · 对应章节：Horizon and trajectories · Optimal policies</em></p>
+        <h3>轨迹概率</h3>
+        <p>
+            前面看的是 MDP 的各个组成部分，可机器人不只存在于某一个时刻，它在序列里运行，这种序列叫轨迹（trajectory），用 $\tau$ 表示。轨迹概率表示在当前策略 $\pi$ 下，看到某条特定的状态-动作序列的总概率，由三样东西组成：初始状态分布 $\rho$，即机器人从某个状态开始的概率；每个状态下策略选什么动作；转移函数，即给定动作后物理规律把我们带到哪里。每个时间步把它们乘起来，就得到完整的概率：
+        </p>
+        $$p_\pi(\tau) = \rho(s_0) \prod_{t=0}^{T-1} \pi(a_t \mid s_t)\, \mathcal{T}(s_{t+1} \mid s_t, a_t)$$
+        <h3>有限和无限时间范围</h3>
+        <p>
+            知道怎样建模轨迹后，要决定机器人该在乎多远的未来，这就是时间范围（horizon）的概念。
+        </p>
+        <ul>
+            <li>有限时间范围 MDP：机器人有严格的时间限制，比如 5 秒内抓住一个移动的物体，时间一到回合重新开始。这种设定下策略可能随时间临近而改变，比如在第 4 秒变得"着急"，去尝试一个冒险的动作来拿到奖励。</li>
+            <li>无限时间范围 MDP：理论上永远继续，或者直到到达某个终止状态。这在自主导航或长期任务里更常见。</li>
+        </ul>
+        <p>
+            他指出，如果直接用这种形式，在无限时间里累积奖励会得到无穷大，策略就没法判断哪个更好。所以通常引入折扣因子（discount factor）$\gamma$，取 0 到 1 之间，让时间上更近的奖励权重更大，远期的奖励权重更小。
+        </p>
+        <h3>学习目标</h3>
+        <p>
+            最后一张幻灯片把所有东西合在一起，得到寻找最优决策策略的学习目标。智能体一生中累积的奖励，在有限时间范围里是直接求和，在无限时间范围里是折扣求和：
+        </p>
+        $$R(\tau) = \sum_{t=0}^{T} r(s_t, a_t) \qquad \text{或} \qquad R(\tau) = \sum_{t=0}^{\infty} \gamma^t\, r(s_t, a_t), \quad 0 \le \gamma < 1$$
+        <p>
+            因为世界是随机的，要把它建模成期望回报（expected return），也就是按策略行动时所有可能轨迹上回报的平均。最优策略就是让期望回报最大的那个策略：
+        </p>
+        $$\pi^* = \arg\max_\pi \; \mathbb{E}_{\tau \sim p_\pi(\tau)} \big[ R(\tau) \big]$$
+        <p>
+            讲完这张，他说可以切换到论文讨论了。这一讲最后没有录到问答。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>"the network has to respect like the different topologies that your robot configuration space has"（网络要尊重机器人构型空间的不同拓扑。）· <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=774s" target="_blank">0:12:54</a></li>
+            <li>"this is kind of like the fundamental difference between you know, hardcoded like geometry to learned representations"（这就是手写几何和学出来的表征之间的根本区别。）· <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=966s" target="_blank">0:16:06</a></li>
+            <li>"a policy is just a conditional probability distribution over actions given an observation"（策略就是给定观测时动作上的一个条件概率分布。）· <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=1933s" target="_blank">0:32:13</a></li>
+            <li>"in classification, if you mislabel a cat as a dog, the cat doesn't change, but in robotics, if your policy chooses the wrong action, the state of the world changes"（分类时把猫错标成狗，猫不会变；机器人里策略选错了动作，世界的状态就变了。）· <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=1933s" target="_blank">0:32:13</a></li>
+            <li>"the state doesn't change. So, the state remains constant."（状态不会变。状态保持不变。他指的是天气和能见度只影响观测，不影响状态。）· <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=2030s" target="_blank">0:33:50</a></li>
+            <li>"allows us to treat complex physical machines exactly like any other computational agent"（它让我们可以把复杂的物理机器，完全当成任何其他计算智能体来处理。）· <a href="https://www.youtube.com/watch?v=5-Bb84eTTqQ&t=2226s" target="_blank">0:37:06</a></li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>ETH Zürich Robot Learning 2026 · Lecture 2: Robot Control &amp; Markov Decision Processes · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

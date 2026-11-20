@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scott Reed：具身智能该用什么骨干网络 | ETH Robot Learning 2026 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="14_世界模型.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">ETH Robot Learning 目录</a> · 15</span>
+    <span><a href="16_通用机器人策略.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>嘉宾讲座 · Scott Reed：具身智能该用什么骨干网络</h1>
+        <p class="subtitle">机器人策略的三种骨干：从视觉语言模型改来的 VLA，从视频生成模型改来的世界动作模型（DreamZero、Cosmos Policy、GR-1/GR-2），以及靠大规模人类数据从零训练；各自的长处、短处和他押注的方向</p>
+        <div class="author-meta">
+            主讲：Scott Reed（NVIDIA GEAR Lab 首席研究科学家），ETH Robot Learning 课程嘉宾讲座<br>
+            课程：Robot Learning: From Fundamentals to Foundation Models（ETH Zürich 263-5911，Week 8）· 时长：36 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=fqkp_wkov6M" target="_blank">课堂录像</a>（ETH Zürich 公开，2026 年春季，本文依据录像字幕整理，是中文转述，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            这是第 8 周的嘉宾讲座，接在 Oier Mees 的“世界模型”那一讲后面。主持人介绍说，Scott Reed 是 NVIDIA 通用具身智能体研究实验室（GEAR，Generalist Embodied Agent Research）的创始成员，之前在 Google DeepMind 做了 8 年生成模型和通用智能体研究，主导了 Gato（“A Generalist Agent”）论文，2016 年在 University of Michigan 跟 Honglak Lee 读完博士。本周课上讨论的论文里也有 Gato 的后续思路和 DreamZero（“World Action Models are Zero-shot Policies”）。
+        </p>
+        <p>
+            他讲的问题是：具身智能体（embodied agent，有身体、在物理世界里行动的智能体）的骨干网络该选哪种。他比较了三条路线：VLA、世界动作模型、从零训练，给出每种的代表工作、结构、强项和弱项，最后说他现在看好世界动作模型加大规模人类数据。问答部分谈到 JEPA 这类隐空间世界模型、视频质量和动作失败的关系、仿真会不会被取代、力和触觉能否从视频里推断，以及资源有限的研究者能做什么。录像在最后一个问题提出后结束。
+        </p>
+        <ol>
+            <li><a href="#t01">什么是骨干网络，有哪几种选择</a> · <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=110s" target="_blank">0:01:50</a></li>
+            <li><a href="#t02">VLA 的代表工作和结构</a> · <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=241s" target="_blank">0:04:01</a></li>
+            <li><a href="#t03">扩散解码器、LBM 研究和 VLA 的长短处</a> · <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=507s" target="_blank">0:08:27</a></li>
+            <li><a href="#t04">世界动作模型</a> · <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=768s" target="_blank">0:12:48</a></li>
+            <li><a href="#t05">世界动作模型的长处和短处</a> · <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=1248s" target="_blank">0:20:48</a></li>
+            <li><a href="#t06">从零训练和人类数据</a> · <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=1385s" target="_blank">0:23:05</a></li>
+            <li><a href="#t07">结论和问答</a> · <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=1568s" target="_blank">0:26:08</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 什么是骨干网络，有哪几种选择</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=110s" target="_blank">0:01:50</a>–0:04:01</em></p>
+        <p>
+            他先简单介绍自己：在 DeepMind 做了 8 年生成模型和通用智能体，最近 2 年在 Jim Fan 和 Yuke Zhu 带领的 GEAR 团队。
+        </p>
+        <p>
+            他说的骨干网络（backbone）指的是这样一个结构：把机器人的传感器数据（摄像头等）和语言指令一起编码成一个共享表示，再用这个表示预测动作。骨干决定的不只是策略在推理时怎么运行，也决定了它在预训练时能吸收多少知识、能把多少知识迁移到机器人的下游任务上。
+        </p>
+        <p>主要选择有三种：</p>
+        <ul>
+            <li>从零训练：只用自己的机器人数据训练一个视觉结构。如果你有很多数据，或者只关心某个机器人上的一个窄任务、不追求开放性，这样做说得通。</li>
+            <li>用视觉语言模型（VLM，vision language model）初始化。他说过去 5 到 10 年的主流做法是用预训练基础模型，至少从它初始化。VLM 原本可能用来做视觉问答之类的任务。</li>
+            <li>用视频模型初始化，这是新兴的路线。有人叫它世界模型，他说这类模型的来历是视频生成，再改成骨干。视频扩散模型已经有几年了，但他认为直到最近，无论是生成质量还是结构，才成熟到能做机器人和其他具身智能体的骨干。</li>
+        </ul>
+    </section>
+
+    <section id="t02">
+        <h2>02. VLA 的代表工作和结构</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=241s" target="_blank">0:04:01</a>–0:08:27</em></p>
+        <h3>代表工作和基本思路</h3>
+        <p>
+            VLA（Vision-Language-Action model，视觉语言动作模型）是在 VLM 基础上加上动作输出的机器人策略。他列的代表工作有 RT-2、OpenVLA、Physical Intelligence 的 π0、π0.5、π0.6，NVIDIA 偏重人形机器人的 GR00T 系列，TRI 的 Large Behavior Model，还有 Gemini Robotics 等，他说这些只是他最熟的。
+        </p>
+        <p>他总结的好处：</p>
+        <ul>
+            <li>把所有东西放进一种统一的模态；</li>
+            <li>一般能较好地支持跨本体（cross-embodiment，不同形态的机器人共用一个模型）；</li>
+            <li>可以直接微调 VLM 去生成控制用的 token；</li>
+            <li>能利用互联网规模的数据做推理和语义落地（grounding，把语言概念对应到图像里的具体东西）。</li>
+        </ul>
+        <p>
+            动作的表示方式差别很大：有的用离散 token，有的用连续值，配合扩散或 flow matching 生成。泛化方面，他说有证据表明 VLA 比从零训练的模仿学习更好：在多任务、多本体数据上训练，数据效率更高，能达到的最高性能也比在单任务或单本体上从零训练要高。
+        </p>
+        <h3>OpenVLA：最简单的结构</h3>
+        <p>
+            他先讲 OpenVLA，因为它最简单。用一个预训练视觉编码器（DINO 或 CLIP，或两个都用）编码图像，用预训练语言模型编码指令，这部分一开始可能冻结，然后学习把表示“反 token 化”成动作。OpenVLA 的动作用分箱（binning）离散化：把每个动作维度的连续取值切成若干区间，每个区间对应一个 token，运行策略时再把 token 还原成连续值。他说这个结构很简单，效果却相当好。
+        </p>
+        <h3>π 系列：离散和连续两种动作预测</h3>
+        <p>
+            更复杂的做法是 π 系列模型，同时有离散和连续两种动作预测。离散部分用 FAST tokenizer 把动作编码成 token，这样 VLM 可以一边做语言任务（比如预测子任务），一边预测动作。
+        </p>
+        <p>
+            他解释了为什么这对预训练很重要：如果直接把离散语言 token 预测和 flow matching 或扩散的梯度一起反向传播进 VLM，会破坏 VLM 的权重，丢掉语言跟随之类的能力。分阶段仔细训练也许可行，但只要简单地把 VLM 语言任务和机器人动作预测放在一起训练，就总有灾难性遗忘（catastrophic forgetting，学新任务时把原来学会的能力忘掉）的风险。全部用离散 token 做，预训练的选择就多了，VLM 里也能学到更适合控制的表示。
+        </p>
+        <p>
+            但单独的扩散或 flow matching 动作专家（action expert）仍然有用。离散动作 token 解码时可能出错，这会带来安全问题：如果解码出来的动作没有定义、出了错，系统给机械臂一个默认位置目标，机械臂可能猛地甩出去，很危险。他说出于安全，可能也出于性能，保留 flow matching 或扩散动作专家是好的，因为那里不会有解码错误。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 扩散解码器、LBM 研究和 VLA 的长短处</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=507s" target="_blank">0:08:27</a>–0:12:48</em></p>
+        <h3>TRI 的 Large Behavior Model</h3>
+        <p>
+            带扩散解码器的 VLA 还有很多，比如 π 系列、GR00T 系列，以及 TRI 的 Large Behavior Model（LBM）。他说 LBM 可以看成 VLA 的另一个名字，他也喜欢这个名字。LBM 同样用预训练 ViT 处理图像和语言，结构更简化：把 ViT 的图像 token 和语言 token 拼起来直接送进网络。他说至少在他们的任务集上，效果出奇地好。
+        </p>
+        <p>
+            他推荐每个人都读这篇论文。它严格检验了 VLA 式的多任务预训练是否真的提升下游任务表现、数据效率和最高性能，结论是提升相当明显。由于真机评估很难，他们做了很仔细的分析，比如双盲评估：拿一对策略，评估员不知道哪个是哪个，在同一台机器人上同时一对一比较，再做统计分析确认结果显著。他说结果印证了大家对 VLA 的很多直觉，但有人真正严格地做了，这很好，论文里有很多值得学的东西。
+        </p>
+        <h3>让他印象深的演示</h3>
+        <ul>
+            <li>Physical Intelligence 经过 RL 后训练的模型（字幕不清，应是 π*0.6）连续做特调饮品将近一个小时，他说他觉得很厉害。</li>
+            <li>NVIDIA 的 EgoScale，建立在 GR00T N1.5 结构上，用了大量带手部追踪的人类第一视角数据。他认为就是这些数据让这个方案效果很好。</li>
+        </ul>
+        <p>
+            他说 VLA 能控制平行夹爪，能很好地控制人形机器人的手，配合全身控制器（whole body controller）还能控制人形机器人。VLA 已经在各种机器人形态上找到了应用，作为一类模型开始成熟。
+        </p>
+        <h3>VLA 的强项</h3>
+        <ul>
+            <li>从预训练得到语义落地能力；</li>
+            <li>学新任务比从零开始更省数据；</li>
+            <li>扩大模型和数据时性能应该可预测地提升，前提是有高质量数据可扩；</li>
+            <li>有一些跨任务、跨本体迁移的证据，但他说远没解决。</li>
+        </ul>
+        <h3>VLA 的弱项</h3>
+        <ul>
+            <li>预测和推理发生在动作空间里，可能是语言，也可能是做扩散的连续空间。他认为这可能不是推理物理和控制的合适地方。</li>
+            <li>动作表示通常是在预训练之后以某种方式“外挂”上去的，微调时总有灾难性遗忘的风险。</li>
+            <li>数据孤岛（data islands）。因为机器人缺少网页规模的数据，大家的直觉是把不同本体的数据全扔在一起，叫跨本体训练。但模型很可能把这些数据看成互不相干的孤岛，彼此之间迁移很少，因为各子集的形式和相关结构不同。</li>
+            <li>他认为当前 VLA 在分布外零样本泛化、对新本体零样本泛化方面，证据有限甚至没有。</li>
+        </ul>
+    </section>
+
+    <section id="t04">
+        <h2>04. 世界动作模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=768s" target="_blank">0:12:48</a>–0:20:48</em></p>
+        <h3>范式变化</h3>
+        <p>
+            让很多人兴奋的新一类策略模型是世界动作模型（world action model，WAM），也叫视频动作模型（video action model）。他列的代表是最近出的 DreamZero 和 Cosmos Policy，更早的有字节跳动的 GR-1、GR-2，最近的会议上还有很多。
+        </p>
+        <p>
+            范式上的变化是：在行动之前，或者和行动一起，用像素预测世界状态。这样预测和推理可以在一个更丰富、可能更适合控制的空间里做。他还强调，这种预训练目标让策略在预训练阶段能吸收比单纯预测动作多得多的相关信息，用他的话说能从数据里榨出更多东西。
+        </p>
+        <h3>DreamZero 的结构</h3>
+        <p>
+            DreamZero 用一个 VAE（变分自编码器，把图像压缩成低维隐变量再还原的网络）把视频帧编码成隐变量（latent），和动作嵌入拼在一起，以语言为条件，送进一个块因果（block causal）的 DiT（Diffusion Transformer，用 Transformer 做去噪网络的扩散模型）。块因果的结构让推理时可以做 KV 缓存，所以采样帧和动作的效率较高。
+        </p>
+        <p>
+            DreamZero 对动作和未来一段帧做联合 flow matching。可以选择把两者都完整去噪；还有一个 DreamZero Flash 版本，只做一两步，不把未来的视频块完全去噪，主要关注动作块（action chunk，一次预测的一段连续动作）。他说这个版本表现一样好。
+        </p>
+        <h3>从视频模型拿到动作的几种方式</h3>
+        <ul>
+            <li>完整采样出一段未来视频，再用逆动力学模型（inverse dynamics model，根据前后两帧推出中间做了什么动作的模型）恢复动作；</li>
+            <li>用视频模型做规划；</li>
+            <li>只把视频预测当成预训练手段，推理时不需要把未来观测完整去噪。</li>
+        </ul>
+        <p>
+            他类比了 VLA 里的推理模型：推理带来的很多好处来自预训练阶段做过推理，模型因此学到了更好的表示；推理时也做推理可能还是最好的，但就算不做，预训练做过也让模型更好。他认为视频模型也有类似的情况。
+        </p>
+        <h3>Cosmos Policy</h3>
+        <p>
+            差不多同时出来的 Cosmos Policy 思路类似，但除了预测动作和未来图像，还扩散生成未来的本体感知（proprio，机器人自身的关节角度、位置等状态）和价值（value）。他说这说明这个范式很灵活，这篇论文甚至更有资格叫真正的世界模型，因为它建模的内容更完整。
+        </p>
+        <p>
+            它的结构设计也有意思：把本体感知、动作和价值嵌入到图像嵌入空间里，在空间上平铺。这样从扩散模型的角度看，一切都是图像，只是除了机器人摄像头画面，还有几种表示动作、本体感知和价值的特殊帧。他说给足数据，模型自己会弄明白。
+        </p>
+        <h3>自回归的世界动作模型</h3>
+        <p>
+            更早出现、思路很不同的是字节跳动的 GR-1、GR-2 这类自回归世界动作模型。它们把语言、机器人状态、图像交错排成序列，什么都预测。他说这些工作在别的团队转向这个范式之前很久就有很不错的结果，他认为这条路也能扩展得很远。这和他以前做的 Gato 是一路的：一个大的 Transformer 语言模型，用某种规范的方式把所有传感器和摄像头数据串成一条扁平的 token 序列来建模。GR 系列做了一些巧妙的设计，在机器人上推得更远。
+        </p>
+        <h3>DreamZero 的演示和失败分析</h3>
+        <p>
+            他放了 DreamZero 的演示：解开箱子上的绳子、拉推车、把吸管从杯子里拔出来、“熨”衬衫（他说其实没在真熨，只是做出动作）。这些行为都不在机器人训练数据里，不过可能在视频模型预训练的某个阶段由人类展示过。
+        </p>
+        <p>
+            生成的视频不是像素级完美，但大体和机器人实际做的一致。他们观察到，样本质量和成功率都随模型规模提升：用 140 亿参数的 Wan 模型比 20 亿参数的好得多，样本和成功率都是。
+        </p>
+        <p>
+            失败分析显示，大多数失败来自视频生成错误，而不是动作预测错误：视频预测成什么样，策略最后就做成什么样。他说这意味着改进视频骨干可以直接转化为更好的策略表现。看到策略有漏洞时，只要改进对应的视频能力，就可以期待策略变好，而且补这些漏洞不一定需要机器人数据，也可以是人类数据。他认为这是机器人学习一条有希望的路。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 世界动作模型的长处和短处</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=1248s" target="_blank">0:20:48</a>–0:23:05</em></p>
+        <h3>长处</h3>
+        <ul>
+            <li>能从像素里自然地学到某种直觉物理。</li>
+            <li>预训练数据来源更容易扩展：如果大部分收益来自预测摄像头画面，那只需要大量摄像头数据。</li>
+            <li>某种意义上和本体无关，因为预测和推理共享统一的输出空间；所有数据要预测的相关结构形式相同，所以不太容易形成数据孤岛。</li>
+        </ul>
+        <h3>短处</h3>
+        <ul>
+            <li>采样比 VLA 贵得多。</li>
+            <li>建模每个像素可能是大材小用。实际是在隐空间里做，但这个隐空间是为了压缩像素、还能重建像素而学的，来自最终要生成好看、高保真画面的视频模型，对机器人可能过头了。他说有很多论文表明，如果只关心一个领域，比如 Minecraft，可以训练压缩率高得多的 tokenizer 或 VAE，再在上面训练序列模型，泛化好、更紧凑、跑得快得多。对开放领域的机器人，不确定能压缩这么多，但他认为这是有希望的方向：如果只做控制、不在乎生成，能不能改造这些 tokenizer 或 VAE 让它们压缩得多得多？他认为答案是能，但需要一个通用、稳健、即插即用的方法，那会带来世界动作模型的又一轮改进。</li>
+            <li>上下文长度目前在大多数方法里有限（字幕这里有一处不清）。他说这方面也有很多研究，关键是做得简单、好用、可扩展，同时不牺牲性能。</li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. 从零训练和人类数据</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=1385s" target="_blank">0:23:05</a>–0:26:08</em></p>
+        <h3>早期的从零训练</h3>
+        <p>
+            第三种范式是从零训练。在基础模型时代之前、DQN 那个年代，大家都是为一个任务训练一个专门的网络。后来自然有人想：把所有数据放进一个大网络。他把 Gato、Octo、RT-1 归在这一类。Gato 甚至把文本、图像、问答任务和 Atari、机器人放在一起，全部 token 化，送进一个大 Transformer。机器人上也可以这样做，不管是单本体多任务的 RT-1，还是多本体多任务的 RT-X 和 Octo。
+        </p>
+        <p>
+            他说这些工作都有一定泛化，但都受数据孤岛现象限制。这条路也容易碰到上限：能拿到多少本体、多少高质量数据，取决于数据联盟能凑多少，或者像他当年那样把 DeepMind 的模拟智能体和几台机器人的数据全搜集起来，最终受研究人员时间的限制。
+        </p>
+        <h3>现代做法：大规模人类数据</h3>
+        <p>
+            现代的从零训练很有意思。一类是 UMI（Universal Manipulation Interface，一种人手持的、带传感器的夹爪采集设备），Generalist AI、Sunday 等公司在做大规模基于人类的预训练，他记得有家公司说有大约 50 万小时。给人装上传感器，就能采集到质量很高、可以直接迁移到机器人的示范。
+        </p>
+        <p>
+            另一类是连传感器都不装，用摄像头拍人在真实环境里做事，再做标注。他提到一项工作（字幕识别为 “Ego4D from DeepMind”，名称不清），只有 2 万小时，但很容易扩大；再加少量带传感器的数据（50 小时就够），和极少的机器人数据，就得到了很好的结果。
+        </p>
+        <p>
+            他说这两类方法都表现出类似缩放规律（scaling law）的行为：增加人类数据，验证损失持续下降，成功率单调上升。两种思路很不同，但都说明扩展的是人类数据，而人类数据扩展起来容易得多，这样从零训练就能行得通。你可以训练一个基础模型，不必绑在 VLM 或视频模型上，结构随便选，他说结构可能都不重要。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 结论和问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=1568s" target="_blank">0:26:08</a>–0:36:11</em></p>
+        <h3>他看好什么</h3>
+        <p>
+            他说现在最看好两样：世界动作模型（视频动作模型），因为它的泛化特性；以及扩大人类数据，可以是带传感器的，也可以只部分带传感器。他认为两者结合会把机器人学习推得很远。
+        </p>
+        <h3>预测 JEPA 的隐空间会不会更高效</h3>
+        <p>
+            有学生问：既然预测视频生成 VAE 的隐空间可能过头，那预测 JEPA 这类模型的隐空间会不会更高效？JEPA（Joint Embedding Predictive Architecture）是 LeCun 提出的一类在表示空间里做预测、不重建像素的模型。
+        </p>
+        <p>
+            他说他觉得会，隐空间世界模型是很有希望的方向，但他现在不会在上面下大注，因为还不知道机器人到底需要什么样的特征。很多人的直觉是像素过头了，但像素至少是够用的；里面大概有很多不需要的东西，但还不知道怎样削减到最小的必要特征集。他认为 JEPA 等隐空间世界模型方向是对的，但还不清楚它们是否已经解决了问题，需要更多研究。
+        </p>
+        <h3>失败是视频质量问题，还是动作条件没用</h3>
+        <p>
+            有学生追问：失败案例里动作预测本身没问题、视频生成得差，那会不会其实是动作条件化不起作用，或者动作超出了分布、视频模型没有很好地以动作为条件？怎么区分？
+        </p>
+        <p>
+            他说需要把问题拆开。确实可能出现视频完美、模型却找不到能解释这段视频的动作的情况。但他们做这篇论文时看到，大多数任务失败都能和低质量视频对应起来，机器人至少会尝试做视频里那些粗的动作。如果是很精细的操作，相关信息可能根本不在这些视频里。所以在极精细的操作层面，生成动作仍然是一个可以和视频生成分开的问题。他预计视频模型质量越来越高、能捕捉越来越精细的动作后，视频失败和动作失败的相关性会更紧。
+        </p>
+        <h3>仿真会被取代吗，力和触觉能从视频里推出来吗</h3>
+        <p>
+            有学生问了两件事：仿真会不会变得多余、世界模型足以捕捉所有物理和动力学、在线和离线 RL 也不再必要？“带传感器的人类数据”是指 Aria 眼镜这类记录手部位置的设备，还是也包括触觉？力能不能完全从视频推断，还需不需要硬件去采这类人类数据？
+        </p>
+        <p>
+            关于仿真，他说近期不会多余。他认为基于神经网络的仿真对操作任务会很有帮助，可能取代一部分仿真在操作上的角色，并说很多人会不同意他。接触丰富的操作、可变形物体这类场景，可能是神经仿真能发挥的地方，可以在神经模拟器里学习。但对人形机器人或四足机器人的全身控制，他怀疑传统仿真不会消失：人工打造的仿真器效率极高，而运行世界模型很贵，他不认为后者短期内会超过前者。他说仿真和神经仿真在一段时间里都会有用。
+        </p>
+        <p>
+            关于力和触觉，他认为带传感器的人类数据至少要采一些。他引用了一个关于语言模型有没有世界模型的论点（字幕没听清是谁的）：如果在足够完整的英文或网页文本上训练，想要把下一个 token 预测到极致准确，模型内部就隐含地需要某种世界模型来解释接下来会发生什么，这可能需要很深的理解，甚至包括物理、包括你以为需要具身经验才能懂的东西；只要把困惑度（perplexity）和损失压下去，更好的模型从构造上就会有这种世界模型。他认为对视频预测模型这一点更成立：各种没有直接出现在像素里的力，如果模型足够好，可能潜藏在模型里，因为像素里有这些力的各种相关信号。要预测得足够好，视频模型必须有这些特征，只是需要办法探测和引出它们。
+        </p>
+        <p>
+            所以他仍然认为要给人装传感器采数据，但需要的量可能比像素数据少几个数量级。他提到前面那项工作的做法有参考价值：2 万小时头戴摄像头的真实环境数据，只需要 50 小时带传感器的数据，用设备追踪手腕、用 Manus 手套追踪手指。可以想象再加上触觉，他预计触觉数据是需要的，但量很小，作用是把世界模型里主要从视频学到的特征引出来。
+        </p>
+        <h3>以后好的策略只会出自公司吗</h3>
+        <p>
+            有学生问：既然策略表现会随视频预测能力和数据规模提升，训练视频模型和采数据需要大量资金，未来有意思的机器人策略是不是只会出自公司？
+        </p>
+        <p>
+            他说不会，学术界、大公司和小公司都会做出有意思的东西。很多好想法来自亲身经历，他认为各种规模的实验室和公司都会做出很棒的东西，包括高保真、可交互的视频模型。
+        </p>
+        <p>
+            最后有学生问：训练骨干需要大量 GPU 时间，资源有限的研究者该研究哪些问题？录像在这个问题提出后结束，没有录到回答。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“this backbone, it determines not just how the policy runs at inference time, but how it's able to soak up knowledge during pre-training”<br>骨干决定的不只是策略在推理时怎么运行，还有它在预训练中能吸收多少知识。· <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=94s" target="_blank">0:01:34</a></li>
+            <li>“it's likely that the model just sees these as completely separate islands”<br>模型很可能把这些数据看成完全分开的孤岛。· <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=719s" target="_blank">0:11:59</a></li>
+            <li>“we see most failures stem from video generation errors rather than action prediction.”<br>我们看到大多数失败来自视频生成错误，而不是动作预测。· <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=1200s" target="_blank">0:20:00</a></li>
+            <li>“improvements to the video backbone can directly translate to better when performance.”<br>（字幕 when 即 WAM）视频骨干的改进可以直接转化为更好的世界动作模型表现。· <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=1200s" target="_blank">0:20:00</a></li>
+            <li>“modeling every pixel is probably overkill.”<br>建模每个像素大概是大材小用。· <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=1250s" target="_blank">0:20:50</a></li>
+            <li>“We have this intuition, many of us have this intuition that pixels are overkill, but at least they are sufficient.”<br>我们很多人有个直觉：像素是过头了，但至少是够用的。· <a href="https://www.youtube.com/watch?v=fqkp_wkov6M&t=1633s" target="_blank">0:27:13</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>ETH Zürich Robot Learning 2026 · Guest: Scott Reed, What is the right Backbone for Embodied Agents? · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>
