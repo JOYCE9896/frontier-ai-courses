@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 13 讲：生成模型（一）：自回归模型与 VAE | Stanford CS231N 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="12_自监督学习.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS231N 目录</a> · 13</span>
+    <span><a href="14_生成模型二GAN与扩散.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 13 讲：生成模型（一）：自回归模型与 VAE</h1>
+        <p class="subtitle">先补完对比学习的 SimCLR、MoCo、DINO 和 DINOv2；再讲监督与无监督、判别模型与生成模型的区别，生成模型的分类树，最大似然和自回归模型，以及变分自编码器 VAE 的结构、ELBO 推导和训练流程</p>
+        <div class="author-meta">
+            主讲：Justin Johnson · 2025 年 5 月 15 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=zbHXQRUNlH0" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs231n.stanford.edu/slides/2025/lecture_13.pdf" target="_blank">课程幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            生成模型是两讲的主题，这是第一讲。Justin Johnson 先花十分钟补上上一讲没讲完的对比学习方法，然后退一步，把几组容易混的概念摆清楚：监督和无监督是一条轴，判别模型和生成模型是另一条轴；判别模型、无条件生成模型、条件生成模型分别在建模什么，在概率上"谁和谁竞争"。接着画出生成模型的分类树（显式密度和隐式密度，各分两支），这一讲讲左半边：自回归模型和变分自编码器 VAE。
+        </p>
+        <p>
+            数学集中在最大似然估计和 VAE 的 ELBO 推导。下一讲讲右半边：生成对抗网络 GAN 和扩散模型。
+        </p>
+        <ol>
+            <li><a href="#t01">回顾：自监督学习，以及 SimCLR、MoCo、DINO</a> · <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">生成模型这十年，监督与无监督学习</a> · <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=622s" target="_blank">0:10:22</a></li>
+            <li><a href="#t03">判别模型与生成模型：谁在争概率质量</a> · <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=907s" target="_blank">0:15:07</a></li>
+            <li><a href="#t04">条件生成模型、贝叶斯公式和三类模型的用途</a> · <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=1205s" target="_blank">0:20:05</a></li>
+            <li><a href="#t05">为什么要生成模型，以及生成模型的分类树</a> · <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=1610s" target="_blank">0:26:50</a></li>
+            <li><a href="#t06">最大似然估计与自回归模型</a> · <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=1954s" target="_blank">0:32:34</a></li>
+            <li><a href="#t07">图像的自回归模型、VAE 的动机和两个问答</a> · <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=2571s" target="_blank">0:42:51</a></li>
+            <li><a href="#t08">从自编码器到变分自编码器</a> · <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=2908s" target="_blank">0:48:28</a></li>
+            <li><a href="#t09">怎样训练：边缘化行不通，贝叶斯公式加一个编码器</a> · <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=3264s" target="_blank">0:54:24</a></li>
+            <li><a href="#t10">神经网络怎样输出一个概率分布</a> · <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=3544s" target="_blank">0:59:04</a></li>
+            <li><a href="#t11">训练目标：ELBO 的推导</a> · <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=3773s" target="_blank">1:02:53</a></li>
+            <li><a href="#t12">训练流程、采样、解耦和小结</a> · <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=4154s" target="_blank">1:09:14</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 回顾：自监督学习，以及 SimCLR、MoCo、DINO</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=5s" target="_blank">0:00:05</a>–0:10:22 · Self-supervised review / Contrastive learning methods</em></p>
+        <h3>自监督学习的两阶段</h3>
+        <p>
+            Justin 先回顾上一讲（<a href="12_自监督学习.html">第 12 讲</a>）。自监督学习想在没有监督、没有标签的情况下直接从数据中学到结构。典型做法是：一个没有标签的大数据集（最好就是图像，图像很好找），送进编码器提取特征表示，再经过一个解码器从表示预测某样东西。全部技巧在于设计一个前置任务 Pretext Task，让整个系统不需要人工标注就能训练。
+        </p>
+        <p>
+            通常是两阶段。第一阶段，在能找到的所有数据上训练自监督的编码器和解码器；第二阶段，扔掉解码器，换上一个新的、可能很小的全连接网络，在一个小的带标签任务上训练，可以端到端训练，也可以只训练最后的全连接网络。他让大家记住的典型设定是：在从互联网拿来的十亿张无标签图像上训练，再把特征迁移到愿意坐下来标几十、几百、几千个样本的具体任务上，希望这些任务因为自监督学到的通用知识而变好。
+        </p>
+        <p>
+            上一讲的前置任务有旋转、重排、重建。它们的共同点是对输入像素做某种几何扰动，再让模型从扰动中恢复：旋转后预测转了多少；切成小块后预测原来的相对位置（拼图）；删掉一部分再让模型补上（修复或重建）。
+        </p>
+        <h3>对比学习与 SimCLR</h3>
+        <p>
+            对比学习 Contrastive Learning 是另一种很成功的自监督形式：拿到相似的对和不相似的对，把相似的拉近，把不相似的推远。具体做法是，对每张无标签输入图做两次随机变换（可以更多，两次是最小的集合），比如猫的图一次裁脸、一次裁后背，猴子的图裁脸并转成黑白。把这些扰动后的版本全部送进特征提取器（ViT、CNN，任何能输入图像、输出特征的网络都行）。
+        </p>
+        <p>
+            $N$ 张图各做两次扰动，得到一个 $2N \times 2N$ 的相似度矩阵，共 $4N^2$ 个标量相似度。来自同一张原图的两个增强版本要拉近，来自不同原图的要推远。把这些拼到一起、在图像上做得很成功的论文是 SimCLR（Chen et al., ICML 2020）。
+        </p>
+        <p>
+            SimCLR 的问题是需要相当大的 batch 才能收敛得好。样本少的时候，任务对网络来说太容易，一眼就能挑出那两张猫。为了让问题足够难、给网络足够的学习信号，batch 要很大，这就要用到前几讲的大规模分布式训练（见<a href="11_大规模分布式训练.html">第 11 讲</a>）。这完全可行，但能不能不用？
+        </p>
+        <h3>MoCo：动量编码器</h3>
+        <p>
+            Justin 说接下来几种方法他不打算逐一讲清怎么工作，只想让大家知道它们存在、大致在做什么。MoCo（Momentum Contrast，He et al., CVPR 2020）的设定和 SimCLR 很像：增强成对，送进编码器，拉近相似的，推远不相似的。区别在于不想每次迭代都要巨大的 batch，所以维护一个队列 Queue，存之前若干次迭代的样本。每次迭代，当前新 batch 是查询 $x_{\text{query}}$，队列里的 $x_0, x_1, x_2, \dots$ 是之前 batch 的键 Key。
+        </p>
+        <p>
+            当前 batch 照常送进编码器，按 SimCLR 的方式算对比损失。队列里那一大堆历史样本送进另一个网络，叫动量编码器 Momentum Encoder，同样得到特征、算相似度。但这部分数据太多，放不进 GPU 显存，不能对它反向传播，所以动量编码器没法用梯度下降更新。Justin 说的做法"有点怪"：动量编码器有自己的一套权重，它的权重取普通编码器权重的指数移动平均 Exponential Moving Average。普通编码器照常前向、反向、梯度更新；之后把动量编码器当前权重乘以 0.99 左右，再加上 1% 的普通编码器权重：
+        </p>
+        <p>
+            $$\theta_k \leftarrow m\,\theta_k + (1-m)\,\theta_q, \qquad m \approx 0.99$$
+        </p>
+        <p>
+            这样动量编码器就是一个滞后的、跟在后面的移动平均。他坦言没有很好的直觉来解释为什么这样合理，但经验证据很强，就是有效。好处是不再需要每次迭代都有一大批负样本。
+        </p>
+        <h3>DINO 和 DINOv2</h3>
+        <p>
+            后续有很多论文沿这个方向推进。Justin 让大家知道的另一个是 DINO（Caron et al. 2021, "Emerging Properties in Self-Supervised Vision Transformers"）。思路相近，也是一个用梯度下降学的普通编码器加一个动量编码器，和 MoCo 一样；但损失不同，不用 softmax（点积），用的是 KL 散度 KL Divergence（衡量两个概率分布差多少的量），并且用 Vision Transformer 代替 ResNet。
+        </p>
+        <p>
+            他提 DINO 是因为大家应该知道 DINOv2（Oquab et al., 2023）。DINOv2 是很强的自监督特征模型，今天实际中用得很多。它沿用 DINO v1 的配方（类似 MoCo，也有很多来自 SimCLR 的想法，加上不少自己的细节），最大的不同是训练数据扩大了很多：之前的自监督方法大多在 ImageNet 的 100 万张图上训练，DINOv2 成功扩到大约 1.42 亿张。他说深度学习里大家喜欢更大的网络、更多的数据、更多 GPU、更多 FLOPs，DINOv2 找到了能在大得多的数据上扩展的自监督配方。今天想拿现成特征再为自己的下游任务微调，常常就用它。幻灯片还引了 Darcet 等人 2023 年的 "Vision Transformers Need Registers"，配图是特征的 PCA 可视化。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 生成模型这十年，监督与无监督学习</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=622s" target="_blank">0:10:22</a>–0:15:07 · Introduction to generative models / Learning paradigm spectrum</em></p>
+        <h3>从"模糊的垃圾"到真的能用</h3>
+        <p>
+            Justin 说生成模型这一块在十年前完全不行，最近几年真的行了。语言模型可以看作生成模型，所有图像生成、视频生成模型也是。他读研时这些模型的样本分辨率低，模糊得一塌糊涂，但能从里面看出一点希望；他很高兴大家没放弃，在过去十年把规模做上去了。这门课第一次开的时候这一块完全不行，现在行了。
+        </p>
+        <p>
+            不过生成建模的很多基本思想没变：怎样看待数据、用什么方法建模，这些数学基础十年里变化不大。变的是算力更多、训练配方更稳定、数据集更大、有了分布式训练，能把这一切扩展到更有用的任务上。他认为这是过去十年进展的主要动力。算法上也有一些调整，下一讲讲扩散模型时会看到。
+        </p>
+        <h3>监督学习</h3>
+        <p>
+            先理清术语。任务可以沿几条正交的轴切分。监督学习 Supervised Learning 是这学期除上一讲外一直在做的：数据是成对的 $(x, y)$，目标是学一个从输入 $x$ 映射到目标或标签 $y$ 的函数。例子有图像分类（$x$ 是图，$y$ 是标签）、图像描述（$y$ 是一段描述图像的文字，幻灯片的例子是 neuraltalk2 生成的 "A cat sitting on a suitcase on the floor"）、目标检测（$y$ 是一组框和类别）、语义分割（给每个像素一个标签）。说它是监督学习，是因为要预测的东西就在数据集里，只需学一个在训练集上模仿 $x \to y$ 映射的函数，再泛化到训练集以外。
+        </p>
+        <h3>无监督学习</h3>
+        <p>
+            无监督学习 Unsupervised Learning（有时叫自监督学习）更难描述。没有标签，只有样本 $x$，想从数据中学到某种隐藏结构，并不针对某个特定任务。为什么要做？像自监督学习那样，常常是为了以后用到下游任务上。但任务本身往往不明确。例子：
+        </p>
+        <ul>
+            <li>K-means 聚类：在数据中找簇，这是没有标签也能从原始像素里看出的结构；</li>
+            <li>降维，比如主成分分析 PCA：找一个能解释数据结构的低维子空间或低维流形；</li>
+            <li>密度估计 Density Estimation：给数据拟合一个概率分布，弄清是什么概率函数生成了我们看到的样本，也就是建模 $p(x)$。</li>
+        </ul>
+        <p>
+            无监督学习不一定是概率的或生成的。聚类、PCA 常常有概率解释，但不必当成概率模型来看。他把监督和无监督看作一条谱上的两端。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 判别模型与生成模型：谁在争概率质量</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=907s" target="_blank">0:15:07</a>–0:20:05 · Discriminative vs generative</em></p>
+        <h3>三种概率模型</h3>
+        <p>
+            另一条轴是判别模型和生成模型。这两个概念天然是概率的，总是假设数据里有某种概率结构要学，区别在于建模哪些变量之间的什么概率关系。通常 $x$ 是大的、高维的东西，在这门课里一般是图像；$y$ 是标签、描述或其他辅助信息，比如一段文字、一个类别。
+        </p>
+        <ul>
+            <li>判别模型 Discriminative Model：学 $p(y \mid x)$；</li>
+            <li>生成模型 Generative Model：学 $p(x)$；</li>
+            <li>条件生成模型 Conditional Generative Model：学 $p(x \mid y)$。</li>
+        </ul>
+        <h3>概率密度是归一化的</h3>
+        <p>
+            要理解这三者在概率上的不同，得记住概率分布最重要的性质：归一化。密度函数 $p(x)$ 给每个可能的 $x$ 一个非负数，数越大 $x$ 越可能出现，并且满足
+        </p>
+        <p>
+            $$\int_X p(x)\, dx = 1$$
+        </p>
+        <p>
+            Justin 说概率模型的威力某种意义上来自这个约束：概率质量总共只有一份，选一个分布就是把这一份质量分摊到所有可能的 $x$ 上，所有 $x$ 都在争这份质量。想抬高一个 $x$ 的概率，其他 $x$ 的概率就必须下降。不同概率模型的差别，就在于是哪些变量在争。式子写出来看着差不多，但"谁在竞争"不同，模型要学的结构就很不一样。
+        </p>
+        <h3>判别模型：图像之间不竞争</h3>
+        <p>
+            判别模型学的是 $p(y \mid x)$，对每个 $x$ 预测一个标签上的分布。标签是猫和狗时，$P(\text{cat} \mid x) + P(\text{dog} \mid x) = 1$，每张图各有一个标签分布。他强调，这里图像之间没有竞争，竞争的只是同一张图的不同标签。
+        </p>
+        <p>
+            另一个特点是判别模型没法拒绝不合理的输入。标签空间定成猫和狗之后，喂进去一只猴子或一幅抽象画，系统没有余地说"这不合理"，只能在固定的词表上输出一个分布。这可以看成缺点，但更要紧的是明白底层到底在发生什么。
+        </p>
+        <h3>生成模型：所有图像都在竞争</h3>
+        <p>
+            生成模型学的是所有可能图像上的分布 $p(x)$。这意味着宇宙里可能存在的所有图像都在争概率质量。这听上去简单，实际上逼你面对关于世界的很难的问题。幻灯片上的例子：狗更可能坐着还是站着？三条腿的狗是不是比三条胳膊的猴子更可能？Justin 说大概三条腿的狗应该得到更多概率，因为狗可能失去一条腿；三条胳膊的猴子怎么来的？除非你在建模科幻图像。一旦所有图像都在争，模型就得认真考虑数据里可能有的结构，问题难得多。
+        </p>
+        <p>
+            另一方面，生成模型可以说"这不是一张合理的图"：给它很低甚至为零的概率。比如只想要一个动物园动物的生成模型，喂进去一幅抽象画，它应该给零概率。这就有了拒绝超出范围的输入的机制。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 条件生成模型、贝叶斯公式和三类模型的用途</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=1205s" target="_blank">0:20:05</a>–0:26:50 · Generative model types / Practical generative applications</em></p>
+        <h3>条件生成模型：每个标签引发一场竞争</h3>
+        <p>
+            条件生成模型学 $p(x \mid y)$，对每个可能的标签，在所有可能的图像之间引发一场竞争。$y$ 是猫和狗时，模型对"猫"和"狗"分别有一个图像上的分布。在 $P(\cdot \mid \text{cat})$ 下，猫的图应该高，猴子和狗的图稍高一点（至少都是哺乳动物），抽象画很低甚至为零；$P(\cdot \mid \text{dog})$ 是另一个分布。
+        </p>
+        <p>
+            如果条件信号 $y$ 比单个类别丰富得多，比如一段文字、一整段话、另一张图加一段文字，事情就更有意思：要在很丰富的输入空间条件下建模很丰富的输出空间，模型要解的是一个很复杂、定义也不太清楚的问题，需要对涉及的物体做深层推理。Justin 说这就是生成建模有意思的地方：看起来只是把 $x$ 和 $y$ 对调了一下，能有多难？结果一下子逼你认真思考视觉世界里在发生什么。
+        </p>
+        <h3>贝叶斯公式把三者连起来</h3>
+        <p>
+            三类模型写成了三个类别，其实通过贝叶斯公式 Bayes' Rule 相互关联：
+        </p>
+        <p>
+            $$P(x \mid y) = \frac{P(y \mid x)}{P(y)}\, P(x)$$
+        </p>
+        <p>
+            左边是条件生成模型，右边分子是判别模型和无条件生成模型，分母是标签上的（无条件）先验 Prior。有了其中两个，总能通过重排贝叶斯公式得到第三个。所以原则上可以用另两个部件拼出一个条件生成模型，但实际中不常这么做，一般直接从头学条件生成模型。他提到，扩散模型里有时会把条件模型和无条件模型一起学，原因后面讲。
+        </p>
+        <h3>三类模型各能做什么</h3>
+        <ul>
+            <li>判别模型：给数据打标签；特征学习（用标签），比如在 ImageNet 上做监督学习，为了预测类别，网络中间学到可迁移的特征表示。</li>
+            <li>无条件生成模型：检测离群点，看一张图的概率是不是很低、是不是不合理；无标签的特征学习，希望在拟合 $p(x)$ 的过程中学到有用特征，但 Justin 说这在自监督学习上一般不太成功，实际中上一讲的对比方法要成功得多；采样生成新数据。</li>
+            <li>条件生成模型：给数据打标签的同时拒绝离群点（对每个可能的 $y$ 看 $p(x \mid y)$，如果都太低就拒绝），实际中用得不多；从标签生成数据，这是到处都在用的。</li>
+        </ul>
+        <p>
+            Justin 的看法很直接：无条件生成模型总体上没什么用。用它采样能得到一张新图，但你没法控制图里是什么。他觉得思考怎么构造它们数学上有意思，但实际意义不大。条件生成模型最有用、最有意思，实际训练和使用的生成模型绝大多数是这类。如果 $y$ 是一段文字，你可以写"我想看一只穿着热狗口味 T 恤、站在月球上的猫"，你喜欢的图像生成模型就会按这个 $y$ 生成一张新图 $x$。他说所有的魔法和令人兴奋的东西都在这里。
+        </p>
+        <p>
+            他提醒，文献里说"生成模型"时常把无条件和条件混在一起，很多论文为了式子好看干脆不写条件 $y$。所以读论文、看公式、听人讲生成模型时，大家真正关心、训练得最多的往往是条件生成模型，哪怕记号上看不出来。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 为什么要生成模型，以及生成模型的分类树</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=1610s" target="_blank">0:26:50</a>–0:32:34 · Generative model taxonomy</em></p>
+        <h3>输出有歧义时用生成模型</h3>
+        <p>
+            有学生问无条件生成模型的输入输出是什么。Justin 说他刚才故意没讲，因为取决于具体的建模方式，后面的分类树里各不相同。
+        </p>
+        <p>
+            为什么要生成模型？主要原因是任务有歧义。$p(x \mid y)$ 是概率的，给定输入 $y$，可能的输出 $x$ 有一整个空间。有些问题是确定的映射，问一张图里有几只猫，就是三只，只有一个答案。但很多情况更微妙：要一张"戴热狗帽子的狗"的图，符合的图有很多，输出有不确定性。生成模型建模的就是给定输入时输出的整个分布。他举了三个例子：
+        </p>
+        <ul>
+            <li>语言建模：由输入文本 $y$ 生成输出文本 $x$（他说这个例子里 $x$、$y$ 的位置有点别扭）。幻灯片放了 ChatGPT 写的一首"关于生成模型的押韵短诗"，Justin 说这竟然真的能行，第一次开这门课时完全不行；他不念出来，那样太尴尬。关于生成模型的押韵诗可以有很多首，模型得挑一首，生成模型原则上建模的是所有可能输出的分布。</li>
+            <li>文本生成图像：让它画"一个人在白板前给一个班讲生成模型"。你们眼前看到的是一个例子，ChatGPT 给的是另一个，符合这段文字的图有一整个空间。</li>
+            <li>图像生成视频：输入一张图，接下来会发生什么？图是他拿着 AirPods 举在一个纸箱上方。也许会掉下去，也许手会移开，也许手移开后 AirPods 变成另一副 AirPods。生成模型原则上可以建模这些可能的未来，并从中采样。</li>
+        </ul>
+        <p>
+            他说这是深度学习里数学比较多的一个子领域，因为要思考用什么方式建模概率分布、怎样写出能让正确的事情发生的损失函数。读这方面论文会看到很多公式，可能真要仔细推一遍才懂。
+        </p>
+        <h3>分类树（改自 Goodfellow 2017 的 GAN 教程）</h3>
+        <p>
+            第一层分两支：
+        </p>
+        <ul>
+            <li>显式密度 Explicit Density：模型能算出任意样本的 $p(x)$（或 $p(x \mid y)$）的值。这类方法有时采样比较麻烦，但不总是。</li>
+            <li>隐式密度 Implicit Density：拿不到 $p(x)$ 的值，但能以某种方式从 $p(x)$ 采样。模型隐式地学到了密度。很多时候我们并不在乎每个输入的密度是多少，只想生成多样的好样本，那就不需要能看到密度值。</li>
+        </ul>
+        <p>
+            第二层再各分两支：
+        </p>
+        <ul>
+            <li>显式里的可解密度 Tractable Density：真能算出 $p(x)$。例子是自回归模型 Autoregressive。</li>
+            <li>显式里的近似密度 Approximate Density：能算出一个密度值，但不是真实的，是对真实密度的某种近似或下界。例子是变分自编码器 VAE。</li>
+            <li>隐式里的直接 Direct：一次网络前向就能从分布里采一个样本。例子是生成对抗网络 GAN。</li>
+            <li>隐式里的间接 Indirect：能从 $p(x)$ 采样，但需要一个迭代过程，没有一个前馈函数能直接输出样本。例子是扩散模型 Diffusion Models。Justin 说"indirect"这个名字是他昨天自己起的，有更好的叫法欢迎纠正。</li>
+        </ul>
+        <p>
+            他说他对这个分类挺得意，因为很对称：两支、四个叶子，今天讲一半，下次讲另一半。
+        </p>
+        <h3>关于分类树的三个问答</h3>
+        <p>
+            有学生问到条件 $y$。Justin 说他在这张幻灯片上故意把 $y$ 去掉了，就是为了等人问：这张以及这一讲后面所有写 $p(x)$ 的地方，都应该想成后面还有一个"给定 $y$"。
+        </p>
+        <p>
+            有学生问能不能把间接方法的迭代过程当成黑盒，看成一种直接采样方法。他说原则上可以，实际上不行，因为采出来的样本是近似的。扩散模型要真正采到分布里的样本需要无穷多步，实际用有限步近似；以前的马尔可夫链蒙特卡洛 MCMC 方法也有这种性质。
+        </p>
+        <p>
+            还有学生问近似密度和从隐式 $p(x)$ 直接采样有什么区别。他说间接的隐式方法里根本找不到密度值，一个都算不出来，但能迭代采样；近似密度方法能算出一个密度值，是真实 $p(x)$ 的近似或界。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 最大似然估计与自回归模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=1954s" target="_blank">0:32:34</a>–0:42:51 · Autoregressive models introduction / Maximum likelihood and text</em></p>
+        <h3>最大似然估计</h3>
+        <p>
+            讲自回归模型之前，Justin 先绕一下，讲所有生成建模背后的一个很一般的想法：最大似然估计 Maximum Likelihood Estimation，用有限的样本拟合概率模型的通用办法。
+        </p>
+        <p>
+            目标是写出一个密度的显式函数。用神经网络来写：输入数据 $x$ 和网络权重 $W$，输出一个表示密度的数，$p(x) = f(x, W)$。给定数据集 $x^{(1)}, x^{(2)}, \dots, x^{(N)}$，求让数据集最可能出现的权重：
+        </p>
+        <p>
+            $$W^* = \arg\max_W \prod_i p\big(x^{(i)}\big)$$
+        </p>
+        <p>
+            权重一变，网络建模的密度就变，所以是在让网络选出使数据似然最大的那个分布。
+        </p>
+        <h3>似然和概率的区别</h3>
+        <p>
+            他特意用了似然 Likelihood 这个词，没说概率，并说这是一个很深的哲学兔子洞，区别在于什么在变。说概率时，想象分布固定，$x$ 在滑动，问固定分布下某个 $x$ 的概率；说似然时，通常固定样本 $x$，变化的是分布本身，问换不同分布时这些样本的概率密度怎样变。所以看这些式子要想清楚什么固定、什么在变。最大似然估计就是变化网络所建模的分布，让训练集里这组固定样本的概率最大。
+        </p>
+        <p>
+            背后没说出来的假设是：存在一个真实的分布 $p_{\text{data}}$，宇宙用它生成了我们看到的数据。我们永远拿不到 $p_{\text{data}}$，因为没有全知视角，只有宇宙给我们的一些样本。学习过程要做的，就是从有限样本里尽量还原这个未知分布。一种办法就是：选那个让我看到的数据最可能出现的分布。
+        </p>
+        <h3>独立同分布和取对数</h3>
+        <p>
+            标准技巧是假设数据独立同分布 IID（每个 $x$ 都独立地从同一个 $p_{\text{data}}$ 抽出），于是所有数据的联合分布可以拆成每个样本似然的乘积。再用取对数的技巧：对数是单调函数，最大化一个量等价于最大化它的对数；对数还把乘积变成求和，求和更好处理。代入神经网络，就得到一个可以直接用梯度下降优化的损失函数：
+        </p>
+        <p>
+            $$W^* = \arg\max_W \sum_i \log p\big(x^{(i)}\big) = \arg\max_W \sum_i \log f\big(x^{(i)}, W\big)$$
+        </p>
+        <p>
+            但最大似然很一般，对数据结构没有任何假设，要真正取得进展得再加点结构。
+        </p>
+        <h3>自回归：把样本拆成序列，用链式法则</h3>
+        <p>
+            自回归模型的假设是：每个数据样本 $x$ 有一种规范的方式拆成一串子部分 $x = (x_1, x_2, \dots, x_T)$。他提醒注意下标：这里下标表示同一个样本的不同部分，上一张幻灯片的上标表示不同样本。然后用概率的链式法则 Chain Rule：
+        </p>
+        <p>
+            $$p(x) = p(x_1, x_2, x_3, \dots, x_T) = p(x_1)\, p(x_2 \mid x_1)\, p(x_3 \mid x_1, x_2) \cdots = \prod_{t=1}^{T} p(x_t \mid x_1, \dots, x_{t-1})$$
+        </p>
+        <p>
+            链式法则不需要任何假设，对任何联合分布都成立。于是可以训练一个神经网络，输入序列的前面部分，输出下一个部分的概率分布。
+        </p>
+        <h3>RNN 和带掩码的 Transformer</h3>
+        <p>
+            他问这听起来是不是很熟悉，学生答 RNN。RNN 通过把隐状态沿时间往前传，让每个隐状态都依赖从序列开头到当前位置的内容，所以天然适合做自回归建模：从每个隐状态预测下一个元素在前面所有元素条件下的概率，这就是前面讲过的 RNN 语言模型（见<a href="07_循环神经网络.html">第 7 讲</a>）。还有什么能做到？学生答 Transformer，特别是带掩码的 Transformer：把注意力矩阵按正确方式遮住，每个输出就只依赖序列的前缀（见<a href="08_注意力与Transformer.html">第 8 讲</a>）。幻灯片的标题是 "LLMs are Autoregressive Models"。CS224N 笔记里也讲过 RNN 语言模型（<a href="../CS224N-NLP-with-Deep-Learning/04_语言模型与循环神经网络.html">CS224N 第 4 讲</a>）。
+        </p>
+        <h3>为什么自回归特别适合文本</h3>
+        <p>
+            自回归的问题是要把数据拆成序列。文本天然是一维序列，而且是离散的，这很好，因为离散事物的概率最容易建模：这学期一直在用交叉熵 softmax 损失，网络对固定数量的类别各给一个分数，用 softmax 归一化，用交叉熵训练。语言已经是离散的一维序列（中间有个分词器 Tokenizer，这里不展开），所以和自回归天然契合。图像就麻烦些：图像不是天然一维的，也不是天然离散的，我们常把它看成连续的实数值。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 图像的自回归模型、VAE 的动机和两个问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=2571s" target="_blank">0:42:51</a>–0:48:28 · Autoregressive models of images / Variational autoencoders</em></p>
+        <h3>把图像当成子像素序列</h3>
+        <p>
+            Justin 说手里有锤子，就会去敲钉子，几年前确实有人把自回归模型简单粗暴地用到图像上。一个像素其实就是三个数；大多数显示设备和图像表示里，这些数是离散的。常用的 JPEG、PNG 大多每个通道 8 位，所以一个像素就是三个单字节值，每个是 0 到 255 的整数。
+        </p>
+        <p>
+            于是可以把图像按扫描线顺序展开成一个长序列，每个元素是一个子像素值。这样图像变成了一维离散序列，每个子像素就是在 256 个值 $[0, \dots, 255]$ 上做分类，用 RNN 或 Transformer 建模，和语言模型一模一样。幻灯片引的是 van den Oord 等人 2016 年的两篇：PixelRNN（"Pixel Recurrent Neural Networks"，ICML 2016）和 PixelCNN（"Conditional Image Generation with PixelCNN Decoders"，NeurIPS 2016）。
+        </p>
+        <h3>问题：太贵</h3>
+        <p>
+            他问能不能看出问题，学生说太贵。一张 1024×1024 的图并不算高分辨率，但展开后是 300 万个子像素的序列。今天确实有人能建模百万级长度的序列，但代价很高。几年前直接在像素上做自回归的论文不太成功，他认为是因为很难扩展到高分辨率。
+        </p>
+        <p>
+            他剧透了下一讲的内容：这条路最近几年又复兴了，诀窍是用另一个过程或模型（可能是神经网络）把图像拆成一维的 token 序列，序列元素不再是单个像素值。幻灯片上的说法是把图像建模成小块 Tile 的序列。
+        </p>
+        <h3>VAE 要放弃什么、换来什么</h3>
+        <p>
+            接下来是变分自编码器 Variational Autoencoder。自回归模型做的是最大似然：把数据拆成序列，最大化数据似然，能精确算出密度。VAE 不一样：它仍是显式方法，仍有一个可以写出的密度，但这个密度不可解 Intractable，我们不能直接计算或优化它，只能优化它的一个下界。
+        </p>
+        <p>
+            为什么放着能精确算密度的好方法不用？因为能换来一样东西：数据的合理潜在向量 Latent Vector。学习过程自然地给出代表数据的向量，这些向量本身就有用。能拿到这些潜在向量足够有用，所以愿意放弃精确密度，接受作为真实密度下界的近似密度。
+        </p>
+        <h3>问答：为什么要拆成序列</h3>
+        <p>
+            有学生回头问，自回归模型为什么要拆成序列。Justin 说拆开是为了把问题分解，让每一部分更好建模。做语言建模，词表大小是 $V$，两个词的序列有 $V^2$ 种，三个词有 $V^3$ 种，$T$ 个词有 $V^T$ 种，随长度指数增长。直接建模 $T$ 个东西的联合分布，离散分布里要建模的条目数随序列长度指数增长，序列一长就完全不可行。所以分解成"只在前面部分的条件下预测一部分"。
+        </p>
+        <h3>问答：实际是在对数空间里算</h3>
+        <p>
+            另一个学生问能不能用取对数来缓解。他说对，实际上你几乎看不到直接建模的概率值，基本都在对数概率 Log Probability 里算：模型输出对数概率，损失在对数空间算，为了数值稳定性几乎所有东西都在对数空间里算。
+        </p>
+        <p>
+            $p(x)$ 是怎么得到的？Transformer 顶部在每个位置输出"给定前面所有 token 时下一个 token 的分布"。拿一个输入序列过一遍 Transformer，在每个位置查出真实的下一个 token 被预测的概率，把整个序列上的这些概率乘起来（对数空间里就是相加），就恢复出精确的密度值。RNN 也一样。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 从自编码器到变分自编码器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=2908s" target="_blank">0:48:28</a>–0:54:24 · Training variational autoencoders</em></p>
+        <h3>普通（非变分）自编码器</h3>
+        <p>
+            Justin 说讲 VAE 会有点乱，所以先去掉"变分"，用几张幻灯片讲普通的自编码器 Autoencoder，因为这门课还没正式讲过。它是一种无监督方法，没有标签，从输入 $x$ 学着提取特征 $z$，属于刚讲的自监督学习一脉。希望特征提取出关于数据的有用信息：也许隐式编码了图里物体是什么、有几个、什么颜色，幻灯片上写的是物体身份、外观、场景类型等，可以用于下游任务。编码器可以是任何架构：MLP、CNN、Transformer 都行。
+        </p>
+        <p>
+            没有标签怎么学？上一讲有很多例子，最简单的一个是重建输入。加一个解码器 Decoder，输入 $z$ 输出 $\hat{x}$，训练让输出和输入一致，损失是 L2 距离 $\|\hat{x} - x\|_2^2$。"Autoencoding" 就是"编码自己"。完全不用标签，只用原始数据。
+        </p>
+        <h3>为什么要学恒等函数</h3>
+        <p>
+            Justin 说这在某种意义上是史上最蠢的损失函数：就是训练模型去模仿恒等函数。恒等函数我们早就知道，为什么要花大量 FLOPs 在大数据集上训练神经网络去学它？因为要给它加一个瓶颈。如果模型容量无限，比如 $z$ 很宽、学习不受约束，神经网络会轻松解决这个问题，但我们根本不在乎这个目标本身。要的是让网络在某种约束下学恒等函数。传统自编码器的约束是瓶颈 Bottleneck：中间的 $z$ 比输入小得多。输入可能是 1024×1024 的图，300 万个浮点数，$z$ 可能只有 128 维。要把数据挤过中间这个窄口还要重建出来，希望能逼模型学到数据里非平凡的结构。
+        </p>
+        <p>
+            训完之后可以用自监督的老办法：扔掉解码器，用编码器给出的 $z$ 去初始化某个下游的监督模型，比如接一个 softmax 分类器预测标签。
+        </p>
+        <h3>想用它生成数据</h3>
+        <p>
+            如果想用它生成数据，要做的和自监督相反：扔掉编码器，设法采样出和模型学到的 $z$ 相匹配的 $z$，送进训练好的解码器，得到新样本。如果能做到，这是一种隐式方法，整个过程里没有显式建模任何密度。
+        </p>
+        <p>
+            但这只是把问题往后踢了一脚。想生成 $x$，手里有一堆 $x$；训练自编码器后，手里变成了一堆 $z$，要在 $z$ 空间里采样，一点也不比原来容易。幻灯片上写的是：生成新的 $z$ 并不比生成新的 $x$ 容易。
+        </p>
+        <h3>VAE 的想法：强制 z 服从已知分布</h3>
+        <p>
+            传统自编码器没有给 $z$ 强加任何已知结构，只要求能从表示重建数据。VAE 的想法是：如果有机制强制所有 $z$ 都来自一个高斯分布，或别的已知分布，那训练完之后从这个已知分布里抽一个样本，送进解码器，就得到一个样本。让自编码器变成概率的、给潜空间强加概率结构，这就是 VAE 要做的。为什么叫"变分"？他说文献里这个术语有很长的历史。论文是 Kingma 和 Welling 的 "Auto-Encoding Variational Bayes"（ICLR 2014）。
+        </p>
+        <h3>概率设定</h3>
+        <p>
+            VAE 是自编码器的概率版：从原始数据学到潜在特征 $z$；给学到的潜空间强加结构，训练后能从中采样生成新数据。具体地，假设每个训练样本 $x^{(i)}$（上标 $i$ 表示不同的独立样本）都由某个潜在向量 $z^{(i)}$ 生成。宇宙生成数据的过程是先生成 $z$，再从 $z$ 生成 $x$，宇宙生成这张图需要知道的一切都在 $z$ 里。但 $z$ 永远观察不到，我们没有它的数据集。直觉是：$x$ 是图像，$z$ 是生成 $x$ 用的潜在因素，比如属性、朝向等，包含关于这张图你想知道的一切，但你看不到。
+        </p>
+        <p>
+            另一个约束是 $z$ 来自已知分布。训练好之后这样采样：先从先验 $p(z)$ 采 $z$，再从条件分布 $p(x \mid z)$ 采 $x$。通常假设简单的先验，最常见的是单位高斯 $\mathcal{N}(0, I)$。CME296 的笔记从图像生成的角度也讲过 VAE（<a href="../CME296-Diffusion-and-Large-Vision-Models/04_潜空间与引导生成.html">CME296 第 4 讲</a>）。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 怎样训练：边缘化行不通，贝叶斯公式加一个编码器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=3264s" target="_blank">0:54:24</a>–0:59:04 · Training variational autoencoders</em></p>
+        <h3>回到最大似然</h3>
+        <p>
+            怎么训练？要给每个 $x$ 找一个 $z$，可 $z$ 永远观察不到，看起来是不可能的问题。Justin 说回到最大似然。如果手里有 $(x, z)$ 成对的数据集，就能用同样的对数技巧直接训练一个条件生成模型 $p(x \mid z)$。但我们不知道 $z$。
+        </p>
+        <h3>想法一：边缘化</h3>
+        <p>
+            既然不知道 $z$，可以试着边缘化 Marginalize：假设存在一个看不到的联合分布 $p(x, z)$，把 $z$ 积分掉得到 $p(x)$，再用链式法则拆开：
+        </p>
+        <p>
+            $$p_\theta(x) = \int p_\theta(x, z)\, dz = \int p_\theta(x \mid z)\, p(z)\, dz$$
+        </p>
+        <p>
+            $p_\theta(x \mid z)$ 没问题，可以用解码器算，那就是我们想训练的网络。$p(z)$ 也没问题，假设了它是单位高斯或别的简单分布。但这个积分要命：一般没有可行的办法对神经网络输入的整个空间积分，$p_\theta(x \mid z)$ 是神经网络建模的很复杂的函数，没法解析或精确地积。可以用有限采样近似，但 $z$ 维度很高，在训练内循环里做近似数值积分不是好主意。
+        </p>
+        <p>
+            Justin 在这里讲了一般思路：做概率建模时，写出若干概率项，希望其中一些是能写出解析式、能推理的简单分布，另一些是要学的神经网络部件。这里 $p(x \mid z)$ 是原则上可以用最大似然学的神经网络。
+        </p>
+        <h3>想法二：贝叶斯公式</h3>
+        <p>
+            概率里另一个总会用到的工具是贝叶斯公式：
+        </p>
+        <p>
+            $$p_\theta(x) = \frac{p_\theta(x \mid z)\, p(z)}{p_\theta(z \mid x)}$$
+        </p>
+        <p>
+            分子的 $p_\theta(x \mid z)$ 能用解码器算，$p(z)$ 是假设的高斯，能算，也没有积分了。问题在分母：后验 Posterior $p_\theta(z \mid x)$ 没有好办法算，算它也需要某种积分。
+        </p>
+        <h3>VAE 的办法：再加一个网络</h3>
+        <p>
+            Justin 说 VAE 的招数是：有一项算不了，那就塞进另一个神经网络来算。用一个权重为 $\phi$ 的网络 $q_\phi(z \mid x)$，学习近似 $p_\theta(z \mid x)$（录像里他口误说成近似 $p(x \mid z)$，按幻灯片应为 $p_\theta(z \mid x)$）。这一般没法严格保证，但先放一个网络试试。如果 $q_\phi(z \mid x) \approx p_\theta(z \mid x)$，就能近似算出似然：
+        </p>
+        <p>
+            $$p_\theta(x) \approx \frac{p_\theta(x \mid z)\, p(z)}{q_\phi(z \mid x)}$$
+        </p>
+        <p>
+            于是训练 VAE 时联合学两个网络：
+        </p>
+        <ul>
+            <li>解码器网络 $p_\theta(x \mid z)$：输入潜在编码 $z$，输出数据 $x$ 上的分布；</li>
+            <li>编码器网络 $q_\phi(z \mid x)$：输入数据 $x$，输出潜在编码 $z$ 上的分布。</li>
+        </ul>
+        <p>
+            两个网络是分开的，各有自己独立的权重。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 神经网络怎样输出一个概率分布</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=3544s" target="_blank">0:59:04</a>–1:02:53 · Training variational autoencoders</em></p>
+        <h3>输出高斯分布的参数</h3>
+        <p>
+            一个问题是：神经网络怎么可能输出一个概率分布？办法是强制所有分布都是正态分布，让网络输出正态分布的参数，也就是均值（和标准差），分布是对角的。
+        </p>
+        <ul>
+            <li>解码器：假设输出分布是对角高斯，对角线上的元素对应图像的像素。网络输出这个对角高斯的均值 $\mu_{x \mid z}$，方差通常固定为 $\sigma^2$：$p_\theta(x \mid z) = \mathcal{N}(\mu_{x \mid z}, \sigma^2)$。</li>
+            <li>编码器：输入数据 $x$，输出 $q_\phi(z \mid x)$ 这个高斯分布的参数，一个向量是均值 $\mu_{z \mid x}$，另一个向量是协方差的对角线 $\Sigma_{z \mid x}$：$q_\phi(z \mid x) = \mathcal{N}(\mu_{z \mid x}, \Sigma_{z \mid x})$。</li>
+        </ul>
+        <h3>为什么用对角协方差</h3>
+        <p>
+            Justin 说假设对角结构很重要。对一张 $H \times W$ 的图，原则上可以建模每对像素之间的完整协方差，但那需要 $H^2 W^2$ 个元素，太大了。所以忽略各个值之间的相关结构，对角协方差就是一个和数据本身同样大小的向量。编码器这边，$\mu_{z \mid x}$ 和 $\Sigma_{z \mid x}$ 都是和 $z$ 形状相同的向量：让网络输出两个同形状的向量，把它们当作高斯分布的参数，网络就"输出了一个分布"。
+        </p>
+        <h3>固定方差的高斯似然就是 L2</h3>
+        <p>
+            解码器用固定方差时，对数似然写出来：
+        </p>
+        <p>
+            $$\log p_\theta(x \mid z) = -\frac{1}{2\sigma^2}\, \big\| x - \mu_{x \mid z} \big\|_2^2 + C$$
+        </p>
+        <p>
+            常数 $\sigma^2$ 只在前面当系数。所以最大化固定对角方差高斯的对数似然，等价于最小化 $x$ 和网络输出均值之间的 L2 距离。
+        </p>
+        <p>
+            为什么解码器不也学每个像素的方差？原则上可以，但没用。没有像素间的协方差结构时，学逐像素方差相当于说每个像素可以各自晃一点，晃多少因像素而异；从这样的分布采样就是固定均值、再加上按逐像素方差缩放的独立噪声，这不是合理的做法。所以解码器这边"作了点弊"：假装输出一个分布，但实际从不从中采样，总是直接输出均值。
+        </p>
+        <p>
+            有学生问，这里是否有关于像素平移的某种不变性或非不变性结构。Justin 说那更多是所选网络架构的性质，可以在预测这些量的网络架构里加入不变或等变性质，但在损失这个层面确实没有考虑。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 训练目标：ELBO 的推导</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=3773s" target="_blank">1:02:53</a>–1:09:14 · Training variational autoencoders</em></p>
+        <h3>从贝叶斯公式出发</h3>
+        <p>
+            编码器输入 $x$、输出 $z$ 上的分布，解码器输入 $z$、输出 $x$ 上的分布，训练目标是什么？Justin 说这是这一讲唯一一张做数学的幻灯片。指导原则还是最大似然，要最大化 $\log p_\theta(x)$。先用贝叶斯公式写成精确等式：
+        </p>
+        <p>
+            $$\log p_\theta(x) = \log \frac{p_\theta(x \mid z)\, p(z)}{p_\theta(z \mid x)}$$
+        </p>
+        <p>
+            然后做一件看起来很傻的事：分子分母同乘 $q_\phi(z \mid x)$，也就是刚凭空引入的那个网络建模的分布：
+        </p>
+        <p>
+            $$\log p_\theta(x) = \log \frac{p_\theta(x \mid z)\, p(z)\, q_\phi(z \mid x)}{p_\theta(z \mid x)\, q_\phi(z \mid x)}$$
+        </p>
+        <h3>拆成三项</h3>
+        <p>
+            做对数运算，如果有先见之明，就会按特定顺序重排成三项（幻灯片上用颜色标了每项从哪来）：
+        </p>
+        <p>
+            $$\log p_\theta(x) = \log p_\theta(x \mid z) - \log \frac{q_\phi(z \mid x)}{p(z)} + \log \frac{q_\phi(z \mid x)}{p_\theta(z \mid x)}$$
+        </p>
+        <p>
+            到这里都是精确等式。接着要另一个"神奇"的观察：$\log p_\theta(x)$ 不依赖 $z$。式子里虽然有 $z$，但所有 $z$ 最后都会消掉。不依赖 $z$ 的东西，外面总可以套一个对 $z$ 的期望，而且对任意分布都成立。这里选 $z \sim q_\phi(z \mid x)$：
+        </p>
+        <p>
+            $$\log p_\theta(x) = \mathbb{E}_{z \sim q_\phi(z \mid x)}\big[\log p_\theta(x)\big]$$
+        </p>
+        <p>
+            期望是线性的，可以分别作用到三项上：
+        </p>
+        <p>
+            $$\log p_\theta(x) = \mathbb{E}_z\big[\log p_\theta(x \mid z)\big] - \mathbb{E}_z\left[\log \frac{q_\phi(z \mid x)}{p(z)}\right] + \mathbb{E}_z\left[\log \frac{q_\phi(z \mid x)}{p_\theta(z \mid x)}\right]$$
+        </p>
+        <p>
+            三项看着都很神秘。Justin 说如果你对概率很有直觉、记得统计或概率课上的公式，就能认出后两项是 KL 散度。KL 散度 KL Divergence 衡量两个概率分布之间的不相似程度，定义是 $D_{KL}(q \,\|\, p) = \mathbb{E}_{z \sim q}\big[\log \frac{q(z)}{p(z)}\big]$，恰好就是这两项的形式。于是可以精确地改写为：
+        </p>
+        <p>
+            $$\log p_\theta(x) = \mathbb{E}_{z \sim q_\phi(z \mid x)}\big[\log p_\theta(x \mid z)\big] - D_{KL}\big(q_\phi(z \mid x),\, p(z)\big) + D_{KL}\big(q_\phi(z \mid x),\, p_\theta(z \mid x)\big)$$
+        </p>
+        <h3>每一项的含义</h3>
+        <ul>
+            <li>第一项是数据重建 Data Reconstruction：把数据点 $x$ 送进编码器，得到 $z$ 上的分布 $q_\phi(z \mid x)$，从中采样 $z$，对所有这样的 $z$ 取期望，最大化 $\log p_\theta(x \mid z)$。也就是 $x$ 经过编码器再经过解码器，应该能重建出 $x$。</li>
+            <li>第二项是先验项 Prior：编码器预测的潜空间分布 $q_\phi(z \mid x)$ 和预先选好的先验 $p(z)$（通常是对角高斯）之间的 KL 散度，衡量模型学到的潜空间和先验有多接近。幻灯片注明这一项对高斯可以算出闭式解。</li>
+            <li>第三项是后验近似 Posterior Approximation：编码器的输出 $q_\phi(z \mid x)$ 和解码器那边反过来的 $p_\theta(z \mid x)$ 有多接近。这一项算不了，当初引入 $q$ 就是因为算不了 $p_\theta(z \mid x)$。</li>
+        </ul>
+        <h3>扔掉第三项，得到下界</h3>
+        <p>
+            怎么办？扔掉。KL 散度总是大于等于 0，所以即使算不出这两个分布，也知道这一项非负，去掉它就得到真实对数似然的一个下界：
+        </p>
+        <p>
+            $$\log p_\theta(x) \;\ge\; \mathbb{E}_{z \sim q_\phi(z \mid x)}\big[\log p_\theta(x \mid z)\big] - D_{KL}\big(q_\phi(z \mid x),\, p(z)\big)$$
+        </p>
+        <p>
+            这就是 VAE 的训练目标，由重建项和先验项组成，是对数似然的下界。希望最大化下界也能把真实对数似然推高，虽然不是精确地在优化它。总结起来：联合训练编码器 $q$ 和解码器 $p$，最大化数据对数似然的变分下界 Variational Lower Bound，也叫证据下界 Evidence Lower Bound，简称 ELBO。
+        </p>
+        <p>
+            作为背景补充（不是课上讲的）：当 $q_\phi(z \mid x) = \mathcal{N}(\mu, \operatorname{diag}(\sigma^2))$、$p(z) = \mathcal{N}(0, I)$ 时，先验项的闭式解是 $D_{KL} = \frac{1}{2}\sum_j \big(\mu_j^2 + \sigma_j^2 - \log \sigma_j^2 - 1\big)$。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 训练流程、采样、解耦和小结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=4154s" target="_blank">1:09:14</a>–1:12:30 · Training variational autoencoders</em></p>
+        <h3>训练的五步</h3>
+        <p>
+            训练时最大化变分下界 $\mathbb{E}_{z \sim q_\phi(z \mid x)}[\log p_\theta(x \mid z)] - D_{KL}(q_\phi(z \mid x), p(z))$，按幻灯片分五步：
+        </p>
+        <ol>
+            <li>把输入数据送进编码器，得到 $z$ 上的分布（$\mu_{z \mid x}$ 和 $\Sigma_{z \mid x}$）；</li>
+            <li>先验损失：编码器的输出应该是单位高斯，也就是鼓励预测的均值为 0、预测的 sigma 全为 1；</li>
+            <li>用重参数化技巧 Reparameterization Trick 从编码器输出 $q_\phi(z \mid x)$ 采样 $z$，这样采样这一步也能反向传播：$\epsilon \sim \mathcal{N}(0, I)$，$z = \epsilon \odot \Sigma_{z \mid x} + \mu_{z \mid x}$；</li>
+            <li>把 $z$ 送进解码器，得到预测的数据均值；</li>
+            <li>重建损失：预测的均值应该在 L2 意义上和 $x$ 一致。</li>
+        </ol>
+        <p>
+            Justin 说虽然前面的数学看着吓人，最后得到的训练目标并不算太疯狂。
+        </p>
+        <h3>两项损失在打架</h3>
+        <p>
+            他觉得 VAE 有意思的地方在于两项损失以一种有趣的方式互相对抗。模型被迫经过潜空间 $z$ 这个瓶颈，而两项对潜空间的要求不同：
+        </p>
+        <ul>
+            <li>重建损失希望 $\Sigma_{z \mid x} = 0$，并且每个 $x$ 的 $\mu_{z \mid x}$ 各不相同。那样每个数据点有一个独一无二的向量，没有任何随机性，解码器就能确定地完美重建一切。</li>
+            <li>先验损失希望 $\Sigma_{z \mid x} = I$、$\mu_{z \mid x} = 0$，也就是编码器输出永远是单位高斯，和重建损失想要的完全不同。</li>
+        </ul>
+        <p>
+            训练 VAE 就是让这两项去争，在"把数据重建好"和"让潜空间接近先验"之间找到某个平衡。
+        </p>
+        <h3>采样</h3>
+        <p>
+            训练好之后：从先验采样 $z \sim \mathcal{N}(0, I)$，送进解码器，得到一张图。
+        </p>
+        <h3>解耦变化因素</h3>
+        <p>
+            另一个好处是潜空间是对角高斯，$z$ 的各个维度之间有统计独立性，可以分别改变它们，不同维度常常编码数据中某种有用、可解释或彼此正交的东西。幻灯片上的说法是"解耦变化因素 Disentangling Factors of Variation"。例子是在手写数字数据集上训练的 VAE：同时改变潜空间的两个维度 $z_1$、$z_2$，数字从一个类别平滑地变成另一个类别。Justin 说这是 VAE 很常见的性质。
+        </p>
+        <h3>小结</h3>
+        <p>
+            这一讲讲了监督与无监督学习、三种生成建模（判别、无条件生成、条件生成），以及生成模型分类树的一支：自回归模型和 VAE。下一讲讲另一半：生成对抗网络和扩散模型（见<a href="14_生成模型二GAN与扩散.html">第 14 讲</a>）。扩散模型的数学细节也可以看 CME296 的笔记（<a href="../CME296-Diffusion-and-Large-Vision-Models/01_扩散模型DDPM与DDIM.html">CME296 第 1 讲</a>）。
+        </p>
+    </section>
+
+    <section>
+        <h2>课上的原话</h2>
+        <ul>
+            <li>"And I don't have a great intuition or explanation for why this exactly makes sense."<br>我对这为什么说得通，没有很好的直觉或解释。（谈 MoCo 的动量编码器，<a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=473s" target="_blank">0:07:53</a>）</li>
+            <li>"So this is an area of deep learning that basically didn't work at all with the first time we taught this class, and that's really cool that it now does."<br>这是深度学习里一个在我们第一次开这门课时基本完全不行的领域，现在它行了，这很酷。（<a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=661s" target="_blank">0:11:01</a>）</li>
+            <li>"This means that all possible images that could ever exist in the universe are all now competing with each other for probability mass."<br>这意味着宇宙里可能存在的所有图像，现在都在彼此争夺概率质量。（<a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=1126s" target="_blank">0:18:46</a>）</li>
+            <li>"Anytime there's ambiguity in the output, that's when you want to try to turn to a generative model to solve it."<br>只要输出有歧义，就该考虑用生成模型来解决。（<a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=1779s" target="_blank">0:29:39</a>）</li>
+            <li>"But you got a hammer, you're going to whack some nails."<br>但手里有了锤子，你就会去敲钉子。（<a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=2568s" target="_blank">0:42:48</a>）</li>
+            <li>"In some sense, the stupidest loss function ever."<br>某种意义上，这是史上最蠢的损失函数。（谈自编码器的重建损失，<a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=2939s" target="_blank">0:48:59</a>）</li>
+            <li>"So in the process of training a VAE, you're asking these two losses to fight against each other to try to find some equilibrium between reconstructing your data well and forcing your latent space to be close to your prior."<br>所以训练 VAE 的过程，就是让这两项损失互相对抗，在把数据重建好和迫使潜空间接近先验之间找到某种平衡。（<a href="https://www.youtube.com/watch?v=zbHXQRUNlH0&t=4246s" target="_blank">1:10:46</a>）</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS231N · Lecture 13: Generative Models 1 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

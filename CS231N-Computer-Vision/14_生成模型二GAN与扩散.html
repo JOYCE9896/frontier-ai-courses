@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 14 讲：生成模型（二）GAN 与扩散模型 | Stanford CS231N 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="13_生成模型一自回归与VAE.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS231N 目录</a> · 14</span>
+    <span><a href="15_三维视觉.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 14 讲：生成模型（二）GAN 与扩散模型</h1>
+        <p class="subtitle">GAN 的极小极大目标、训练难点和潜空间插值；扩散模型的直觉，整流流的训练与采样代码，无分类器引导、噪声调度；潜扩散模型、DiT、文生图与文生视频的实际配置，蒸馏，以及扩散模型的三种数学视角</p>
+        <div class="author-meta">
+            主讲：Justin Johnson · 2025 年 5 月 20 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=Edr4uZFh4EE" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs231n.stanford.edu/slides/2025/lecture_14.pdf" target="_blank">课程幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            上一讲 Justin 讲了生成模型家族树的左半边：显式密度模型，包括自回归模型和变分自编码器 VAE。这一讲讲右半边的隐式密度模型。这类模型算不出某个样本的概率密度 $p(x)$，但能从学到的分布里采样。他先讲生成对抗网络 GAN，然后用大约三分之二的时间讲扩散模型，具体落在当前最常用的一种写法：整流流 Rectified Flow。
+        </p>
+        <p>
+            后半段把前面讲过的东西拼在一起。现在最常见的图像和视频生成系统是潜扩散模型：用一个带判别器的 VAE 把图像压成潜变量，再在潜空间里训练一个扩散 Transformer。Justin 的说法是，生成模型这一块讲了 VAE、GAN、自回归、扩散四类，因为它们在现代流水线里全都用得上。最后他简单介绍了扩散模型背后的三套数学框架，没有展开推导。下一讲是 Jiajun Wu 的三维视觉。
+        </p>
+        <ol>
+            <li><a href="#t01">回顾与 GAN 的基本设定</a> · <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">极小极大目标与交替训练</a> · <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=517s" target="_blank">0:08:37</a></li>
+            <li><a href="#t03">训练难点、非饱和损失与最优判别器</a> · <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=939s" target="_blank">0:15:39</a></li>
+            <li><a href="#t04">GAN 架构、潜空间插值与优缺点</a> · <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=1448s" target="_blank">0:24:08</a></li>
+            <li><a href="#t05">扩散模型的直觉</a> · <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=1828s" target="_blank">0:30:28</a></li>
+            <li><a href="#t06">整流流的训练与采样</a> · <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=2155s" target="_blank">0:35:55</a></li>
+            <li><a href="#t07">条件生成与无分类器引导 CFG</a> · <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=2719s" target="_blank">0:45:19</a></li>
+            <li><a href="#t08">最优预测与噪声调度</a> · <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=3008s" target="_blank">0:50:08</a></li>
+            <li><a href="#t09">潜扩散模型：VAE、GAN 和扩散一起上</a> · <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=3148s" target="_blank">0:52:28</a></li>
+            <li><a href="#t10">扩散 Transformer 与文生图</a> · <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=3332s" target="_blank">0:55:32</a></li>
+            <li><a href="#t11">文生视频与扩散蒸馏</a> · <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=3514s" target="_blank">0:58:34</a></li>
+            <li><a href="#t12">广义扩散、三种数学视角与自回归的回归</a> · <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=3836s" target="_blank">1:03:56</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 回顾与 GAN 的基本设定</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=5s" target="_blank">0:00:05</a>–0:08:37 · Review of generative models / Introduction to GANs</em></p>
+        <h3>上一讲回顾</h3>
+        <p>
+            三种概率模型的区别在于预测什么、以什么为条件、对什么做归一化。判别模型 Discriminative Model 学 $p(y\mid x)$，给定图像预测标签；生成模型 Generative Model 学 $p(x)$，只对数据本身建模；条件生成模型 Conditional Generative Model 学 $p(x\mid y)$，在用户给的输入或标签 $y$ 下对数据建模。概率密度要满足 $\int p(x)\,dx = 1$，所以不同的 $x$ 要互相争夺概率质量，这是归一化带来的效果。
+        </p>
+        <p>
+            生成模型的家族树分成两支。显式密度 Explicit Density 模型能输出 $p(x)$：自回归模型给出精确的 $p(x)$（可处理密度 Tractable Density），VAE 给出它的近似（近似密度 Approximate Density）。自回归模型把图像拆成像素（甚至子像素）序列，每个值当成 0 到 255 的 8 位整数，用 RNN 或 Transformer 按顺序建模：
+        </p>
+        <p>$$p(x) = p(x_1, x_2, \dots, x_N) = \prod_{t=1}^{N} p(x_t \mid x_1, \dots, x_{t-1})$$</p>
+        <p>
+            VAE 联合训练编码器 $q_\phi(z\mid x)$ 和解码器 $p_\theta(x\mid z)$，去最大化似然的变分下界，也叫证据下界 ELBO：
+        </p>
+        <p>$$\log p_\theta(x) \ge \mathbb{E}_{z\sim q_\phi(z\mid x)}\big[\log p_\theta(x\mid z)\big] - D_{KL}\big(q_\phi(z\mid x),\, p(z)\big)$$</p>
+        <p>
+            Justin 强调，最大似然 Maximum Likelihood 是所有生成模型背后的核心想法之一：训练目标通常就是让观测到的数据在模型下的概率尽量大。这一讲转到家族树的另一半，隐式密度 Implicit Density 模型。它们拿不到任何 $p(x)$ 的数值，但能从模型学到的分布里抽样。
+        </p>
+        <h3>GAN 要解决的问题</h3>
+        <p>
+            生成对抗网络 Generative Adversarial Network（GAN，Goodfellow et al., NeurIPS 2014）放弃直接写出 $p(x)$。设定是：手上有有限个样本 $x_i$，假设它们来自真实数据分布 $p_{data}$。Justin 说 $p_{data}$ 可以理解成宇宙给你数据时用的那个分布，里面牵涉物理、历史，也许还有社会政治因素，复杂得写不出来。我们想拟合一个近似它的模型，并能从这个模型里抽出像训练数据的新样本。
+        </p>
+        <p>
+            做法是引入一个潜变量 Latent Variable $z$，也就是一个没有直接观测到、由模型自己定义的随机向量。$z$ 服从我们自己选定的先验 $p(z)$，通常是单位高斯，也可以是均匀分布，总之是容易采样、性质清楚的分布。采样一个 $z$，送进生成器网络 Generator $G$，得到 $x = G(z)$。这个 $x$ 服从生成器诱导出的分布 $p_G$。改变生成器的参数或结构，$p_G$ 就会变。GAN 训练的全部目标是让 $p_G$ 尽量接近 $p_{data}$；两者相等时，采一个 $z$ 过一遍生成器，就得到一个像真实数据的样本。
+        </p>
+        <h3>判别器</h3>
+        <p>
+            怎样逼 $p_G$ 去对齐 $p_{data}$？VAE 和自回归模型都是写下一个可以最小化的目标函数。GAN 把这件事交给另一个神经网络：判别器 Discriminator $D$。判别器的输入是一张图，有时是真图，有时是生成器造的假图，它要分类这张图是真是假。生成器的任务是骗过判别器，判别器则被当成普通分类模型训练，尽量分对。直觉是两个网络互相对抗：判别器越来越擅长抓住真实数据的特征，生成器为了让自己的样本被判为真，就只能产出越来越像真实数据的样本。
+        </p>
+        <p>
+            有学生问生成器能不能拿到判别器的反馈。Justin 说能，而且整个过程就靠它，反馈的形式是梯度。生成器和判别器都是神经网络，两者通过生成的图像连在一起，梯度从判别器一路反向传播，穿过生成图像回到生成器的参数上。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 极小极大目标与交替训练</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=517s" target="_blank">0:08:37</a>–0:15:39 · GAN training objective</em></p>
+        <h3>目标函数</h3>
+        <p>
+            生成器和判别器通过一个极小极大博弈 Minimax Game 联合训练：
+        </p>
+        <p>$$\min_G \max_D \; \mathbb{E}_{x\sim p_{data}}\big[\log D(x)\big] + \mathbb{E}_{z\sim p(z)}\big[\log\big(1 - D(G(z))\big)\big]$$</p>
+        <p>
+            判别器 $D(x)$ 输出 $x$ 是真实数据的概率：$D(x)=0$ 表示判为假，$D(x)=1$ 表示判为真，实际输出在两者之间。Justin 把式子拆开，从两方分别看。
+        </p>
+        <p>
+            先固定 $G$，站在判别器的角度。第一项从真实分布 $p_{data}$ 抽样 $x$，取 $\log D(x)$。log 是单调函数，最大化 $\log D(x)$ 等于让真实数据上的 $D(x)$ 趋近 1。第二项从先验抽 $z$，经过生成器得到生成样本，再送进判别器。判别器希望这些样本被判为假，也就是 $D(G(z))$ 趋近 0，所以它要最大化 $\log(1 - D(G(z)))$。两项合起来，就是在生成样本和真实样本之间做正确的二分类。
+        </p>
+        <p>
+            再固定 $D$，站在生成器的角度。第一项与生成器无关，生成器只关心第二项。它希望判别器把假数据判为真，即 $D(G(z))$ 趋近 1，所以对同一项它要做最小化。判别器想最大化、生成器想最小化，就是极小极大。
+        </p>
+        <h3>交替梯度更新</h3>
+        <p>
+            把整个式子记成一个标量函数 $V(G, D)$，训练就是 $\min_G \max_D V(G,D)$。具体做法是一个无限循环，交替更新两组参数：
+        </p>
+        <p>$$D \leftarrow D + \alpha_D \frac{\partial V}{\partial D}, \qquad G \leftarrow G - \alpha_G \frac{\partial V}{\partial G}$$</p>
+        <p>
+            判别器做梯度上升，因为它要最大化 $V$；更新完判别器后，生成器做一步梯度下降，因为它要最小化 $V$。
+        </p>
+        <h3>$V$ 不是损失函数</h3>
+        <p>
+            Justin 说训练 GAN 时最需要明白的一点是：<strong>$V$ 不是一个损失函数，它的绝对值说明不了生成器和判别器做得好不好</strong>。我们真正关心的是 $p_G$ 和 $p_{data}$ 有多接近，而 $V$ 的数值取决于判别器有多强。判别器很差，生成器很容易骗过它，数字就好看；判别器很强，生成器就得很强。不同的 $(D, G)$ 组合可以得到完全相同的 $V$。
+        </p>
+        <p>
+            所以 GAN 很难训练，也很难判断训练有没有进展。平常训练神经网络有一条损失曲线，看着它往下走就行。GAN 只有生成器损失和判别器损失，可以画出来，但一般没什么意义。他总结了两个难处：目标本身不稳定，对同一个量分别关于两组参数做最大化和最小化，天生是困难的优化问题；而且没有一个数值可以看出你是不是在接近好的解。他的结论是 GAN 效果不错，但很难训、很难调，也很难在上面做研究进展。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 训练难点、非饱和损失与最优判别器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=939s" target="_blank">0:15:39</a>–0:24:08 · GAN challenges</em></p>
+        <h3>训练初期生成器拿不到梯度</h3>
+        <p>
+            想象训练刚开始：生成器和判别器都是随机初始化的，生成器吐出来的是纯随机噪声，和真实图像差得很远。判别器面对的是一个很容易的问题，几次迭代就能高置信度地分开真图和假图，于是 $D(G(z))$ 接近 0。
+        </p>
+        <p>
+            从生成器的角度画出它要优化的那一项 $\log(1 - D(G(z)))$ 关于 $D(G(z))$ 的曲线，会发现在 $D(G(z))$ 接近 0 的地方，曲线几乎是平的。也就是说，用这个原始目标训练时，生成器在训练初期几乎拿不到梯度，很难学起来。
+        </p>
+        <p>
+            解决办法是一个小改动：生成器不再最小化 $\log(1 - D(G(z)))$，改为最小化 $-\log D(G(z))$；判别器仍然最大化 $\log(1 - D(G(z)))$。两者目标方向相同（生成器都想让 $D(G(z))=1$），但新曲线在训练初期给生成器的梯度大得多。Justin 说只要从头用这种 log 目标训练 GAN，这个修改过的生成器损失在实践中很重要。这也意味着生成器和判别器算的其实是两个不太一样的 $V$。
+        </p>
+        <h3>课堂问答</h3>
+        <p>
+            有学生问，怎么生成一张世界上不存在的东西，比如独角兽的照片？Justin 说 $p_{data}$ 就是你自己收集的训练集决定的。想生成和见过的任何东西都不像的样本，那不会发生。所有生成模型和神经网络都会有一点泛化，希望是：模型没见过戴圣诞帽的独角兽的写实照片，但见过马的照片、圣诞帽的照片、独角兽和马的画，见过足够接近的东西，就能组合出新的样本。从判别器的角度看，如果生成的独角兽纹理、光照、阴影、树叶都完美，样本本身就没有破绽。一个极聪明的判别器也许能知道独角兽不存在、写实照片不太可能出现，但那是很难的语义问题，实际中的判别器没那么聪明。
+        </p>
+        <p>
+            有学生问，为什么不分别画两条曲线，一条看判别器有多好，一条看生成器有多好？Justin 说可以画，但它们看起来基本没用。为了改 GAN 目标、不用 log、改用 Wasserstein 距离之类，让曲线更好解读，大概有几百篇论文，花了成千上万人五年的时间，他认为没有人找到好的解决办法，很多人最后还是用最原始的写法。
+        </p>
+        <p>
+            有学生问判别器在训练初期是不是特别重要。他说这和以往见过的分类问题都不同，因为数据分布是非平稳的 Non-stationary。在 ImageNet 或 CIFAR 上训分类器，数据集固定不变；GAN 里判别器要区分的数据会随着生成器变好而在训练过程中不断变化，学习动态很复杂。还有学生问会不会陷入局部极小、能不能把它踢出来，他说同样有成百上千篇论文和很多启发式方法，没有一个真正流行起来。另外两个回答：整个系统必须端到端训练，生成器参数上的梯度只能经由判别器传过来（除非加正则项），这也是不稳定的原因之一；$p_{data}$ 在训练中保持不变。
+        </p>
+        <h3>为什么这个目标是合理的</h3>
+        <p>
+            Justin 说他以前有几页逐步证明，这次没时间，只给结论。这是一个嵌套优化：内层对 $D$ 最大化，外层对 $G$ 最小化。对任意给定的生成器，内层的最优判别器可以写出来：
+        </p>
+        <p>$$D_G^*(x) = \frac{p_{data}(x)}{p_{data}(x) + p_G(x)}$$</p>
+        <p>
+            这个式子写得出来却永远算不出来，因为它依赖 $p_{data}$；要是能算 $p_{data}$ 的密度，问题早就解决了。把最优判别器代回去，可以证明外层目标当且仅当 $p_G(x) = p_{data}(x)$ 时取得最小。所以理论上，生成器和判别器的最优状态唯一地出现在 $p_G = p_{data}$。
+        </p>
+        <p>
+            他列了两条保留意见。第一，这个结论假设 $G$ 和 $D$ 有无限容量，能表示任何函数，而固定大小的神经网络做不到。第二，它完全没有说我们能否收敛到这个解：最优点存在，不代表用梯度下降、梯度上升，在有限数据下能走到那里。所以这是一个让人安心的理论依据，实践中给不了很强的保证。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. GAN 架构、潜空间插值与优缺点</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=1448s" target="_blank">0:24:08</a>–0:30:28 · GAN architectures and latent space</em></p>
+        <h3>DC-GAN 与 StyleGAN</h3>
+        <p>
+            实践中 $G$ 和 $D$ 都是神经网络，过去一般是 CNN。幻灯片上写，GAN 在 ViT 流行起来之前就已经不再受青睐，Justin 认为换成 ViT 应该也能工作。第一个在非玩具数据上做出像样结果的是 DC-GAN（Radford et al., ICLR 2016），一个五层的卷积网络架构，样本在当时很让人兴奋。
+        </p>
+        <p>
+            他特意提 DC-GAN 是因为第一作者 Alec Radford。对大多数人来说 DC-GAN 会是职业生涯的高光，但 Radford 紧接着做的项目就是 GPT，他后来做了 GPT-1、GPT-2 和 OpenAI 的其他重要工作。Justin 觉得这是一个很有意思的联系：做图像生成建模的人跳去做离散文本的生成建模，做出了那边很重要的工作。
+        </p>
+        <p>
+            另一篇他推荐的是 StyleGAN（Karras et al., CVPR 2019），想了解 GAN 的最佳实践可以读它。架构复杂很多，效果很好。幻灯片上写，StyleGAN 通过自适应归一化把噪声注入每一层：每层预测一个和 $x$ 形状相同的缩放 $w$ 和偏移 $b$，
+        </p>
+        <p>$$\mathrm{AdaIN}(x, w, b)_i = w_i \,\frac{x_i - \mu(x)}{\sigma(x)} + b_i$$</p>
+        <h3>潜空间插值</h3>
+        <p>
+            GAN 一个很好的性质是潜空间往往是平滑的。从高斯里抽两个潜向量 $z_0$ 和 $z_1$，在它们之间插值，对曲线上每一点都用生成器生成一个样本：
+        </p>
+        <p>$$z_t = t\,z_0 + (1-t)\,z_1, \qquad x_t = G(z_t)$$</p>
+        <p>
+            得到的图像会平滑地从一个样本变到另一个。课上放的是 StyleGAN3（Karras et al., "Alias-Free Generative Adversarial Networks", NeurIPS 2021）的例子，动物平滑地互相变形，说明模型发现了数据中的某种有用结构并放进了潜空间。
+        </p>
+        <p>
+            有学生问，这种平滑的潜空间是不是理所当然会出现？Justin 说不一定。GAN 可能出现的一种情况是生成器忽略 $z$，只记住训练集里的 10 个样本，不管给什么 $z$ 都输出其中之一。这些输出可能和真实样本逐比特相同，判别器就被骗过了。这时生成器相当于在几个有限样本附近堆了狄拉克 δ 密度，别处一点概率质量都没有。这对生成器是一个合法的解，潜空间一点也不平滑。这只是 GAN 会塌缩到反直觉解的一个例子。
+        </p>
+        <p>
+            又有学生问训练数据和潜变量是什么关系。他说这是 GAN 很根本的一点：生成器给出从 $z$ 到 $x$ 的映射，但一般没有从 $x$ 回到 $z$ 的映射。VAE 会学一个显式的 $x\to z$ 映射，GAN 没有。可以用梯度下降数值地求逆，有论文这么做，但 $x$ 与 $z$ 之间没有被显式约束的关系。判别器做的只是让生成器所有输出的分布和所有数据样本的分布对齐，两者之间没有逐个配对的监督。也有不少学双向映射的 GAN 变体，都没流行起来。
+        </p>
+        <p>
+            还有学生问：从 VAE 到 GAN，我们得到了什么？VAE 得到了潜向量、放弃了精确密度；GAN 连可控的潜向量也放弃了。Justin 的回答是得到了好得多的样本。VAE 的样本特征就是模糊，单独用很难得到干净清晰的样本；GAN 能给出很清晰的样本。失去的是调这些系统时的理智。推理时扔掉判别器，只用生成器：从先验采样 $z$，过一遍生成器就得到样本，推理很高效。
+        </p>
+        <h3>小结</h3>
+        <p>
+            优点：公式简单，调好了能给出很高分辨率、很漂亮的图像。缺点：没有可看的损失曲线；训练不稳定，动不动就崩，出现所谓模式崩溃 Mode Collapse（生成器只产出很少几种样本），或者突然出现 NaN、inf，判别器失控，生成器开始一直输出垃圾，而你没有曲线可以诊断；很难扩展到很大的模型和很大的数据。GAN 大约从 2016 年到 2020、2021 年是生成模型的首选，五六年间有成千上万篇论文，有的换公式、换损失、换数学框架，有的把 GAN 用到各种生成任务上。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 扩散模型的直觉</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=1828s" target="_blank">0:30:28</a>–0:35:55 · Introduction to diffusion models</em></p>
+        <h3>先打个预防针</h3>
+        <p>
+            取代 GAN 的是扩散模型 Diffusion Models。幻灯片列了几篇奠基论文：Sohl-Dickstein et al.（ICML 2015）、Song and Ermon（NeurIPS 2019）、Ho et al. 的 DDPM（NeurIPS 2020）、Song et al. 的基于 SDE 的分数生成模型（ICLR 2021）和 DDIM（ICLR 2021）。
+        </p>
+        <p>
+            Justin 先警告：扩散模型的文献很乱。论文常常先写五页数学才告诉你在干什么；有三套数学上很不一样的形式体系都能推出扩散模型；论文之间的记号、术语、形式化都不一样。他不打算覆盖所有变体和严格推导，只给一个直观概述，再给一个对现在最常见的扩散形式（整流流）的直观几何理解。要讲清所有数学细节需要好几讲，这里只有一讲的三分之二。
+        </p>
+        <h3>加噪和逐步去噪</h3>
+        <p>
+            和 GAN 一样，目标是把噪声分布里的样本 $z$ 变成数据分布 $p_x$ 里的样本，但做法完全不同。GAN 通过生成器学一个从 $z$ 直接到 $x$ 的确定性映射；扩散模型的做法更间接。
+        </p>
+        <p>
+            第一个约束是噪声 $z$ 必须和数据形状完全相同。图像是 $H\times W\times 3$，噪声也必须是 $H\times W\times 3$。噪声分布几乎总是高斯，通常是单位高斯。
+        </p>
+        <p>
+            然后考虑被不同强度噪声污染的数据。用 $t$ 表示噪声水平，取值 0 到 1：$t=0$ 没有噪声，是干净样本；$t=0.3$ 混进了一点噪声；$t=1$ 是满噪声，等于直接从噪声分布采的样本。$t$ 在数据分布和噪声分布之间平滑插值，得到带噪数据 $x_t$。
+        </p>
+        <p>
+            训练一个神经网络 $f_\theta(x_t, t)$ 做一点点增量去噪：输入一张带有某个中间程度噪声的图，让它把噪声去掉一点。推理时先从噪声分布采一个 $x_1 \sim p_{noise}$，然后反复调用网络，每次去掉一点噪声。第一次调用时输入全是噪声，网络只能在噪声里幻想出一丝数据结构；得到稍微干净一点的样本后再送回网络，再去一点，如此反复，直到噪声全部去掉，得到一个干净样本 $x_0$。
+        </p>
+        <p>
+            有学生问步数是不是固定的超参数。Justin 说这一页他是故意讲得含糊：噪声是什么、用噪声污染数据是什么意思、去掉一点噪声是什么意思、推理时怎么迭代，不同的扩散形式体系对这些都有不同的具体选择。
+        </p>
+        <p>
+            CME296 第一讲从 DDPM 的前向加噪过程讲起，可以和这里对照着看：<a href="../CME296-Diffusion-and-Large-Vision-Models/01_扩散模型DDPM与DDIM.html">CME296 · 扩散模型 DDPM 与 DDIM</a>。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 整流流的训练与采样</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=2155s" target="_blank">0:35:55</a>–0:45:19 · Rectified flow models</em></p>
+        <h3>几何设定</h3>
+        <p>
+            接下来具体到一类扩散模型：整流流 Rectified Flow（Liu et al., "Flow Straight and Fast", 2022；Lipman et al., "Flow Matching for Generative Modeling", 2022）。Justin 说有人会说整流流不算扩散、是另一回事，他不在乎，在他看来整流流就是一种扩散模型。
+        </p>
+        <p>
+            他用二维图来建立直觉，同时提醒：真实的图像和高斯分布在极高维的空间里，二三维的直觉到了上百、上千维常常失效，"我们活在这么低维的宇宙里挺可惜的"。
+        </p>
+        <p>
+            有两个分布：$p_{noise}$ 简单友好，能采样、能算积分；$p_{data}$ 复杂，是宇宙给我们图像的那个分布。每次训练迭代：
+        </p>
+        <ul>
+            <li>从噪声分布采 $z \sim p_{noise}$，从数据分布采 $x \sim p_{data}$（就是从有限训练集里挑一个样本）；</li>
+            <li>采噪声水平 $t \sim \mathrm{Uniform}[0, 1]$；</li>
+            <li>画一条从数据样本 $x$ 指向噪声样本 $z$ 的直线，这个向量记作 $v = z - x$，看作一个流场的速度 Velocity；</li>
+            <li>令 $x_t = (1-t)\,x + t\,z$，即 $x$ 和 $z$ 之间的线性插值上的一点。</li>
+        </ul>
+        <p>
+            上一节说的"带噪数据"，在整流流里的含义就是数据样本和噪声样本之间的线性插值。训练目标很简单：神经网络 $f_\theta$ 输入 $x_t$ 和 $t$，预测速度 $v$，
+        </p>
+        <p>$$L = \big\| f_\theta(x_t, t) - v \big\|_2^2$$</p>
+        <h3>训练代码</h3>
+        <p>
+            Justin 说读论文时会发现这里包裹着大量晦涩的东西，归结起来就是下面几行，很多讲解没有把这一点讲清楚，让他很抓狂。幻灯片上的训练循环：
+        </p>
+<pre><code>for x in dataset:
+    z = torch.randn_like(x)
+    t = random.uniform(0, 1)
+    xt = (1 - t) * x + t * z
+    v = model(xt, t)
+    loss = (z - x - v).square().sum()</code></pre>
+        <p>
+            和 GAN 对比，训练扩散模型时有一条能看的损失曲线，损失下降一般就说明模型变好了。他说对经历了五年 GAN 的人来说，第一次训练扩散模型、看到有损失可看，感觉太棒了；看 GAN 曲线就像读茶叶渣占卜，而扩散模型给你一条平滑的指数下降曲线。
+        </p>
+        <h3>采样</h3>
+        <p>
+            GAN 推理很简单，扩散模型的单次输出本身没法直接用：给它 $x_t$，它给你一个 $v$，接下来怎么办？推理过程是：
+        </p>
+        <ul>
+            <li>先选定步数 $T$，通常是固定常数。整流流里 $T=50$ 是不错的起点，有时降到 30 也还行；</li>
+            <li>从噪声分布采 $x \sim p_{noise}$，作为 $x_1$；</li>
+            <li>让 $t$ 从 1 线性走回 0，即 $t \in [1, 1-\tfrac{1}{T}, 1-\tfrac{2}{T}, \dots, 0]$。每步算 $v_t = f_\theta(x_t, t)$，然后走一小步 $x \leftarrow x - v_t / T$；</li>
+            <li>最后返回 $x$。</li>
+        </ul>
+        <p>
+            几何上很直观：$v$ 本该从数据样本指向噪声样本，所以沿预测的 $v$ 反方向走一小步，就去掉了一点噪声。预测的 $v$ 不会直接把你带到干净样本，它只是把你送上一条通向干净样本的轨迹。课上用 $T=3$ 演示：从 $x_1$ 得到 $v_1$，走到 $x_{2/3}$；再算 $v_{2/3}$，走到 $x_{1/3}$；再算 $v_{1/3}$，一直走到向量末端，得到 $x_0$。采样代码：
+        </p>
+<pre><code>sample = torch.randn(x_shape)
+for t in torch.linspace(1, 0, num_steps):
+    v = model(sample, t)
+    sample = sample - v / num_steps</code></pre>
+        <p>
+            推理比 GAN 复杂了一点，换来的是训练时找回了理智，样本质量好得多，并且能很好地扩展到大数据集和大模型。他说这些代码放进一个合理的模型架构里，在很多情况下真的能训出合理的结果。
+        </p>
+        <h3>生成建模的核心问题</h3>
+        <p>
+            一位学生的提问让 Justin 谈到他备课时一直在想的事。生成建模的核心问题是：有一个会采样的先验分布（$z$），有一个想生成的数据分布（$x$），要想办法把 $z$ 和 $x$ 对应起来，各类方法只是做法不同。VAE 让模型从 $x$ 预测 $z$ 再预测回 $x$，同时逼 $z$ 服从一个会采样的分布，这效果不太好；GAN 不监督这种对应关系，生成器在判别器给的分布匹配目标下自己摸索出一个前馈的 $z\to x$ 映射；扩散模型则要沿这些曲线做积分。为什么这种形式的目标能合理地匹配概率分布，有好几套数学解释。根本难点在于训练前没办法把先验的样本 $z$ 和数据样本 $x$ 配成对。要是知道怎么配对、又会从先验采样，问题就解决了。
+        </p>
+        <p>
+            整流流和流匹配在 CME296 里有专门一讲：<a href="../CME296-Diffusion-and-Large-Vision-Models/03_流匹配与整流流.html">CME296 · 流匹配与整流流</a>。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 条件生成与无分类器引导 CFG</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=2719s" target="_blank">0:45:19</a>–0:50:08 · Conditional diffusion models</em></p>
+        <h3>条件整流流</h3>
+        <p>
+            上一讲说过，无条件生成基本没什么用，我们几乎总是关心条件生成。整流流很容易改成条件版本。设想数据分布由几个子分布组成，比如数据里有正方形和三角形两类，就有整体的 $p_{data}$，以及 $p_{data}(x\mid y=\blacksquare)$、$p_{data}(x\mid y=\blacktriangle)$ 两个子分布。数据集变成 $(x, y)$ 对，模型多接收一个辅助输入 $y$；采样时同样把 $y$ 传进去。实际中 $y$ 是用户能控制的条件信号，可以是文本提示、输入图像或其他用户输入，模型因此变得可控、有用。
+        </p>
+        <h3>CFG 的训练和采样</h3>
+        <p>
+            接着的问题是：有没有一个旋钮能控制模型多重视条件信号？直接训练的话，模型常常不像你希望的那样紧跟条件。无分类器引导 Classifier-Free Guidance（CFG，Ho and Salimans, 2022）对训练循环只做一点改动：每次迭代抛一次硬币，正面就把条件信息删掉，设成某个零值或空值 $y_\varnothing$。删掉的概率是超参数，大多数人用 50%。
+        </p>
+        <p>
+            这样同一个模型被迫学两种速度向量。输入空条件时它是无条件模型，预测的 $v_\varnothing = f_\theta(x_t, y_\varnothing, t)$ 指回整个数据分布 $p(x)$ 的主体；输入真实条件时，$v_y = f_\theta(x_t, y, t)$ 指向条件分布 $p(x\mid y)$。然后做一个线性组合，把方向往条件那边再推一把：
+        </p>
+        <p>$$v^{cfg} = (1 + w)\, v_y - w\, v_\varnothing$$</p>
+        <p>
+            $w$ 是标量超参数。$w=0$ 时恢复成普通的条件预测，$w$ 越大越强调条件信号。采样时沿 $v^{cfg}$ 走，不再用模型的原始输出。幻灯片上的代码：
+        </p>
+<pre><code># Training
+for (x, y) in dataset:
+    z = torch.randn_like(x)
+    t = random.uniform(0, 1)
+    xt = (1 - t) * x + t * z
+    if random.random() &lt; 0.5: y = y_null
+    v = model(xt, y, t)
+    loss = (z - x - v).square().sum()
+
+# Sampling
+y = user_input()
+sample = torch.randn(x_shape)
+for t in torch.linspace(1, 0, num_steps):
+    vy = model(sample, y, t)
+    v0 = model(sample, y_null, t)
+    v = (1 + w) * vy - w * v0
+    sample = sample - v / num_steps</code></pre>
+        <p>
+            名字里的"无分类器"来历很随意。更早有一篇 classifier guidance 的工作（幻灯片引用 Dhariwal and Nichol, "Diffusion Models beat GANs on Image Synthesis", 2021），用一个单独的判别模型 $p(y\mid x)$ 计算步进方向 $\frac{\partial}{\partial x}\log p(y\mid x)$；后来的工作把分类器去掉了。Justin 说两篇论文只隔了九个月，第二篇已经过去四年，我们还是被这个名字困住。
+        </p>
+        <p>
+            CFG 在实践中到处都在用，对高质量输出很重要。代价是采样成本翻倍，因为每步要调用模型两次。CME296 第四讲详细讲了 classifier guidance 与 CFG：<a href="../CME296-Diffusion-and-Large-Vision-Models/04_潜空间与引导生成.html">CME296 · 潜空间与引导生成</a>。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 最优预测与噪声调度</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=3008s" target="_blank">0:50:08</a>–0:52:28 · Conditional diffusion models（续）</em></p>
+        <p>
+            Justin 说"最优预测"这部分有意思，但怕时间不够，只简单带过，重点讲为什么要调整 $t$ 的分布。
+        </p>
+        <h3>不同噪声水平难度不同</h3>
+        <p>
+            原始整流流里 $t$ 从均匀分布采样，等于对所有噪声水平一视同仁。可是不同噪声水平下的难度差很多。在满噪声 $t=1$ 处，最优预测就是指向数据分布的均值；在无噪声 $t=0$ 处，最优预测是指向噪声分布的均值。两端都只需要学一个均值，相对容易。中间最难：给定一个中间的 $x_t$，可能有很多不同的 $(x, z)$ 对都会经过这一点，网络必须对所有可能经过这里的 $x$ 和 $z$ 取平均，算出最优方向。中间噪声最难、最模糊，而均匀采样给所有噪声水平同样的权重，这和直觉不符。
+        </p>
+        <h3>logit-normal 与平移调度</h3>
+        <p>
+            所以实践中常用非均匀的噪声调度 Noise Schedule，即 $t$ 的采样分布 $p(t)$。一种很流行的是 logit-normal 采样（幻灯片引用 Esser et al., "Scaling Rectified Flow Transformers for High-Resolution Image Synthesis", 2024），形状像高斯，在 0 和 1 附近权重很小，中间权重大。另一种是不对称的平移调度 Shifted Schedule，往一侧偏，扩展到高分辨率时很重要。直觉是：高分辨率图像相邻像素之间相关性很强，低分辨率图像相关性弱一些；相关性越强，要破坏掉信息所需的噪声水平就不同，对高分辨率数据通常要往更高噪声的方向平移。所以这些设置不能直接搬到不同分辨率上。Justin 说这是扩散模型的一个大问题：公式很漂亮，但直接在高分辨率数据上很难训起来。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 潜扩散模型：VAE、GAN 和扩散一起上</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=3148s" target="_blank">0:52:28</a>–0:55:32 · Latent diffusion models</em></p>
+        <h3>在潜空间里做扩散</h3>
+        <p>
+            Justin 说前面讲"扩散模型是最流行的生成模型"有点不准，真正到处在用的是潜扩散模型 Latent Diffusion Models（LDM，Rombach et al., CVPR 2022）。这是一个多阶段流程：
+        </p>
+        <ol>
+            <li>先训练编码器和解码器。编码器把 $H\times W\times 3$ 的图像映射到潜空间，空间上下采样 $D$ 倍，通道从 3 变成 $C$，得到 $H/D \times W/D \times C$ 的潜变量。常见设置是 $D=8$、$C=16$，例如 $256\times256\times3$ 的图像变成 $32\times32\times16$ 的潜变量。编码器和解码器通常是带注意力的 CNN，较新的论文也在试 ViT。</li>
+            <li>在潜空间上训练扩散模型：取一张图，用第一阶段的编码器得到潜变量，对潜变量加噪，训练扩散模型给带噪潜变量去噪。编码器是冻结的，梯度不回传进编码器，只用它来提取潜变量。</li>
+            <li>训练好后，采一个随机潜变量，反复用扩散模型去噪，得到干净的潜变量，再用解码器把它变回图像。</li>
+        </ol>
+        <p>
+            这是现在最常见的扩散模型形式。
+        </p>
+        <h3>编码器和解码器怎么训练</h3>
+        <p>
+            Justin 问全班：编码器和解码器怎么训练？答案是用 VAE，幻灯片注明通常 KL 先验项的权重很小。但 VAE 的老问题是输出模糊。解码器重建的质量决定了下游扩散模型生成质量的上限，重建模糊难看，生成的样本也不会干净。怎样清理 VAE 的输出？在解码器之后加一个判别器，也就是让它变成 GAN。
+        </p>
+        <p>
+            于是实际要训练的是：一个从图像到潜空间的编码器，一个从潜空间回到图像的解码器，一个区分真假图像的判别器，以及一个在潜空间里生成的扩散模型。Justin 说这就是为什么要把这些生成模型一个个讲过来：现代流水线里 VAE、GAN、扩散全都有，"抱歉，这很乱"。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 扩散 Transformer 与文生图</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=3332s" target="_blank">0:55:32</a>–0:58:34 · Diffusion transformers</em></p>
+        <h3>DiT 与条件注入</h3>
+        <p>
+            网络本身长什么样？Justin 说这几年总算有些简洁之处：相当直接的 Transformer 就能用在扩散模型上，效果很好，一般叫扩散 Transformer Diffusion Transformer（DiT，Peebles and Xie, ICCV 2023）。用的基本是标准 Transformer 块，没有什么特别的配方。
+        </p>
+        <p>
+            架构上主要的问题是怎样注入条件信息。扩散模型要接收三样输入：带噪图像（或潜变量）、时间步 $t$、条件信号（比如文本）。有两类机制：
+        </p>
+        <ul>
+            <li>预测缩放和偏移 Scale/Shift，用来调制扩散块内部的中间激活。这通常是注入时间步 $t$ 的方式。</li>
+            <li>Transformer 本来就是序列模型，可以把东西都塞进序列：时间步、文本，想塞什么都行，让 Transformer 一起建模。具体可以用交叉注意力 Cross-Attention 或联合注意力 Joint Attention，不同模型各有选择。</li>
+        </ul>
+        <p>
+            现代 DiT 通常用缩放/偏移注入时间步，用序列拼接注入文本或其他条件，多数是交叉注意力，有时用联合注意力。
+        </p>
+        <h3>文生图</h3>
+        <p>
+            文生图 Text-to-Image 的例子是 Justin 前一天写的提示词："A professional documentary photograph of a monkey shaking hands with a tiger in front of the Eiffel tower. The monkey is wearing a hat made out of bananas, and the tiger is standing on two legs and wearing a suit." 课上展示的是真实生成结果。
+        </p>
+        <p>
+            流程是：文本提示先过一个预训练的文本编码器（如 T5、CLIP），得到 $D\times L$ 的文本嵌入，文本编码器通常冻结。他补了一句：除了编码器、解码器、VAE 和判别器，你其实还偷偷需要一个语言模型。文本嵌入和 $h\times w\times c$ 的带噪潜变量、标量时间步一起送进 DiT，DiT 迭代输出干净潜变量，最后经 VAE 解码器得到图像。
+        </p>
+        <p>
+            具体数字以开源模型 FLUX.1 [dev] 为例：文本编码器用 T5 和 CLIP；编码器/解码器做 $8\times8$ 下采样，$1024\times1024\times3$ 的图像变成 $128\times128\times16$ 的潜变量；扩散模型是 120 亿参数（12B）的 Transformer；Transformer 在 VAE 之上又做一次 $2\times2$ 的 patchify，Justin 说这有点乱，结果是 $64\times64=1024$ 个图像 token 的序列。
+        </p>
+        <p>
+            DiT 等图像生成架构的更多细节见 <a href="../CME296-Diffusion-and-Large-Vision-Models/05_图像生成模型架构.html">CME296 · 图像生成模型架构</a>。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 文生视频与扩散蒸馏</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=3514s" target="_blank">0:58:34</a>–1:03:56 · Image and video generation</em></p>
+        <h3>文生视频的流水线</h3>
+        <p>
+            文生视频 Text-to-Video 的流程基本一样：文本过预训练编码器，DiT 对带噪潜变量去噪。唯一的区别是潜变量多了一个时间维度，从 $h\times w\times c$ 变成 $t\times h\times w\times c$；解码器换成时空自编码器，在空间和时间上都做下采样和上采样，最后输出 $T\times H\times W\times 3$ 的视频。
+        </p>
+        <p>
+            例子是 Meta 的 Movie Gen（Polyak et al., 2024 年 10 月）：文本编码器用 UL2、ByT5、MetaCLIP；编码器/解码器做 $8\times8\times8$ 下采样，$257\times1024\times576\times3$ 的视频变成 $33\times128\times72\times16$ 的潜变量；扩散模型是 300 亿参数（30B）的 DiT；做 $1\times2\times2$ 的 patchify，得到约 7.6 万个 token。
+        </p>
+        <p>
+            Justin 强调视频模型最贵的地方是序列长度。高帧率、高分辨率的视频会产生大量 token：前面那个相当先进的文生图模型处理 1024 个图像 token，这个文生视频模型整体架构差不多，却要处理 76,000 个视频 token。
+        </p>
+        <h3>视频扩散模型的时代</h3>
+        <p>
+            他说过去一年基本是视频扩散模型的时代，几乎每周都有新模型，有开源的，有发技术报告的，也有纯商业、什么都不说、只收信用卡号让你生成的。幻灯片的时间线包括 WALT（Google，4.6 亿参数）、Sora（OpenAI）、Mochi（Genmo，10B）、MovieGen（Meta，30B）、LTX-Video（Lightricks，2B）、Hunyuan（腾讯，13B）、Cosmos（NVIDIA，14B）、Wan（阿里）、Step-Video（阶跃星辰）、CogVideoX（智谱，5B）、Veo 2（Google）、Kling 2.0（快手）、Gen3（Runway）、Ray 2 和 Dream Machine（Luma），按开源模型、有技术报告、无技术信息三类标注。
+        </p>
+        <p>
+            其中影响很大的是 OpenAI 2024 年发布的 Sora。它不是第一个视频扩散模型，但它是第一个给出特别好结果的，采用了现代 DiT（是否用了整流流，Justin 说他不确定对方有没有讲）。他把 Sora 称为视频扩散模型的"四分钟一英里时刻"：之后各大公司都注意到了，迅速去复现。上课当天上午 11 点，Google 刚发布 Veo 3，他说这几乎可以肯定是当时最好的视频生成模型，他是在来学校的车上读的博客。Veo 3 还联合建模声音，能和视频帧一起输出音频。课上放了几段 Veo 3 的生成视频。
+        </p>
+        <p>
+            视频生成在 CME296 的最后一讲有更多展开：<a href="../CME296-Diffusion-and-Large-Vision-Models/08_前沿趋势与视频生成.html">CME296 · 前沿趋势与视频生成</a>。
+        </p>
+        <h3>扩散蒸馏</h3>
+        <p>
+            扩散模型的一大问题是采样慢。采样是迭代过程，模型可能有几百亿参数、处理几万甚至更长的序列，就算用整流流，推理也要几十次模型调用（幻灯片写整流流大约 30 到 50 次）。解决办法是一类叫蒸馏 Distillation 的算法，Justin 没时间展开，只列了参考文献。蒸馏把原本推理要 30、50、100 步的模型改造成少得多的步数仍能出好样本，有的能降到单步采样，也可以把 CFG 烘焙进模型。代价通常是样本质量下降，整个技巧就在于少步的同时尽量保住质量；降到单步时质量损失往往比较明显。幻灯片列出的论文：Salimans and Ho 的渐进式蒸馏（ICLR 2022）、Song et al. 的一致性模型 Consistency Models（ICML 2023）、Sauer et al. 的对抗扩散蒸馏（ECCV 2024）和潜对抗扩散蒸馏（2024）、Lu and Song 的简化、稳定、扩展一致性模型（ICLR 2025）、Salimans et al. 的矩匹配多步蒸馏（NeurIPS 2025）。他说这些都是 2024、2025 年的工作，是正在活跃发展的方向。CME296 第六讲讲了蒸馏：<a href="../CME296-Diffusion-and-Large-Vision-Models/06_模型训练与蒸馏.html">CME296 · 模型训练与蒸馏</a>。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 广义扩散、三种数学视角与自回归的回归</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=3836s" target="_blank">1:03:56</a>–1:12:08 · Conclusion and future work</em></p>
+        <h3>广义扩散的四个函数</h3>
+        <p>
+            Justin 说扩散有一个"数学黑洞"，前面故意绕开了，这里只让大家知道有哪些形式体系。先把整流流目标重写一遍：采 $x\sim p_{data}$、$z\sim p_{noise}$；采 $t\sim p_t$（均匀、logit-normal 或平移分布）；令 $x_t = (1-t)x + tz$；真值速度 $v_{gt} = z - x$；网络预测 $v_{pred} = f_\theta(x_t, t)$；损失是 $\|v_{gt} - v_{pred}\|_2^2$。
+        </p>
+        <p>
+            各种扩散变体主要是在这套框架的几个位置填不同的函数。噪声分布一般不变，连续模型几乎总是高斯。变的是：
+        </p>
+        <p>$$x_t = a(t)\,x + b(t)\,z, \qquad y_{gt} = c(t)\,x + d(t)\,z, \qquad y_{pred} = f_\theta(x_t, t), \qquad L = \big\|y_{gt} - y_{pred}\big\|_2^2$$</p>
+        <p>
+            也就是 $t$ 的分布 $p_t$，带噪样本怎样由 $x$ 和 $z$ 线性组合（系数是 $t$ 的函数），以及让模型预测的目标是 $x$ 和 $z$ 的哪种线性组合。损失通常是 L2，不总是。整流流的取法最简单：$a(t)=1-t$，$b(t)=t$，$c(t)=-1$，$d(t)=1$，其中 $c$、$d$ 是常数。
+        </p>
+        <ul>
+            <li>方差保持 Variance Preserving（VP，Song et al., ICLR 2021）：$a(t)=\sqrt{\sigma(t)}$，$b(t)=\sqrt{1-\sigma(t)}$。如果 $x$ 和 $z$ 独立且方差都是 1，$x_t$ 的方差也是 1。两个函数合成一个噪声调度 $\sigma(t)$，但仍要选。</li>
+            <li>方差爆炸 Variance Exploding（VE，Karras et al., "Elucidating the Design Space of Diffusion-Based Generative Models", NeurIPS 2022）：$a(t)=1$，$b(t)=\sigma(t)$，$\sigma(1)$ 要足够大，能淹没 $x$ 里的所有信号。</li>
+            <li>预测目标也有多种：x-prediction 预测干净数据（$c=1, d=0$）；ε-prediction 预测加入的噪声（$c=0, d=1$）；v-prediction 预测 $b(t)z - a(t)x$（$c=b(t), d=-a(t)$，幻灯片引用 Salimans and Ho 2022 和 Imagen Video）。整流流预测的是从数据直接指向噪声的速度。</li>
+        </ul>
+        <p>
+            Justin 说选超参数已经够难了，现在超参数还是 $t$ 的函数，凭直觉不可能设好，必须由某种数学框架指导。主要有三套。
+        </p>
+        <h3>三种数学视角</h3>
+        <p>
+            第一，扩散是潜变量模型（Sohl-Dickstein et al. 2015，图出自 DDPM）。每个干净样本 $x_0$ 对应一串观测不到的、逐渐变噪的样本，这些就是潜变量。前向过程（加高斯噪声）是已知的，学一个网络去近似反向过程。这和 VAE 很像：VAE 里有观测不到的 $z$，扩散可以用很类似的数学技巧，最大化数据似然的变分下界。
+        </p>
+        <p>
+            第二，扩散在学分数函数 Score Function（Song and Ermon 2019；DDPM）。对 $x\in\mathbb{R}^N$ 上的分布 $p(x)$，分数函数 $s:\mathbb{R}^N\to\mathbb{R}^N$ 定义为
+        </p>
+        <p>$$s(x) = \frac{\partial}{\partial x}\log p(x)$$</p>
+        <p>
+            直观上它是一个向量场，在数据空间里每一点都指向概率密度更高的区域。按这种解释，扩散在学数据分布的分数函数，更准确地说，是学一族分数函数，分别对应被不同强度已知噪声污染后的数据分布。数学框架完全不同，最后得到的算法很相似。
+        </p>
+        <p>
+            第三，扩散在求解随机微分方程 Stochastic Differential Equation（SDE）。Justin 坦言他自己也没完全弄懂这一种，别问他太多。连续的加噪过程可以写成 SDE：
+        </p>
+        <p>$$d\mathbf{x} = f(\mathbf{x}, t)\,dt + g(t)\,d\mathbf{w}$$</p>
+        <p>
+            它刻画了数据 $x$、时间 $t$ 和噪声 $w$ 的无穷小变化之间的关系，相当于写下一种把噪声样本无穷小地输运成数据样本的方式，神经网络学的是近似求解这个方程。这个视角打开了推理时的一大类采样方法：前面整流流那种类似梯度下降的朴素更新，对应 SDE 上的前向欧拉 Forward Euler 积分器；在这个视角下可以用更复杂的积分器，更好地沿分数函数前进。
+        </p>
+        <p>
+            他推荐 Sander Dieleman 的博客文章 Perspectives on Diffusion（sander.ai/2023/07/20/perspectives.html），里面给了八种看待扩散模型的视角，并说 Dieleman 写扩散的所有博客都很好。分数匹配和 SDE 的推导在 <a href="../CME296-Diffusion-and-Large-Vision-Models/02_分数匹配与随机微分方程.html">CME296 · 分数匹配与随机微分方程</a> 里有完整展开。
+        </p>
+        <h3>自回归模型卷土重来</h3>
+        <p>
+            最后补一条：自回归模型直接在原始像素上太慢，但在离散潜变量上效果很好。做法同样是编码器/解码器加生成模型：训练一个编码器和解码器，把图像变成 $H/D\times W/D$ 的离散整数潜变量（离散 VAE）；训练自回归模型对这些整数序列建模；从自回归模型采样离散潜变量，送进解码器得到图像。幻灯片列了 VQ-VAE（van den Oord et al., NeurIPS 2017）、VQ-VAE-2（Razavi et al., NeurIPS 2019）、Taming Transformers（Esser et al., CVPR 2021）和 Parti（Yu et al., 2022）。所以除了扩散，另一种现代生成配方是离散 VAE 上的自回归模型。
+        </p>
+        <p>
+            Justin 的总结：这一讲快速过了 GAN 和扩散模型两类，又在潜扩散模型里看到它们完整的现代流水线，前面讲过的生成模型最后都汇到了一起。下一讲是视觉与语言。
+        </p>
+    </section>
+
+    <section>
+        <h2>课上的原话</h2>
+        <ul>
+            <li>"really important to realize when we're training generative adversarial networks is that this V is not a loss function."<br>训练 GAN 时要明白一件很重要的事：这个 V 不是损失函数。<a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=845s" target="_blank">0:14:05</a></li>
+            <li>"What you gained was much better samples."<br>你换来的是好得多的样本。<a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=1777s" target="_blank">0:29:37</a></li>
+            <li>"To me, rectified flow is a kind of diffusion model. Fight me."<br>在我看来，整流流就是一种扩散模型。不服来辩。<a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=2155s" target="_blank">0:35:55</a></li>
+            <li>"If we knew how to make that pairing and also knew how to sample from the prior, you'd be done."<br>如果我们知道怎么配对，又会从先验采样，问题就解决了。<a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=2673s" target="_blank">0:44:33</a></li>
+            <li>"The modern generative modeling pipeline involves training a VAE and a GAN and a diffusion model. I'm sorry. It's a mess."<br>现代生成建模流水线要训练一个 VAE、一个 GAN 和一个扩散模型。抱歉，这很乱。<a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=3332s" target="_blank">0:55:32</a></li>
+            <li>"And then that was the four minute mile moment in video diffusion models."<br>那是视频扩散模型的"四分钟一英里"时刻。<a href="https://www.youtube.com/watch?v=Edr4uZFh4EE&t=3651s" target="_blank">1:00:51</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS231N · Lecture 14: Generative Models 2 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

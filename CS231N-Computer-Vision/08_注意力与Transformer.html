@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 8 讲：注意力与 Transformer | Stanford CS231N 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="07_循环神经网络.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS231N 目录</a> · 08</span>
+    <span><a href="09_检测分割与可视化.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 8 讲：注意力与 Transformer</h1>
+        <p class="subtitle">从 RNN 机器翻译的瓶颈讲起，引出 Bahdanau 注意力，再一步步把它推广成独立的注意力算子：缩放点积、键和值、交叉注意力与自注意力、置换等变、掩码、多头；最后比较 RNN、卷积和自注意力，搭出 Transformer 模块，并用它做语言模型和 ViT</p>
+        <div class="author-meta">
+            主讲：Justin Johnson（密歇根大学助理教授，Facebook AI Research 研究科学家）· 2025 年 4 月 24 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=RQowiOF_FvQ" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs231n.stanford.edu/slides/2025/lecture_8.pdf" target="_blank">课程幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            上一讲的循环神经网络 RNN 让模型能处理序列，于是能做一对多（看图说话）、多对一（视频分类）这类问题。这一讲引入两样东西。第一样是注意力 Attention，Justin 把它定义为一种新的神经网络基本算子，处理的对象是一组向量。第二样是 Transformer，一种以自注意力为核心的网络结构。他开场就说，今天几乎所有大型、最先进、用大量数据训练、由大公司部署的神经网络，不管是分类图像、生成图像、生成文本还是处理音频，基本都是 Transformer。
+        </p>
+        <p>
+            他还提到一个历史细节：Transformer 在 2017 年出现时，当时的感受并没有后来回头看那么像一个转折点，因为注意力和自注意力的想法在那之前已经在领域里流传了好几年，而且它们是从 RNN 里长出来的。所以这一讲按历史顺序走：先回到 RNN 做机器翻译，看它的问题，再看注意力怎样解决这个问题，然后把注意力从 RNN 里剥出来，最后只用注意力搭网络。下一讲会用这些结构去做检测、分割和可视化。
+        </p>
+        <ol>
+            <li><a href="#t01">引子：Transformer 从 RNN 里长出来</a> · <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=4s" target="_blank">0:00:04</a></li>
+            <li><a href="#t02">用 RNN 做序列到序列：编码器、解码器和瓶颈</a> · <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=188s" target="_blank">0:03:08</a></li>
+            <li><a href="#t03">带注意力的序列到序列模型</a> · <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=513s" target="_blank">0:08:33</a></li>
+            <li><a href="#t04">看注意力权重：网络自己学出了对齐</a> · <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=1253s" target="_blank">0:20:53</a></li>
+            <li><a href="#t05">把注意力剥成独立算子</a> · <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=1582s" target="_blank">0:26:22</a></li>
+            <li><a href="#t06">缩放点积，以及一次处理多个查询</a> · <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=1912s" target="_blank">0:31:52</a></li>
+            <li><a href="#t07">键和值分开</a> · <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=2283s" target="_blank">0:38:03</a></li>
+            <li><a href="#t08">交叉注意力与自注意力</a> · <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=2708s" target="_blank">0:45:08</a></li>
+            <li><a href="#t09">置换等变与位置编码</a> · <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=3032s" target="_blank">0:50:32</a></li>
+            <li><a href="#t10">掩码自注意力、多头自注意力和四次矩阵乘法</a> · <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=3220s" target="_blank">0:53:40</a></li>
+            <li><a href="#t11">处理序列的三种方式</a> · <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=3498s" target="_blank">0:58:18</a></li>
+            <li><a href="#t12">Transformer 模块、语言模型与 ViT</a> · <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=3731s" target="_blank">1:02:11</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 引子：Transformer 从 RNN 里长出来</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=4s" target="_blank">0:00:04</a>–0:03:08</em></p>
+        <p>
+            Justin 先回顾上一讲。之前的问题大多是一对一：输入一张图，输出一个类别。RNN 能处理序列以后，能做的问题多了，比如一对多的图像描述 Image Captioning（输入一张图，输出一句话，也就是一串词），多对一的视频分类（输入一串帧，输出一个类别）。结构更复杂，能解决的问题也更多。
+        </p>
+        <p>
+            今天的两件事：注意力是“一种在向量集合上运算的新基本算子”，Transformer 是“处处使用注意力的网络结构”。幻灯片上写着，Transformer 今天到处都在用，但它是作为 RNN 的一个分支发展起来的，所以从 RNN 讲起。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 用 RNN 做序列到序列：编码器、解码器和瓶颈</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=188s" target="_blank">0:03:08</a>–0:08:33</em></p>
+        <h3>机器翻译这个例子</h3>
+        <p>
+            贯穿前半讲的例子是机器翻译，一个序列到序列 Sequence to Sequence（seq2seq）问题：输入一串英文词，输出一串意大利文词。两边的词数可能不同，顺序也可能完全不同，不能假设词与词一一对应。Justin 说用 RNN 处理这类问题至少可以追溯到 2014 年（幻灯片引用 Sutskever et al., “Sequence to sequence learning with neural networks”, NeurIPS 2014），人们用 RNN 处理序列已经有十多年了。为了让方框都画得下，幻灯片用了一个很短的句子：“we see the sky”。
+        </p>
+        <h3>编码器</h3>
+        <p>
+            编码器 Encoder 是一个 RNN。RNN 是一个反复作用在两个输入上的函数：当前时间步的输入 $x_t$，和上一步的隐藏状态 $h_{t-1}$（hidden state，RNN 用来记住前面内容的向量），输出下一步的隐藏状态：
+        </p>
+        <p>$$h_t = f_W(x_t, h_{t-1})$$</p>
+        <p>
+            同一个单元随时间展开，就能处理长度可变的序列。句子里每个词让 RNN 走一步。编码器的目的，是读完整个输入序列，把它的内容总结起来，好翻译成目标语言。具体做法是：读完所有词以后，把整个输入总结成一个向量，叫上下文向量 Context Vector $c$。幻灯片写的是从最后一个隐藏状态预测两样东西：解码器的初始状态 $s_0$ 和上下文向量 $c$（常常就取 $c = h_T$）。Justin 说做法有好几种，细节不重要，可以把 $c$ 理解成编码器最后一个隐藏状态。因为 RNN 的递归结构，最后一个隐藏状态包含了整个输入序列的信息。
+        </p>
+        <h3>解码器</h3>
+        <p>
+            第二个 RNN 叫解码器 Decoder，结构通常相同，但权重 $U$ 是另一套可学习参数。它每一步吃三个输入：上一步输出的词 $y_{t-1}$、上一步的解码器隐藏状态 $s_{t-1}$、上下文向量 $c$：
+        </p>
+        <p>$$s_t = g_U(y_{t-1}, s_{t-1}, c)$$</p>
+        <p>
+            从 [START] 开始，一步输出一个词：vediamo、il、cielo，最后输出 [STOP]。Justin 说他不会意大利语，只能假设屏幕上那几个词确实是 “we see the sky”。
+        </p>
+        <h3>问题：通信瓶颈</h3>
+        <p>
+            输入序列和输出序列之间唯一的通信渠道是上下文向量 $c$，而它的长度在设定 RNN 大小时就固定了，比如 128 个或 1024 个浮点数，不随输入输出序列变长变短而改变。翻译四个词时，把需要的东西塞进 1024 个数也许说得过去；要翻译一段话、一本书，甚至整个语料库时，让网络把全部输入压进一个定长向量就不现实了。幻灯片上的问法是：如果 $T = 1000$ 怎么办？
+        </p>
+        <p>
+            解决思路：去掉输入和输出之间那个定长向量的瓶颈，在生成输出序列的每一步，都让模型回头看整个输入序列。这样就没有瓶颈，能扩展到长得多的序列。Justin 说，一种讲法是，注意力、Transformer 以及今天这一切，都来自想解决 RNN 的这个瓶颈问题。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 带注意力的序列到序列模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=513s" target="_blank">0:08:33</a>–0:20:53</em></p>
+        <p>
+            这一版来自 Bahdanau et al., “Neural machine translation by jointly learning to align and translate”, ICLR 2015。编码器完全不变，仍然需要用某种方式设定解码器初始状态 $s_0$。变化在解码器每一步怎样拿到上下文向量。
+        </p>
+        <h3>第一步：对齐分数</h3>
+        <p>
+            有了解码器状态 $s_0$ 以后，回头看输入序列：对输入的每个位置算一个标量，表示 $s_0$ 和这个位置的编码器隐藏状态有多匹配，叫对齐分数 Alignment Score。输入有四个词，就算四个分数 $e_{11}, e_{12}, e_{13}, e_{14}$。实现方式很多，简单的一种是线性层 $f_{att}$：把解码器状态 $s$ 和某个编码器状态 $h$ 拼起来，再用线性变换压成一个标量。它是计算图里的普通线性算子，和网络其他参数一起用梯度下降学：
+        </p>
+        <p>$$e_{t,i} = f_{att}(s_{t-1}, h_i)$$</p>
+        <h3>第二步：softmax 得到注意力权重</h3>
+        <p>
+            对齐分数是任意实数，从负无穷到正无穷。为了给它加上结构、防止数值爆炸，过一个 softmax。回忆前几讲，softmax 把一组任意分数变成概率分布，每一项在 0 到 1 之间，总和为 1：
+        </p>
+        <p>$$a_{t,:} = \mathrm{softmax}(e_{t,:}),\qquad 0 < a_{t,i} < 1,\qquad \sum_i a_{t,i} = 1$$</p>
+        <p>
+            这样就得到了给定解码器状态时，在输入各个词上的一个分布，这些数叫注意力权重 Attention Weights。
+        </p>
+        <h3>第三步：加权求和得到上下文向量</h3>
+        <p>
+            用注意力权重对编码器隐藏状态 $h_1,\dots,h_4$ 做线性组合，得到这一步的上下文向量 $c_1$：
+        </p>
+        <p>$$c_t = \sum_i a_{t,i} h_i$$</p>
+        <p>
+            之后和没有注意力时一样：$c_1$ 和第一个输出词 $y_0$（[START]）拼起来送进循环单元，得到解码器的下一个隐藏状态和第一个输出词。解码器公式只是把固定的 $c$ 换成每步不同的 $c_t$：$s_t = g_U(y_{t-1}, s_{t-1}, c_t)$，其中 $g_U$ 是一个 RNN 单元（比如 LSTM、GRU）。
+        </p>
+        <h3>直觉和训练</h3>
+        <p>
+            直觉是，上下文向量会关注输入里和当前要生成的词相关的部分。意大利语 vediamo 对应 “we see”，所以生成它时网络可能会在这两个词上放较高的权重，幻灯片上的假想数字是 $a_{11}=a_{12}=0.45$，$a_{13}=a_{14}=0.05$；它不太在乎 “the sky”。
+        </p>
+        <p>
+            整个过程都可微。不需要告诉网络每个输出词需要输入里的哪些词，这只是一个由可微运算组成的大计算图，可以端到端用梯度下降学。损失仍然是预测输出词的 softmax 交叉熵，网络在学着预测正确输出的过程中，自己学会怎样关注输入的不同部分。Justin 说这一点很要紧：如果要人工标注两种语言的对齐关系，训练数据会很难拿到。
+        </p>
+        <h3>课堂问答</h3>
+        <p>
+            有学生问解码器怎样初始化。Justin 说“初始化”这个词在这里有两层意思。一层是解码器作为网络有权重，训练开始时随机初始化，再用梯度下降优化。另一层是网络处理一个序列时，要设定输出序列的初始隐藏状态 $s_0$，常见做法有：直接用编码器最后一个隐藏状态；用一个学出来的线性投影把编码器最后状态映射成解码器初始状态；甚至直接设成全零。只要训练时网络习惯了那种输入，哪种都行。
+        </p>
+        <p>
+            有学生问否定、异或这类结构会不会成问题。他的回答是“也许”，这是难题，需要大量数据和算力，指望网络自己理清。还有人指出图上漏了 $s_0$ 到 $s_1$ 的箭头，他承认画漏了。他补充说，我们之所以觉得这个机制合理，是因为语言任务里输出词和输入词之间常有某种对应，但我们并不直接监督它，只是觉得网络可能会选择这样用。
+        </p>
+        <h3>第二步及以后</h3>
+        <p>
+            生成第二个词时，把整套过程再做一遍：用刚算出的 $s_1$ 和所有编码器状态比较，用同一个 $f_{att}$ 算对齐分数 $e_{2,i}$，过 softmax 得到新的分布 $a_{2,i}$，再对编码器状态做新的线性组合得到 $c_2$。然后用 $c_2$、下一个输出词和 $s_1$ 算出 $s_2$ 和下一个输出词 il。il 大概对应 “the”，这时可能只有一个输入词对应，幻灯片假想 $a_{21}=a_{22}=0.05$，$a_{24}=0.1$，$a_{23}=0.8$。之后每一步都一样。
+        </p>
+        <p>
+            结果是：输入序列不再挤过一个定长向量，解码器每一步都回头看整个输入，现场重新总结出一个上下文向量。这叫注意力，因为网络在输出的每一刻都在“注意”或“看”输入的不同部分。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 看注意力权重：网络自己学出了对齐</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=1253s" target="_blank">0:20:53</a>–0:26:22</em></p>
+        <p>
+            注意力还带来一个好处：可以借它看网络在解题时看着哪里。我们从没告诉它输入和输出怎样对齐，但看它预测出的注意力权重，就能对网络的处理过程有所了解。
+        </p>
+        <p>
+            例子是英译法。输入：“The agreement on the European Economic Area was signed in August 1992.” 输出：“L’accord sur la zone économique européenne a été signé en août 1992.” 把每一步的注意力权重画成二维网格：列是输入英文词，行是输出法文词，每一行是生成那个词时在整句英文上的概率分布。生成第一个词 le 时，概率几乎全在 “the” 上；生成 accord 时，几乎全在 agreement 上。
+        </p>
+        <ul>
+            <li>对角线结构表示输入和输出的词按顺序一一对应。开头 “The agreement on the” 四个词形成对角线，结尾 “in August 1992” 也是。</li>
+            <li>中间的 European Economic Area 在法语里是 zone économique européenne，顺序反过来，矩阵里对应一段反向的对角线。网络自己发现了英法语序的差别。</li>
+            <li>中间还有一个 2×2 的小块，表示两个法文词对应两个英文词，没有完全一一拆开。</li>
+        </ul>
+        <p>
+            有学生问它怎么学会语法。Justin 的回答是：这是深度学习的谜。我们没告诉网络任何语法，只给了大量英法句对、一个处理机制，让它用梯度下降调权重。人类设计者有一个直觉，觉得某些词之间应该有对应，于是把一个可能有用的机制放进结构里；网络在完成端到端任务的过程中，自己摸索出怎样用这个机制。他说这能行得通很了不起。
+        </p>
+        <p>
+            注意力在机器学习里最初就是用在机器翻译上，出自 2015 年那篇 Bahdanau 的论文。Justin 提到这篇论文刚拿到 ICLR 2025 的时间检验奖亚军（runner up Test of Time Award）。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 把注意力剥成独立算子</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=1582s" target="_blank">0:26:22</a>–0:31:52</em></p>
+        <p>
+            Justin 说这里藏着一个更一般的算子。我们是为了修补 RNN 才想到它的，但这个机制本身就很通用、很强。接下来要把注意力从 RNN 里拆出来，最后可以把 RNN 部分完全去掉，只留注意力做结构的核心。
+        </p>
+        <h3>换一套名字</h3>
+        <p>
+            先换名字。数据向量 Data Vectors 是我们要总结的数据，在 RNN 里是编码器状态。查询向量 Query Vectors 是我们要为之产生输出的东西，每个输出对应一个查询，在 RNN 里是解码器的隐藏状态。注意力算子的输出，就是前面说的那些上下文向量。每个查询回头看所有数据向量，用自己的方式总结它们，给出一个输出向量。
+        </p>
+        <p>
+            有学生没跟上，Justin 又讲了一遍，承认方框很多、名字又在换，确实绕。至于查询向量从哪来，注意力算子不关心：来一个查询，就回去总结一次数据向量，给出一个输出。
+        </p>
+        <h3>最初的注意力层</h3>
+        <p>只看一个查询时，注意力层是这样的：</p>
+        <ul>
+            <li>输入：查询向量 $q$，形状 $[D_Q]$；数据向量 $X$，形状 $[N_X \times D_X]$。</li>
+            <li>相似度：$e_i = f_{att}(q, X_i)$，$e$ 形状 $[N_X]$。</li>
+            <li>注意力权重：$a = \mathrm{softmax}(e)$，形状 $[N_X]$。</li>
+            <li>输出：$y = \sum_i a_i X_i$，形状 $[D_X]$。</li>
+        </ul>
+        <p>
+            有学生问 $f_{att}$ 是否必须是线性层。Justin 说原则上它可以是任何输入两个向量、输出一个标量的函数，但下一步反而要把它变得更简单。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 缩放点积，以及一次处理多个查询</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=1912s" target="_blank">0:31:52</a>–0:38:03</em></p>
+        <h3>第一处推广：用点积算相似度</h3>
+        <p>
+            输入两个向量、输出一个相似度标量，最简单的函数是点积 Dot Product。事实证明点积作为相似度已经够用，所以相似度变成 $e_i = q \cdot X_i$。
+        </p>
+        <h3>为什么要除以根号维度</h3>
+        <p>
+            点积和 softmax 之间有一个微妙的相互作用，和向量维度的变化有关。幻灯片的推理是：$a\cdot b = |a||b|\cos(\text{夹角})$；如果 $a$ 是每一维都等于常数 $a$ 的 $D$ 维向量，那么 $|a| = (\sum_i a^2)^{1/2} = a\sqrt{D}$，点积的大小会随维度增长。相似度太大会让 softmax 饱和，导致梯度消失 Vanishing Gradients，上一讲刚讲过，这会阻碍学习。Justin 口头举的例子是全 1 的 10 维向量和全 1 的 100 维向量对比。
+        </p>
+        <p>
+            所以改用缩放点积 Scaled Dot Product，把点积除以向量维度的平方根：
+        </p>
+        <p>$$e_i = \frac{q\cdot X_i}{\sqrt{D_X}}$$</p>
+        <p>
+            Justin 说这一点很重要：网络越做越大，向量维度也会越来越高，因为维度高意味着更多计算和容量。设计结构时总要想它的各个部分变大以后还能不能正常工作，缩放点积让梯度在很宽的维度范围内都能顺畅地流过 softmax。有学生指出点积要求数据和查询维度相同，他说这一点后面会解决。
+        </p>
+        <h3>第二处推广：多个查询并行</h3>
+        <p>
+            RNN 里本来就有一串查询向量，注意力算子最好能一次并行处理一整组查询，对每个查询做完全相同的计算。现在查询是矩阵 $Q$，形状 $[N_Q \times D_Q]$。要算所有查询和所有数据向量两两之间的（缩放）点积，最自然高效的办法是矩阵乘法，因为矩阵乘法输出的每个元素就是一行和一列的内积（要加一个转置让行列对上）：
+        </p>
+        <p>$$E = \frac{QX^\top}{\sqrt{D_X}}\ \ [N_Q \times N_X],\qquad E_{ij} = \frac{Q_i\cdot X_j}{\sqrt{D_X}}$$</p>
+        <p>
+            相似度现在是一个矩阵。每个查询仍然要各自得到一个在数据向量上的分布，所以 softmax 只沿一个轴做：
+        </p>
+        <p>$$A = \mathrm{softmax}(E,\ \text{dim}=1)\ \ [N_Q \times N_X]$$</p>
+        <p>
+            输出是数据向量按 softmax 权重的加权组合，这也是矩阵乘法能做的事：矩阵乘法的另一种看法是，用一个矩阵里的数对另一个矩阵的行（或列）做线性组合。Justin 在台上一时想不清是行还是列，建议大家自己画图对一下下标。结果是：
+        </p>
+        <p>$$Y = AX\ \ [N_Q \times D_X],\qquad Y_i = \sum_j A_{ij} X_j$$</p>
+        <p>
+            计算和之前完全一样，只是一次处理一组查询，用几次矩阵乘法就完成了。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 键和值分开</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=2283s" target="_blank">0:38:03</a>–0:45:08</em></p>
+        <h3>数据向量被用了两次</h3>
+        <p>
+            上面的公式里，数据向量 $X$ 出现在两个地方：一处是和查询比相似度，问每个数据向量和每个查询有多对得上；另一处是算输出，输出是数据向量的加权组合。Justin 说在两种场合重复用同一组数据向量有点怪，不如把两种用途分开，让网络自己学两种不同的用法。
+        </p>
+        <h3>键矩阵和值矩阵</h3>
+        <p>
+            做法是把每个数据向量投影成两个向量：键向量 Key 拿去和查询比，算对齐分数；值向量 Value 拿去做线性组合，算输出。为此加两个可学习的权重矩阵：
+        </p>
+        <ul>
+            <li>查询 $Q$：$[N_Q \times D_Q]$；数据 $X$：$[N_X \times D_X]$。</li>
+            <li>键矩阵 $W_K$：$[D_X \times D_Q]$。键要和查询比，所以维度必须是 $D_Q$。$K = XW_K$，形状 $[N_X \times D_Q]$。</li>
+            <li>值矩阵 $W_V$：$[D_X \times D_V]$，值的维度 $D_V$ 原则上可以和 $D_Q$ 不同。$V = XW_V$，形状 $[N_X \times D_V]$。</li>
+        </ul>
+        <p>$$E = \frac{QK^\top}{\sqrt{D_Q}}\ \ [N_Q\times N_X],\qquad A = \mathrm{softmax}(E,\ \text{dim}=1),\qquad Y = AV\ \ [N_Q \times D_V],\quad Y_i = \sum_j A_{ij}V_j$$</p>
+        <h3>搜索引擎的比方</h3>
+        <p>
+            Justin 用搜索引擎做比方：你在 Google（或者如今的 ChatGPT）里输入“世界上最好的学校是哪所”，这是查询，它要去和后台互联网上的各种字符串（键）匹配；你想拿回的是 “Stanford”，这是值，和你输入的查询是两回事。另一种说法：查询是我在找什么；后台有全部数据的记录，匹配时可能只用数据向量的一部分去对，取回来的又是数据向量的另一部分。
+        </p>
+        <h3>图上走一遍</h3>
+        <p>
+            现在 RNN 彻底扔掉了，注意力自己就是一个算子。查询 $Q_1,\dots,Q_4$ 和数据 $X_1,\dots,X_3$ 进来；每个数据向量投影出 $K_j$ 和 $V_j$；每个键和每个查询比，得到标量矩阵 $E_{i,j}$；对它做 softmax，让每个查询得到一个在所有键上的分布。Justin 一开始说成对每一行做 softmax，随即改口：幻灯片的图里查询沿列排布，所以是每一列归一化，“每个查询预测一个在键上的分布”。然后用这些权重对值向量加权求和，得到输出 $Y_1$，第二个查询同理得到 $Y_2$，依此类推。
+        </p>
+        <h3>问答：怎样把数据拆成键和值</h3>
+        <p>
+            有学生问怎样把数据向量拆成键和值。Justin 说妙处在于我们不用规定，$W_K$ 和 $W_V$ 只是可学习参数，和其他东西一起用梯度下降学，就像前面也没告诉网络英法句子怎样对齐。他补充说，可以把键和值看成两种过滤器：数据向量里可能有很多东西，针对手头任务，只拿其中一部分和查询匹配，再取回另一部分信息。
+        </p>
+        <p>
+            到这里，注意力层就是一个独立的神经网络层：两组输入（查询向量和数据向量），两组可学习参数（键矩阵和值矩阵），输入两个向量序列，输出一个向量序列。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 交叉注意力与自注意力</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=2708s" target="_blank">0:45:08</a>–0:50:32</em></p>
+        <h3>交叉注意力</h3>
+        <p>
+            上面这种层有时叫交叉注意力层 Cross-Attention Layer，因为有两组输入，可能来自两个不同的来源：我有一组查询，每个查询去总结另一组数据，数据的个数和内容都可以和查询完全不同。每个查询产生一个输出，输出是数据向量里信息的混合。
+        </p>
+        <h3>自注意力</h3>
+        <p>
+            更常见的是自注意力层 Self-Attention Layer：只有一组向量，不再区分数据和查询。输入一组向量 $X$，输出同样个数的一组向量 $Y$。机制不变，只是每个输入向量投影成三样东西：查询、键、值。
+        </p>
+        <ul>
+            <li>输入 $X$：$[N \times D_{in}]$；$W_Q, W_K, W_V$：$[D_{in} \times D_{out}]$。</li>
+            <li>$Q = XW_Q$，$K = XW_K$，$V = XW_V$，形状都是 $[N \times D_{out}]$。</li>
+            <li>$E = QK^\top/\sqrt{D_Q}$：$[N\times N]$；$A = \mathrm{softmax}(E,\ \text{dim}=1)$：$[N\times N]$；$Y = AV$：$[N\times D_{out}]$。</li>
+        </ul>
+        <p>
+            每个输入产生一个输出，输出混合了所有输入的信息。形状也简单了：$N$ 个输入向量，每个 $D_{in}$ 维，几乎总是 $D_Q = D_V = D_{out}$。
+        </p>
+        <p>
+            有学生问 $D_{in}$ 和 $D_{out}$ 怎么定。Justin 说它们是层的结构超参数，就像线性层把 $D_{in}$ 投影到 $D_{out}$。原则上可以不同，但他几乎没见过不同的，实践中基本都一样，他只是在记号上写得宽一点。
+        </p>
+        <h3>三个投影合成一次矩阵乘法</h3>
+        <p>
+            三个投影是三次矩阵乘法。硬件上做少量大的矩阵乘法比做许多小的更高效，所以常见技巧是把三个权重矩阵拼起来，一次算出所有输入的查询、键、值：
+        </p>
+        <p>$$[Q\ K\ V] = X\,[W_Q\ W_K\ W_V],\qquad [N\times 3D_{out}] = [N\times D_{in}]\,[D_{in}\times 3D_{out}]$$</p>
+        <p>
+            Justin 补了一句：读 Transformer 论文时会见到编码器、解码器、编码器-解码器注意力的区分。现在最常用的是所谓 decoder-only 风格的注意力。他承认这里耍了点手法：注意力是为 RNN 机器翻译引入的，但推广到自注意力以后，它已经不能直接放回开头那个 RNN 解码器里用了，却在很多别的地方用得上。
+        </p>
+        <h3>问答：两种注意力各用在哪</h3>
+        <p>
+            有学生问自注意力和交叉注意力的区别和好处。Justin 说它们用在不同场合。有些问题天然有两种数据要比较，比如机器翻译里的输入句和输出句，图像描述里的图像块和正在生成的词，这时用交叉注意力。有些问题只有一种东西，比如图像分类只有一张图，想让图像的各个部分彼此比较，这时用自注意力。好处是不同问题可以复用同一套机制和计算原语。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 置换等变与位置编码</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=3032s" target="_blank">0:50:32</a>–0:53:40</em></p>
+        <h3>打乱输入会怎样</h3>
+        <p>
+            Justin 让大家想：把一组输入向量打乱顺序再处理，会发生什么？
+        </p>
+        <ul>
+            <li>查询、键、值都是输入的线性投影，所以会得到同样的查询、键、值，只是顺序被同样地打乱。</li>
+            <li>相似度只是点积，所以相似度也一样，只是被打乱。</li>
+            <li>softmax 不在乎输入的顺序，所以注意力权重的每一列和原来一样，只是打乱了。</li>
+            <li>线性组合同理，输出 $Y$ 还是原来那些输出，只是顺序跟着输入一起变。</li>
+        </ul>
+        <p>
+            这个性质叫置换等变 Permutation Equivariance：先打乱再算，等于先算再打乱。几讲之前在卷积那里见过另一种等变性（平移等变）。写成式子，$\sigma$ 表示一个打乱顺序的操作：
+        </p>
+        <p>$$F(\sigma(X)) = \sigma(F(X))$$</p>
+        <p>
+            所以自注意力不在乎输入的顺序。向量只是碰巧被装进一个有顺序的矩阵里，应该把自注意力理解成作用在一个无序的向量集合上。这也是开头说它“在向量集合上运算”的意思。
+        </p>
+        <p>
+            有学生问打乱以后训练出来的结果是否一样。Justin 说他这里讲的是固定权重、只看这一层的计算，和训练无关：算出哪些输出向量与输入顺序无关，但输出向量的排列顺序跟着输入顺序走。
+        </p>
+        <h3>位置编码</h3>
+        <p>
+            有时候这反倒成了问题，因为网络需要知道各项的顺序。一个快速的补救是给每个输入向量附加一段数据，叫位置嵌入 Positional Embedding（幻灯片称位置编码 Positional Encoding），告诉网络“这个在第 1 位，这个在第 2 位……”。幻灯片的写法是：它是索引的一个固定函数 $E(1), E(2), E(3), \dots$，加到每个输入上。Justin 说具体机制有很多种，没有展开。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 掩码自注意力、多头自注意力和四次矩阵乘法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=3220s" target="_blank">0:53:40</a>–0:58:18</em></p>
+        <h3>掩码自注意力</h3>
+        <p>
+            完整的自注意力里，每个输入都能看所有其他输入。有些问题需要加结构：某些输入只允许看某些其他输入。实现方式叫掩码自注意力 Masked Self-Attention：算出对齐分数 $E$ 以后，在想阻断的位置填上 $-\infty$。softmax 里 $e^{-\infty} = 0$，所以这些位置的注意力权重变成 0，对应位置的值向量就不会影响输出。
+        </p>
+        <p>
+            这在语言建模里用得上。到这一步，算子已经推广到完全不需要 RNN，可以直接拿自注意力做上一讲用 RNN 做的语言建模：输入 “Attention is very”，输出 “is very cool”。第一个输出 “is” 只能依赖第一个词，第二个输出 “very” 只能依赖前两个词，不能让网络往后偷看答案。所以对第 $i$ 个查询，所有 $j > i$ 的位置都填 $-\infty$。
+        </p>
+        <h3>多头自注意力</h3>
+        <p>
+            多头自注意力 Multi-Headed Self-Attention 是并行跑 $H$ 份独立的自注意力。为什么？Justin 的回答很直接：计算更多、参数更多，深度学习总是想要更多更大，这是又一种把层做大做强的办法。输入 $X$ 分别送进 $H$ 个独立的自注意力层（叫头 Head，各有各的权重），每个头给出自己的输出，把 $H$ 份输出堆起来，再过一个输出投影，把各个头的信息融合起来。现在用自注意力基本都是多头版本。
+        </p>
+        <ul>
+            <li>输入 $X$：$[N\times D]$；$W_Q, W_K, W_V$：$[D \times HD_H]$；输出矩阵 $W_O$：$[HD_H \times D]$。</li>
+            <li>$Q = XW_Q$，$K = XW_K$，$V = XW_V$，重排成 $[H\times N\times D_H]$。</li>
+            <li>$E = QK^\top/\sqrt{D_Q}$：$[H\times N\times N]$；$A = \mathrm{softmax}(E,\ \text{dim}=2)$：$[H\times N\times N]$。</li>
+            <li>各头输出 $Y = AV$：$[H\times N\times D_H]$，重排成 $[N\times HD_H]$；最终输出 $O = YW_O$：$[N\times D]$。</li>
+        </ul>
+        <p>
+            $D_H$ 叫头维度 head dim，通常取 $D_H = D/H$，这样输入输出维度相同。实践中不用 for 循环，用批量矩阵乘法 batched matrix multiply 一次并行算完所有头。
+        </p>
+        <p>
+            有学生问各个头的输入 $x_1, x_2, x_3$ 不是完全一样吗。Justin 说是的，各头之间唯一的区别是权重：结构和计算完全一样，但权重随机初始化成不同的值，所以会学出略微不同的处理方式，这只是给这一层更多容量。
+        </p>
+        <h3>自注意力就是四次矩阵乘法</h3>
+        <ol>
+            <li>QKV 投影：$[N\times D]\,[D\times 3HD_H] \Rightarrow [N\times 3HD_H]$，拆分并重排得到形状各为 $[H\times N\times D_H]$ 的 $Q, K, V$。</li>
+            <li>QK 相似度：$[H\times N\times D_H]\,[H\times D_H\times N] \Rightarrow [H\times N\times N]$。</li>
+            <li>V 加权：$[H\times N\times N]\,[H\times N\times D_H] \Rightarrow [H\times N\times D_H]$，重排成 $[N\times HD_H]$。</li>
+            <li>输出投影：$[N\times HD_H]\,[HD_H\times D] \Rightarrow [N\times D]$，混合各个头的信息。</li>
+        </ol>
+        <p>
+            公式和向量很多，但整个算子就是四次大的批量矩阵乘法。矩阵乘法可扩展、可分布、可优化，能做得高度并行、高效。
+        </p>
+        <h3>计算量和显存</h3>
+        <p>
+            幻灯片接着问：向量个数 $N$ 增大时，计算量是多少？答案是 $O(N^2)$，因为要算 $N\times N$ 个相似度。显存呢？如果把注意力矩阵存下来，同样是 $O(N^2)$：$N = 100\text{K}$、$H = 64$ 时，$H\times N\times N$ 个注意力权重要占 1.192 TB，GPU 没有那么大的显存。Flash Attention（Dao et al., “FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness”, 2022）把第 2、3 步合在一起算，不存完整的注意力矩阵，显存降到 $O(N)$，大 $N$ 才成为可能。Justin 口头只简单提到“$n^2$ 的计算，$n^2$ 或者后来的 $n$ 的显存”。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 处理序列的三种方式</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=3498s" target="_blank">0:58:18</a>–1:02:11</em></p>
+        <p>到这里，课上已经见过三种处理序列的方式。</p>
+        <h3>循环神经网络</h3>
+        <p>
+            作用在一维有序序列上。幻灯片写：理论上适合长序列，长度为 $N$ 的序列只要 $O(N)$ 的计算和显存；缺点是不能并行。Justin 说 RNN 很强，人们喜欢了它很久，但每个隐藏状态依赖上一个隐藏状态，这是一种天生串行的算法，没法沿序列并行，所以很难扩展、很难做大。
+        </p>
+        <h3>卷积</h3>
+        <p>
+            作用在 $N$ 维网格上：图像是二维网格，也可以用在一维、三维、四维网格上，在网格上局部地混合信息。它很容易并行，卷积核滑到的每个位置原则上都能同时算。缺点是很难建立大的感受野 Receptive Field（输出的一个位置能“看到”的输入范围）：要总结很长的序列或很大的图像，要么用很大的卷积核，要么堆很多层，这又带回了一种串行性。
+        </p>
+        <h3>自注意力</h3>
+        <p>
+            作用在向量集合上。它天然适合长序列，没有 RNN 那样的瓶颈，也不用堆很多层才能让所有向量互相看到：一层自注意力里每个向量就能看到所有其他向量。它高度并行，整个运算就是四次矩阵乘法，可以分布式地跑在 GPU 上。唯一的缺点是贵：长度 $N$ 的序列要 $O(N^2)$ 的计算，$N$ 到十万、一百万、一千万时 $N^2$ 代价很高。Justin 说的解决办法是：买更多 GPU。
+        </p>
+        <p>
+            该用哪一个？他接上 2017 年 Vaswani et al. 那篇论文的标题 “Attention is All You Need”：三者之中，只用注意力就能走很远。
+        </p>
+        <h3>问答：为什么并行这么重要，$N^2$ 是不是坏事</h3>
+        <p>
+            有学生问可并行到底有什么好处。Justin 说，计算的历史上，把单个处理器做快已经越来越难，这是硬件的根本限制；但多弄一些处理器很容易。过去二十年能调动越来越多算力，靠的是找到不依赖单个快处理器的算法，能用上 10 个、100 个、1000 个、一百万个处理器。他说想用处理器铺满整个斯坦福校园，让它们一起处理一个大问题。算法能轻松用上越来越多的并行处理器，就能扩展，而不用等单个处理器变快，它们可能永远不会再快了。
+        </p>
+        <p>
+            又有学生问 $N^2$ 是不是一种代价。Justin 认为 $N^2$ 其实可能是好事。计算机科学课上教的是复杂度里的 $N$ 越高越糟，但对神经网络来说，更多计算意味着网络在输入上做了更多处理，有更多“思考”的能力，可能得到更好的答案。贵，但不一定是坏事。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. Transformer 模块、语言模型与 ViT</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=3731s" target="_blank">1:02:11</a>–1:06:31</em></p>
+        <h3>Transformer 模块</h3>
+        <p>
+            Transformer（Vaswani et al., “Attention is all you need”, NeurIPS 2017）把自注意力放在一切的核心。一个 Transformer 模块 Transformer Block 的结构：
+        </p>
+        <ol>
+            <li>输入一组向量 $x$。</li>
+            <li>所有向量通过（多头）自注意力相互作用。</li>
+            <li>自注意力外面包一个残差连接 Residual Connection（把层的输入直接加到输出上），理由和几讲前 ResNet 里用残差连接一样。</li>
+            <li>残差连接的输出过一个层归一化 Layer Normalization，因为在 ResNet 和 CNN 里已经看到，结构里加归一化会让训练更稳定。</li>
+            <li>自注意力负责让向量彼此比较，但还需要对每个向量单独做处理，所以第二个原语是多层感知机 MLP，也叫前馈网络 FFN（Feed-Forward Network）：一个小的两层网络，独立地作用在每个向量上，经典设置是 $D \Rightarrow 4D \Rightarrow D$。</li>
+            <li>MLP 外面也包残差连接，再接一个层归一化，得到输出向量集合 $y$。</li>
+        </ol>
+        <p>幻灯片回顾了层归一化的公式（Ba et al., 2016）。对每个 $D$ 维向量 $h_i$ 单独算均值和标准差，再用可学习的缩放 $\gamma$ 和平移 $\beta$：</p>
+        <p>$$\mu_i = \frac{1}{D}\sum_j h_{i,j},\qquad \sigma_i = \Big(\frac{1}{D}\sum_j (h_{i,j}-\mu_i)^2\Big)^{1/2},\qquad z_i = \frac{h_i-\mu_i}{\sigma_i},\qquad y_i = \gamma * z_i + \beta$$</p>
+        <p>
+            幻灯片总结：自注意力是向量之间唯一的相互作用，层归一化和 MLP 都对每个向量独立运算。所以它高度可扩展、可并行，大部分计算就是 6 次矩阵乘法，自注意力 4 次，MLP 2 次。
+        </p>
+        <h3>从 2017 年到现在：只是变大了</h3>
+        <p>
+            Transformer 就是一串相同的 Transformer 模块。Justin 说结构从 2017 年以来没怎么变，只是大了很多：最初的 Transformer 大约 12 个模块、2 亿参数，如今人们训练几百个模块、上万亿参数的 Transformer，同一个结构在八年里跨越了好几个数量级。幻灯片给的具体数字：
+        </p>
+        <table>
+            <thead><tr><th>模型</th><th>模块数</th><th>$D$</th><th>$H$</th><th>$N$</th><th>参数量</th></tr></thead>
+            <tbody>
+                <tr><td>Original Transformer（Vaswani et al., 2017）</td><td>12</td><td>1024</td><td>16</td><td>512</td><td>213M</td></tr>
+                <tr><td>GPT-2（Radford et al., 2019）</td><td>48</td><td>1600</td><td>25</td><td>1024</td><td>1.5B</td></tr>
+                <tr><td>GPT-3（Brown et al., 2020）</td><td>96</td><td>12288</td><td>96</td><td>2048</td><td>175B</td></tr>
+            </tbody>
+        </table>
+        <h3>用 Transformer 做语言模型</h3>
+        <p>
+            Justin 口头只说它能用于前面已经见过的语言建模。幻灯片把流程写全了：开头学一个嵌入矩阵 Embedding Matrix，形状 $[V\times D]$（$V$ 是词表大小，$D$ 是模型维度），是一个把词变成向量的查找表；每个模块里用掩码注意力，让每个 token 只能看到它前面的 token；最后学一个 $[D\times V]$ 的投影矩阵，把每个 $D$ 维向量变成词表上每个词的分数；用 softmax 加交叉熵损失训练它预测下一个 token。更多语言模型方面的细节可以对照 <a href="../CS224N-NLP-with-Deep-Learning/05_注意力与Transformer.html">CS224N 第 5 讲</a>。
+        </p>
+        <h3>视觉 Transformer（ViT）</h3>
+        <p>
+            Transformer 也能用于图像，做法很直接：把图像切成块 Patch，每块单独投影成一个向量，这些向量作为 Transformer 的输入；Transformer 给每个输入块一个输出向量。要做分类，就对所有输出向量做池化，再用一个线性层预测类别分数。出处是 Dosovitskiy et al., “An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale”, ICLR 2021。幻灯片的具体数字：
+        </p>
+        <ul>
+            <li>输入图像比如 $224\times 224\times 3$，切成 $16\times 16\times 3$ 的块。</li>
+            <li>每块展平后做线性变换 $768 \Rightarrow D$（$16\times16\times3 = 768$）。幻灯片问还能怎样描述这个操作，答案是：一个 $16\times 16$、步长 16、3 个输入通道、$D$ 个输出通道的卷积。</li>
+            <li>用位置编码告诉 Transformer 每块在图中的二维位置。</li>
+            <li>不用任何掩码，每个图像块都能看所有其他图像块。</li>
+            <li>把 $N\times D$ 个输出向量平均池化成 $1\times D$，再用线性层 $D \Rightarrow C$ 预测类别分数。</li>
+        </ul>
+        <h3>没来得及讲的改进</h3>
+        <p>
+            Justin 说 Transformer 提出以来有过几处小改动，但时间不够，留作课外阅读。幻灯片列了四项：Pre-Norm（把层归一化挪进残差连接里面）、RMSNorm（换一种归一化层）、SwiGLU（换一种 MLP 结构）、混合专家 Mixture of Experts（学 $E$ 套 MLP，每个 token 只用其中 $A < E$ 套，参数大增而计算只适度增加）。下一讲开头 Ehsan Adeli 把这几项讲了一遍，见 <a href="09_检测分割与可视化.html#t02">第 9 讲第 2 节</a>。幻灯片还引了 Shazeer 那篇 GLU 论文里的一句话：“We offer no explanation as to why these architectures seem to work; we attribute their success, as all else, to divine benevolence.” 这几项在大语言模型里的用法，CS336 有更细的讲解，见 <a href="../CS336-Language-Modeling-from-Scratch/03_架构与超参数.html">CS336 第 3 讲</a> 和讲混合专家的 <a href="../CS336-Language-Modeling-from-Scratch/04_注意力的替代方案与混合专家模型.html">第 4 讲</a>。
+        </p>
+        <h3>小结</h3>
+        <p>
+            Justin 收尾时回到开头的两件事：注意力是作用在向量集合上的新原语，高度并行，基本就是几次矩阵乘法，灵活可扩展；Transformer 以自注意力为主要计算原语，是如今深度学习各个应用都在用的结构，语言、视觉、语音都在用。他说 Transformer 已经陪了我们八年，他看不出它会很快消失。下一讲讲检测、分割和可视化。
+        </p>
+    </section>
+
+    <section>
+        <h2>课上的原话</h2>
+        <ul>
+            <li>“We don't need to tell it which words in the input sequence were required for each word in the output.”<br>我们不需要告诉它，输出里的每个词需要输入序列里的哪些词。· <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=885s" target="_blank">0:14:45</a></li>
+            <li>“That's the mystery of deep learning.”<br>（网络怎么学会语法？）这就是深度学习的谜。· <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=1443s" target="_blank">0:24:03</a></li>
+            <li>“this whole self-attention operator is basically just four big batch matrix multiplies.”<br>整个自注意力算子基本上就是四次大的批量矩阵乘法。· <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=3405s" target="_blank">0:56:45</a></li>
+            <li>“In one layer of self-attention, every vector looks at every other vector.”<br>一层自注意力里，每个向量都看所有其他向量。· <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=3594s" target="_blank">0:59:54</a></li>
+            <li>“But you can solve that by buying more GPUs.”<br>（$N^2$ 太贵）不过这可以靠买更多 GPU 解决。· <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=3640s" target="_blank">1:00:40</a></li>
+            <li>“It turns out that of the three, you can get a long way using only attention.”<br>结果是，三者之中，只用注意力就能走很远。· <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=3640s" target="_blank">1:00:40</a></li>
+            <li>“The transformers have been with us for eight years now. And I don't see them really dying anytime soon.”<br>Transformer 已经陪了我们八年，我看不出它会很快消失。· <a href="https://www.youtube.com/watch?v=RQowiOF_FvQ&t=3962s" target="_blank">1:06:02</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS231N · Lecture 8: Attention and Transformers · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

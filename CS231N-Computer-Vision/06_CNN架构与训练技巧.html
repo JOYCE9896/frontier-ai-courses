@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 6 讲：CNN 架构与训练技巧 | Stanford CS231N 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="05_卷积神经网络.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS231N 目录</a> · 06</span>
+    <span><a href="07_循环神经网络.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 6 讲：CNN 架构与训练技巧</h1>
+        <p class="subtitle">归一化层、Dropout 和激活函数补齐 CNN 的零件，VGG 和 ResNet 两个案例讲怎么搭网络，Kaiming 初始化讲怎么给权重起步；后半段是训练实务：数据预处理、数据增强、迁移学习和超参数选择</p>
+        <div class="author-meta">
+            主讲：Zane Durante（Stanford 计算机系四年级博士生，由 Ehsan Adeli 和李飞飞共同指导，本课合讲教师之一）· 2025 年 4 月 17 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=aVJy4O5TOk8" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs231n.stanford.edu/slides/2025/lecture_6.pdf" target="_blank">课程幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            上一讲 Justin Johnson 讲了卷积层和池化层。这一讲 Zane 把剩下的零件补上，然后讲怎么把零件拼成一个能训练的网络、再怎么把它训练好。他把内容分成两大组：前一组是“怎么搭 CNN”，包括 CNN 里的各种层、激活函数、经典架构和权重初始化；后一组是“怎么训练 CNN”，包括数据预处理、数据增强、迁移学习和超参数选择。
+        </p>
+        <p>
+            他提前说过，前半段比较密，后半段是一串实用技巧，课程项目里基本都会用上。下一讲开始处理序列数据，讲循环神经网络。
+        </p>
+        <ol>
+            <li><a href="#t01">开场：卷积层与池化层回顾</a> · <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">归一化层：LayerNorm、BatchNorm 及其他</a> · <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=234s" target="_blank">0:03:54</a></li>
+            <li><a href="#t03">Dropout 正则化</a> · <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=563s" target="_blank">0:09:23</a></li>
+            <li><a href="#t04">激活函数：Sigmoid、ReLU、GELU</a> · <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=970s" target="_blank">0:16:10</a></li>
+            <li><a href="#t05">VGGNet：小卷积核，更深的网络</a> · <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=1305s" target="_blank">0:21:45</a></li>
+            <li><a href="#t06">ResNet 与残差学习</a> · <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=1743s" target="_blank">0:29:03</a></li>
+            <li><a href="#t07">ResNet 的整体结构与深度</a> · <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=2227s" target="_blank">0:37:07</a></li>
+            <li><a href="#t08">权重初始化与 Kaiming 初始化</a> · <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=2520s" target="_blank">0:42:00</a></li>
+            <li><a href="#t09">数据预处理与数据增强</a> · <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=2950s" target="_blank">0:49:10</a></li>
+            <li><a href="#t10">迁移学习</a> · <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=3520s" target="_blank">0:58:40</a></li>
+            <li><a href="#t11">超参数选择与调试流程</a> · <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=3957s" target="_blank">1:05:57</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场：卷积层与池化层回顾</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=5s" target="_blank">0:00:05</a>–0:03:54</em></p>
+        <p>
+            Zane 先补了一句自我介绍：他是这门课的合讲教师之一，Stanford 计算机系四年级博士生，导师是 Ehsan Adeli 和李飞飞。第 3 讲也是他讲的。
+        </p>
+        <h3>卷积层</h3>
+        <p>
+            卷积层 Convolution Layer 的工作方式是：每层有预先定好数量的滤波器 Filter（也叫卷积核），每个滤波器的深度和输入的通道数相同。幻灯片上的例子是一张 $3\times32\times32$ 的 RGB 图，用 6 个 $3\times5\times5$ 的滤波器。每个滤波器在图上滑动，在每个位置把滤波器里的值和图像对应位置的值逐个相乘再求和，加上偏置项 bias，得到输出激活图 Activation Map 上的一个值。一个滤波器产出一张激活图，6 个滤波器就是 6 张 $28\times28$ 的图，叠起来是 $6\times28\times28$ 的输出。之后通常接一个 ReLU 之类的激活函数。
+        </p>
+        <p>
+            有学生问：图像的深度是 RGB 三个通道，这里输出的深度是 6，那下一层怎么办？Zane 说下一层卷积的滤波器深度就得是 6，要同时覆盖这 6 张激活图。
+        </p>
+        <h3>池化层</h3>
+        <p>
+            池化层 Pooling Layer 简单得多。它也是一个在图上滑动的窗口，例子里是 $2\times2$ 窗口、步长 stride 为 2（步长就是窗口每次挪动几格，步长 2 表示隔一格跳一次，不是每个位置都算）。最大池化 Max Pooling 取窗口里的最大值，平均池化 Average Pooling 取平均。Zane 说两种都常用，设计新架构时一般两种都试，看哪个效果好。池化的作用是在高和宽两个维度上做汇总、缩小尺寸。
+        </p>
+        <p>
+            到这里，CNN 的三种主要层已经讲完：卷积层、池化层、全连接层（Fully-Connected Layer，就是第 4 讲里那种一次矩阵乘法加一个激活函数的层）。这一讲补上剩下的常用零件：归一化层、Dropout，再回头把激活函数讲完整。上一讲的内容见 <a href="05_卷积神经网络.html">第 5 讲：卷积神经网络</a>。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 归一化层：LayerNorm、BatchNorm 及其他</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=234s" target="_blank">0:03:54</a>–0:09:23</em></p>
+        <h3>所有归一化层共用的两步</h3>
+        <p>
+            归一化层 Normalization Layer 的做法是：先从输入数据算出均值和标准差这类统计量，用它们把数据规范化，再让模型自己学出这一层最合适的分布。具体分两步：
+        </p>
+        <ol>
+            <li>把输入规范成单位高斯分布，均值 0、标准差 1；</li>
+            <li>用学出来的参数做缩放和平移：乘一个值改变标准差，加一个值改变均值。</li>
+        </ol>
+        <p>
+            幻灯片上写的规范化公式是（$\varepsilon$ 是防止除零的小常数）：
+        </p>
+        $$\hat{x}_{i,j} = \frac{x_{i,j} - \mu_j}{\sqrt{\sigma_j^2 + \varepsilon}}$$
+        <p>
+            Zane 强调，各种归一化层都在做这同一件事，差别只在两处：统计量用哪些数据算，以及算出来的统计量作用到哪些数据上。
+        </p>
+        <h3>LayerNorm</h3>
+        <p>
+            他先讲层归一化 LayerNorm（Ba、Kiros、Hinton，2016），说这是今天深度学习里用得最多的归一化层，Transformer 里尤其常见。设输入 $x$ 的形状是 $N\times D$，也就是一批 $N$ 个样本，每个样本是 $D$ 维向量。LayerNorm 对每个样本单独算均值和标准差，沿 $D$ 这一维算，所以 $\mu$ 和 $\sigma$ 的形状是 $N\times1$。然后用可学习的参数 $\gamma$（缩放）和 $\beta$（平移），形状都是 $1\times D$，它们靠梯度下降学出来，作用到每个样本上：
+        </p>
+        $$y = \gamma\,\frac{x-\mu}{\sigma} + \beta$$
+        <h3>用 Group Normalization 论文里的图比较各种归一化</h3>
+        <p>
+            为了说清差别，他用了 Wu 和何恺明 2018 年 Group Normalization 论文里的一张图。GroupNorm 本身现在用得不多，但这张图很适合用来建立直觉。CNN 的数据比向量多了维度：通道（也就是深度）以及高和宽两个空间维度。图里蓝色阴影的部分，就是一起算统计量、也一起被这组统计量规范化的那些值。
+        </p>
+        <ul>
+            <li><strong>LayerNorm</strong>：每个样本单独处理，在所有通道、所有高、所有宽上算出一个均值和一个标准差。</li>
+            <li>BatchNorm（批归一化 Batch Normalization）：每个通道单独算一个均值和一个标准差，并且是在整个 mini-batch 的所有样本上一起算，只作用于这个通道。</li>
+            <li>InstanceNorm：更细，每个样本的每个通道各算一组。</li>
+            <li>GroupNorm：把通道分成若干组，每个样本的每组各算一组。</li>
+        </ul>
+        <p>
+            有学生确认：LayerNorm 是不是每张图各算一个均值和一个标准差？Zane 说是，各样本分开算；BatchNorm 不是这样，它在梯度下降用的那个小批量里，把所有数据放在一起算每个通道的均值和标准差。还有学生问通道指什么，他说通道就是深度，即每个空间位置上有多少个数。
+        </p>
+        <p>
+            他的建议是：如果能看懂这张图，就明白了所有归一化层在做什么，课后没看懂的话值得回去对着图再过一遍。幻灯片注明作业 2 里要实现其中几种。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. Dropout 正则化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=563s" target="_blank">0:09:23</a>–0:16:10</em></p>
+        <h3>做法</h3>
+        <p>
+            Dropout（Srivastava 等，JMLR 2014）是放在模型结构里的一种正则化层。正则化 Regularization 指的是让模型在训练集上学得难一点、换来在新数据上泛化得更好的手段。Dropout 的思路是在训练时加入随机性，测试时再把随机性拿掉。
+        </p>
+        <p>
+            具体做法：每次前向传播时，随机把这一层的一部分输出（激活值）置零。丢弃的概率是一个固定的超参数，0.5 最常见，0.25 也常用。被置零的值传到下一层还是 0，所以实现上可以用掩码 mask 的技巧，连这些值都不必计算，因为 0 乘任何数都是 0。
+        </p>
+        <h3>为什么有用</h3>
+        <p>
+            Zane 说，Dropout 为什么有效，更多是经验上的发现，理论上研究得不算透，但有几种看法可以帮助理解。幻灯片上的说法是：它迫使网络学出冗余的表示，防止特征之间的“共适应” co-adaptation。
+        </p>
+        <p>
+            他举的例子：假设输出层前一层学到的特征是“有耳朵”“有尾巴”“毛茸茸”“有爪子”“表情调皮”，模型要据此输出“猫”的分数。训练时这些特征会被随机丢掉，模型就没法过度依赖某几个特征同时出现。比如数据集里碰巧“有耳朵 + 毛茸茸”几乎总是猫，有了 Dropout，训练时模型并不总能同时看到这一对特征，只能学一组更宽的特征和类别之间的对应关系，对新数据泛化得更好。
+        </p>
+        <p>
+            幻灯片上还有另一种解释：Dropout 相当于在训练一个共享参数的大型模型集成 ensemble，每一种二值掩码对应一个模型。一个有 4096 个单元的全连接层，可能的掩码有 $2^{4096}\approx10^{1233}$ 种，而宇宙里的原子大约只有 $10^{82}$ 个。
+        </p>
+        <h3>课上的几个问答</h3>
+        <p>
+            有学生问：如果类别换成“树”，怎么决定丢哪些特征？Zane 说丢弃完全随机，不做任何选择，每一步随机丢掉例如 50% 的特征。又有人问：只看到尾巴和爪子这些子集，模型怎么知道？他的回答是，正因为只看到一部分特征，模型在训练数据上会表现得差一些，但测试时会更好。
+        </p>
+        <p>
+            关于反向传播：被置零的位置，在计算图里那条路就不用再往回走，和 ReLU 在负半轴的情况类似，梯度变成 0，更早的部分在这条路径上没有梯度。所以被丢掉的激活对应的权重，在这一步梯度下降里不会更新。
+        </p>
+        <p>
+            还有学生问能不能改成给图像加噪声。Zane 说可以，这就是后面数据增强要讲的内容。
+        </p>
+        <h3>测试时的缩放</h3>
+        <p>
+            测试时不再丢弃任何值，所有激活都用上。但这会带来一个问题：如果训练时丢掉了 50% 的激活，测试时每一层收到的输入就比训练时多出一倍，数值量级变大，行为会很怪。所以要对激活做缩放，幻灯片上的原则是：
+        </p>
+        $$\text{测试时的输出} = \text{训练时的期望输出}$$
+        <p>
+            幻灯片上的代码（这段实现被标注为“不推荐的写法”，仅作说明）：
+        </p>
+<pre><code>p = 0.5  # probability of keeping a unit active. higher = less dropout
+
+def train_step(X):
+    # forward pass for example 3-layer neural network
+    H1 = np.maximum(0, np.dot(W1, X) + b1)
+    U1 = np.random.rand(*H1.shape) &lt; p  # first dropout mask
+    H1 *= U1  # drop!
+    H2 = np.maximum(0, np.dot(W2, H1) + b2)
+    U2 = np.random.rand(*H2.shape) &lt; p  # second dropout mask
+    H2 *= U2  # drop!
+    out = np.dot(W3, H2) + b3
+
+def predict(X):
+    # ensembled forward pass
+    H1 = np.maximum(0, np.dot(W1, X) + b1) * p  # NOTE: scale the activations
+    H2 = np.maximum(0, np.dot(W2, H1) + b2) * p  # NOTE: scale the activations
+    out = np.dot(W3, H2) + b3</code></pre>
+        <p>
+            课上 Zane 口头说“测试时乘以 dropout 的概率 p”，这和代码里 p 的含义对不上：代码里的 p 是<em>保留</em>一个单元的概率。他在下一讲开头专门做了澄清，见 <a href="07_循环神经网络.html#t01">第 7 讲第 1 节</a>：多数库里 p 指丢弃概率，测试时要乘的是保留概率。比如训练时丢掉 25%，测试时乘 0.75，这样期望输出才一致。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 激活函数：Sigmoid、ReLU、GELU</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=970s" target="_blank">0:16:10</a>–0:21:45</em></p>
+        <p>
+            激活函数 Activation Function 的用处是给模型引入非线性。卷积核在图上滑动、全连接层做矩阵乘法，如果不加激活函数，这些都只是乘法和加法，整体还是线性运算。
+        </p>
+        <h3>Sigmoid 与梯度消失</h3>
+        <p>
+            Sigmoid 函数 $\sigma(x) = \dfrac{1}{1+e^{-x}}$ 把数压到 $[0,1]$ 之间。它历史上很流行，因为可以解释成神经元一个会饱和的“放电频率”。但它有一个问题，也是今天不再用它的原因：经验上，叠了很多层 Sigmoid 之后，反向传播时梯度越来越小。从网络末端开始梯度量级还不小，一层层传回最早的几层，梯度就越来越小。这叫梯度消失 vanishing gradient。
+        </p>
+        <p>
+            Zane 问全班：Sigmoid 在哪些区域梯度很小？学生答：很大的负值和很大的正值。他说对，看图就知道，两端几乎是平的，导数很小；从负无穷到正无穷，几乎整个输入范围梯度都很小，只有中间一小段不为零。所以只要进入 Sigmoid 的值很大或很小，梯度就很小。
+        </p>
+        <h3>ReLU</h3>
+        <p>
+            ReLU（Rectified Linear Unit，修正线性单元）计算 $f(x)=\max(0,x)$。这是它流行起来的两个原因：
+        </p>
+        <ul>
+            <li>正半轴不饱和，导数恒为 1。虽然负半轴导数为 0，但一半输入有梯度 1、一半为 0，比 Sigmoid 几乎处处接近 0 好得多，实践中效果更好。幻灯片引用 AlexNet（Krizhevsky 等，2012）的数据：实践中收敛比 Sigmoid 快得多，例如 6 倍。</li>
+            <li>计算便宜，取一个 $\max$ 比算 Sigmoid 省得多。</li>
+        </ul>
+        <p>
+            幻灯片还列了它的缺点：输出不以 0 为中心；输入为负时梯度为 0，会出现“死掉的 ReLU” dead ReLU。
+        </p>
+        <h3>GELU 和 SiLU</h3>
+        <p>
+            为了避开负输入梯度为 0 的问题，近年流行的激活函数在 0 附近有一段不平的区域，把 ReLU 在 0 点从 0 跳到 1 的导数变化磨平。代表是 GELU（Gaussian Error Linear Unit，高斯误差线性单元，Hendrycks 等，2016）：
+        </p>
+        $$f(x) = x\,\Phi(x)$$
+        <p>
+            其中 $\Phi(x)$ 是标准正态分布的累积分布函数，可以理解成标准高斯曲线在 $x$ 左边的面积。$x$ 很负时 $\Phi(x)$ 接近 0，函数趋近 0；$x$ 很大时 $\Phi(x)$ 接近 1，函数趋近 $x$。所以在两端 GELU 收敛到 ReLU，中间更平滑，并且负半轴附近有非零梯度。Zane 说 GELU 是今天 Transformer 里最主要的激活函数。幻灯片上的优缺点：0 附近行为好，平滑性在实践中有利于训练；计算比 ReLU 贵；很大的负值梯度仍然趋于 0。
+        </p>
+        <p>
+            他还提到另一个形状很像的函数，字幕里写作 SELU，但他给的定义是 $x\cdot\sigma(x)$，也就是 $x$ 乘 Sigmoid，按这个定义它应是 SiLU。它同样在很负时接近 0、很正时接近 $x$。Sigmoid 的形状和标准高斯的累积分布函数相近，所以它和 GELU 的曲线也很像。他的总结是：“激活函数动物园”里的这些函数眯着眼看都差不多，在某处比较平，在极限处趋近 $f(x)=x$ 的直线。
+        </p>
+        <h3>激活函数放在哪</h3>
+        <p>
+            一般放在线性算子之后：前馈层、线性层、全连接层（这几个名字说的是同一种层，矩阵乘法后接激活），或者卷积层之后。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. VGGNet：小卷积核，更深的网络</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=1305s" target="_blank">0:21:45</a>–0:29:03</em></p>
+        <h3>ImageNet 冠军的层数变化</h3>
+        <p>
+            零件讲完，开始讲怎么拼。Zane 先放了一张 ImageNet 大规模视觉识别挑战赛 ILSVRC 历年冠军的图：蓝色柱是错误率，橙色三角是层数。2010、2011 年的冠军（Lin 等，Sanchez &amp; Perronnin）还是浅层方法；2012 年 AlexNet 8 层；2013 年 ZFNet（Zeiler &amp; Fergus）8 层；2014 年 VGG 19 层、GoogLeNet 22 层；2015 年 ResNet 152 层，之后 2016 年的 Shao 等和 2017 年的 SENet（Hu 等）也是 152 层。图上还标了人类水平（Russakovsky 等）。他指出，错误率大幅下降、第一次超过人类水平的同一时间点，层数也暴涨，幻灯片把这称作“深度的革命” Revolution of Depth。这一讲要讲的就是人们怎么做到的、遇到了哪些设计难题。
+        </p>
+        <p>
+            AlexNet 是第一个在 ImageNet 上效果很好的 CNN，靠 GPU 训练出来，第 1 讲已经讲过它的历史（见 <a href="01_课程介绍与计算机视觉简史.html">第 1 讲</a>），这里只拿它和 VGG 比较。
+        </p>
+        <h3>VGG 的结构</h3>
+        <p>
+            VGG（Simonyan &amp; Zisserman，2014）是 2010 年代的标准常用架构。AI 里习惯用方块图画模型结构，每个方块代表一层或一组层。VGG 只用两种操作：步长 1、填充 padding 1 的 $3\times3$ 卷积，和步长 2 的 $2\times2$ 最大池化。步长 1 表示每个位置都算、不跳；填充 1 表示在图像外圈补一圈值，这样卷积后尺寸不缩小。
+        </p>
+        <p>
+            VGG16 自下而上：
+        </p>
+<pre><code>Input
+3x3 conv, 64  ×2   → Pool
+3x3 conv, 128 ×2   → Pool
+3x3 conv, 256 ×3   → Pool
+3x3 conv, 512 ×3   → Pool
+3x3 conv, 512 ×3   → Pool
+FC 4096 → FC 4096 → FC 1000 → Softmax</code></pre>
+        <p>
+            VGG19 把后三组卷积各加到 4 层。对比用的 AlexNet 是：$11\times11$ 卷积 96 → 池化 → $5\times5$ 卷积 256 → 池化 → $3\times3$ 卷积 384 → $3\times3$ 卷积 384 → $3\times3$ 卷积 256 → 池化 → FC 4096 → FC 4096 → FC 1000。
+        </p>
+        <p>
+            所有这些网络在最后的池化层之后都接两层 4096 维的全连接层，再接 1000 维。1000 是因为 ImageNet 有 1000 个类别，最后一层的维度总等于分类问题的类别数。Zane 说 VGG 看上去就是放大版的 AlexNet，层更多，并且每次连做两到三四个卷积再池化，AlexNet 是一两个卷积就池化一次。它基本只有三种层，效果却远超当时人们试过的其他方法。幻灯片数据：层数从 AlexNet 的 8 层到 VGG 的 16–19 层；ILSVRC'13 的 ZFNet top-5 错误率 11.7%，ILSVRC'14 的 VGG 降到 7.3%（top-5 错误率指正确答案不在模型给出的前 5 个猜测里的比例）。
+        </p>
+        <h3>为什么用 3×3：有效感受野</h3>
+        <p>
+            Zane 问：三层步长 1 的 $3\times3$ 卷积叠在一起，第三层激活图 A3 上的一个值，它的有效感受野 effective receptive field 是多大？感受野就是输出上一个值在计算时“看过”的那部分输入图像区域。
+        </p>
+        <p>
+            推一遍：A3 上一个值由 A2 上一个 $3\times3$ 区域算出；A2 上每个值又各由 A1 上的 $3\times3$ 算出，合起来是 A1 上 $5\times5$；再往前到输入是 $7\times7$。学生答出 $7\times7$。规律是：步长 1 的 $3\times3$ 卷积每叠一层，感受野边长加 2，因为每个点向左右上下各多看一格。所以三层 $3\times3$ 卷积（步长 1）的有效感受野和一层 $7\times7$ 卷积相同。
+        </p>
+        <p>
+            参数量更少。设每层输入输出通道都是 $C$，一个 $3\times3$ 滤波器有 $3\times3\times C$ 个值，共 $C$ 个滤波器，一层就是 $3^2C^2$，三层是
+        </p>
+        $$3\times(3^2C^2) = 27C^2 \quad\text{对比}\quad 7^2C^2 = 49C^2$$
+        <p>
+            而且三层意味着三个激活函数，非线性更多，能建模更复杂的关系。所以堆叠小滤波器比用一个大滤波器滑动更好：参数更少，表达能力更强。
+        </p>
+        <p>
+            有学生问：这是事后找的理由，还是设计时的直觉？Zane 说要看架构。VGG 的作者是否这样想，他没见过作者公开谈过，不好替他们说。但接下来要讲的 ResNet，他确定是一个假设催生了整个研究方向。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. ResNet 与残差学习</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=1743s" target="_blank">0:29:03</a>–0:37:07</em></p>
+        <h3>一个反常的实验结果</h3>
+        <p>
+            ResNet（何恺明等，2015）起源于一个经验发现：在“朴素” plain 的卷积网络上不停加层，会怎样？结果是 20 层的模型测试误差低于 56 层的模型。第一反应可能是深模型过拟合了，但看训练误差，20 层模型的训练误差也更低。训练和测试都更差，说明问题不是过拟合（过拟合指训练集上好、新数据上差）。
+        </p>
+        <h3>假设：这是优化问题</h3>
+        <p>
+            幻灯片上的“事实”：更深的模型参数更多，表示能力更强。理论上，深网络能表示的所有映射是浅网络的超集：把多出来的层设成恒等函数 identity（什么也不做），深网络就和浅网络一模一样。把一半的层设为恒等，表示能力就和一半大小的模型完全相同。
+        </p>
+        <p>
+            所以“假设”是：深模型差，原因在于它更难优化，表示能力并不差。那么深模型要怎样才能至少和浅模型一样好？一个构造性的解是：把浅模型学好的层照搬过来，额外的层设为恒等映射。
+        </p>
+        <h3>残差块</h3>
+        <p>
+            怎么把这个直觉直接做进模型里？做法是让网络层去拟合残差映射 residual mapping，不直接拟合想要的底层映射。具体是：把输入 $x$ 复制一份，绕过两层卷积，加到这两层的输出上：
+        </p>
+        $$H(x) = F(x) + x$$
+        <p>
+            这里 $F(x)$ 叫残差映射，是两层卷积（中间夹一个 ReLU）的输出。如果所有卷积滤波器都学成 0，$F(x)=0$，输出就是 $H(x)=x$，这一块等于被跳过了。所以模型想绕过某几层很容易，学 0 就行。更实际的情况是这些层只需学很小的值，因为它们不用学从 $x$ 到 $H(x)$ 的整个映射，只需学两者的差：
+        </p>
+        $$F(x) = H(x) - x$$
+        <p>
+            把前面某层的值复制到后面某层、直接相加，这种结构叫残差块 residual block，或残差连接 residual connection（也叫跳跃连接 skip connection）。恒等映射由结构本身提供，不必让卷积层费力去学。经验上，这个办法效果极好。
+        </p>
+        <h3>课上问答</h3>
+        <p>
+            有学生问残差块里传的是什么。Zane 说：输入 $x$ 进两层卷积得到 $F(x)$；$x$ 原样复制过去，和 $F(x)$ 相加。$x$ 是前面某层的输出，如果是模型第一层，它就是图像。
+        </p>
+        <p>
+            有学生问：会不会只是数据不够，数据足够多就不需要残差块？Zane 认为残差块反而帮助模型从更多数据里学习，问题出在优化上。Transformer 用残差连接的理由完全一样，它让模型更容易表示更多种函数，能更高效地利用更多数据。
+        </p>
+        <p>
+            另一个问题：深模型会不会只是训练得慢，训练足够久就会追上浅模型？他说不会。当时无论训练多久都追不上，原因是卡在了局部极小值 local minimum 里，加了残差连接就能避开。他也说，背后的确切原因至今仍是活跃的研究方向，很难说清是什么让模型避开局部极小值、找到更好的解。这类结论往往是经验发现，配上一些直觉，这里的直觉就是“让深模型至少能做到浅模型的水平”。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. ResNet 的整体结构与深度</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=2227s" target="_blank">0:37:07</a>–0:42:00</em></p>
+        <h3>整体结构</h3>
+        <p>
+            完整的 ResNet 就是把残差块一个个叠起来。每个残差块：$3\times3$ 卷积 → ReLU → $3\times3$ 卷积，把复制过来的 $x$ 加上，再过一个 ReLU。方块图上每两个卷积方块旁边那条跳过去的线，就是值被直接加到后面。
+        </p>
+        <p>
+            幻灯片上的结构（以 34 层左右为例）：
+        </p>
+<pre><code>Input
+7x7 conv, 64, /2        # stem
+Pool
+3x3 conv, 64   (several residual blocks)
+3x3 conv, 128, /2 → 3x3 conv, 128 ...
+...
+3x3 conv, 512, /2 → 3x3 conv, 512 ...
+Pool
+FC 1000 → Softmax</code></pre>
+        <p>
+            两个设计细节：
+        </p>
+        <ul>
+            <li>每隔若干个残差块，滤波器个数翻倍，同时用步长 2 在空间上下采样（每个维度除以 2）。图上写作 “3x3 conv, 128, /2”。Zane 让大家这样想象：一张扁平的图进入网络，越往后空间尺寸越小、深度越大，最后变成一个向量拿去分类。</li>
+            <li>在所有残差块之前有一个比较大的卷积层（$7\times7$，64 个滤波器，步长 2），叫 stem。他说这一条纯粹是经验发现，加了效果更好。其他架构也有类似做法。</li>
+        </ul>
+        <h3>不同深度</h3>
+        <p>
+            ResNet 做了一整个家族，用于 ImageNet 的总深度有 18、34、50、101、152 层。层数增加时性能上升，但越往后增幅越小：数据集固定的情况下，再加层也提不了多少。101 到 152 之间性能几乎不变，大约只差 1%。
+        </p>
+        <p>
+            幻灯片上的成绩：152 层模型赢得 ILSVRC'15 分类冠军，top-5 错误率 3.57%，并且横扫了 ILSVRC'15 和 COCO'15 的所有分类与检测比赛。Zane 说这是第一次成功训练出 100 层以上的模型，影响很大，之后计算机视觉里几乎每个任务都用 ResNet。
+        </p>
+        <h3>课上问答</h3>
+        <p>
+            有学生问 152 这个数是怎么来的。Zane 坦白说不知道。他的推测是：试不同层数时，一般先训练最小的模型，再加层，看性能是否继续上升；大概到 152 性能不怎么涨了就停了。另外还有 GPU 显存的限制，模型越大需要放进显存的参数越多，给定的硬件能训练的模型大小有上限。这些不同深度的模型要分开各训练一次。
+        </p>
+        <p>
+            有学生问：用了残差连接以后，还能把 CNN 理解成逐层得到更高层的抽象吗？他说可以，研究也证实各层确实如此。区别只在实现方式：块内部学的是从输入到更高层特征之间的那个差值（delta），把它加到输入上。
+        </p>
+        <p>
+            有学生问相加是不是要求张量尺寸相同。他说是，这也是为什么残差块里都是步长 1、填充 1 的 $3\times3$ 卷积，保持尺寸不变。经过池化之后尺寸变了，就没法直接相加，所以普通的残差连接都在池化之前。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 权重初始化与 Kaiming 初始化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=2520s" target="_blank">0:42:00</a>–0:49:10；另有一段补充在 <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=3138s" target="_blank">0:52:18</a></em></p>
+        <h3>初始值太小</h3>
+        <p>
+            “怎么搭 CNN”的最后一件事：每层权重的初始值怎么定。值选得太小或太大，训练时都会出大问题。
+        </p>
+        <p>
+            例子是一个 6 层全连接网络，隐藏层 4096 维，每层用 ReLU，权重从单位高斯随机取再乘 0.01：
+        </p>
+<pre><code>dims = [4096] * 7
+hs = []
+x = np.random.randn(16, dims[0])
+# Forward pass with ReLU activation
+for Din, Dout in zip(dims[:-1], dims[1:]):
+    W = 0.01 * np.random.randn(Din, Dout)  # Small weight init
+    x = np.maximum(0, x.dot(W))  # ReLU activation
+    hs.append(x)</code></pre>
+        <p>
+            把各层激活值的分布画出来：因为有 ReLU，均值都是正的。第一层的均值和标准差还比较大，越往后越小，深层的激活全都趋向 0。理想情况是每层的均值和标准差大致相同，那样优化问题好解得多。
+        </p>
+        <h3>初始值太大</h3>
+        <p>
+            Zane 问：如果把 0.01 改成 0.05 会怎样？学生答：激活值每层越来越大。画出来确实如此，到最后一层均值和标准差大得离谱。训练 152 层的 ResNet 时，这个问题很快就会失控。
+        </p>
+        <h3>Kaiming 初始化</h3>
+        <p>
+            这个例子里最合适的值大概在 0.022 左右，但要怎么对任意层都找到合适的值？初始化的规模应该是输入维度的函数，4096 维的全连接层和 2048 维的全连接层用的值不同。课上讲的是今天最常用的一种，Kaiming 初始化（也叫 MSRA 初始化，出自何恺明等 2015 年的 “Delving Deep into Rectifiers: Surpassing Human-Level Performance on ImageNet Classification”，ICCV 2015）。Zane 特意提到，提出它的就是做 ResNet 的同一个人：何恺明是很有名的计算机视觉研究者，他认为可能是过去十到十五年被引用最多的计算机科学家之一，也许是最多的。
+        </p>
+        <p>
+            公式是对 ReLU 做的修正：
+        </p>
+        $$\text{std} = \sqrt{\frac{2}{D_{\text{in}}}}$$
+        <p>
+            即 <code>W = np.random.randn(Din, Dout) * np.sqrt(2 / Din)</code>。推导他没有展开，只说论文证明了在 ReLU 激活下，这样初始化能让各层激活的均值和标准差大致保持不变，可以当作“一套进去就得到想要性质的公式”。画出来各层分布“刚刚好”。对任何具体设置，也可以靠试验去找这个值。
+        </p>
+        <h3>课上问答</h3>
+        <p>
+            有学生问 CNN 怎么用这个初始化。Zane 说公式一样，只是 $D_{\text{in}}$ 的算法变了，用卷积核的大小：$3\times3$ 卷积核、输入 6 个通道，就是 $3\times3\times6$。可以粗略理解成每次运算涉及的数值个数，具体取决于层的类型，有些层也用别的初始化方法。
+        </p>
+        <p>
+            有学生问初始值太大为什么会爆炸。他的解释：每层都用同一套大的随机值初始化，ReLU 又不会给输出封顶，可以一直到无穷大；每一层都在把一组已经很大的值再乘上一组很大的值，就像一个递推关系，乘的因子理想上应该是 1。输出的平均大小取决于向量维度；过了 ReLU 之后负的一半被去掉，标准差越大，剩下部分的均值就越往正方向跑。他承认这里没准备幻灯片，建议看论文，说论文不难读。讨论下来的结论是：归一化能解决激活爆炸这个具体问题，但可能仍然更难优化。（下一讲开头他用一个小实验专门回答了这个问题，见 <a href="07_循环神经网络.html#t01">第 7 讲第 1 节</a>。）
+        </p>
+        <p>
+            后面讲数据增强时，他回头补答了“怎么知道初始化刚好”：看各层激活的均值和标准差是否大致恒定，既没有塌到 0，也没有随层数增加爆到无穷。实践中直接用这个公式就能初始化好。只有当你设计了一种前人没做过的新层，才可能需要试一批初始化方案，看哪个效果好；线性层和卷积层用 Kaiming 初始化即可。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 数据预处理与数据增强</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=2950s" target="_blank">0:49:10</a>–0:58:40</em></p>
+        <h3>图像的数据预处理</h3>
+        <p>
+            下半节讲怎么训练。图像的数据预处理很简单：在整个图像数据集上算出红、绿、蓝三个通道各自的平均值和标准差（一共 3 组数），每张输入图减去每个通道的均值、除以每个通道的标准差。幻灯片说几乎所有现代模型都这样做，对每个通道做中心化和缩放。
+        </p>
+        <p>
+            这需要先在数据集上把这几个数算好。常见做法是直接用别人算好的，最常用的是 ImageNet 的均值和标准差，即使你的模型不在 ImageNet 上训练也照用。这些值和数据集有关，不同模型会用自己数据集的值。有学生确认：是不是任何输入图像都在送进模型前做这一步？他说是。
+        </p>
+        <h3>正则化的共同模式</h3>
+        <p>
+            之前有学生建议“给图像加噪声”，Zane 说这就是数据增强 Data Augmentation，它也是一种正则化，可以防止过拟合。这里有一个常见模式：
+        </p>
+        <ul>
+            <li>训练时：加入某种随机性；</li>
+            <li>测试时：把随机性平均掉（有时是近似的）。</li>
+        </ul>
+        <p>
+            Dropout 就是这个模式：训练时随机丢掉例如 50% 的激活，测试时全用，再按概率缩放。数据增强也一样。流程是：从数据集读入一张图和它的标签（比如“猫”），在送进 CNN 之前先对图做变换，再算损失。变换后的图要看起来不同，但仍能认出是同一类。
+        </p>
+        <p>
+            Zane 说现代深度学习训练计算机视觉模型基本都会用数据增强。好处是等于扩大了数据集：模型看到的是同一张图的多个变换版本，标签都相同，泛化能力因此提高。代价是训练损失会更高，因为模型没法简单地背下同一个样本。
+        </p>
+        <h3>几种常见增强</h3>
+        <ul>
+            <li><strong>水平翻转</strong>：看任务。做文字识别时很糟，翻过来就像照镜子，读不了。日常物体通常没问题，因为多数物体左右对称。如果是显微镜图像或俯拍图，垂直翻转也合理；日常物体做垂直翻转就不合理，猫几乎总是正着的。但如果数据集里猫什么朝向都有，翻转、旋转都可以用。</li>
+            <li>随机裁剪与缩放：ResNet 等许多模型的做法是，训练时随机取 $L\in[256,480]$，把图像短边缩放到 $L$（保持长宽比），再随机截一块 $224\times224$。例如一张 $800\times600$ 的图，取 $L=256$，就把 600 那条边缩到 256，800 按比例缩，然后从中随机截一块。这个操作在多数库里叫 random resized crop，是最常用的增强，因为效果好并且保持了图像的相对分辨率。</li>
+            <li>测试时增强 Test-Time Augmentation：如果想把性能榨到最后一点，可以在测试时对一张图取一组固定的裁剪和缩放，都送进模型，最后把预测平均。ResNet 的做法是：把图像缩放到 5 个尺度 $\{224, 256, 384, 480, 640\}$，每个尺度取 10 个 $224\times224$ 的裁剪（四个角 + 中心，再加上翻转）。收益会递减，但通常能带来 1% 到 2% 的提升，几乎对任何计算机视觉问题都适用。</li>
+            <li>颜色抖动 Color Jitter：随机改变对比度和亮度，让颜色看起来更暗淡或更鲜亮。这些是传统的图像处理手段。</li>
+            <li>Cutout（DeVries &amp; Taylor，2017）：训练时把图像里随机一块区域置零（盖一个黑块或灰块），测试时用完整图像。幻灯片说它在 CIFAR 这类小数据集上效果很好，在 ImageNet 这样的大数据集上不太常用。Zane 说这个例子说明可以根据问题发挥创意：如果实际场景里摄像头常被遮挡、物体看不全，这种增强能让模型对遮挡更鲁棒。</li>
+        </ul>
+        <p>
+            他自己的做法：开始一个新问题时，先试一批增强，调不同的强度，看哪些设置让数据看起来和原数据不同、但人眼仍然能轻松认出来，用这个标准来定抖动多少、亮度变化多大。判断标准就是：变换后人还能认，模型却更难把训练样本背下来。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 迁移学习</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=3520s" target="_blank">0:58:40</a>–1:05:57</em></p>
+        <h3>数据不多还能训练 CNN 吗</h3>
+        <p>
+            最初版本的 ImageNet 有一百万张图，大多数人的问题没有这么多数据，除非有一个大团队专门采集。数据少还能训练 CNN 吗？Zane 的回答是能，但要做得聪明一点。他说接下来几张幻灯片讲的，课程项目里就该照着做，课外做任何计算机视觉问题也适用。
+        </p>
+        <h3>预训练特征为什么好用</h3>
+        <p>
+            CNN 前几层学到的是边缘、纹理、小形状，越往后越高层。如果把一张图送进 CNN，取分类层之前的那个向量（例如 4096 维或 2048 维），和数据集里其他图的同位置向量比较 L2 距离，会发现离得近的图几乎都是同一类。这和第 2 讲的最近邻方法一样，只是比较的对象从像素换成了 CNN 末端的特征向量。所以这些特征很适合拿来在上面训练线性分类器或 K 近邻分类器。（幻灯片注明第 13 讲会细讲。）
+        </p>
+        <h3>三种做法</h3>
+        <ol>
+            <li>先在 ImageNet（或互联网规模的数据集）上训练一个模型，或者直接拿别人训练好的。</li>
+            <li>小数据集（$C$ 个类别）：把预训练模型的所有层冻结 freeze，一个都不训练；把最后一层从 1000 类换成你的 $C$ 类，用 Kaiming 初始化随机初始化，只训练这一层。整个流程就像在训练一个线性分类器：输入是每张图过完整个模型后得到的 4096 维向量，输出是类别分数。Zane 说可以把冻结的模型看成旧范式里的特征提取器：以前的计算机视觉用预先定义好的一套操作算颜色直方图之类的特征，这里冻结的模型也是一个不变的特征提取器，在它算出的特征上训练模型。</li>
+            <li>数据集更大：用预训练的权重初始化，然后把整个模型都微调 finetune。数据越多，越适合训练更多层。</li>
+        </ol>
+        <p>
+            Zane 说他自己做的几乎所有问题都用第 3 种。他手上通常有一百万到一千万个训练样本，就从一个在几十亿数据上训练好的模型出发（那样的算力他没有），在自己相对小的数据集上微调，效果比自己从头训练好，因为预训练模型见过更多数据，特征提取器更好，整体微调又能适配到具体问题。相关论文是 DeCAF（Donahue 等，ICML 2014）和 “CNN Features Off-the-Shelf: An Astounding Baseline for Recognition”（Razavian 等，CVPR Workshops 2014）。
+        </p>
+        <h3>数据集差异与数据量的四种组合</h3>
+        <p>
+            有学生问：模型在 ImageNet 上训练，会不会带上偏差？Zane 说一定会。如果用第 2 种方式，在和 ImageNet 很像的数据上效果最好，比如笔记本电脑、教室、人这类日常物体；如果是火星照片，效果会差很多。所以要找一个训练数据分布和你的问题相近的预训练模型。
+        </p>
+        <p>
+            幻灯片上的表格（网络前几层更通用，后几层更特定）：
+        </p>
+        <table>
+            <thead><tr><th></th><th>数据集很相似</th><th>数据集很不同</th></tr></thead>
+            <tbody>
+                <tr><td>数据很少</td><td>在最后一层上用线性分类器</td><td>换个模型试试，或者多采数据</td></tr>
+                <tr><td>数据较多</td><td>微调所有层</td><td>微调所有层，或从头训练</td></tr>
+            </tbody>
+        </table>
+        <p>
+            数据多但领域差别大的时候，从头训练或用预训练初始化都可能更好，没有保证，得实际测。最难的是右上角：数据少、领域又很不同。这时最好找一个在相近数据上训练过的模型。跨领域泛化 out-of-domain generalization 是活跃的研究方向，有专门的技术，但没有总能奏效的通用方法，要看具体问题。他补了一句，语言模型在学习各种不同领域上表现不错。
+        </p>
+        <h3>只训练一部分层，以及 LoRA</h3>
+        <p>
+            有学生问：在“只训最后一层”和“训练所有层”之间，有没有折中？Zane 说有很多工作研究只训练部分层。还有一种技术叫 LoRA，他说 Transformer 那讲也许会讲到。思路是所有层都微调，但不直接改原来的权重值，只学一个低秩 low rank 的差值，加到原层上。这有点像 ResNet 学的是差值，只是 LoRA 用很少的参数来做。LoRA 的细节可参考 <a href="../CS224N-NLP-with-Deep-Learning/08_高效适配提示与参数高效微调.html">CS224N 第 8 讲</a>。
+        </p>
+        <p>
+            还有学生回头问：为什么 ResNet 里每种尺寸都用两个卷积层，不用一个？他说理由和 VGG 那个例子一样：三个 $3\times3$ 卷积和一个 $7\times7$ 感受野相同，但有三个激活函数，非线性更多。一组多而小的滤波器比一组少而大的滤波器表达能力更强。
+        </p>
+        <p>
+            给项目的建议（幻灯片原意）：如果你的数据集不到约一百万张图，先找一个有相似数据的大数据集，在上面训练一个大模型（或直接拿现成的），再迁移到你的数据上。深度学习框架都提供预训练模型的 Model Zoo，比如 PyTorch 的 torchvision（github.com/pytorch/vision）和 Hugging Face 的 pytorch-image-models（github.com/huggingface/pytorch-image-models）。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 超参数选择与调试流程</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=3957s" target="_blank">1:05:57</a>–1:11:07</em></p>
+        <h3>幻灯片上的七步</h3>
+        <ol>
+            <li>检查初始损失。</li>
+            <li>在一个小样本上过拟合。</li>
+            <li>找一个能让损失下降的学习率：用上一步的架构、全部训练数据、开一点小的权重衰减，找一个能在约 100 次迭代内让损失明显下降的学习率。值得试的学习率：1e-1、1e-2、1e-3、1e-4、1e-5。</li>
+            <li>超参数粗网格，每组训练约 1–5 个 epoch。</li>
+            <li>细化网格，训练更久。</li>
+            <li>看损失曲线和准确率曲线。</li>
+            <li>回到第 5 步。</li>
+        </ol>
+        <h3>先过拟合一个小样本</h3>
+        <p>
+            Zane 说，模型训练不起来时，最好的办法是在一个小样本上过拟合，这是深度学习里默认的调试策略。拿一个数据点，看训练损失能不能降到 0。模型应该能背下一个训练样本；如果背不下来，要么代码有 bug，要么选的模型不适合这个问题。这一步还能告诉你哪些学习率可行、哪些不行，给出大致该在哪个范围里找学习率。他说只要跑代码遇到问题，第一步永远是这个。
+        </p>
+        <p>
+            接下来试一个粗的超参数网格，先试不同学习率，看各自的训练损失曲线，选在大约一个 epoch 内损失持续下降最明显的那个。学习率定好之后再看其他超参数。
+        </p>
+        <h3>读准确率曲线</h3>
+        <ul>
+            <li>训练准确率和验证准确率都还在上升：需要训练更久。</li>
+            <li>训练准确率继续上升，验证准确率却往下走，两者差距很大：这是过拟合。要么加强正则化，要么获取更多数据，否则性能超不过验证准确率峰值那一点（那是目前最好的模型）。（课上口头把这里说成了“训练损失上升、验证损失下降”，按幻灯片应为训练和验证之间差距很大。）</li>
+            <li>两者几乎没有差距：幻灯片说这是欠拟合，可以训练更久，也可以换更大的模型。Zane 的说法是，一般希望训练到验证表现达到最好为止，只要还能继续训练就继续，直到训练准确率开始和验证准确率分开。</li>
+        </ul>
+        <p>
+            这个过程可以反复进行。
+        </p>
+        <h3>随机搜索优于网格搜索</h3>
+        <p>
+            有两个或更多超参数要搜时，该把所有组合都试一遍吗？Zane 说实践中，在超参数空间里随机搜索比网格搜索好得多（Bergstra &amp; Bengio，2012，“Random Search for Hyper-Parameter Optimization”）。原因：假设一个轴是不重要的超参数，取什么值性能都差不多，另一个轴是重要的。网格搜索会在不重要的那个超参数上反复试多个值，浪费时间；随机取值的话，重要超参数被探索到的不同取值多得多。所以做法是定好每个超参数的范围，从中随机采样组合，一直跑，直到得到最好的模型。
+        </p>
+        <p>
+            最后他回顾了整讲的八个主题：CNN 中的层（卷积、全连接、归一化、Dropout）、激活函数（ReLU、GELU 等）、CNN 架构（VGG、ResNet）、权重初始化（保持激活分布）、数据预处理（减均值、除标准差）、数据增强（裁剪、抖动）、迁移学习（先在 ImageNet 上训练）、超参数（检查损失 + 随机搜索）。
+        </p>
+    </section>
+
+    <section>
+        <h2>课上的原话</h2>
+        <ul>
+            <li>“And this is the main activation function used in transformers today.”（GELU 是今天 Transformer 里用的主要激活函数。）<a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=1222s" target="_blank">0:20:22</a></li>
+            <li>“So three of these 3 by 3s have the same effective receptive field as one 7 by 7 layer.”（三个 3×3 卷积和一个 7×7 层的有效感受野相同。）<a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=1648s" target="_blank">0:27:28</a></li>
+            <li>“So the idea is not that these models are worse in terms of the representational power, but they're actually harder to optimize”（这些深模型的表示能力并不差，它们是更难优化。）<a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=1841s" target="_blank">0:30:41</a></li>
+            <li>“So it allows a very simple way for the model to bypass these layers if it doesn't need to learn anything for the layers.”（如果这些层不需要学任何东西，残差连接让模型能很简单地绕过它们。）<a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=1938s" target="_blank">0:32:18</a></li>
+            <li>“It was the first time they were able to train 100 plus layer models successfully so it was a really big deal.”（这是第一次成功训练出 100 层以上的模型，所以是件大事。）<a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=2459s" target="_blank">0:40:59</a></li>
+            <li>“Your model should be able to memorize one training example and if it's not able to do that have a bug somewhere in your code or you're not picking the right kind of model to model your problem.”（模型应该能背下一个训练样本；做不到的话，要么代码某处有 bug，要么你选的模型不适合这个问题。）<a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=4051s" target="_blank">1:07:31</a></li>
+            <li>“I think in practice, random search over the hyperparameter space works a lot better than a grid search where you're trying every set of a predefined set.”（实践中，在超参数空间里随机搜索比把预定义集合逐一试遍的网格搜索好得多。）<a href="https://www.youtube.com/watch?v=aVJy4O5TOk8&t=4190s" target="_blank">1:09:50</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS231N · Lecture 6: CNN Architectures · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

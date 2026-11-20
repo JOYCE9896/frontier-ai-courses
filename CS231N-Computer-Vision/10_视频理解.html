@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 10 讲：视频理解 | Stanford CS231N 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="09_检测分割与可视化.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS231N 目录</a> · 10</span>
+    <span><a href="11_大规模分布式训练.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 10 讲：视频理解</h1>
+        <p class="subtitle">视频分类的几种做法：单帧 CNN、晚融合、早融合、3D CNN 与 C3D，光流和双流网络，CNN 加 RNN、循环卷积网络、时空自注意力和 I3D 膨胀；最后讲动作定位、音视频多模态、高效视频理解和视频大模型</p>
+        <div class="author-meta">
+            主讲：Ruohan Gao（客座讲者，马里兰大学帕克分校计算机系助理教授，带 Multisensory Machine Intelligence Lab；博士毕业于 UT Austin，在 Stanford 跟李飞飞、Jiajun Wu、Silvio Savarese 做博士后期间教过 CS231N）· 2025 年 5 月 1 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=wElqklprhPE" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs231n.stanford.edu/slides/2025/lecture_10.pdf" target="_blank">课程幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            前面九讲处理的都是单张图像：分类、检测、分割。这一讲把输入换成视频。视频就是图像多了一个时间维，模型要回答的问题也从“图里有什么物体”变成“画面里的人或动物在做什么动作”。Ruohan Gao 先讲视频数据太大带来的工程问题，然后沿着时间线把视频分类的模型过一遍：从直接拿图像分类器逐帧跑，到 3D 卷积、光流双流网络，再到用 RNN 和自注意力建模长时程结构，以及把 2D 网络“膨胀”成 3D 网络的 I3D。
+        </p>
+        <p>
+            他自己做多模态感知，所以最后十分钟转到视频里的声音：用画面引导的声源分离、音视频联合分类、用音频预览来省计算的高效视频理解，以及第一视角视频和视频大模型。课上用到的 RNN、自注意力、Faster R-CNN 和可视化方法分别来自第 7、8、9 讲；下一讲是 Justin Johnson 的大规模分布式训练。
+        </p>
+        <ol>
+            <li><a href="#t01">视频是什么，视频分类要认什么</a> · <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">视频太大：在短片段上训练</a> · <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=313s" target="_blank">0:05:13</a></li>
+            <li><a href="#t03">单帧 CNN 基线与晚融合</a> · <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=509s" target="_blank">0:08:29</a></li>
+            <li><a href="#t04">早融合与 3D 卷积</a> · <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=935s" target="_blank">0:15:35</a></li>
+            <li><a href="#t05">三种融合方式对比与时间平移不变性</a> · <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=1306s" target="_blank">0:21:46</a></li>
+            <li><a href="#t06">Sports-1M 数据集与 C3D</a> · <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=1921s" target="_blank">0:32:01</a></li>
+            <li><a href="#t07">光流与双流网络</a> · <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=2421s" target="_blank">0:40:21</a></li>
+            <li><a href="#t08">长时程结构：CNN 加 RNN 与循环卷积网络</a> · <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=2721s" target="_blank">0:45:21</a></li>
+            <li><a href="#t09">时空自注意力、I3D 与视频 Transformer</a> · <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=3102s" target="_blank">0:51:42</a></li>
+            <li><a href="#t10">可视化视频模型与动作定位</a> · <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=3549s" target="_blank">0:59:09</a></li>
+            <li><a href="#t11">视频里的声音：音视频多模态</a> · <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=3740s" target="_blank">1:02:20</a></li>
+            <li><a href="#t12">高效视频理解、第一视角视频与视频大模型</a> · <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=3926s" target="_blank">1:05:26</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 视频是什么，视频分类要认什么</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=5s" target="_blank">0:00:05</a>–0:05:13 · Introduction to video / Video classification tasks</em></p>
+        <p>
+            Zane Durante 开场介绍：这是本学期第一位客座讲者。Ruohan Gao 现在是马里兰大学帕克分校计算机系的助理教授，带 Multisensory Machine Intelligence Lab；他 2022 到 2023 年做李飞飞、Jiajun Wu 和 Silvio Savarese 的博士后时，当过 CS231N 的讲师。Ruohan 说自己关心多模态，也就是除了视觉之外，怎样像人一样用上声音、触觉等感官去感知和交互，但视觉是其中最重要的一种。
+        </p>
+        <h3>从图像任务说起</h3>
+        <p>
+            他先回顾前几讲的图像任务。图像分类给整张图一个标签，比如狗、猫、卡车、飞机。语义分割 Semantic Segmentation 给每个像素一个类别（草、猫、树、天空）。目标检测 Object Detection 在每个物体上画框。实例分割 Instance Segmentation 在检测的基础上，给同一类里的每个个体各自一张掩码（两只狗就是两张）。对一张客厅照片，这些工具已经能说出“这是客厅”，框出婴儿和狗，再把它们分割出来。可真实世界不是静止的。
+        </p>
+        <h3>视频 = 2D 图像 + 时间</h3>
+        <p>
+            视频是一串图像帧，多了一个时间维 T。一段视频可以写成 4D 张量 $T \times 3 \times H \times W$（也可以排成 $3 \times T \times H \times W$），H 和 W 是空间维，3 是 RGB 通道。
+        </p>
+        <p>
+            示例任务是视频分类 Video Classification：输入一段视频，比如一个人在跑步，输出这段视频属于游泳、跑步、跳跃、吃东西、站立中的哪一类。训练方式和图像分类一样，提取特征后接交叉熵损失 Cross-Entropy Loss。所以视频理解的核心问题是：怎样从视频里拿到能接上这些损失函数的特征。
+        </p>
+        <p>
+            他指出一个区别：图像分类关心的多是场景和物体类别（狗、猫、鱼、卡车）；视频分类关心的多是动作 Action，画面里的人或动物在做什么。要识别的东西性质不同。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 视频太大：在短片段上训练</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=313s" target="_blank">0:05:13</a>–0:08:29 · Data handling and processing</em></p>
+        <h3>存储量</h3>
+        <p>
+            第二个问题是视频很大。一张图像是一个 $3 \times H \times W$ 的数组；视频大约每秒 30 帧（fps, frames per second），电影的分辨率和帧率还可能更高。按每像素 3 字节、不压缩计算，幻灯片给的数字是：
+        </p>
+        <ul>
+            <li>标清 SD（640 × 480）：每分钟约 1.5 GB；</li>
+            <li>高清 HD（1920 × 1080）：每分钟约 10 GB。</li>
+        </ul>
+        <p>
+            这样的数据没法直接塞进 GPU。显存里除了输入，还要放网络权重和卷积网络各层的激活值，模型会变得很大。
+        </p>
+        <h3>办法：低帧率、低分辨率的短片段</h3>
+        <p>
+            最简单的办法是在时间和空间上都把视频变小。相邻帧之间冗余很多，每秒不需要全部 30 帧，取 5 帧就够；空间分辨率降到 $112 \times 112$。幻灯片的例子是 $T = 16$、$H = W = 112$，相当于 5 fps 下的 3.2 秒，大小约 588 KB（$16 \times 3 \times 112 \times 112 = 602{,}112$ 字节）。算力够的话也可以用更高分辨率，这和图像一样。
+        </p>
+        <p>
+            视频可能长达几分钟、几小时，训练时的做法是在片段 Clip 上训练：
+        </p>
+        <ul>
+            <li>训练：用滑动窗口从原视频里采很多低帧率的短片段，每个片段作为一条训练样本，训练一个片段分类器；</li>
+            <li>测试：在同一段视频的不同片段上跑模型（比如采 10 个片段），把预测结果平均，作为整段视频的预测。</li>
+        </ul>
+    </section>
+
+    <section id="t03">
+        <h2>03. 单帧 CNN 基线与晚融合</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=509s" target="_blank">0:08:29</a>–0:15:35 · Single-frame CNN baseline / Late fusion techniques / Limitations of fusion methods</em></p>
+        <h3>单帧 CNN</h3>
+        <p>
+            最简单的视频分类器是把视频当成一堆图像：训练一个普通的 2D 卷积神经网络 CNN（Convolutional Neural Network，用卷积层逐层提取图像特征的网络），独立地给每一帧分类，测试时把各帧的预测概率平均。对跑步这种视频，各帧之间变化不大，每一帧单独看都像跑步，平均下来就预测“跑步”。
+        </p>
+        <p>
+            Ruohan 说这通常是视频分类里很强的基线，设计视频分类器时应该先跑它，可能已经能得到不错的结果。比如 30 帧的视频，采 10 帧，每帧过图像分类器，直接平均。
+        </p>
+        <p>
+            怎样采帧本身是个研究问题。一小时的视频，不知道有用的部分在哪里，最简单的是随机采样或均匀采样，比如每分钟取一帧再平均。这能给出还可以的结果，但不是最聪明的办法；也有方法先采一帧，再根据它的判断决定下一帧采哪里，后面高效视频理解部分有例子。
+        </p>
+        <h3>晚融合：拼接后接全连接层</h3>
+        <p>
+            往前走一步：不直接平均预测，而是在特征层面融合各帧。这叫晚融合 Late Fusion（Karpathy 等人，CVPR 2014）。每帧过一个 2D CNN，得到 $D \times H' \times W'$ 的特征图；T 帧就是 $T \times D \times H' \times W'$。把它们全部展平拼接，得到长度为 $TDH'W'$ 的片段特征，再用多层感知机 MLP 映射到 C 个类别分数。直觉是：先拿到每帧的高层外观特征，再把它们组合起来。
+        </p>
+        <p>
+            之所以叫“晚”，是因为各帧在网络前面完全独立处理，到最后才拼在一起过全连接层。缺点是这个全连接层参数太多：T 越大，拼出的向量越长，把它映射到低维需要一个很大的全连接层，效率不高。
+        </p>
+        <h3>晚融合：池化</h3>
+        <p>
+            另一种晚融合不拼接，而是在空间和时间上做平均池化 Average Pooling，把 $T \times D \times H' \times W'$ 压成一个 D 维的片段特征，再用一个线性层映射到 C 个类别，训练交叉熵损失。池化不会让特征变长，就不需要很大的全连接层；代价是池化会扔掉可能有用的信息。
+        </p>
+        <h3>晚融合的问题：低层运动信息丢了</h3>
+        <p>
+            幻灯片上的问题是：晚融合很难比较帧与帧之间的低层运动。他指着视频里男子的脚：识别跑步的重要线索是脚一上一下的动作。每帧单独经过很多层卷积和池化后，到了网络后段，特征里装的主要是语义这类高层信息，脚的上下移动这类低层运动信息多半已经不在了。越靠近输入的特征越接近原始像素，越可能保留这种运动信息，这就引出了早融合。
+        </p>
+        <p>
+            有学生问池化到底池的是什么。Ruohan 的回答：每帧给出一个 D 维特征，T 帧就是 T 个 D 维向量；池化是在这些特征上做平均（mean pooling）或取最大值（max pooling），结果还是 D 维。池化对象是特征，不是帧本身。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 早融合与 3D 卷积</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=935s" target="_blank">0:15:35</a>–0:21:46 · Early fusion approaches / Introduction to 3D CNNs / 3D convolution mechanics</em></p>
+        <h3>早融合</h3>
+        <p>
+            早融合 Early Fusion（同样出自 Karpathy 等人 2014）在网络一开始就把时间信息合并：把输入 $T \times 3 \times H \times W$ 直接 reshape 成 $3T \times H \times W$，也就是把时间维并进通道维；第一层 2D 卷积把通道数从 $3T$ 映射到 D，输出 $D \times H \times W$。之后的网络就是标准 2D CNN，跟图像分类一样，最后接交叉熵损失。直觉是：用第一层卷积比较各帧，后面照常。
+        </p>
+        <p>
+            问题在于太激进。所有时间信息在一层卷积里就被压扁了，只有一层做时间上的处理，可能不够。
+        </p>
+        <h3>3D CNN：慢融合</h3>
+        <p>
+            介于两者之间的做法叫慢融合 Slow Fusion，也就是 3D 卷积神经网络 3D CNN（Ji 等人，TPAMI 2010；Karpathy 等人，CVPR 2014）。思路是用 3D 版本的卷积和池化，在网络各层里逐步融合时间信息，空间和时间维都慢慢缩小。网络每一层的特征是一个 4D 张量 $D \times T \times H \times W$。
+        </p>
+        <h3>3D 卷积怎么算</h3>
+        <p>
+            先回顾 2D 卷积 Convolution（<a href="05_卷积神经网络.html">第 5 讲</a>）：输入一张 $32 \times 32 \times 3$ 的图像，一个 $5 \times 5 \times 3$ 的卷积核 Filter 在空间上滑动，深度方向一直贯穿全部通道；每个位置做一次点积得到一个数，滑完所有空间位置后得到一张 $28 \times 28 \times 1$ 的激活图 Activation Map。
+        </p>
+        <p>
+            3D 卷积多一个维度。输入是 $C \times T \times H \times W$。幻灯片只能画出三维，所以画的是 $T \times H \times W$ 的立方体，通道维 C 没画出来：可以想成立方体每个格点上都有 C 个特征。一个比如 $6 \times 6 \times 6$ 的 3D 卷积核在这个 $T \times H \times W$ 的立方体里滑动，同时覆盖空间和时间，深度方向仍然贯穿全部通道。其余部分和 2D 卷积相同。幻灯片的示意网络依次是 $6 \times 6 \times 6$、$5 \times 5 \times 5$、$4 \times 4 \times 4$ 的 3D 卷积，展平后接全连接层输出类别分数。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 三种融合方式对比与时间平移不变性</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=1306s" target="_blank">0:21:46</a>–0:32:01 · Fusion comparison examples / Advantages of 3D CNNs / Visualizing 3D CNN filters</em></p>
+        <h3>一个玩具例子：特征图尺寸和感受野</h3>
+        <p>
+            为了看清区别，他用三个小网络走了一遍特征图尺寸和感受野 Receptive Field（输出上一个位置能“看到”的输入范围，这里分时间和空间两部分记作 $T \times H \times W$）。实际网络比这大得多。输入都是 $3 \times 20 \times 64 \times 64$（3 通道、20 帧、$64 \times 64$）。
+        </p>
+        <p>晚融合：</p>
+        <table>
+            <thead><tr><th>层</th><th>尺寸 C×T×H×W</th><th>感受野 T×H×W</th></tr></thead>
+            <tbody>
+                <tr><td>Input</td><td>3×20×64×64</td><td></td></tr>
+                <tr><td>Conv2D(3×3, 3→12)</td><td>12×20×64×64</td><td>1×3×3</td></tr>
+                <tr><td>Pool2D(4×4)</td><td>12×20×16×16</td><td>1×6×6</td></tr>
+                <tr><td>Conv2D(3×3, 12→24)</td><td>24×20×16×16</td><td>1×14×14</td></tr>
+                <tr><td>GlobalAvgPool</td><td>24×1×1×1</td><td>20×64×64</td></tr>
+            </tbody>
+        </table>
+        <p>
+            前面每层都不动时间维，一直是 20，只在空间上逐步扩大感受野；最后的全局平均池化同时在时间和空间上池化，时间感受野在最后一层一次性从 1 变成 20。幻灯片的概括是：空间上慢慢建，时间上在末尾一次建完。
+        </p>
+        <p>早融合：</p>
+        <table>
+            <thead><tr><th>层</th><th>尺寸</th><th>感受野 T×H×W</th></tr></thead>
+            <tbody>
+                <tr><td>Input</td><td>3×20×64×64</td><td></td></tr>
+                <tr><td>Conv2D(3×3, 3*20→12)</td><td>12×64×64</td><td>20×3×3</td></tr>
+                <tr><td>Pool2D(4×4)</td><td>12×16×16</td><td>20×6×6</td></tr>
+                <tr><td>Conv2D(3×3, 12→24)</td><td>24×16×16</td><td>20×14×14</td></tr>
+                <tr><td>GlobalAvgPool</td><td>24×1×1</td><td>20×64×64</td></tr>
+            </tbody>
+        </table>
+        <p>
+            第一层把 $3 \times 20$ 全部当成通道映射到 12，时间感受野在第一层就从 1 变成 20；之后空间感受野和晚融合一样逐步扩大，最后的全局平均池化只在空间上池化。空间上慢慢建，时间上在开头一次建完。
+        </p>
+        <p>3D CNN：</p>
+        <table>
+            <thead><tr><th>层</th><th>尺寸 C×T×H×W</th><th>感受野 T×H×W</th></tr></thead>
+            <tbody>
+                <tr><td>Input</td><td>3×20×64×64</td><td></td></tr>
+                <tr><td>Conv3D(3×3×3, 3→12)</td><td>12×20×64×64</td><td>3×3×3</td></tr>
+                <tr><td>Pool3D(4×4×4)</td><td>12×5×16×16</td><td>6×6×6</td></tr>
+                <tr><td>Conv3D(3×3×3, 12→24)</td><td>24×5×16×16</td><td>14×14×14</td></tr>
+                <tr><td>GlobalAvgPool</td><td>24×1×1</td><td>20×64×64</td></tr>
+            </tbody>
+        </table>
+        <p>
+            第一层把通道从 3 变成 12，时间维保持 20，但时间和空间感受野都长了一点；$4 \times 4 \times 4$ 池化把时间从 20 压到 5；第二个 3D 卷积继续在时空两方向扩大感受野，最后对 $5 \times 16 \times 16$ 做全局平均池化（Ruohan 口头说成 4，幻灯片上是 5）。空间和时间都慢慢建，所以叫慢融合。
+        </p>
+        <h3>早融合的 2D 卷积和 3D 卷积差在哪</h3>
+        <p>
+            早融合和 3D CNN 都在网络里建立时间感受野，那区别是什么？幻灯片设输入 $C_{in} \times T \times H \times W$，$T = 16$、$H = W = 224$。
+        </p>
+        <p>
+            早融合的 2D 卷积权重是 $C_{out} \times C_{in} \times T \times 3 \times 3$：空间上是局部的 $3 \times 3$，时间上一下覆盖全部 16 帧，只在 x、y 两个方向滑动，输出 $C_{out} \times H \times W$。他让大家想想这有什么问题。答案是没有时间平移不变性 Temporal Shift-Invariance。假设视频里出现颜色从蓝变橙的变化，一次发生在第 4 帧，一次发生在第 15 帧，是同一种变化；但卷积核在时间上是铺满的，要识别不同时刻发生的同一种变化，就得分别学不同的卷积核。
+        </p>
+        <p>
+            这和图像分类里的空间不变性是一回事：猫在左上角还是右下角，我们希望共享同一组卷积核都能认出来。视频里，希望同一种运动模式无论发生在哪个时刻都能被认出。3D 卷积的权重是 $C_{out} \times C_{in} \times 3 \times 3 \times 3$，时间方向只覆盖 3 帧的局部窗口，并且在时间维上也滑动，输出是 $C_{out} \times T \times H \times W$ 的 3D 网格。因为每个卷积核都在时间上滑动，蓝变橙在任何时刻都能被同一个核认出，不必为不同时刻单独学核，表示效率更高。
+        </p>
+        <h3>可视化 3D 卷积核</h3>
+        <p>
+            上一讲讲过可视化 2D CNN 学到的卷积核。3D CNN 第一层卷积核形状是 $3\,(\text{RGB}) \times 4\,(\text{帧}) \times 5 \times 5\,(\text{空间})$，在时间上也有长度，所以可以当作小视频播放。有些核和图像分类器的核类似，是颜色模式和不同方向的边缘，不学运动；另一些学到了时间上的变化，比如从一个角移到另一个角、从一种边缘模式变成另一种，也就是不同方向的运动。
+        </p>
+        <p>
+            有学生问 3D 卷积和慢融合是不是一回事。他的回答：从卷积运算上说，3D 卷积多了时间维，和 2D 卷积是不同的运算；实际用 3D 卷积搭网络时，效果就是在空间和时间上逐步建立感受野，也就是慢融合。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. Sports-1M 数据集与 C3D</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=1921s" target="_blank">0:32:01</a>–0:40:21 · Sports-1M dataset / Technical challenges of big data / C3D network architecture / Computational costs</em></p>
+        <h3>Sports-1M</h3>
+        <p>
+            像 ImageNet 之于图像，视频也需要大数据集。Sports-1M（Karpathy 等人，CVPR 2014）有 100 万个 YouTube 视频，标注了 487 种运动类别，类别很细，比如马拉松和超级马拉松都是单独的类，Ruohan 说他自己也分不清两者的区别。
+        </p>
+        <p>前面几种模型在 Sports-1M 上的 Top-5 准确率：</p>
+        <table>
+            <thead><tr><th>模型</th><th>Top-5 准确率 (%)</th></tr></thead>
+            <tbody>
+                <tr><td>Single Frame</td><td>77.7</td></tr>
+                <tr><td>Early Fusion</td><td>76.8</td></tr>
+                <tr><td>Late Fusion</td><td>78.7</td></tr>
+                <tr><td>3D CNN</td><td>80.2</td></tr>
+                <tr><td>C3D</td><td>84.4</td></tr>
+            </tbody>
+        </table>
+        <p>
+            让人意外的是单帧模型已经有 77.7；早融合反而略差，晚融合略好，2014 年的 3D CNN 提高了 2 到 3 个百分点。幻灯片的结论是：单帧模型效果好，永远先试它；3D CNN 自 2014 年以来进步很多，后面会看到数字好得多。
+        </p>
+        <p>
+            有学生问单帧模型训练和测试时具体怎么做。他的回答：训练和测试都把视频帧当图像，训练一个图像分类器；训练时用的是视频里的很多帧，不是每个视频只取一帧。
+        </p>
+        <h3>大视频数据集的麻烦</h3>
+        <p>
+            视频太大，数据集没法像 ImageNet 那样打包让大家从一个数据库下载。Sports-1M 发布时是一份 YouTube 链接列表。上传者会修改或删除视频，原来的 100 万个视频现在可能有一半已经找不到了，所以这个数据集不太稳定。
+        </p>
+        <h3>C3D：3D CNN 里的 VGG</h3>
+        <p>
+            C3D（Tran 等人，“Learning Spatiotemporal Features with 3D Convolutional Networks”，ICCV 2015）是早期流行的 3D CNN。结构和 VGG 很像，只是换成 3D：全部用 $3 \times 3 \times 3$ 卷积和 $2 \times 2 \times 2$ 池化，只有 Pool1 是 $1 \times 2 \times 2$（第一次池化不压时间）。所以被称为 3D CNN 里的 VGG。
+        </p>
+        <table>
+            <thead><tr><th>层</th><th>输出尺寸</th><th>计算量（GFLOP）</th></tr></thead>
+            <tbody>
+                <tr><td>Input</td><td>3×16×112×112</td><td></td></tr>
+                <tr><td>Conv1 (3×3×3)</td><td>64×16×112×112</td><td>1.04</td></tr>
+                <tr><td>Pool1 (1×2×2)</td><td>64×16×56×56</td><td></td></tr>
+                <tr><td>Conv2 (3×3×3)</td><td>128×16×56×56</td><td>11.10</td></tr>
+                <tr><td>Pool2 (2×2×2)</td><td>128×8×28×28</td><td></td></tr>
+                <tr><td>Conv3a (3×3×3)</td><td>256×8×28×28</td><td>5.55</td></tr>
+                <tr><td>Conv3b (3×3×3)</td><td>256×8×28×28</td><td>11.10</td></tr>
+                <tr><td>Pool3 (2×2×2)</td><td>256×4×14×14</td><td></td></tr>
+                <tr><td>Conv4a (3×3×3)</td><td>512×4×14×14</td><td>2.77</td></tr>
+                <tr><td>Conv4b (3×3×3)</td><td>512×4×14×14</td><td>5.55</td></tr>
+                <tr><td>Pool4 (2×2×2)</td><td>512×2×7×7</td><td></td></tr>
+                <tr><td>Conv5a (3×3×3)</td><td>512×2×7×7</td><td>0.69</td></tr>
+                <tr><td>Conv5b (3×3×3)</td><td>512×2×7×7</td><td>0.69</td></tr>
+                <tr><td>Pool5</td><td>512×1×3×3</td><td></td></tr>
+                <tr><td>FC6 / FC7 / FC8</td><td>FC8 输出 C 类</td><td>0.51 / 0.45 / 0.05</td></tr>
+            </tbody>
+        </table>
+        <p>
+            （幻灯片表头写的是 MFLOPs，但各层数字加起来是 39.5，与下面的总量 39.5 GFLOP 对得上，所以这里按 GFLOP 记。）
+        </p>
+        <p>
+            2014 年前后很少有人能拿到大量 GPU。C3D 是在 Facebook 训练的，他们在 Sports-1M 上训好后公开了预训练权重。很多自己训不起视频模型的人就把它当特征提取器：输入视频抽出特征，再在上面训一个线性分类器。C3D 因此流行起来。
+        </p>
+        <p>
+            有学生问提特征时输入多少帧。他的回答：这里讲的模型都假设输入是预先定好长度的片段，比如 16 帧或 32 帧，一个模型始终吃这个长度；片段级预测怎样汇总成视频级，是另外的技术，此处只讲片段级特征提取。
+        </p>
+        <h3>计算代价</h3>
+        <p>
+            C3D 的缺点是计算量大，它是用蛮力把 VGG 从 2D 搬到 3D。GFLOP 指一次前向传播需要多少十亿次浮点运算，用来衡量网络是否高效：
+        </p>
+        <ul>
+            <li>AlexNet：0.7 GFLOP；</li>
+            <li>VGG-16：13.6 GFLOP；</li>
+            <li>C3D：39.5 GFLOP，是 VGG 的 2.9 倍。</li>
+        </ul>
+        <p>
+            效果上，C3D 在 Sports-1M 上比 2014 年的 3D CNN 又高了大约 4 个点（84.4 对 80.2）。2D 图像分类里的那些技巧，比如 ResNet 的残差连接 Residual Connection，也都可以加进 3D CNN，后来有大量工作改进视频网络结构。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 光流与双流网络</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=2421s" target="_blank">0:40:21</a>–0:45:21 · Optical flow for motion / Two-stream networks</em></p>
+        <h3>只看运动也能认出动作</h3>
+        <p>
+            3D CNN 把空间和时间同等对待。Ruohan 问：空间信息和时间信息差别很大，是否应该分开处理，显式地建模时间上的东西，也就是运动？他放了一段只有十几个光点的视频（Johansson 1973 年的生物运动知觉实验），让大家猜在做什么，有学生答“坐下”。画面里没有任何外观信息，只有几个点的运动，人就能认出一个人或两个人在做什么动作。所以外观和运动或许应该用不同的网络处理，这就是 2014 年双流网络的动机。
+        </p>
+        <h3>光流</h3>
+        <p>
+            显式度量运动的一种方式是光流 Optical Flow：对相邻两帧，估计第一帧里每个像素在第二帧里移动到了哪里，也就是每个点的速度。光流给出帧 $I_t$ 和 $I_{t+1}$ 之间的位移场 F：
+        </p>
+        $$F(x, y) = (dx, dy), \qquad I_{t+1}(x + dx,\ y + dy) = I_t(x, y)$$
+        <p>
+            怎样从一对帧算出光流有很多论文，各自做不同假设，比如假设物体移动时亮度保持不变。算出来以后，光流就刻画了相邻两帧的低层运动。它有两个分量，可以分开可视化：水平流 $dx$ 和垂直流 $dy$，分别显示水平方向和垂直方向的局部运动。
+        </p>
+        <h3>双流网络</h3>
+        <p>
+            Simonyan 和 Zisserman 的双流网络（“Two-stream convolutional networks for action recognition in videos”，NeurIPS 2014）有两路：
+        </p>
+        <ul>
+            <li>空间流 Spatial Stream：输入单张图像 $3 \times H \times W$，就是一个单帧模型，根据外观分类；</li>
+            <li>时间流 Temporal Stream：每两张相邻帧算一张光流，水平和垂直分量分开，堆叠成 $[2(T-1)] \times H \times W$ 的输入，用早融合的方式，第一层 2D 卷积处理所有光流图。</li>
+        </ul>
+        <p>
+            两路各自给出预测，最后把两路的预测结果合起来得到最终分类。在 UCF-101（101 个动作类别）上的准确率：
+        </p>
+        <table>
+            <thead><tr><th>模型</th><th>UCF-101 准确率 (%)</th></tr></thead>
+            <tbody>
+                <tr><td>3D CNN</td><td>65.4</td></tr>
+                <tr><td>Spatial only（只用外观流）</td><td>73.0</td></tr>
+                <tr><td>Temporal only（只用运动流）</td><td>83.7</td></tr>
+                <tr><td>Two-stream（平均融合）</td><td>86.9</td></tr>
+                <tr><td>Two-stream（SVM 融合）</td><td>88.0</td></tr>
+            </tbody>
+        </table>
+        <p>
+            只用运动流的效果好得出奇，比只用外观流高出 10 个点以上。Ruohan 的猜想是运动流更不容易过拟合 Overfitting（在训练集上表现好、在新数据上表现差）：外观里有大量背景信息，对动作分类不一定重要；运动流里装的是动作本身的移动这类关键信息。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 长时程结构：CNN 加 RNN 与循环卷积网络</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=2721s" target="_blank">0:45:21</a>–0:51:42 · Long-term temporal structure / Recurrent CNNs / Recurrent convolution implementation</em></p>
+        <h3>CNN 提特征，RNN 建模长时程</h3>
+        <p>
+            到这里，所有时间方向的 CNN 都只建模很短片段（大约 2 到 5 秒）里相邻帧之间的局部运动。可视频里第一个事件和第二个事件可能隔得很远，需要建模长时程的时间结构，才能把时间上相距较远的东西联系起来。
+        </p>
+        <p>
+            处理序列的工具在 <a href="07_循环神经网络.html">第 7 讲</a>学过：循环神经网络 RNN（Recurrent Neural Network，每一步读入一个输入并更新隐藏状态的网络）和 LSTM。做法是：先用 CNN（单帧的 2D CNN 或片段级的 3D CNN 都行）给每个时间点抽一个特征向量，再把这串局部特征送进 RNN 或 LSTM。
+        </p>
+        <ul>
+            <li>多对一 Many to One：只在视频最后一步输出一个结果，做整段视频的分类；</li>
+            <li>多对多 Many to Many：每一帧输出一个结果，用于需要逐帧预测的任务。</li>
+        </ul>
+        <p>
+            这个想法 2011 年就有人提出（Baccouche 等人，“Sequential Deep Learning for Human Action Recognition”），比 2012 年的 AlexNet 还早，Ruohan 说那是超前于时代的工作；2015 年 Donahue 等人的 LRCN（“Long-term recurrent convolutional networks for visual recognition and description”，CVPR 2015）让它流行起来。
+        </p>
+        <p>
+            训练时，CNN 部分加 RNN 部分是个很大的网络，很难端到端训练。常见做法是不往 CNN 里反向传播以节省显存：先在片段或图像分类上预训练 CNN，把它当固定的特征提取器，只训练 RNN。
+        </p>
+        <h3>能不能把两种方式合起来</h3>
+        <p>
+            幻灯片对比了两者：在 CNN 内部，每个值是一个固定时间窗口的函数，只能建模局部时间结构；在 RNN 内部，每个向量是之前所有向量的函数，能建模全局时间结构。能不能合并？
+        </p>
+        <p>
+            回忆多层 RNN：每个时间步、每一层的隐藏状态依赖两个输入，一是同一层上一个时间步的隐藏状态，二是同一时间步上一层的输出。视频可以用类似的结构，这就是循环卷积网络 Recurrent Convolutional Network（Ballas 等人，“Delving Deeper into Convolutional Networks for Learning Video Representations”，ICLR 2016）。
+        </p>
+        <p>
+            整个网络用的都是 2D 特征图 $C \times H \times W$，构成一个“层 × 时间”的网格。第 L 层、第 t 步的特征图依赖：同一层上一时间步的特征图，和上一层同一时间步的特征图。每层用不同的权重，同一层在不同时间步之间共享权重。
+        </p>
+        <p>
+            普通 RNN 的递推是“新状态 = 带参数 W 的某个函数（旧状态，当前输入）”，香草 RNN 写成：
+        </p>
+        $$h_{t+1} = \tanh(W_h h_t + W_x x)$$
+        <p>
+            循环卷积网络把其中所有矩阵乘法换成 2D 卷积。记 $*$ 为 2D 卷积：
+        </p>
+        $$h^{L}_{t} = \tanh\left(W_h * h^{L}_{t-1} + W_x * h^{L-1}_{t}\right)$$
+        <p>
+            同一层上一步的特征图过一个 2D 卷积，上一层这一步的特征图过另一个 2D 卷积，两者相加，再过 tanh，得到当前层当前步的特征图。同样的替换也能用在 GRU、LSTM 这些 RNN 变体上。
+        </p>
+        <p>
+            三者的时间范围对比：CNN 时间范围有限（卷积式）；RNN 时间范围无限（全连接式）；循环 CNN 时间范围无限，而且是卷积式的，把空间融合和时间融合都放进了一个网络。但这个模型用得不多，因为 RNN 的老问题：处理长序列很慢，没法并行；视频又往往很长，需要并行处理。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 时空自注意力、I3D 与视频 Transformer</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=3102s" target="_blank">0:51:42</a>–0:59:09 · Attention-based models / Inflated 3D models (I3D) / Transfer learning for video / Advanced video architectures</em></p>
+        <h3>回顾自注意力</h3>
+        <p>
+            <a href="08_注意力与Transformer.html">第 8 讲</a>的自注意力 Self-Attention：输入 N 个向量 $x$（形状 $N \times D$），每个输入算出查询 Query、键 Key、值 Value 三个向量，用查询和所有键的相似度决定从哪些值里取信息：
+        </p>
+        $$q = xW_q,\quad k = xW_k,\quad v = xW_v$$
+        $$e_{i,j} = \frac{q_j \cdot k_i}{\sqrt{D}},\qquad a = \operatorname{softmax}(e),\qquad y_j = \sum_i a_{i,j} v_i$$
+        <p>
+            它可以作为独立的层来处理图像，也可以处理视频。最大的好处是高度可并行：所有输入之间的对齐分数和注意力权重可以完全并行地算出来。
+        </p>
+        <h3>Nonlocal Block：把自注意力搬到 3D</h3>
+        <p>
+            Wang 等人的 Non-local Neural Networks（CVPR 2018）把自注意力直接搬到时空特征上，提出了 Nonlocal Block：
+        </p>
+        <ol>
+            <li>输入是 3D CNN 输出的特征 $C \times T \times H \times W$；</li>
+            <li>用三个 $1 \times 1 \times 1$ 的 3D 卷积分别把通道数从 C 变成 C'，得到查询、键、值，各为 $C' \times T \times H \times W$；</li>
+            <li>把查询转置后与键相乘，过 softmax，得到 $(THW) \times (THW)$ 的注意力权重，也就是每一对时空位置之间都有一个权重；</li>
+            <li>用注意力权重对值加权，得到 $C' \times T \times H \times W$；</li>
+            <li>再用一个 $1 \times 1 \times 1$ 卷积把通道从 C' 映射回 C，与输入相加，构成残差连接。</li>
+        </ol>
+        <p>
+            整体和自注意力的运算一样，只是挪到了 3D。这个块可以独立使用，插进已有的 3D CNN：3D CNN、Nonlocal Block、3D CNN、Nonlocal Block……最后接分类。每个 Nonlocal Block 都能在整个时空范围里融合信息。
+        </p>
+        <h3>I3D：把 2D 网络膨胀成 3D</h3>
+        <p>
+            剩下的问题是：里面的 3D CNN 用什么结构？图像结构已经有大量研究，能不能直接拿来用于视频？Carreira 和 Zisserman 的 I3D（“Quo Vadis, Action Recognition? A New Model and the Kinetics Dataset”，CVPR 2017）的想法是膨胀 Inflation：拿一个 2D CNN 结构，把每个 $K_h \times K_w$ 的 2D 卷积或池化层换成 $K_t \times K_h \times K_w$ 的 3D 版本。他们用的是 Inception 块：原来的 $1 \times 1$、$3 \times 3$、$5 \times 5$ 卷积和 $3 \times 3$ 最大池化，膨胀后变成 $1 \times 1 \times 1$、$3 \times 3 \times 3$、$5 \times 5 \times 5$ 卷积和 $3 \times 3 \times 3$ 最大池化，再拼接。这样在 2D 上好用的结构就能迁移到 3D。
+        </p>
+        <p>
+            再进一步，权重也能迁移。图像数据集上已经预训练了大量模型，这些权重里有有用的先验。初始化方法：2D 卷积核形状是 $C_{in} \times K_h \times K_w$，把它沿时间方向复制 $K_t$ 份，再除以 $K_t$，得到 $C_{in} \times K_t \times K_h \times K_w$ 的 3D 卷积核：
+        </p>
+        $$W^{3D}_{:,\,\tau,\,:,\,:} = \frac{1}{K_t} W^{2D}, \qquad \tau = 1, \dots, K_t$$
+        <p>
+            如果输入是把一张图复制 $K_t$ 次得到的“静止视频”（$3 \times K_t \times H \times W$），那么 3D 卷积的输出 $\sum_{\tau} \frac{1}{K_t} W^{2D} * x = W^{2D} * x$，和 2D 卷积作用在单张图上的输出完全一样。用这种初始化之后，再在视频数据上微调 Fine-tune。
+        </p>
+        <p>Kinetics-400 上的 Top-1 准确率（都用 Inception 结构）：</p>
+        <table>
+            <thead><tr><th>模型</th><th>从头训练</th><th>ImageNet 预训练</th></tr></thead>
+            <tbody>
+                <tr><td>Per-frame CNN</td><td>57.9</td><td>62.2</td></tr>
+                <tr><td>CNN+LSTM</td><td>53.9</td><td>63.3</td></tr>
+                <tr><td>Two-stream CNN</td><td>62.8</td><td>65.6</td></tr>
+                <tr><td>Inflated CNN</td><td>68.4</td><td>71.1</td></tr>
+                <tr><td>Two-stream inflated CNN</td><td>71.6</td><td>74.2</td></tr>
+            </tbody>
+        </table>
+        <p>
+            膨胀后的网络比双流 CNN 好；不光外观流，运动流也可以膨胀，两路都膨胀的双流版本又有提升；用 ImageNet 预训练权重初始化在每一行都比从头训练高。
+        </p>
+        <h3>视频 Transformer</h3>
+        <p>
+            I3D 只是一个例子，之后还有很多视频 Transformer。幻灯片列了几类：
+        </p>
+        <ul>
+            <li>分解注意力 Factorized Attention，分别在空间和时间上做注意力：TimeSformer（Bertasius 等人，“Is Space-Time Attention All You Need for Video Understanding?”，ICML 2021）、ViViT（Arnab 等人，ICCV 2021）、Video Transformer Network（Neimark 等人，ICCV 2021）；</li>
+            <li>用池化模块减少 token 数以提高效率：Multiscale Vision Transformers（Fan 等人，ICCV 2021）、MViTv2（Li 等人，CVPR 2022）；</li>
+            <li>视频掩码自编码器 Video Masked Autoencoder，用于高效、可扩展的预训练：VideoMAE（Tong 等人，NeurIPS 2022）、Feichtenhofer 等人的 Masked Autoencoders as Spatiotemporal Learners（NeurIPS 2022）、VideoMAE V2（Wang 等人，CVPR 2023）。</li>
+        </ul>
+        <p>
+            课上没有展开，有兴趣可以看论文。Kinetics-400 Top-1 准确率的进展：Per-frame CNN 62.2，CNN+LSTM 63.3，Two-stream CNN 65.6，I3D 71.1，两路膨胀 74.2，SlowFast 16×8+NL 79.8，MViTv2-L 86.1，VideoMAE V2-g 到了 90。掩码自编码器 MAE 的思路在 <a href="12_自监督学习.html">第 12 讲自监督学习</a>里讲。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 可视化视频模型与动作定位</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=3549s" target="_blank">0:59:09</a>–1:02:20 · Visualizing action models / Action localization tasks</em></p>
+        <h3>可视化</h3>
+        <p>
+            和上一讲可视化图像模型一样，视频模型也能用梯度上升 Gradient Ascent 找出最能激活某个类别的输入。以双流网络为例：随机初始化一张外观图像和一张光流图像，前向算出某个类（比如“举重”）的分数，再对输入反向传播，用梯度上升让分数最大（Feichtenhofer 等人，CVPR 2018；IJCV 2019）。
+        </p>
+        <p>
+            对光流那一路加了一个约束项，鼓励光流在空间上平滑，防止它变化太快；调这个惩罚的强度，可以分别挑出“慢”运动和“快”运动。左边外观流的优化图不太容易看出是什么；运动流里，慢运动那张像杠铃在抖（bar shaking），快运动那张像把杠铃推过头顶（push overhead），动作是举重。幻灯片上的另一个例子是画眼妆 Apply Eye Makeup。这说明视频模型确实学到了一些关于运动的东西。
+        </p>
+        <h3>时间动作定位与时空检测</h3>
+        <p>
+            前面讲的都是给短片段分类。另一类任务是时间动作定位 Temporal Action Localization：给一段很长、没有剪辑过的视频，找出不同动作分别对应哪些帧，比如这段是在跑，那段是在跳。做法可以借鉴 <a href="09_检测分割与可视化.html">第 9 讲</a>的 Faster R-CNN：先生成时间上的候选区间 Temporal Proposals，再给候选分类（Chao 等人，CVPR 2018）。
+        </p>
+        <p>
+            两者一起做就是时空检测 Spatio-Temporal Detection：在长视频里，既在空间上框出所有人，又在时间上定位，并给每个人正在做的动作分类。幻灯片的例子来自 AVA 数据集（Gu 等人，CVPR 2018）。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 视频里的声音：音视频多模态</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=3740s" target="_blank">1:02:20</a>–1:05:26 · Multimodal video analysis / Audio-guided separation</em></p>
+        <p>
+            到此为止讲的都是时间流：3D CNN、双流网络、时空自注意力。最后十分钟，Ruohan 回到开头那段客厅视频，这次放出了声音：婴儿在笑，狗在叫。视频里还有一个一直没讲的维度，就是声音和其他模态。少了它，很多乐趣和情绪就感受不到；把声音和画面结合，能做的事情也更多。
+        </p>
+        <h3>视觉引导的声源分离</h3>
+        <p>
+            他自己做过的一个任务是视觉引导的声源分离 Visually-Guided Audio Source Separation：视频里可能有多个物体或多个人同时发声，录到的是混合声音，目标是借助画面信息把混合声音分离成各个声源。幻灯片列出了 2018 年以来的一串相关工作（Gao 等人 ECCV 2018、Owens 与 Efros ECCV 2018、Ephrat 等人 SIGGRAPH 2018、Zhao 等人 ECCV 2018 等）。
+        </p>
+        <ul>
+            <li>语音：VisualVoice（Gao 等人，CVPR 2021）。课上播了两个人说话的混合语音，再分别播放分离出的左边说话人和右边说话人的声音。</li>
+            <li>乐器：Co-Separating Sounds of Visual Objects（Gao 与 Grauman，ICCV 2019），在 10 万段无标注的多声源视频片段上训练，然后为新视频分离音频；通过分析画面中以物体为中心的信息和运动，结合音频流，把不同乐器的声音分开。</li>
+        </ul>
+        <h3>音视频联合的视频理解</h3>
+        <p>
+            即便任务只是视频分类，音频也是有用的线索。有工作用基于 Transformer 的模型，把图像或视频切成 patch，同时把音频的频谱图 Spectrogram 也切成 patch，一起送进 Transformer 分类（Nagrani 等人，“Attention Bottlenecks for Multimodal Fusion”，NeurIPS 2021）；也有用掩码自编码器的方式，同时预测被遮住的图像 patch 和频谱图 patch（Georgescu 等人，Audio-Visual Masked Autoencoders，ICCV 2023）。幻灯片还列了 Zhang 等人的 Audio-Adaptive Activity Recognition Across Video Domains（CVPR 2022）。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 高效视频理解、第一视角视频与视频大模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=3926s" target="_blank">1:05:26</a>–1:08:44 · Efficient video understanding / Future directions: Egocentric / Future directions: Video LLMs</em></p>
+        <h3>高效视频理解</h3>
+        <p>
+            这一讲主要讲片段级分类；对长视频，要把很多片段的结果汇总成视频级预测，这是长视频的动作识别。视频很长，没法把每个片段都过一遍，于是有高效视频理解 Efficient Video Understanding 这个方向。几条思路：
+        </p>
+        <ul>
+            <li>让单个片段的处理更便宜：X3D（Feichtenhofer，CVPR 2020）设计更高效的 3D CNN；幻灯片还列了 MoViNets（Kondratyuk 等人，CVPR 2021）。</li>
+            <li>只处理重要片段：SCSampler（Korbar 等人，ICCV 2019）先预测哪些片段最有用，只在这些片段上跑片段分类器再合并预测。</li>
+            <li>策略学习 Policy Learning 选模态：AdaMML（ICCV 2021）学一个策略，决定用视频还是音频或别的传感器数据、用多少个视频片段。</li>
+            <li>音频预览：Listen to Look（Gao 等人，CVPR 2020）用便宜的音频当预览机制，先预测重要时刻在哪里，再以此为线索去处理那些片段并平均结果。幻灯片的结构图里，每一步由图像特征和音频特征经融合层送入 LSTM，决定下一步去查询哪一帧和哪段音频。</li>
+        </ul>
+        <h3>第一视角视频</h3>
+        <p>
+            人们开始用 VR、AR 和智能眼镜，未来会有大量第一视角 Egocentric 的视频流，而且不止视频，还有麦克风阵列录下的多通道音频。如何从这种多模态第一视角数据里理解视频是热门课题。他们做过的一个例子是用视频流、多通道音频和视觉信息预测谁在对谁说话、谁在听谁说话（Jia 等人，“The Audio-Visual Conversational Graph: From an Egocentric-Exocentric Perspective”，CVPR 2024）。设想将来戴着智能眼镜，它可以帮你理解各种社交互动。
+        </p>
+        <h3>视频大模型</h3>
+        <p>
+            最后一页是视频和大语言模型 LLM 的结合，目标是视频基础模型。做法是把视频 token 化，映射到 LLM 的嵌入空间，然后用文字提问（比如这个人在做什么），模型输出描述视频的文本。幻灯片列了 Video-LLaVA（Lin 等人，EMNLP 2024）、Video-ChatGPT（Maaz 等人，ACL 2024）和 VideoLLaMA 3（Zhang 等人，arXiv 2025）。视觉与语言的结合在第 16 讲展开。
+        </p>
+    </section>
+
+    <section>
+        <h2>课上的原话</h2>
+        <ul>
+            <li>“Basically, video is just like this 2D image plus time.”（视频基本上就是 2D 图像加上时间。）· <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=148s" target="_blank">0:02:28</a></li>
+            <li>“So if you are trying to design some video classifier, you should always run this first because that's simple things to try.”（如果你要设计视频分类器，应该永远先跑这个（单帧模型），因为它试起来简单。）· <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=581s" target="_blank">0:09:41</a></li>
+            <li>“So there is no temporal shift invariance.”（所以没有时间平移不变性。）· <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=1669s" target="_blank">0:27:49</a></li>
+            <li>“So the transition from blue to orange can now be recognized at every moment in time.”（这样，从蓝到橙的变化在任何时刻都能被识别出来。）· <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=1764s" target="_blank">0:29:24</a></li>
+            <li>“So it's 2.9 times VGG, so it's not very efficient.”（它是 VGG 的 2.9 倍，所以效率不高。）· <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=2301s" target="_blank">0:38:21</a></li>
+            <li>“Just a few points. Just motion.”（只有几个点，只有运动。）· <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=2445s" target="_blank">0:40:45</a></li>
+            <li>“And one very large advantage of self-attention is highly parallelizable.”（自注意力很大的一个优点是高度可并行。）· <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=3123s" target="_blank">0:52:03</a></li>
+            <li>“If we miss that ingredient, you lose a lot of fun.”（少了声音这一样，就少了很多乐趣。）· <a href="https://www.youtube.com/watch?v=wElqklprhPE&t=3793s" target="_blank">1:03:13</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS231N · Lecture 10: Video Understanding · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 7 讲：循环神经网络 | Stanford CS231N 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="06_CNN架构与训练技巧.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS231N 目录</a> · 07</span>
+    <span><a href="08_注意力与Transformer.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 7 讲：循环神经网络</h1>
+        <p class="subtitle">从序列建模的几种形式讲到 RNN 的递推公式，手工搭一个检测连续 1 的 RNN，再讲时间反向传播及其截断版、字符级语言模型、可解释的隐藏单元、图像描述等视觉应用，最后讲梯度消失、LSTM 和 Mamba 这类新的状态空间模型</p>
+        <div class="author-meta">
+            主讲：Zane Durante（Stanford 计算机系博士生，本课合讲教师之一）· 2025 年 4 月 22 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=kG2lAPBF7zA" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs231n.stanford.edu/slides/2025/lecture_7.pdf" target="_blank">课程幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            到上一讲为止，课上的网络都是固定大小的输入、固定大小的输出。这一讲处理长度可变的序列：输入或输出是一串东西，比如视频的一串帧、一句话里的一串字符。Zane 讲的是 Transformer 时代之前人们处理序列的主力，循环神经网络 RNN 及其变体，并说明 RNN 的核心思想今天仍在 Mamba 这类状态空间模型里延续。
+        </p>
+        <p>
+            Zane 说，如果一两年前讲这门课，他会更愿意把 RNN 整个砍掉；但最近 RNN 有一点复兴，它有一些 Transformer 没有的优点。下一讲讲注意力和 Transformer。
+        </p>
+        <ol>
+            <li><a href="#t01">上一讲的两处澄清</a> · <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">序列建模的几种形式</a> · <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=289s" target="_blank">0:04:49</a></li>
+            <li><a href="#t03">RNN 的数学形式</a> · <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=448s" target="_blank">0:07:28</a></li>
+            <li><a href="#t04">手工搭一个 RNN：检测连续的 1</a> · <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=842s" target="_blank">0:14:02</a></li>
+            <li><a href="#t05">RNN 的计算图</a> · <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=1454s" target="_blank">0:24:14</a></li>
+            <li><a href="#t06">时间反向传播与截断</a> · <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=1667s" target="_blank">0:27:47</a></li>
+            <li><a href="#t07">字符级语言模型</a> · <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=2194s" target="_blank">0:36:34</a></li>
+            <li><a href="#t08">解读 RNN 的隐藏状态</a> · <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=2737s" target="_blank">0:45:37</a></li>
+            <li><a href="#t09">RNN 的优缺点</a> · <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=2903s" target="_blank">0:48:23</a></li>
+            <li><a href="#t10">计算机视觉里的应用</a> · <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=3056s" target="_blank">0:50:56</a></li>
+            <li><a href="#t11">多层 RNN</a> · <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=3407s" target="_blank">0:56:47</a></li>
+            <li><a href="#t12">梯度消失、LSTM 与现代 RNN</a> · <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=3505s" target="_blank">0:58:25</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 上一讲的两处澄清</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=5s" target="_blank">0:00:05</a>–0:04:49</em></p>
+        <h3>Dropout 在测试时怎么缩放</h3>
+        <p>
+            上一讲讲 Dropout 时，口头说法和幻灯片代码对不上（见 <a href="06_CNN架构与训练技巧.html#t03">第 6 讲第 3 节</a>）。Zane 澄清：Dropout 的超参数 $p$ 有的实现指丢弃的比例，有的指保留的比例；多数库里 $p$ 指丢弃的比例。原则是测试时的期望输出要和训练时相同。所以训练时丢掉 25% 的激活，测试时就乘 0.75。上一讲幻灯片上的代码把 $p$ 当成保留一个单元的概率，所以和口头说法不一致。
+        </p>
+        <h3>归一化能不能弥补糟糕的初始化</h3>
+        <p>
+            上一讲有学生问：归一化能否解决权重初始化不当带来的问题？Zane 在 Ed 上写了帖子，附了 Colab 代码。实验设置是一个玩具问题：二维输入，两层带 ReLU 的神经网络，输出点所在的象限（1、2、3、4）。他画了几条训练和测试损失曲线：用 Kaiming 初始化的“好初始化”，标准差太大的“坏初始化”，以及坏初始化加 LayerNorm。
+        </p>
+        <p>
+            结果：
+        </p>
+        <ul>
+            <li>坏初始化加上 LayerNorm，误差大幅下降，确实解决了很多问题；</li>
+            <li>但和好初始化之间仍有差距，归一化没有完全解决，仍存在优化上的问题；</li>
+            <li>归一化不一定总合适。在象限问题里，不需要知道点的精确坐标，LayerNorm 不改变输入所在的象限，所以有帮助。代码里另有一些函数需要知道精确坐标才能输出正确答案，这时 LayerNorm 反而降低性能，因为减均值、除标准差会丢掉输入精确位置的信息。</li>
+        </ul>
+        <p>
+            结论：归一化对这个问题有帮助，但差距仍在，不能只靠归一化绕过初始化问题，而且要看你建模的是什么。
+        </p>
+        <h3>回顾与一个工具</h3>
+        <p>
+            他回顾了训练非循环网络的三块内容：一次性设置（激活函数、预处理、权重初始化、归一化、迁移学习）；训练动态（照看学习过程、参数更新、超参数优化）；评估（验证集表现、测试时增强）。针对后两块，他推荐自己几乎每个项目都用的 Weights &amp; Biases：用不同超参数跑多组实验，按验证集表现可视化。他展示的例子里有一列是 dropout 取值，颜色编码显示较低的 dropout 一般准确率更高。跑的次数多了，就能看出哪些超参数好。类似工具还有 TensorBoard，但他个人更喜欢这个。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 序列建模的几种形式</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=289s" target="_blank">0:04:49</a>–0:07:28</em></p>
+        <p>
+            这一讲的主题是序列建模 sequence modeling：输入从固定大小变成长度可变的序列。他会讲 Transformer 之前人们常用的简单模型，主要是 RNN 及其变体，并用一张幻灯片说明 RNN 和现代状态空间模型（如 Mamba）的联系。他说 RNN 的核心概念今天仍在使用，并且相对 Transformer 有一些优点。
+        </p>
+        <p>
+            幻灯片按输入输出的对应关系列了几种形式：
+        </p>
+        <ul>
+            <li><strong>一对一</strong>：“普通”神经网络 Vanilla Neural Network，一个固定大小的输入对一个固定大小的输出，就是课程到目前为止讲的。</li>
+            <li>一对多：输入固定大小，比如一张图，输出长度可变的序列。例子是图像描述 Image Captioning，输入一张图，输出一串词（或字符，看语言怎么编码）。</li>
+            <li>多对一：输入是序列，输出一个值。例子是动作预测：给一段视频的一串帧，输出一个动作类别，类似图像分类，只是输入从一张图变成多帧。</li>
+            <li>多对多（长度不必相同）：例子是视频描述 Video Captioning，输入可变数量的帧，输出可变长度的描述。</li>
+            <li>多对多（每个输入对应一个输出）：例子是逐帧的视频分类，每一帧都要分类。</li>
+        </ul>
+        <p>
+            讲 RNN 原理时，前半节主要用最后这种：每来一个输入就出一个输出，最直接。其他形式只需做一些小改动就能套用。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. RNN 的数学形式</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=448s" target="_blank">0:07:28</a>–0:14:02</em></p>
+        <h3>隐藏状态与展开图</h3>
+        <p>
+            RNN 有输入序列 $x$ 和输出序列 $y$。让 RNN 成为 RNN 的是它的循环性质：图上通常画一个箭头从模块绕回自己，看到这个箭头就知道是循环层。它的含义是，RNN 有一个内部状态 internal state，通常叫隐藏状态 hidden state，在处理序列的过程中不断更新。每来一个新输入，就根据新输入和上一个隐藏状态算出新的隐藏状态。
+        </p>
+        <p>
+            绕回自己的箭头不太好看出梯度怎么算、运算顺序是什么，所以常画成展开的 RNN unrolled RNN：$x_1, x_2, \dots, x_t$ 依次进入一排 RNN 模块，每个模块输出 $y_1, y_2, \dots, y_t$，并且当前隐藏状态的计算明确依赖当前时间步的输入和前一个 RNN 状态。
+        </p>
+        <h3>递推公式</h3>
+        <p>
+            在每个时间步应用同一个递推公式：
+        </p>
+        $$h_t = f_W(h_{t-1}, x_t)$$
+        <p>
+            $h_t$ 是新状态，$h_{t-1}$ 是旧状态，$x_t$ 是这个时间步的输入向量，$f_W$ 是带参数 $W$ 的某个函数，通常包含一个激活函数。Zane 说这和前面学过的神经网络层很像，权重矩阵相乘再接激活函数，唯一的变化是它成了递推公式：每次算隐藏状态都用同一组 $W$ 和同一个激活函数。
+        </p>
+        <p>
+            输出由另一个函数、另一组参数算出：
+        </p>
+        $$y_t = f_{W_{hy}}(h_t)$$
+        <p>
+            $W_{hy}$ 做两件事：把隐藏状态的维度（可以随便定）转成输出的维度；同时它是一个可学习的矩阵，对隐藏状态做一次变换。
+        </p>
+        <p>
+            有学生问每个时间步是不是共享权重。Zane 说是的，但有两组不同的东西：一组参数和函数负责把旧隐藏状态更新成新隐藏状态，另一组负责把隐藏状态转成输出。幻灯片上强调：每个时间步都用同一个函数和同一组参数。
+        </p>
+        <p>
+            初始隐藏状态记作 $h_0$，原则上可以初始化成任何值，通常是一个学出来的向量。
+        </p>
+        <p>
+            有学生问：之前的输出 $y$ 能影响新的隐藏状态吗？Zane 说在某些形式下可以，最常见的是语言建模或自回归建模（根据前面的值预测下一个值），这时直接把之前的输出当作下一步的输入。另一个问题是第一个时间步的 $h$ 和 $x$ 有什么区别，他的简短回答是两者用不同的权重：$h_0$ 走的是负责更新隐藏状态的那组权重。
+        </p>
+        <h3>Vanilla RNN</h3>
+        <p>
+            人们说 Vanilla RNN 时（幻灯片注：也叫 Elman RNN，以 Jeffrey Elman 命名），状态只有一个隐藏向量 $h$，基本就是指：
+        </p>
+        $$h_t = \tanh(W_{hh}h_{t-1} + W_{xh}x_t)$$
+        $$y_t = W_{hy}h_t$$
+        <p>
+            用双曲正切 tanh 当激活函数的好处是：值域在 $-1$ 到 $1$ 之间，反复做同一个运算值也不会跑出这个范围；它以 0 为中心，能表示正值和负值。有时还会有输出函数 $f_y$，最简单的情况下输出就是一个矩阵乘隐藏状态。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 手工搭一个 RNN：检测连续的 1</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=842s" target="_blank">0:14:02</a>–0:24:14</em></p>
+        <h3>任务</h3>
+        <p>
+            为了把前向传播和每个权重矩阵的作用讲清楚，Zane 不用梯度下降，手工构造一个 RNN。任务是：输入是 0 和 1 组成的序列，每当连续出现两个 1 时输出 1，否则输出 0。这是多对多、每个输入对应一个输出的任务：
+        </p>
+<pre><code>X: 0 1 0 1 1 1 0 1 1
+Y: 0 0 0 0 1 1 0 0 1</code></pre>
+        <h3>隐藏状态里要存什么</h3>
+        <p>
+            他问全班：隐藏状态要记住什么信息？学生答：上一个输入，以及当前的 $x$。于是把隐藏状态设成三维向量：
+        </p>
+        $$h_t = \begin{pmatrix}\text{current}\\ \text{previous}\\ 1\end{pmatrix}$$
+        <p>
+            第一维是当前值（0 或 1），第二维是前一个值，第三维固定为 1，算输出时会用上（他说不要这个 1 大概也能构造出来，加上它是为了课上算起来简单）。$h_0$ 初始化成 $(0,0,1)$，相当于假设之前已经看到两个 0。为了算起来简单，两处激活函数都用 ReLU：
+        </p>
+        $$h_t = \mathrm{ReLU}(W_{hh}h_{t-1} + W_{xh}x_t),\qquad y_t = \mathrm{ReLU}(W_{hy}h_t)$$
+        <p>
+            他说用 tanh 应该也能构造出来，这里只是为了方便。
+        </p>
+        <h3>三个权重矩阵</h3>
+<pre><code>w_xh = np.array([[1], [0], [0]])
+
+w_hh = np.array([[0, 0, 0],
+                 [1, 0, 0],
+                 [0, 0, 1]])
+
+w_yh = np.array([1, 1, -1])
+
+x_seq = [0, 1, 0, 1, 1, 1, 0, 1, 1]
+
+h_t_prev = np.array([[0], [0], [1]])
+
+for t, x in enumerate(x_seq):
+    h_t = relu(w_hh @ h_t_prev + (w_xh @ x))
+    y_t = relu(w_yh @ h_t)
+    h_t_prev = h_t</code></pre>
+        <ul>
+            <li>$W_{xh}$ 是 $3\times1$ 的列向量 $(1,0,0)^\top$：$x=0$ 时得到 $(0,0,0)$，$x=1$ 时得到 $(1,0,0)$。这一项负责把当前值写进第一维。</li>
+            <li>$W_{hh}$ 第一行全 0：乘上一个隐藏状态后第一维是 0，第一维的值完全由右边那项（当前输入）决定。</li>
+            <li>$W_{hh}$ 第二行是 $(1,0,0)$：把上一个隐藏状态的“当前值”搬到这一步的“前一个值”位置。</li>
+            <li>$W_{hh}$ 第三行是 $(0,0,1)$：把那个 1 一直保留下来。</li>
+            <li>$W_{hy}$ 是 $1\times3$ 的 $(1,1,-1)$，和隐藏状态做点积，得到 current + previous − 1，再过 ReLU：</li>
+        </ul>
+        $$y_t = \max(\text{current} + \text{previous} - 1,\ 0)$$
+        <p>
+            验证：两个都是 1 时，$1+1-1=1$，输出 1；两个都是 0 时是 $-1$，ReLU 后为 0；一个 1 一个 0 时是 0。手算几步：$h_0=(0,0,1)$；输入 0 得 $h_1=(0,0,1)$，$y=0$；输入 1 得 $h_2=(1,0,1)$，$y=0$；输入 0 得 $h_3=(0,1,1)$，$y=0$；输入 1 得 $(1,0,1)$，$y=0$；再输入 1 得 $(1,1,1)$，$y=1$。
+        </p>
+        <h3>课上问答</h3>
+        <p>
+            Zane 特地停下来问有没有问题，因为这是整门课里唯一一个把每次矩阵和向量乘法都算出来的例子，后面都是更高层的讲解。
+        </p>
+        <p>
+            有学生问：实际中权重矩阵怎么构造？他说和这门课里一直以来一样，用梯度下降。接下来要讲的就是有多个时间步、每步可能都有损失时怎么做梯度下降。他还说，如果拿这组手工权重去初始化、再训练做别的任务，那就是迁移学习，但实践中大概不会好用，因为这个隐藏状态太小，实际的隐藏状态都大得多，这里只是为了能放进一张幻灯片。
+        </p>
+        <p>
+            有学生请他再讲一遍第二行。他解释：$h_{t-1}$ 是列向量，矩阵乘法时第二行和它做点积，结果的第二个元素等于 $h_{t-1}$ 的第一个元素，这就是把“当前值”挪到“前一个值”。左边一项（乘 $W_{hh}$）负责搬运之前的状态，右边一项（乘 $W_{xh}$）负责当前输入，两项都是隐藏状态大小的向量，相加。他说超出这个玩具例子，一般的 RNN 也是这样：一个矩阵乘当前输入，另一个矩阵乘上一个隐藏状态。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. RNN 的计算图</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=1454s" target="_blank">0:24:14</a>–0:27:47</em></p>
+        <p>
+            把计算图画得更明确：$h_0$ 和 $x_1$ 进 $f_W$ 得到 $h_1$，$h_1$ 和 $x_2$ 进 $f_W$ 得到 $h_2$，一直到 $h_T$。每一步用的都是同一个权重矩阵 $W$，算梯度时要记住这一点。
+        </p>
+        <h3>多对多</h3>
+        <p>
+            每个输入都有输出 $y_t$，通常每个输出都可以算一个损失 $L_t$，衡量这一步的输出对不对。把它们加起来得到整个序列的总损失 $L$。
+        </p>
+        <p>
+            反向传播时，可以对每个时间步分别算 $W$ 的梯度，最后全部加起来。Zane 的讲法是：如果每个时间步用的是不同的 $W$，很容易想象计算图怎么给每个 $W$ 各算一个梯度。计算时可以在脑子里把同一个 $W$ 当成一组不同的 $W$，各算各的梯度；但因为它们其实是同一个矩阵，最后把所有时间步的梯度相加即可。
+        </p>
+        <h3>多对一</h3>
+        <p>
+            只在最后算一个损失。有时只用最后一个隐藏状态算输出，这取决于问题。比如视频分类，用每一步的隐藏状态可能更合理，因为整个视频过程中都有信息，可以对它们做平均池化或最大池化之类的汇总，再算 $y$。
+        </p>
+        <h3>一对多</h3>
+        <p>
+            比如图像描述。这里有一个问题：$f_W$ 有两个权重矩阵，一个要输入向量 $x$，一个要上一步的隐藏状态，那后面的时间步没有 $x$ 时输入什么？可以放 0，也可以把上一步的输出 $y_{t-1}$ 放进去，这就回答了前面“之前的 $y$ 能否影响隐藏状态”的问题。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 时间反向传播与截断</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=1667s" target="_blank">0:27:47</a>–0:36:34</em></p>
+        <h3>时间反向传播</h3>
+        <p>
+            同一个权重矩阵在多个时间步上反复使用，再把各时间步的梯度相加，这叫时间反向传播 Backpropagation Through Time，BPTT。幻灯片的描述：前向走完整个序列算出损失，再反向走完整个序列算梯度。
+        </p>
+        <p>
+            实际中会遇到很现实的问题。Zane 说，训练神经网络时几乎所有问题都出在 GPU 显存不够上（还有训练中出现 NaN 损失）。如果每个时间步都有损失、输入序列又极长，就得把每个时间步的激活和梯度都存在显存里再求和，序列越长占用越大。
+        </p>
+        <h3>截断的时间反向传播</h3>
+        <p>
+            解决办法叫截断的时间反向传播 Truncated BPTT：固定一个时间窗口，把序列切成块，对每块分别前向和反向，不对整个序列一次做完。
+        </p>
+        <p>
+            具体过程：从 $h_0$ 开始，用第 1 步的输入和 $h_0$ 算出 $h_1$，再算输出和损失，一直算到这一块结束。对第一块，就当训练时只看到了这么多。进入下一块时，用上一块最后一步的隐藏状态作为初始隐藏状态，但梯度不再往前传。幻灯片上的说法是：隐藏状态一直向前传下去，反向传播只走较少的若干步。这相当于把计算图分批，每次只看邻近几个时间步的损失，窗口大小是自己定的。序列很长时这是常用的做法。
+        </p>
+        <h3>只有最后一个输出时</h3>
+        <p>
+            如果只有最后一个时间步有输出，每个时间步还是要算梯度，只是不再有那一步自己的损失，要依靠上游梯度 upstream gradient。先根据最后一步输出的损失，算出损失对最后一个隐藏状态的梯度；$W_{hh}$ 描述了上一个隐藏状态如何影响下一个，据此可以算出损失对再前一个隐藏状态的梯度，以及应该怎样改 $W_{hh}$ 来减小损失。就这样沿着隐藏状态一步步把链式法则用下去。
+        </p>
+        <h3>课上问答</h3>
+        <p>
+            有学生问：如果每个时间步用不同的 $W$ 会怎样？Zane 说那就不再是递推关系了，相当于每个时间步一层，彼此独立，性能大概会更差。对于不是序列的问题（只是一组要分类的东西）这样可能行，但需要事先知道序列长度；对于长度可变的序列，相当于每个时间步训练一个神经网络，不是正确的建模方式。
+        </p>
+        <p>
+            有学生问截断时分块怎么处理。他解释：在一块内部，能算出损失对最后一个隐藏状态的梯度，就能顺着 $W$ 一路往回算到这块开头。这一块需要保存下来的只有一个量：损失对这块第一个隐藏状态的梯度。参数的梯度涉及两部分：输入怎样影响隐藏状态，前一个隐藏状态怎样影响后一个。每一块算完后，按学习率和优化器把梯度应用到权重上，清掉显存，接着算下一块；跨块时只需关心块边界处那个隐藏状态。
+        </p>
+        <p>
+            这样做不是精确计算，因为各块分别算、分别更新，三块就是三次更新，不是一次。他说分布式训练里也有类似的情况：每块 GPU 各自算梯度，再应用到同一组权重上（后面有一讲专讲分布式训练）。有学生说如果能全放进显存会更好，他同意。他补充：在每步都有损失的设定里，截断显然丢了信息，因为一次只看了一部分输出的损失；只有末端一个输出的设定里，这种情况不会丢信息。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 字符级语言模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=2194s" target="_blank">0:36:34</a>–0:45:37</em></p>
+        <h3>训练：逐时间步的分类</h3>
+        <p>
+            一个放不进一张幻灯片的更实际的例子是字符级语言模型 character-level language model。Zane 说有意思的是，这种方法十年前就被证明很有效，现在这一波语言模型就是从这种“用 RNN 预测下一个字符”的简单方法一步步发展来的。
+        </p>
+        <p>
+            例子的词表只有 4 个字符 $[h, e, l, o]$，训练序列是 “hello”。输入用独热编码 one-hot encoding：向量里只有一个位置是 1，其余都是 0，1 的位置就是字符在词表里的下标。每一步用前一个隐藏状态和当前输入算隐藏层，输出层给出每个字符的分数（logits），用类似 softmax 的方式变成概率，目标是下一个字符。比如输入 h，目标是 e。
+        </p>
+        <p>
+            他指着幻灯片说，这一步正确字符 e 的分数是 2.2，比另一个字符的 4.1 低，所以这一步输出不太好，要受惩罚。所以可以把它看成逐时间步的分类问题，Zane 说今天的语言模型做的一般也是这个：基于 softmax 的逐时间步分类。
+        </p>
+        <h3>测试：一次采样一个字符</h3>
+        <p>
+            测试时一次采样一个字符，再把它喂回模型，让模型看到上一步自己生成了什么，如此反复直到生成出词。幻灯片上的例子里，第一步 softmax 输出 $(.03, .13, .00, .84)$ 之类的概率，采样得到 “e”，之后依次得到 “l”“l”“o”。Zane 在这里发现幻灯片有个错，某个应该概率更高的位置标反了，他笑说这套幻灯片用了好几年都没人发现。
+        </p>
+        <h3>嵌入层</h3>
+        <p>
+            实际中一般不直接把独热向量送进模型，而在输入层和隐藏层之间加一个嵌入层 embedding layer。嵌入层就是一个大矩阵，行数对应可能的输入个数。幻灯片上的说明：矩阵乘一个独热向量，只是从权重矩阵里取出一列（一行，看排列方式）。所以嵌入层就是根据输入是哪个字符，取出矩阵对应的那一行当输入向量。
+        </p>
+        <p>
+            有学生问为什么要用嵌入层。Zane 的回答：一般来说，模型的输入最好是向量，而且嵌入可以学；训练时更喜欢“分散开”的权重。可以用 Kaiming 初始化之类的方法把嵌入层初始化成很小的值，每次取一行作为输入向量。直接给一个数或者一个只有一个 1 的独热向量，优化效果不如嵌入层。
+        </p>
+        <h3>min-char-rnn 与生成样例</h3>
+        <p>
+            这个实现很简单，Andrej Karpathy 的 min-char-rnn.py 只有 112 行 Python。Karpathy 是这门课以前的讲师，2015 年写过一篇博客，讲这类 RNN 在生成文本上“效果好得不合常理” unreasonably effective。这是 LLM 时代之前能做到的事。
+        </p>
+        <ul>
+            <li>用莎士比亚的十四行诗训练：一开始输出是乱码，因为 $W$ 还没学好；训练多一些，开始像英文，部分词对了；再训练下去效果很好，学到了文体，比如台词前要有人名。生成得越长，意思越说不通，但看起来很有意思。Zane 说这算是对后来 AI 时代的预告。</li>
+            <li>用 Linux 源代码训练，能生成看起来像样的 C 代码。他说不知道能不能编译，但看起来合理。</li>
+        </ul>
+        <p>
+            幻灯片接着列了 OpenAI Codex、GitHub Copilot、Cursor IDE。Zane 说这些编程工具背后的语言模型训练任务很相似：吃下大量现有代码，只是预测对象从下一个字符换成了下一个 token。token 是一组字符，怎么切分 token 因模型而异，细节很多（分词的细节可参考 <a href="../CS336-Language-Modeling-from-Scratch/01_课程概览与分词.html">CS336 第 1 讲</a>）。在高层上是同一件事：一个接一个自回归地预测字符组。
+        </p>
+        <h3>课上问答</h3>
+        <ul>
+            <li>模型的第一个输入是什么？Zane 说需要某个初始输入，可以是一个随机字符；语言模型通常有一个预先定好的起始 token，序列开头总是它。这个具体例子用的是什么他不确定。</li>
+            <li>语言模型的标注怎么做？他说纯语言模型只是预测下一个 token，不需要标注，给大量文本就行。这些模型做得这么好，就是因为可以抓取互联网上几乎所有能拿到的文本来训练。</li>
+            <li>如果每一步都取概率最大的输出，是不是总生成同样的东西？他说是。总取最大概率叫贪心解码 greedy decoding，同样的输入总得到同样的输出。实际中按 softmax 给出的分布采样，比如以 0.84 的概率选这个字符、以 0.13 的概率选另一个。还有束搜索 beam search，同时往前探几种选择，看哪条序列整体概率最高。怎么从这些模型里采样是一个活跃的研究方向。</li>
+            <li>多对一的设定里，每个时间步也输出吗？他说为了省算力，一般不输出用不到的东西；但每步都输出也可以，看看输出在训练过程中是否收敛，可能有助于理解模型，比如有没有某些触发点帮它预测出正确答案。</li>
+        </ul>
+    </section>
+
+    <section id="t08">
+        <h2>08. 解读 RNN 的隐藏状态</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=2737s" target="_blank">0:45:37</a>–0:48:23</em></p>
+        <p>
+            RNN 的一个好处是可以直接看激活值，有时能看出模型在跟踪什么。在手工例子里，隐藏状态跟踪的是当前值和前一个值。对训练好的模型，也可以喂一段序列，看每个字符进来时某个单元的激活。
+        </p>
+        <p>
+            这些图出自 Karpathy、Johnson 和李飞飞的 “Visualizing and Understanding Recurrent Networks”（ICLR Workshop 2016）。模型用 tanh 激活，值域 $-1$ 到 $1$：接近 $-1$ 显示为红色，接近 1 显示为蓝色。每张图是某一层里单个激活值随字符变化的颜色。
+        </p>
+        <ul>
+            <li>很多单元看不出规律，是随机的。</li>
+            <li>引号检测单元 quote detection cell：引号一开始就激活，引号结束就熄灭。模型需要知道之后某处要补一个右引号。</li>
+            <li>行长跟踪单元 line length tracking cell：一行开头值很高，越接近模型认为该换行的位置值越低。</li>
+            <li>if 语句单元：if 语句里面的内容都被它标出来。</li>
+            <li>引号或注释单元：模型需要知道何时输出注释结束符，所以要跟踪自己是否在注释里。</li>
+            <li>代码深度单元 code depth cell：代码每多嵌套一层缩进，它的激活就更强一些。</li>
+        </ul>
+        <p>
+            Zane 说，不用任何复杂技巧，就能把单个激活直接对应到输入上，这些隐藏状态的可解释程度相当惊人。这和手工例子里人为指定每一维的含义有点像，只是 RNN 内部自己做了类似的事。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. RNN 的优缺点</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=2903s" target="_blank">0:48:23</a>–0:50:56</em></p>
+        <h3>优点</h3>
+        <ul>
+            <li>能处理任意长度的输入。现在基于 Transformer 的语言模型有上下文长度 context length（上下文窗口的最大长度），RNN 没有这个限制，只要一直跑下去，理论上序列可以无限长。</li>
+            <li>理论上，第 $t$ 步的计算可以用到很多步之前的信息，前提是这些信息被隐藏状态有效地保留了。实践中会有问题，后面讲。</li>
+            <li>输入变长，模型大小不变。前面讨论过“每个时间步一层”的设想，RNN 没有那个问题。</li>
+            <li>每个时间步用同样的权重，处理输入的方式是对称的。概念上每一步都在做同一件事，实现上也方便。</li>
+        </ul>
+        <h3>缺点</h3>
+        <ul>
+            <li>循环计算慢。每次都要先算出前一个隐藏状态才能算下一个，每个隐藏状态都依赖之前所有的。推理时这不算问题，Transformer 推理时也要一个 token 一个 token 地输出；但训练时很难把这些步批量并行，因为算损失前必须先算出之前的隐藏状态，扩展到大量数据时会遇到困难。</li>
+            <li>实践中很难取到很多步以前的信息。隐藏状态大小固定，所有信息都要塞进去，序列越来越长，迟早会丢信息。</li>
+        </ul>
+    </section>
+
+    <section id="t10">
+        <h2>10. 计算机视觉里的应用</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=3056s" target="_blank">0:50:56</a>–0:56:47</em></p>
+        <h3>图像描述</h3>
+        <p>
+            幻灯片列了这一时期的几篇图像描述论文：Mao 等 “Explain Images with Multimodal Recurrent Neural Networks”，Karpathy 和李飞飞 “Deep Visual-Semantic Alignments for Generating Image Descriptions”（CVPR 2015），Vinyals 等 “Show and Tell”，Donahue 等 “Long-term Recurrent Convolutional Networks”，Chen 和 Zitnick “Learning a Recurrent Visual Representation for Image Caption Generation”。
+        </p>
+        <p>
+            做法是两段式：一个 CNN 当视觉编码器把图像编码，结果和之前生成的文本一起作为 RNN 的输入。序列以一个起始 token &lt;START&gt; 开头，生成到结束 token &lt;END&gt; 时停止。这个例子里 token 是词级别的。
+        </p>
+        <p>
+            具体怎么接：拿一个在 ImageNet 上训练过的 CNN，不用它的分类标签，取倒数第二层的特征向量 $v$。这和迁移学习时取好的视觉表示的做法一样。然后让 $v$ 也参与隐藏状态的更新：
+        </p>
+        $$\text{之前：}\ h = \tanh(W_{xh}x + W_{hh}h)$$
+        $$\text{现在：}\ h = \tanh(W_{xh}x + W_{hh}h + W_{ih}v)$$
+        <p>
+            于是隐藏状态除了自己的历史，还跟踪图像的视觉信息。生成时第一步输入 &lt;START&gt;，采样得到 “straw”；把它作为下一步输入，采样得到 “hat”；直到采样出 &lt;END&gt; 就结束。采样可以是贪心的，也可以是别的方式。Zane 说这部分不会出现在作业里，只是让大家知道历史上 RNN 是怎样和 CNN 结合的。
+        </p>
+        <h3>成功与失败的例子</h3>
+        <p>
+            这些模型在当时效果很好。幻灯片上用 neuraltalk2 生成的成功例子有：“A cat sitting on a suitcase on the floor”“A dog is running in the grass with a frisbee”“Two giraffes standing in a grassy field”“A man riding a dirt bike on a dirt track” 等。
+        </p>
+        <p>
+            失败的例子很多和图像在训练数据里常见的情境有关：
+        </p>
+        <ul>
+            <li>“A person holding a computer mouse on a desk”：手掌拢起来的姿势很像握鼠标，但人能看出是手机，因为拿的是扁平物体，手心朝上。</li>
+            <li>“A woman is holding a cat in her hand”：其实她只是穿着毛皮衣服。</li>
+            <li>“A woman standing on a beach holding a surfboard”：看到海滩就以为有冲浪板。</li>
+            <li>“A bird is perched on a tree branch”，以及 “A man in a baseball uniform throwing a ball”：其实他在接球，球正飞进手套里，不是从另一只手扔出去。</li>
+        </ul>
+        <p>
+            Zane 说这种“幻觉”在今天的视觉语言模型里仍然很常见：模型会认为某个场景里常见的物体也出现在眼前这张图里。原因是数据集的偏差：训练数据里某些动作或物体和某类场景经常同时出现，模型学到了这种关联，却没学会分辨。要知道那人在接球，得解释出“手套在这边，球正飞进手套”；而这些模型只被训练去输出描述，从不做解释，这是共现问题的部分原因。
+        </p>
+        <h3>视觉问答、视觉对话、视觉语言导航</h3>
+        <p>
+            视觉问答 VQA（Agrawal 等，ICCV 2015；Zhu 等 Visual 7W，CVPR 2016）是 RNN 常用的另一个任务，有两种常见做法：
+        </p>
+        <ul>
+            <li>拿一个描述模型，给它问题，让它输出文本，看每个候选答案序列的概率：每个字符或 token 有一个概率，相乘就是整个答案的概率。</li>
+            <li>更常见的是把问题和多个候选答案分别作为输入，输出每个答案的概率，比如四选一就是一个四类分类器。</li>
+        </ul>
+        <p>
+            视觉对话 Visual Dialog（Das 等，CVPR 2017）是针对一张图聊天。Zane 说当时这些都被当作互不相干的任务，现在一个模型几乎都能做，过去两年这类模型能力爆发式增长。
+        </p>
+        <p>
+            视觉语言导航（Wang 等，CVPR 2018），幻灯片上的例子是“去客厅”：智能体把语言指令编码，每走一步视觉输入就变化，用 RNN 生成一串动作，在二维平面图上走到目标位置。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 多层 RNN</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=3407s" target="_blank">0:56:47</a>–0:58:25</em></p>
+        <p>
+            和多层 CNN、多层全连接网络一样，RNN 也可以叠多层。Zane 说前面展示的 RNN 实际上多数都是多层的。
+        </p>
+        <p>
+            结构是一个“时间 × 深度”的网格。每一层各自处理：第 1 层的隐藏状态只依赖第 1 层上一时间步的隐藏状态。层与层之间传的是输入输出：第 1 层的输入是真正的 $x$，第 2 层的输入是第 1 层的输出 $y$，以此类推。所以要算网格右上角那个值，需要先把整个计算图里所有的隐藏状态都算出来，训练时这是一个很繁琐、效率不高的过程。
+        </p>
+        <p>
+            后面有学生问多层 RNN 的权重怎么共享。他说同一层内所有时间步共享同一组权重；不同的层（图上竖着叠的）各有一组独立的权重。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 梯度消失、LSTM 与现代 RNN</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=3505s" target="_blank">0:58:25</a>–1:11:47</em></p>
+        <p>
+            LSTM 是 1990 年代提出的 RNN 变体，在 Transformer 革命之前相当长一段时间里很成功。Zane 说课上不要求掌握 LSTM 的细节，希望大家理解的是：RNN 有一些关键缺点，LSTM 想要缓解它们，很多现代状态空间模型也在试图缓解同样的问题。
+        </p>
+        <h3>Vanilla RNN 的梯度流</h3>
+        <p>
+            先换一种写法。$W_{hh}$ 乘上一个隐藏状态，$W_{xh}$ 乘当前输入，两者相加。也可以把 $h_{t-1}$ 和 $x_t$ 竖着叠成一个向量，乘一个大的 $W$：
+        </p>
+        $$h_t = \tanh\left(W_{hh}h_{t-1} + W_{xh}x_t\right) = \tanh\left(\begin{pmatrix}W_{hh} & W_{xh}\end{pmatrix}\begin{pmatrix}h_{t-1}\\ x_t\end{pmatrix}\right) = \tanh\left(W\begin{pmatrix}h_{t-1}\\ x_t\end{pmatrix}\right)$$
+        <p>
+            Zane 提醒，这只是简写，合并的 $W$ 由两块拼成，$W_{hh}$ 和 $x_t$ 之间没有任何交互；三种写法都会见到，第一种最明确地标出非零值在哪。
+        </p>
+        <p>
+            从 $h_t$ 反向传到 $h_{t-1}$ 时，要乘 tanh 的导数，再乘 $W_{hh}^\top$（幻灯片：“实际上是乘 $W_{hh}^\top$”）：
+        </p>
+        $$\frac{\partial h_t}{\partial h_{t-1}} = \tanh'\left(W_{hh}h_{t-1} + W_{xh}x_t\right)W_{hh}$$
+        <p>
+            多个时间步时，总损失是各时间步损失之和，对复用的 $W$ 求梯度也是求和：
+        </p>
+        $$\frac{\partial L}{\partial W} = \sum_{t=1}^{T}\frac{\partial L_t}{\partial W}$$
+        <p>
+            要算最后一步的损失 $L_T$ 对 $W$ 的梯度，按链式法则要经过所有中间隐藏状态：
+        </p>
+        $$\frac{\partial L_T}{\partial W} = \frac{\partial L_T}{\partial h_T}\left(\prod_{t=2}^{T}\tanh'\left(W_{hh}h_{t-1} + W_{xh}x_t\right)\right)W_{hh}^{T-1}\frac{\partial h_1}{\partial W}$$
+        <p>
+            问题出在这个连乘上：
+        </p>
+        <ul>
+            <li>tanh 的导数最大值是 1，几乎总是小于 1，连乘很多次就会梯度消失。</li>
+            <li>就算没有非线性，或者换一个没有这个问题的激活函数，还有 $W_{hh}$ 自乘 $T-1$ 次。奇异值 singular value 描述矩阵最多能把一个单位向量拉长多少倍。最大奇异值大于 1，梯度爆炸 exploding gradients；最大奇异值小于 1，梯度消失。</li>
+        </ul>
+        <p>
+            梯度爆炸有现成的办法：梯度裁剪 gradient clipping，梯度范数太大时把它缩小。梯度消失才是大家不在实践中用很长的 RNN 的主要原因：一是 tanh，二是很多情况下权重矩阵要么放大激活、要么缩小激活。所以出路是改 RNN 的架构。幻灯片引用的是 Bengio 等 1994 年的 “Learning long-term dependencies with gradient descent is difficult” 和 Pascanu 等 2013 年的 “On the difficulty of training recurrent neural networks”。
+        </p>
+        <h3>LSTM</h3>
+        <p>
+            LSTM（Long Short Term Memory，长短期记忆网络，Hochreiter &amp; Schmidhuber，Neural Computation 1997）的高层思路是：不只有一个隐藏状态 $h_t$，还多了一个细胞状态 cell state $c_t$；先算出四个门 gate，用它们决定怎样改隐藏状态，以及哪些信息走另一条更容易传递信息的通路。
+        </p>
+        <p>
+            四个门由同一个大矩阵一次算出。把 $h_{t-1}$ 和 $x_t$ 叠起来（各为 $h$ 维，合起来 $2h$），乘一个 $4h\times2h$ 的 $W$，得到 $4h$ 维向量，分成四段分别过激活函数：
+        </p>
+        $$\begin{pmatrix}i\\ f\\ o\\ g\end{pmatrix} = \begin{pmatrix}\sigma\\ \sigma\\ \sigma\\ \tanh\end{pmatrix} W\begin{pmatrix}h_{t-1}\\ x_t\end{pmatrix}$$
+        $$c_t = f\odot c_{t-1} + i\odot g$$
+        $$h_t = o\odot\tanh(c_t)$$
+        <p>
+            $\odot$ 是逐元素相乘。幻灯片上四个门的含义：
+        </p>
+        <ul>
+            <li>$i$，输入门 input gate：是否往细胞里写；</li>
+            <li>$f$，遗忘门 forget gate：是否擦掉细胞里的内容，即从之前的时间步忘掉多少；</li>
+            <li>$o$，输出门 output gate：把细胞内容透露多少给隐藏状态；</li>
+            <li>$g$，幻灯片自嘲地叫它 “Gate gate (?)”：往细胞里写多少。</li>
+        </ul>
+        <p>
+            Zane 说这个结构很复杂，设计选择很多。图的上方那条细胞状态的通路可以看成一条“高速公路”：上面没有 tanh 这类激活函数，所以避开了 tanh 让梯度消失的问题，唯一作用在上面的是遗忘门。只要不是每一步都把信息全忘掉，信息就能更容易地传下去。幻灯片的说法：从 $c_t$ 反向传到 $c_{t-1}$ 只有和 $f$ 的逐元素相乘，没有和 $W$ 的矩阵乘法，梯度可以不间断地流动。
+        </p>
+        <p>
+            他说更重要的是，实践中大家发现 LSTM 效果很好。课程里不会要求实现它，但它在一些深度学习论文里仍是常用的基线 baseline，所以值得了解。可以这样看：人们设计 LSTM 是为了弥补 RNN 的缺陷，一是梯度消失，二是所有信息都要塞进隐藏状态，导致长距离依赖丢失；于是另开一条通路传递长期信息。
+        </p>
+        <h3>LSTM 解决梯度消失了吗</h3>
+        <p>
+            有学生问 LSTM 是否完全解决了梯度消失。Zane 说它肯定有帮助。幻灯片上的回答：LSTM 的结构让 RNN 更容易在很多时间步上保住信息，例如 $f=1$、$i=0$ 时，这个细胞的信息会被无限期保留；而 vanilla RNN 要学出一个能在每一步都保住隐藏状态信息的循环权重矩阵就难得多。LSTM 不保证没有梯度消失或爆炸，但它给了模型一条更容易学到长距离依赖的路。所以如果要走循环建模这条路，人们一般训练 LSTM，较少训练普通 RNN。他也说，这些模型如今已经很大程度上不再流行。
+        </p>
+        <h3>和 ResNet 的联系</h3>
+        <p>
+            Zane 把这和第 6 讲的 ResNet 联系起来（见 <a href="06_CNN架构与训练技巧.html#t06">第 6 讲第 6 节</a>）：直接把值相加、跳过一些激活函数或层，和 ResNet 的跳跃连接很像，值被复制过去，在后面加上。区别是 ResNet 处理的是很深的层数，LSTM 处理的是很长的时间步。幻灯片还提到介于两者之间的 Highway Networks（Srivastava 等，ICML DL Workshop 2015）。
+        </p>
+        <h3>现代 RNN：状态空间模型</h3>
+        <p>
+            最后一张幻灯片讲 RNN 最近一两年的复兴。这类模型有时叫状态空间模型 state space model，同样维护一个隐藏状态。主要优点有两个：
+        </p>
+        <ul>
+            <li>上下文长度不受限。Transformer 的上下文长度有限，人们不断推高模型能力，这个限制越来越成问题；Transformer 这边有 RoPE 等技巧来延长上下文，但限制仍然明显。</li>
+            <li>计算量随序列长度线性增长。序列每多一步，只是把同一个运算再做一次，没有 Transformer 那种要看遍整个输入序列的运算；Transformer 的计算量随序列长度平方增长。</li>
+        </ul>
+        <p>
+            他点名了 RWKV（幻灯片上有它的扩展性对比图）和 Mamba，两者都主打线性时间的序列建模，在长上下文问题上有时更好。人们想两头兼得：Transformer 的性能加上 RNN 的扩展方式，这方面的研究很多。线性注意力、状态空间模型与 Transformer 的对比，可参考 <a href="../CS336-Language-Modeling-from-Scratch/04_注意力的替代方案与混合专家模型.html">CS336 第 4 讲</a>；从 NLP 角度讲 RNN 和 LSTM 的版本见 <a href="../CS224N-NLP-with-Deep-Learning/04_语言模型与循环神经网络.html">CS224N 第 4 讲</a>。
+        </p>
+        <h3>总结</h3>
+        <p>
+            幻灯片上的总结：RNN 在架构设计上很灵活；vanilla RNN 简单但效果不太好；更复杂的变体（如 LSTM、Mamba）引入了有选择地向前传递信息的方式；RNN 的反向梯度可能爆炸或消失，爆炸用梯度裁剪控制，常常需要时间反向传播；更好、更简单的架构是当前的研究热点，对序列做推理的新范式也是。下一讲讲注意力和 Transformer。
+        </p>
+    </section>
+
+    <section>
+        <h2>课上的原话</h2>
+        <ul>
+            <li>“So you really do notice how the same function and the same set of parameters are used at every time step when computing the hidden state.”（算隐藏状态时，每个时间步用的都是同一个函数和同一组参数。）<a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=707s" target="_blank">0:11:47</a></li>
+            <li>“So you can really view this as a time step wise classification problem.”（可以把它看成一个逐时间步的分类问题。）<a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=2257s" target="_blank">0:37:37</a></li>
+            <li>“So you'll eventually lose some information as your sequence goes longer and longer.”（序列越来越长，迟早会丢掉一些信息。）<a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=3012s" target="_blank">0:50:12</a></li>
+            <li>“This type of hallucination, I would say, is still extremely common with vision language models today”（这种幻觉在今天的视觉语言模型里仍然极其常见。）<a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=3199s" target="_blank">0:53:19</a></li>
+            <li>“You can think of this top section here as a highway where the goal is to not have any activation functions.”（可以把上面这部分看成一条高速公路，目的是上面不放任何激活函数。）<a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=3949s" target="_blank">1:05:49</a></li>
+            <li>“So people generally don't train RNNs so much, and more often train LSTMs, if you were going to go with this recurrent modeling route”（如果要走循环建模这条路，人们一般不怎么训练普通 RNN，更多是训练 LSTM。）<a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=4040s" target="_blank">1:07:20</a></li>
+            <li>“I would have been much more willing to want to cut RNNs entirely.”（〔如果一两年前讲这门课，〕我会更愿意把 RNN 整个砍掉。）<a href="https://www.youtube.com/watch?v=kG2lAPBF7zA&t=4136s" target="_blank">1:08:56</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS231N · Lecture 7: Recurrent Neural Networks · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

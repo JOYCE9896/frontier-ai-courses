@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 12 讲：自监督学习 | Stanford CS231N 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="11_大规模分布式训练.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS231N 目录</a> · 12</span>
+    <span><a href="13_生成模型一自回归与VAE.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 12 讲：自监督学习</h1>
+        <p class="subtitle">没有人工标注时怎样训练出好的图像特征：前置任务和下游任务的分工，旋转预测、拼图、图像修复、上色和视频上色，MAE 掩码自编码器，以及对比学习的 InfoNCE 损失、SimCLR 和 MoCo</p>
+        <div class="author-meta">
+            主讲：Ehsan Adeli · 2025 年 5 月 8 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=4howBU7THbM" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs231n.stanford.edu/slides/2025/lecture_12.pdf" target="_blank">课程幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            前面几讲的模型都靠人工标注训练：分类要给每张图标类别，分割要给每个像素标类别。数据规模一大，标注成本就成了瓶颈。这一讲问的是：能不能不用大规模人工标注，也训练出好的特征提取器？办法是自监督学习 Self-Supervised Learning，先在没有标签的大数据集上解一个"前置任务"，标签由数据本身自动生成，再把学到的编码器拿去做真正关心的任务。
+        </p>
+        <p>
+            Ehsan Adeli 先讲基于图像变换的几种前置任务，按时间顺序是旋转预测、相对位置和拼图、图像修复、上色，最后是 2021 年的 MAE；后半段讲对比学习 Contrastive Learning 的形式化（InfoNCE 损失）和 SimCLR、MoCo 两个框架。时间不够，CPC 和 DINO 只提了一句，第 13 讲开头 Justin Johnson 又把 MoCo 和 DINO 补讲了一遍。上一讲是 GPU 与大规模分布式训练，下一讲开始讲生成模型。
+        </p>
+        <ol>
+            <li><a href="#t01">回顾：学到的表示，和标注这个瓶颈</a> · <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">自监督学习的框架：前置任务与下游任务</a> · <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=278s" target="_blank">0:04:38</a></li>
+            <li><a href="#t03">前置任务一：预测旋转角度</a> · <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=930s" target="_blank">0:15:30</a></li>
+            <li><a href="#t04">前置任务二：相对位置与拼图</a> · <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=1388s" target="_blank">0:23:08</a></li>
+            <li><a href="#t05">前置任务三：图像修复</a> · <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=1591s" target="_blank">0:26:31</a></li>
+            <li><a href="#t06">前置任务四：图像上色与 Split-brain 自编码器</a> · <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=1860s" target="_blank">0:31:00</a></li>
+            <li><a href="#t07">视频上色，以及课间问答</a> · <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=2231s" target="_blank">0:37:11</a></li>
+            <li><a href="#t08">掩码自编码器 MAE</a> · <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=2754s" target="_blank">0:45:54</a></li>
+            <li><a href="#t09">前置任务小结与两个问答</a> · <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=3218s" target="_blank">0:53:38</a></li>
+            <li><a href="#t10">对比学习的直觉与 InfoNCE 损失</a> · <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=3547s" target="_blank">0:59:07</a></li>
+            <li><a href="#t11">SimCLR</a> · <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=3969s" target="_blank">1:06:09</a></li>
+            <li><a href="#t12">MoCo、MoCo v2，以及没讲完的 CPC 和 DINO</a> · <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=4252s" target="_blank">1:10:52</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 回顾：学到的表示，和标注这个瓶颈</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=5s" target="_blank">0:00:05</a>–0:04:38 · Introduction to computer vision / Limitations of supervised learning</em></p>
+        <h3>前面讲过什么</h3>
+        <p>
+            Adeli 先回顾。上一讲（周二）讲 GPU，讲怎样用多张 GPU 扩大训练规模，这是今年新加的主题（见<a href="11_大规模分布式训练.html">第 11 讲</a>）。再往前，课上讲完了计算机视觉的主要任务：分类、语义分割、目标检测、实例分割，还讲了怎样可视化和理解模型学到了什么。这一讲的一些结果会回到这些任务上去评估。
+        </p>
+        <h3>特征空间里的最近邻</h3>
+        <p>
+            他提醒大家，课程早期讲过像素空间的最近邻 Nearest Neighbor：只用像素之间的距离找最像的训练图，效果不好。后来在可视化那一讲看到，如果取 CNN 某个全连接层的输出（AlexNet 里是 4096 维向量），在这个特征空间 Feature Space 里用 L2 距离找最近邻，找出来的图在语义上就很接近。这说明网络学到的表示 Representation 对手头任务很有意义。这类东西在不同文献里名字不一样：learned representations、features、embeddings、latent space（潜空间，网络内部那层压缩过的向量所在的空间），说的是同一类东西。有了好的特征，后面接一个简单的线性模型就能把类别标签读出来。
+        </p>
+        <h3>问题出在标注上</h3>
+        <p>
+            他问学生：大规模训练这种网络难在哪？答案是需要大量带标签的数据。网络从图像一路训练到类别标签，学到的特征当然对分类有用，但规模一大，就得有人一张张去标图；如果任务是分割，还得在每张图上一个个像素地标，成本更高。所以这一讲的问题是：有没有办法训练神经网络，又不需要巨大的人工标注数据集？自监督学习就是在这个背景下提出的。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 自监督学习的框架：前置任务与下游任务</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=278s" target="_blank">0:04:38</a>–0:15:30 · Self-supervised learning concept / Pretext tasks and evaluation / Downstream task training</em></p>
+        <h3>两个阶段</h3>
+        <p>
+            设想手里有一个很大的图像数据集，没有任何标签。假设是：可以用某个目标函数，也就是一个前置任务 Pretext Task，在这些图上训练神经网络，让它学到好的图像特征。之后遇到一个只有少量带标签数据的具体问题，就把训练好的编码器 Encoder（把输入变成特征向量的那部分网络）迁移过去，用它提取特征，再解这个下游任务 Downstream Task。
+        </p>
+        <p>
+            他举的场景是：从互联网下载大量自然图像先训练一个模型，然后面对一个工业或医学应用，只有很少的带标签图像，用迁移过来的知识提取特征，再做分类或别的任务。
+        </p>
+        <p>
+            幻灯片上对两者的说明：
+        </p>
+        <ul>
+            <li>前置任务：基于数据本身定义任务，不需要人工标注。可以看作无监督任务，但训练时用的是监督学习的目标，比如分类或回归。</li>
+            <li>下游任务：你真正关心的应用，没有大数据集，但数据有标签。</li>
+        </ul>
+        <h3>编码器加一个"头"</h3>
+        <p>
+            结构上，编码器先把输入变成学到的表示，然后网络的另一部分把表示变到输出空间。输出可以是标签，也可以是其他由数据自动生成的东西，总之不是人工标注。这第二部分按前置任务的不同，可以叫解码器 Decoder、分类器 Classifier 或回归器 Regressor。如果是"编码器加解码器、输出一张图"，这就是自编码器 Autoencoder 的框架（把输入压缩成表示，再从表示还原出来的网络）。有了输出、有了损失函数，网络就能训练。
+        </p>
+        <p>
+            前置任务训完后，把头去掉，在编码器后面接一层或一个小的全连接网络，用下游数据集里的真实标签训练它。整个流程里，前置任务那部分完全不需要人工标签。
+        </p>
+        <h3>好的前置任务要满足两点</h3>
+        <p>
+            怎样定义前置任务并不简单，方法很多。他说要记住两点：第一，任务要足够一般，能逼模型学到好特征；第二，不需要人工标注，标签必须来自数据本身。他列了这一讲要快速过一遍的四个例子：
+        </p>
+        <ul>
+            <li>图像补全 Image Completion：遮住图像的一部分，根据没遮住的部分预测遮住的部分；</li>
+            <li>旋转预测 Rotation Prediction：把图像旋转某个角度，让模型预测转了多少；</li>
+            <li>拼图 Jigsaw Puzzle：把图像切成乱序的小块，让模型输出正确的顺序；</li>
+            <li>上色 Colorization：给黑白版本，预测每个像素的颜色。</li>
+        </ul>
+        <h3>怎样评估一个自监督方法</h3>
+        <p>
+            幻灯片列了几个角度：
+        </p>
+        <ul>
+            <li>前置任务本身的表现：标签是自己生成的，所以能直接衡量模型把前置任务解得多好。</li>
+            <li>表示的质量：线性评估协议 Linear Evaluation Protocol（在冻结的特征上训练一个线性分类器）；对表示做聚类，看能不能看出规律；用 t-SNE 降维。t-SNE 课上没细讲，他说这是一种降维方法，把学到的表示降到 2 维或 3 维画出来，看能不能分得开。</li>
+            <li>鲁棒性和泛化：换数据集、加扰动之后表现如何。</li>
+            <li>计算效率：训练时间和资源。</li>
+            <li>迁移到下游任务的表现。他说这是最重要的一项，因为做自监督、设计前置任务，目的就是提高你关心的那个任务的结果。</li>
+        </ul>
+        <h3>以旋转为例看整个流程</h3>
+        <p>
+            第一步，在大量无标签数据上做自监督学习，比如把图旋转后预测旋转角度。网络是几层卷积再接全连接层，做回归或分类。这样得到一个好的特征提取器。第二步，去掉前置任务专用的部分（那几层 FC），接上一层（有时几层）分类器，用少量带标签的目标任务数据训练，比如分类鸟，然后在目标任务上评估。他说通常接的是浅层网络，因为特征够好的话，读出类别标签不需要太多训练。
+        </p>
+        <h3>更大的图景</h3>
+        <p>
+            这一讲讲的是视觉应用，但 Adeli 指出，自监督学习这套范式也是大语言模型得以出现的原因：GPT-4 这类模型基本是在没有人工标注的原始数据上训练的。语音里也是这样（幻灯片列了 WaveNet），最近机器人和强化学习里用得也很多（幻灯片列了 Dense Object Net）。不需要人工标注，就可以一直采集原始数据来训练；他说这就是湾区到处是自动驾驶车在采数据的原因，它们采到的数据不用标注也能拿来训练模型。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 前置任务一：预测旋转角度</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=930s" target="_blank">0:15:30</a>–0:23:08 · Image transformation tasks</em></p>
+        <h3>假设：认得出正确朝向，就得懂这个物体</h3>
+        <p>
+            这个前置任务的假设是：模型只有具备"视觉常识 Visual Common Sense"，知道物体没被扰动时该长什么样，才能认出物体的正确朝向。这些早期方法大多围绕视觉常识这个概念设计。如果模型能做到这一点，说明它也能把整张图概括成一组有用的特征。
+        </p>
+        <h3>Gidaris 等 2018：四分类</h3>
+        <p>
+            这篇 2018 年的论文（Gidaris et al.）只用了四个角度：0°、90°、180°、270°。把图像按其中一个角度旋转，用卷积网络预测是哪个。因为只有四种情况，这是一个四分类问题，输出类别是 0、1、2、3，不用回归出具体的角度值。
+        </p>
+        <h3>在 CIFAR-10 上的半监督实验</h3>
+        <p>
+            作者在整个 CIFAR-10 训练集上做旋转自监督训练，然后做下游微调：冻结第一、二个卷积块（conv1、conv2），只用一部分带标签的 CIFAR-10 数据训练 conv3 和线性层。所以并没有微调整个网络，但结果很好。
+        </p>
+        <p>
+            曲线显示，预训练过的模型一开始准确率就比较高，说明它在最初几轮迭代里已经对物体有不错的理解。不过 Adeli 指出，CIFAR-10 不算难，任务够简单时，完全监督的版本和先预训练的版本最后往往收敛到差不多的准确率。在难得多的应用里，如果不做大规模预训练，纯监督学习往往得不到一样好的结果。
+        </p>
+        <h3>迁移到 PASCAL VOC</h3>
+        <p>
+            第二组实验：用 AlexNet 在整个 ImageNet 训练集上做旋转自监督，再在 PASCAL VOC 2007 的带标签数据上微调，任务包括分类、检测和分割。表里有几种设定，有的只训练最后几个全连接层，有的训练全部层。对比的三条基准线是：
+        </p>
+        <ul>
+            <li>用完整 ImageNet 标签做监督预训练：准确率最高，但这用到了 ImageNet 的全部标签；</li>
+            <li>不预训练（随机初始化）：差很多；</li>
+            <li>用旋转预测做自监督预训练：比同期其他自监督方法好，离随机初始化的差距很大，和完整 ImageNet 监督预训练还有距离，但已经接近。</li>
+        </ul>
+        <h3>看注意力图</h3>
+        <p>
+            论文还看了学到的特征有没有意义。前面讲过评估自监督框架的一种方式是看特征，Grad-CAM 一类方法可以从全连接层的特征投影回图像空间，看模型在看哪里。监督模型的注意力图更集中，因为它只解一个分类任务，抓住眼睛和周围的形状就够了，别的地方不太管。自监督模型覆盖的区域更多，因为它要对整张图有更整体的理解：下游任务是什么事先不知道，目标是在很多任务上都表现不错。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 前置任务二：相对位置与拼图</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=1388s" target="_blank">0:23:08</a>–0:26:31 · Image transformation tasks</em></p>
+        <h3>预测相对位置（Doersch 等 2015）</h3>
+        <p>
+            另一个流行的前置任务：在图上取一个 3×3 的网格，以中心块为参照，给网络另一个块，让它预测这个块相对中心块在哪个位置。除去中心块一共 8 个位置，所以这是一个八分类问题。幻灯片上的例子里，那块的答案是 3。
+        </p>
+        <h3>拼图（Noroozi 与 Favaro 2016）</h3>
+        <p>
+            后续一篇论文把它改成了拼图：同样是 3×3 网格，把 9 块全部随机打乱，让网络说出正确的排列 Permutation。Adeli 问学生一共有多少种排列，学生答 9 的阶乘，他说对，是三十多万（$9! = 362880$）。作者做了一张查找表，只取其中 64 种排列。打乱时从这 64 种里选一种，输出就是一个 64 维向量，所以还是一个 64 类的分类问题。
+        </p>
+        <p>
+            在同样的数据集和同类下游任务上，这个方法超过了之前的方法，包括 Doersch 等人的相对位置方法。他提醒，这是 2016 年发表的工作。
+        </p>
+        <p>
+            后面问答环节有学生问为什么是 64。他说这几乎是随意的选择。9! 太大，没必要全部预测；而且很多排列之间只差一两块的交换。作者挑了彼此距离最大、差异足够的 64 种，取 64 是因为想把它做成分类问题。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 前置任务三：图像修复</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=1591s" target="_blank">0:26:31</a>–0:31:00 · Image inpainting</em></p>
+        <h3>Context Encoders（Pathak 等 2016）</h3>
+        <p>
+            下一个前置任务是图像修复 Inpainting，预测缺掉的部分。做法是简单的掩码策略：把输入图像的一部分遮住，让模型把遮住的部分补出来。因为手里有完整的原图，期望的输出是现成的。编码器把输入变到特征空间，中间有几层全连接，再由解码器解出缺失的部分，损失函数比较输出和真实值。这也是一种自编码器，只不过是用掩码目标训练的。
+        </p>
+        <h3>修复结果怎么评估</h3>
+        <p>
+            他说修复的评估有点微妙：同一个缺口，合理的补法有很多种，很难说只有一个正确答案。早期基于重建的方法生成的结果往往很模糊、很平滑。所以这篇论文另外加了一个对抗目标 Adversarial Objective，细节放到下一讲生成模型再讲。
+        </p>
+        <h3>损失函数</h3>
+        <p>
+            总损失是重建损失加对抗损失。重建损失算的是原图 $x$ 和经过网络后的图之间的差，再和掩码 $M$ 做逐元素相乘，只在被遮住的区域计算：
+        </p>
+        <p>
+            $$L_{\text{rec}}(x) = \big\| M \odot \big(x - F((1-M)\odot x)\big) \big\|_2^2, \qquad M = \begin{cases} 0 & \text{未遮住} \\ 1 & \text{遮住} \end{cases}$$
+        </p>
+        <p>
+            这里 $F$ 是整个编码器加解码器，$\odot$ 是逐元素相乘（幻灯片给了 $M$ 的定义和"逐元素相乘"的标注，式子按 Pathak 等人论文的写法补全）。对抗损失比较"真实"图像和修复出来的图像，保证生成的部分看起来真实。幻灯片上并列了四列：输入、只用重建损失、只用对抗损失、两者结合；结合之后补出来的部分好看一些。
+        </p>
+        <p>
+            在同样的 ImageNet 自监督预训练、再迁移到 PASCAL VOC 2007 分类、检测和 VOC 2012 语义分割的设定下，这种重建框架也带来了额外收益。他说基于重建和掩码的框架后面还会回来讲，因为它是今天做预训练用得最多的前置任务之一。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 前置任务四：图像上色与 Split-brain 自编码器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=1860s" target="_blank">0:31:00</a>–0:37:11 · Colorization tasks</em></p>
+        <h3>LAB 颜色空间</h3>
+        <p>
+            数据集里大多是彩色图。上了 CS131 或计算机图形学的同学知道颜色空间有很多种，计算机视觉里最常用 RGB。如果想把亮度和颜色分开，可以用 LAB 颜色空间：一个通道 L 表示亮度 Lightness，两个通道 A、B 表示颜色，三个通道合起来就是彩色图。前置任务很简单：给 L 通道，预测 A 和 B 通道。同样不需要任何人工标注，答案已经在数据里。
+        </p>
+        <h3>Split-brain 自编码器（Zhang 等 2017）</h3>
+        <p>
+            既然能由 L 预测 AB，也能反过来。这就是 Split-brain Autoencoder：把输入图拆成 L 通道（一个通道）和颜色通道（两个通道），训练两个网络 $F_1$、$F_2$，各自由一部分预测另一部分，最后把两个预测合并成完整图像，用 L2 损失（或别的距离函数）反向传播。一般形式是跨通道预测 Cross-channel Prediction：给一组通道 $X_1$ 预测另一组 $X_2$，反过来也一样。
+        </p>
+        <p>
+            这个框架不限于颜色和亮度。比如 RGB-D 传感器（有 RGB 通道和深度通道，像 Kinect 和机器人里用的传感器），可以由 RGB 预测深度，反之亦然。他说这在不同应用里都很成功。
+        </p>
+        <p>
+            迁移实验：在整个 ImageNet 上自监督训练，把 $F_1$ 和 $F_2$ 的特征拼起来，在 Places 数据集（Zhou 2016）的带标签数据上做分类。这些特征的准确率已经不错，比表里其他方法好，但还比不上监督学习，毕竟这里完全没用标签。
+        </p>
+        <h3>上色本身也有用</h3>
+        <p>
+            上色这个前置任务有意思的地方在于，它除了用来预训练，本身也能用：可以给没有彩色版本的老照片和视频上色。论文里有一张优胜美地 Half Dome 的上色结果，他让大家看半圆顶、树、桥和它们在水里倒影之间的颜色一致性。模型在大量数据上训练过，懂得倒影应该保留原物的颜色。他也提醒，这些都是大语言模型、大视觉模型之前的工作，每个模型只为特定任务训练，并不是什么都能解决。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 视频上色，以及课间问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=2231s" target="_blank">0:37:11</a>–0:45:54 · Video colorization</em></p>
+        <h3>从参考帧给后续帧上色（Vondrick 等 2018）</h3>
+        <p>
+            上色可以扩展到视频：给定第 0 帧作为有颜色的参考帧，给之后的灰度帧上色。思路是给视频中颜色的时间一致性建模，同一个物体在后面的帧里应该还是同一个颜色。给后续帧上色时，模型实际上在跟踪像素和物体，隐式地学到了轨迹该怎么形成。论文的假设是：学会给视频帧上色，模型就应该能在没有标签的情况下学会跟踪区域或物体。
+        </p>
+        <h3>做法：用注意力当"指针"复制颜色</h3>
+        <p>
+            给目标帧上色，需要找到每个像素在参考帧里对应的位置，相当于一个"指针"，然后把那里的颜色（LAB）复制过来当作这个像素的目标颜色。Adeli 说这和课上讲过的注意力 Attention 很像（见<a href="08_注意力与Transformer.html">第 8 讲</a>）：
+        </p>
+        <ol>
+            <li>对参考帧和目标帧都跑一个 CNN，得到每个像素周围的特征；</li>
+            <li>对目标帧的每个像素，计算它和参考帧所有像素之间的注意力（也就是相似度）；</li>
+            <li>预测颜色等于参考帧颜色按注意力加权的平均；</li>
+            <li>数据里有这些像素的真实颜色，于是可以算预测颜色和真实颜色之间的损失。</li>
+        </ol>
+        <p>
+            写成式子（按 Vondrick 等人论文的写法）：目标像素 $j$ 对参考像素 $i$ 的注意力是特征内积的 softmax，预测颜色是参考颜色的加权和：
+        </p>
+        <p>
+            $$A_{ij} = \frac{\exp\big(f_i^\top f_j\big)}{\sum_k \exp\big(f_k^\top f_j\big)}, \qquad y_j = \sum_i A_{ij}\, c_i$$
+        </p>
+        <p>
+            其中 $f_i$ 是参考帧像素 $i$ 的特征，$f_j$ 是目标帧像素 $j$ 的特征，$c_i$ 是参考帧像素的颜色。
+        </p>
+        <h3>结果：颜色一致，跟踪随之出现</h3>
+        <p>
+            这样上色的结果在时间上很一致。如果每帧单独上色，没有时间上的约束，人的衣服颜色常常会一帧一帧地变。更有意思的应用是，既然已经在算目标帧到参考帧的注意力，就可以用它跟踪物体：把参考帧上的分割掩码沿着学到的注意力传播到后续帧，也能传播人体姿态关键点 Keypoint。幻灯片的例子来自 Google AI 博客。
+        </p>
+        <h3>课间问答</h3>
+        <p>
+            有学生问编码器一开始怎么"知道"数据、怎么学到好表示。Adeli 说，前面这些前置任务都是在编码器后面做解码、分类或回归，产生某种输出，借此训练编码器。如果原始图像是从互联网或 ImageNet 来的自然图像，那学到的就是能从这类图像中提取特征的编码器。去掉解码器、接上分类器之后，只需要训练分类器这部分。学生追问，预训练编码器的"标签"是不是来自解码器那头，他说是的，定义前置任务就是为了有输出可以监督，在预测正确输出的过程中编码器也被训练了。
+        </p>
+        <p>
+            另一个问题是编码器和解码器是一个大网络还是两个不同的东西。他说不同工作做法完全不同。旋转预测里就是一个普通网络，"解码器"只是那几层 FC，所以他把它叫分类器；把图编码再解码成另一张图时，往往是两个端到端训练的网络，因为要用中间的表示空间；后面要讲的 MAE 里，编码器和解码器甚至不对称，可以是两种完全不同的网络。这取决于前置任务。
+        </p>
+        <p>
+            还有学生质疑旋转这种任务太有限。他同意这本身是有限的任务，并说这些是自监督学习最早的一批方法，本来就没打算解决所有问题；假设只是，模型如果能说出"这张图转了 90 度"，就隐式地理解了正确的朝向，给它一张没旋转的图，它也能认出里面是什么。关于拼图为什么用 64 的回答见第 04 节。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 掩码自编码器 MAE</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=2754s" target="_blank">0:45:54</a>–0:53:38 · Masked autoencoders (MAE)</em></p>
+        <h3>更激进的掩码</h3>
+        <p>
+            前面都是对图像或视频做某种变换的框架，由此引出一个更新的框架：2021 年发表的 MAE，全称 Masked Autoencoders（He et al., "Masked Autoencoders Are Scalable Vision Learners"）。后续工作很多，Adeli 说今天要在原始数据集上做预训练，常常就用 MAE。它也是基于重建的，和前面的修复类似，但细节多得多：遮住的是很多分散的小块，掩码比例 Masking Ratio 也激进得多，幻灯片上展示了 50% 和 75%。大规模训练之后，它不仅能把遮住的区域重建出来，还得到了能把图像概括成好特征的编码器。
+        </p>
+        <h3>掩码方式</h3>
+        <ul>
+            <li>和原始 ViT（Vision Transformer，把图切成小块当作 token 输入 Transformer 的模型）一样，把输入图像分成互不重叠的小块 Patch。</li>
+            <li>均匀随机采样，遮住很大一部分（75%）。</li>
+            <li>掩码比例高，预测任务就难；他说在前置任务的语境里，难意味着任务有意义，模型必须学到好特征才能重建出来。</li>
+            <li>每次遮掉 75%，同一张图可以反复使用很多次，相当于做了大量数据增强 Data Augmentation，可用来训练编码器的数据就多了很多。</li>
+        </ul>
+        <h3>编码器：只看可见的 25%</h3>
+        <p>
+            编码器很像 ViT，全部由 Transformer 块组成，但只处理没被遮住的那 25% 的小块。每个小块先经过线性投影变成嵌入，再加上位置嵌入 Positional Embedding，和 ViT 的做法一样。因为输入只占全图一小部分，编码器可以做得很大，用的是大号 ViT。幻灯片上的数字：编码器每个 token 的计算量是解码器的 9 倍以上。
+        </p>
+        <h3>解码器：补上共享的掩码 token</h3>
+        <p>
+            解码阶段，可见小块有编码器给出的嵌入；被遮住的位置统一放一个可训练的参数，叫共享掩码 token Shared Mask Token，和 ViT 里的 class token 类似。Adeli 说可以把它想成一个"平均小块"的表示。所有位置再加上位置编码，组成完整序列，交给解码器（也是 Transformer 块，最后接一个线性投影）还原出整张图的像素。
+        </p>
+        <p>
+            解码器只负责重建，训练完就不用了，所以它和编码器的设计无关，可以很灵活。这和传统自编码器或 UNet 不同，是一种不对称的自编码器设计 Asymmetric Autoencoder。
+        </p>
+        <h3>损失</h3>
+        <p>
+            在像素空间计算输入图和重建图之间的均方误差 MSE，只在被遮住的小块上计算：
+        </p>
+        <p>
+            $$L = \frac{1}{|\mathcal{M}|} \sum_{p \in \mathcal{M}} \big\| \hat{x}_p - x_p \big\|_2^2$$
+        </p>
+        <p>
+            $\mathcal{M}$ 是被遮住的小块集合，$\hat{x}_p$ 是重建出的第 $p$ 块。
+        </p>
+        <h3>线性探测与完全微调</h3>
+        <p>
+            论文展示了两种用于下游任务的方式：
+        </p>
+        <ul>
+            <li>线性探测 Linear Probing：预训练编码器冻结，只在最后加一个线性层预测标签。这衡量的是在受限条件下表示的质量。</li>
+            <li>完全微调 Full Fine-tuning：预训练模型继续训练，可以是全部层，也可以只是几个 Transformer 块，后面可以接一层或多层带非线性的网络。这能把模型的真实潜力用到新任务上。</li>
+        </ul>
+        <h3>消融实验</h3>
+        <p>
+            他建议用这篇论文的人去读原文和后续工作，里面讨论了很多设计选择：掩码比例、解码器深度、解码器宽度、编码器里用不用掩码 token、重建目标、数据增强、掩码采样方式、训练时长。掩码比例 75% 时准确率很高，这就是选 75% 的原因。掩码采样方式比较了随机块状、网格状和随机小块，结论是随机掩码最好。
+        </p>
+        <p>
+            最后 MAE 比当时很多方法都好，包括当时更先进的对比学习框架 DINO 和 MoCo v3。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 前置任务小结与两个问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=3218s" target="_blank">0:53:38</a>–0:59:07 · Representation learning summary</em></p>
+        <h3>小结</h3>
+        <p>
+            幻灯片对基于图像变换的前置任务做了总结：
+        </p>
+        <ul>
+            <li>前置任务关注"视觉常识"，比如预测旋转、修复、重排和上色；</li>
+            <li>为了解前置任务，模型被迫学到关于自然图像的好特征，比如物体类别的语义表示；</li>
+            <li>我们通常不在乎前置任务本身做得多好，在乎的是学到的特征对下游任务（分类、检测、分割）有多大用；</li>
+            <li>问题有两个：一是逐个设计前置任务很繁琐，二是学到的表示可能不够一般。</li>
+        </ul>
+        <p>
+            Adeli 解释第二点：用补全、旋转、拼图或上色学到的表示，适合解那个特定任务，未必适合更一般的任务。表示可能和某个前置任务绑在一起。由此引出问题：能不能设计一个更一般的前置任务？
+        </p>
+        <h3>Split-brain 的模型怎么知道该预测什么颜色</h3>
+        <p>
+            有学生问 split-brain 自编码器里，给了 L 通道，模型怎么知道另一个通道该是什么。他反问：训练分类模型时，编码器怎么知道该提取哪些特征？靠带标签的数据，因为反向传播的损失是围绕标签算的。这里也一样：网络输入一个通道、输出另一个通道，训练时反向传播的是"输出应该是什么"，而另一个通道就在数据里。只是任务从预测物体类别换成了预测像素颜色，像素颜色数据集里已经有，所以损失照样能算、能反向传播。
+        </p>
+        <h3>MAE 的编码器输出怎么进入解码器</h3>
+        <p>
+            另一个问题是 MAE 里编码器的输出怎么作为解码器的输入。他说编码器是 ViT 式的 Transformer，每个输入小块对应输出一个 token，作为那个小块的表示。但这些不是全部小块，有些被遮住了。被遮住的位置放上共享的掩码 token，这是一个可学习的参数，没法直接解释，大概可以看作类似"平均 token"的东西。这样拼成一个完整的长序列，解码器（另一个 Transformer）读入这些 token，投影成输出的像素值。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 对比学习的直觉与 InfoNCE 损失</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=3547s" target="_blank">0:59:07</a>–1:06:09 · Contrastive learning foundation / Contrastive learning frameworks</em></p>
+        <h3>吸引与排斥</h3>
+        <p>
+            Adeli 说剩下 15 分钟，内容还很多。回到刚才的问题：前面那些变换后的图，和原图其实是同一个物体，只是形式不同；而数据集里还有看起来完全不同的其他物体。于是可以定义这样一个任务：属于同一个物体的，在表示空间里拉近，也就是相互吸引 Attract；不属于同一个物体的，在潜空间里推远，也就是相互排斥 Repel。这就是对比学习，或者叫对比表示学习 Contrastive Representation Learning。2019、2020 年前后这方面论文很多，这一讲选了 SimCLR、MoCo、CPC，以及借用了对比学习概念、但严格说不算对比学习框架的 DINO。
+        </p>
+        <h3>参考样本、正样本、负样本</h3>
+        <p>
+            记参考图像为 $x$；它经过各种变换得到的版本是正样本 Positive Sample $x^+$；数据集里（实际实现时是同一个 batch 里）其他物体的图是负样本 Negative Sample $x^-$。给定一个选好的打分函数 $s(\cdot,\cdot)$，目标是学一个编码器 $f$，让正样本对的分数高、负样本对的分数低：
+        </p>
+        <p>
+            $$s\big(f(x), f(x^+)\big) \gg s\big(f(x), f(x^-)\big)$$
+        </p>
+        <h3>InfoNCE 损失</h3>
+        <p>
+            有了打分函数，用 $\exp$ 把分数变成 softmax 形式的概率，分母里放所有负样本。给定 1 个正样本和 $N-1$ 个负样本，损失是：
+        </p>
+        <p>
+            $$L = -\mathbb{E}_X\left[\log \frac{\exp\big(s(f(x), f(x^+))\big)}{\exp\big(s(f(x), f(x^+))\big) + \sum_{j=1}^{N-1} \exp\big(s(f(x), f(x_j^-))\big)}\right]$$
+        </p>
+        <p>
+            分子是正样本对的分数，分母多出来的是 $N-1$ 个负样本对的分数。他问这看起来眼熟吗，答案是多类交叉熵 Cross Entropy。softmax 分类器有 10 个类时，要把其中一个类的分数推高、其余压低；这里一样，要把参考和正样本的分数推高，把参考和负样本的分数压低。也就是说，这是一个 $N$ 路 softmax 分类器的交叉熵损失：在 $N$ 个样本里学会找出那个正样本。
+        </p>
+        <h3>互信息下界</h3>
+        <p>
+            这个损失叫 InfoNCE（Information Noise Contrastive Estimation），由 van den Oord 等人 2018 年提出。论文里有不少理论讨论，结论是这个损失的相反数是互信息 Mutual Information 的一个下界。互信息衡量两个变量之间的依赖，也就是共享了多少信息。我们想让 $x$ 和 $x^+$ 共享的信息尽量多，和 $x^-$ 共享的尽量少。幻灯片上的形式是：
+        </p>
+        <p>
+            $$I\big(f(x);\, f(x^+)\big) - \log N \;\ge\; -L$$
+        </p>
+        <p>
+            所以最小化 InfoNCE，就是在最大化 $f(x)$ 和 $f(x^+)$ 之间互信息的下界。详细推导见 Poole 等人 2019 年的论文，Adeli 说展开讲要半小时。
+        </p>
+        <p>
+            论文里另一个理论结论是：负样本数 $N$ 越大，这个界越紧。所以用这种损失训练网络需要很大的 batch，负样本越多，训练效果越好、收敛越快。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. SimCLR</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=3969s" target="_blank">1:06:09</a>–1:10:52 · Contrastive learning frameworks</em></p>
+        <h3>框架</h3>
+        <p>
+            SimCLR 是 "A Simple Framework for Contrastive Learning"（Chen et al., 2020）。对每张图做两次随机变换，送进编码器得到表示 $h$；在算距离之前，先用一个投影网络 $g(\cdot)$（线性或非线性）把 $h$ 投到另一个空间得到 $z$，在 $z$ 空间里用余弦相似度 Cosine Similarity 当打分函数：
+        </p>
+        <p>
+            $$s(u, v) = \frac{u^\top v}{\|u\|\,\|v\|}$$
+        </p>
+        <p>
+            正样本对靠数据增强生成。幻灯片列了三种：随机裁剪、随机颜色扭曲、随机模糊。他说各种变换都说得通。
+        </p>
+        <h3>mini-batch 里怎么算</h3>
+        <ol>
+            <li>取一个 mini-batch 的 $N$ 张图，每张采样两个增强函数，得到一对正样本，于是 batch 里有 $2N$ 个样本；</li>
+            <li>全部送进编码器和投影头；</li>
+            <li>第 $2k$ 个和第 $2k+1$ 个是一对正样本，其余都是负样本。对第一个样本，第二个是正样本，其余是负样本；对第二个样本，第一个是正样本，其余是负样本，依此类推；</li>
+            <li>算出 $2N \times 2N$ 的"亲和矩阵 Affinity Matrix"，每一行里正样本所在的位置就是这一行的分类标签；</li>
+            <li>把每个样本都当一次参考，算 InfoNCE，取平均。</li>
+        </ol>
+        <p>
+            他特别提醒：作业 3 里有一题是 SimCLR，但作业里的定义和这里的标准定义略有不同，要按作业的说明来做。
+        </p>
+        <h3>结果</h3>
+        <p>
+            在整个 ImageNet 训练集上用 SimCLR 训练编码器，冻结后在上面训练线性分类器，结果超过了之前所有自监督方法，和完全监督学习的结果可比，只是需要更大的网络，因为学的是更通用的特征。另一组实验是半监督：用 ImageNet 1% 或 10% 的带标签数据微调编码器。
+        </p>
+        <h3>设计选择一：投影头</h3>
+        <p>
+            为什么要把特征再投影到新变量 $z$，不直接用表示 $h$？这是 SimCLR 的设计选择。作者的假设是：对比目标在样本之间做对比时，会丢掉一些对对比本身没用、但对下游任务可能有用的信息；$z$ 空间被训练成对数据变换不变。加一个投影头 $g(\cdot)$，就能在 $h$ 空间里保留更多信息。论文用的是非线性投影，实验显示线性和非线性投影头都能提升表示学习。
+        </p>
+        <h3>设计选择二：大 batch</h3>
+        <p>
+            第二点就是前面说的大 batch，SimCLR 需要很大的 batch 才有好效果。但大 batch 在反向传播时内存占用大，ImageNet 实验需要在 TPU 上做分布式训练。很多任务受内存限制，没法用这么大的 batch，这引出了后续的 MoCo。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. MoCo、MoCo v2，以及没讲完的 CPC 和 DINO</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4howBU7THbM&t=4252s" target="_blank">1:10:52</a>–1:14:41 · Contrastive learning frameworks</em></p>
+        <h3>MoCo：用队列存负样本</h3>
+        <p>
+            MoCo 是 Momentum Contrastive Learning（He et al., 2020）。它除了 batch 里的负样本，还建一个队列 Queue，跨 batch 保存负样本的历史，并随训练不断更新，用这些负样本算对比损失。和 SimCLR 的主要区别，幻灯片列了三点：
+        </p>
+        <ul>
+            <li>维护一个键 Key（负样本）的滚动队列，先进先出；</li>
+            <li>只通过查询 Query 计算梯度、更新编码器；</li>
+            <li>mini-batch 大小和键的数量解耦，可以用很多负样本。</li>
+        </ul>
+        <p>
+            因为队列里的样本已经不在当前 batch 里，没法对它们反向传播（幻灯片上标的是 no_grad）。所以编码器要分成两个：正样本这边叫查询编码器 $f_q$，负样本那边叫键编码器 $f_k$，也叫动量编码器。训练只更新查询编码器，键编码器随着时间按动量 $m$ 从查询编码器慢慢更新：
+        </p>
+        <p>
+            $$\theta_k \leftarrow m\,\theta_k + (1-m)\,\theta_q$$
+        </p>
+        <p>
+            每一步的流程：采样增强函数生成正样本对；键这边不传梯度；用键的队列作为负样本算 InfoNCE；通过动量更新 $f_k$；更新先进先出的负样本队列。Adeli 说这个框架在实现上很成功，后续版本也很多。
+        </p>
+        <h3>MoCo v2</h3>
+        <p>
+            MoCo v2（Chen et al., 2020）是两者的混合：从 SimCLR 拿来非线性投影头和强数据增强，从 MoCo 拿来动量更新的队列，可以在大量负样本上训练，不需要 TPU。他说两者合起来性能提升很多。幻灯片上的要点：
+        </p>
+        <ul>
+            <li>非线性投影头和强数据增强对对比学习很重要；</li>
+            <li>mini-batch 大小和负样本数解耦后，MoCo v2 用小得多的 batch 超过了 SimCLR，batch 是 256 对 8192；</li>
+            <li>内存占用也小得多（表里的 "end-to-end" 指 SimCLR）。</li>
+        </ul>
+        <h3>CPC 和 DINO：课上只点了名</h3>
+        <p>
+            时间到了，Adeli 说 CPC（Contrastive Predictive Coding）可以去看幻灯片；更好的 MoCo v3 和 DINO 也是用得很广的框架。DINO 的架构和 MoCo 类似，但不完全算对比学习，因为它用的是学生网络和教师网络；他说这个留到以后讨论，DINO 也被广泛用来从图像、有时从视频里提取特征。下一讲开头 Justin Johnson 补讲了 MoCo 和 DINO（见<a href="13_生成模型一自回归与VAE.html">第 13 讲</a>）。
+        </p>
+        <p>
+            以下是幻灯片上的内容，课上没有展开。对比学习可以分两类：实例级 Instance-level（基于正负实例，比如 SimCLR、MoCo）和序列级 Sequence-level（基于时间顺序，比如 CPC，van den Oord et al., 2018）。CPC 名字三个词的含义：Contrastive，用对比学习区分"对的"和"错的"序列；Predictive，模型要根据当前上下文预测未来的模式；Coding，模型学到可用于下游任务的特征向量，也就是"码"。步骤是：
+        </p>
+        <ol>
+            <li>把序列里每个样本编码成向量 $z_t = g_{\text{enc}}(x_t)$；</li>
+            <li>用自回归模型 $g_{\text{ar}}$ 把上下文（比如序列的前一半）概括成上下文码 $c_t$，原论文用的是 GRU-RNN；</li>
+            <li>在上下文 $c_t$ 和未来的码 $z_{t+k}$ 之间算 InfoNCE，打分函数随时间步而变：$s_k(z_{t+k}, c_t) = z_{t+k}^\top W_k\, c_t$，$W_k$ 是可训练矩阵。</li>
+        </ol>
+        <p>
+            CPC 可以用在音频上（在 LibriSpeech 上做线性分类），也可以用在图像上：把图像切成小块，从上到下把一行行小块当作序列，用上面几行预测下面几行。幻灯片的评价是，它比基于前置任务的方法好，但在图像特征学习上不如更新的实例级对比方法。MoCo v3 那篇论文（Chen et al., "An Empirical Study of Training Self-Supervised Vision Transformers"）自己写着 "This paper does not describe a novel method."。幻灯片最后还有 DINO、DINOv2 的图和 Dense Object Net（Florence et al., 2018，在像素级特征描述子上做对比学习）。
+        </p>
+    </section>
+
+    <section>
+        <h2>课上的原话</h2>
+        <ul>
+            <li>"So the labels should come from the data itself, right?"<br>所以标签应该来自数据本身，对吧？（<a href="https://www.youtube.com/watch?v=4howBU7THbM&t=526s" target="_blank">0:08:46</a>）</li>
+            <li>"But this paradigm of self-supervised learning was actually what enabled all of these large language models."<br>自监督学习这套范式，其实就是让这些大语言模型成为可能的东西。（<a href="https://www.youtube.com/watch?v=4howBU7THbM&t=810s" target="_blank">0:13:30</a>）</li>
+            <li>"So the hypothesis is learning to color video frames should allow a model to learn to track regions or objects without labels."<br>所以假设是：学会给视频帧上色，应该能让模型在没有标签的情况下学会跟踪区域或物体。（<a href="https://www.youtube.com/watch?v=4howBU7THbM&t=2246s" target="_blank">0:37:26</a>）</li>
+            <li>"Remember that these are the very first methods for self-supervised learning."<br>记住，这些是自监督学习最早的一批方法。（<a href="https://www.youtube.com/watch?v=4howBU7THbM&t=2627s" target="_blank">0:43:47</a>）</li>
+            <li>"This is the cross entropy for multi classes."<br>这就是多类交叉熵。（<a href="https://www.youtube.com/watch?v=4howBU7THbM&t=3729s" target="_blank">1:02:09</a>）</li>
+            <li>"With a larger number of negative samples, we'll get better and much faster training convergence."<br>负样本越多，训练收敛得越好、越快。（<a href="https://www.youtube.com/watch?v=4howBU7THbM&t=3923s" target="_blank">1:05:23</a>）</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS231N · Lecture 12: Self-Supervised Learning · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 5 讲：卷积神经网络 | Stanford CS231N 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="04_神经网络与反向传播.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS231N 目录</a> · 05</span>
+    <span><a href="06_CNN架构与训练技巧.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 5 讲：卷积神经网络</h1>
+        <p class="subtitle">先回顾深度学习的基本流程，再讲从手工特征到端到端学习、卷积网络从 LeNet 到 Transformer 的历史；主体是卷积层（滤波器、填充、感受野、步长、参数量与计算量）和池化层，最后讲平移等变性</p>
+        <div class="author-meta">
+            主讲：Justin Johnson（Stanford 博士，曾在 Facebook AI Research 和密歇根大学任职，现在做创业公司 World Labs；2015 年起参与开设并讲授 CS231N）· 2025 年 4 月 15 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=f3g1zGdxptI" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs231n.stanford.edu/slides/2025/lecture_5.pdf" target="_blank">课程幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            课程的第一部分"深度学习基础"（第 2 到 4 讲）到上一讲结束。这一讲开启第二部分"感知和理解视觉世界"（第 5 到 12 讲），问题是：前面那套通用的深度学习流程，怎样专门用到图像上。
+        </p>
+        <p>
+            Justin 的说法是，卷积网络在已有框架上只多了一点东西。计算图里目前只见过全连接层、激活函数和损失函数这几种节点，再加两种针对图像的新节点就够了：卷积层 Convolution Layer 和池化层 Pooling Layer。这一讲大部分时间讲卷积层，下一讲讲怎样把它们拼成完整的 CNN 架构。
+        </p>
+        <ol>
+            <li><a href="#t01">Justin 的介绍和前四讲回顾</a> · <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">从手工特征到端到端学习</a> · <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=732s" target="_blank">0:12:12</a></li>
+            <li><a href="#t03">卷积网络的结构和历史</a> · <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=1265s" target="_blank">0:21:05</a></li>
+            <li><a href="#t04">从全连接层到卷积滤波器</a> · <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=1828s" target="_blank">0:30:28</a></li>
+            <li><a href="#t05">卷积层的细节和问答</a> · <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=2255s" target="_blank">0:37:35</a></li>
+            <li><a href="#t06">非线性和滤波器学到了什么</a> · <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=2662s" target="_blank">0:44:22</a></li>
+            <li><a href="#t07">空间尺寸与填充</a> · <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=2971s" target="_blank">0:49:31</a></li>
+            <li><a href="#t08">感受野与步长</a> · <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=3111s" target="_blank">0:51:51</a></li>
+            <li><a href="#t09">卷积算例、超参数和其他卷积</a> · <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=3344s" target="_blank">0:55:44</a></li>
+            <li><a href="#t10">池化层</a> · <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=3569s" target="_blank">0:59:29</a></li>
+            <li><a href="#t11">平移等变性</a> · <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=3876s" target="_blank">1:04:36</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. Justin 的介绍和前四讲回顾</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=5s" target="_blank">0:00:05</a>–0:12:12</em></p>
+        <h3>主讲人</h3>
+        <p>
+            Justin 自称这门课的"第四位神秘讲师"。他 2012 到 2018 年在 Stanford 读博，做深度学习和计算机视觉，当时几乎所有视觉任务都碰过。读博期间他和 Andrej（Karpathy）等人一起开设了 CS231N，并在 2015 到 2019 年间讲过好几次（幻灯片写的是 2015 到 2018 年在 Stanford）。之后去了 Facebook AI Research，又在密歇根大学任教，在那里把同一门课讲了几遍（幻灯片：2019 到 2022 年）。最近在做创业公司 World Labs。
+        </p>
+        <h3>深度学习的基本流程</h3>
+        <p>
+            Justin 认为，前四讲已经覆盖了深度学习的全部基础，搭一个深度学习系统需要的各个部件大家都见过了。他按顺序重述一遍：
+        </p>
+        <ul>
+            <li>定义问题。解决深度学习问题的第一步，是把问题写成"输入一些张量 Tensor，输出一些张量"的形式。图像分类里，输入是排成三维张量的像素值，输出是每个预先定义好的类别各一个分数，可能的类别分数高，不可能的分数低。线性分类器 $f(x, W) = Wx + b$ 给出了这样一个函数形式。</li>
+            <li>损失函数。给定一个权重矩阵和一个数据集，损失函数告诉你这组权重解决问题解决得多好，例如 softmax 损失和 SVM 损失。</li>
+            <li>优化。把所有可能的权重铺成一个平面，损失是高度，优化就是顺着这个面滑到底部。常用算法有 SGD（通常带动量）、RMSProp、Adam。</li>
+        </ul>
+        <p>
+            他顺带讲了一件当时的新闻：前一天 ICLR 2025 把时间检验奖 Test of Time Award 颁给了 Adam 那篇论文。Adam 是 10 年前在 ICLR 2015 上发表的，学术会议常把这个奖颁给十年前影响最大的论文。
+        </p>
+        <h3>线性分类器的局限</h3>
+        <p>
+            线性分类器不够强，前面从两个角度看过。视觉角度：权重矩阵每一行是一个类别的模板，每个类别所有的知识都得压进一个模板里。比如"汽车"的模板看起来是一团红色，可车也可以是蓝的、紫的、绿的，线性分类器没法表示同一类别有多种外观。几何角度：把每个样本看成高维空间里的点，线性分类器只能用超平面切分空间，而没有理由认为各个类别一般都线性可分。
+        </p>
+        <h3>神经网络、计算图与反向传播</h3>
+        <p>
+            解决办法是神经网络：叠两个权重矩阵，中间加一个非线性。代数上变化很小，只是从 $f = Wx$ 变成多一个 $W_2$ 和一个非线性，分类器却强了很多。
+        </p>
+        <p>
+            为了求梯度，引入了计算图：每个节点是一个小的函数单元，比如矩阵乘法或 ReLU；数据从左往右流，从输入和权重流到最后的损失；再从右往左遍历，求损失对图中每个节点的梯度。
+        </p>
+        <p>
+            Justin 说反向传播是让深度学习能工作的算法之一，因为它把一个全局问题转成了局部问题。每个节点不需要知道自己处在多大的图里、整个系统在解什么问题，只要在前向时会由输入算输出，在反向时收到上游梯度后算出对自己输入的下游梯度。只要所有节点都遵守这个局部接口，就能拼成任意复杂的计算图，梯度"转一下曲柄"就自动出来了。
+        </p>
+        <p>
+            推广到张量时只需记住：上游梯度是损失对输出的梯度，形状和输出一样；下游梯度是损失对输入的梯度，形状和输入一样。因为损失是标量，梯度的含义是"把张量里每个元素单独轻轻动一下，损失变多少"。
+        </p>
+        <p>
+            于是得到一个解决几乎任何深度学习问题的配方：把问题编码成张量，写一个从输入张量算出输出张量的计算图，收集输入输出数据，写下损失函数，用反向传播加梯度下降优化。图像分类、图像生成、大语言模型，几乎所有神经网络都是这样或者这个配方的轻微变体训练出来的。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 从手工特征到端到端学习</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=732s" target="_blank">0:12:12</a>–0:21:05</em></p>
+        <h3>像素空间里的分类</h3>
+        <p>
+            图像分类是计算机视觉的核心任务：输入一张图，从预先给定的 $K$ 个类别里预测一个标签。线性分类器和全连接网络都已经能做这件事，但它们工作在像素空间 Pixel Space：$f(x) = Wx$ 里的 $x$ 就是全部像素的原始值，直接映射到类别分数。
+        </p>
+        <h3>特征表示</h3>
+        <p>
+            神经网络普及之前，大约 2000 年代初到 2010、2011 年，常见做法是特征表示 Feature Representation：不把原始像素喂给分类器，而是由设计者写一个函数，把像素转换成他们认为抓住了图像重要方面的表示，再在这个表示上训练线性分类器。Justin 说这些方法大约十年前就被淘汰了，不必细究，了解一下大致样子就行。
+        </p>
+        <ul>
+            <li>颜色直方图 Color Histogram：把所有可能的颜色划分成若干个桶，每个像素归到一个桶里，特征就是每个桶里有多少像素。他举的例子是做苹果检测器、判断熟没熟时，红色和绿色各占多少可能有用。这种表示完全丢掉了空间结构：红色在左上角还是右下角，在颜色直方图看来一样，在原始像素看来差别很大。</li>
+            <li>方向梯度直方图 Histogram of Oriented Gradients（HoG）：和颜色直方图相反，丢掉颜色，只看结构，即图像每个局部区域里边缘的主要方向。幻灯片里的青蛙图，叶子区域提取出斜向特征，眼睛周围抓到了圆形结构。幻灯片给的做法：把图像分成 $8\times8$ 像素的区域，每个区域内把边缘方向量化到 9 个桶；一张 $320\times240$ 的图分成 $40\times30$ 个区域，每个区域 9 个数，特征向量长 $30\times40\times9 = 10{,}800$（引用 Lowe, ICCV 1999；Dalal 与 Triggs, CVPR 2005）。</li>
+            <li>幻灯片还列了视觉词袋 Bag of Words：随机抽取图像块，聚类成"视觉单词"组成的码本，再用码本对图像编码（引用 Fei-Fei 与 Perona, CVPR 2005）。</li>
+        </ul>
+        <p>
+            哪种特征最好？当时通常的答案是全都要：把多种特征都提取出来，拼接成一个大的特征向量，再在上面接任意分类器。
+        </p>
+        <h3>两种系统的对比</h3>
+        <p>
+            Justin 把两种系统并排放：系统 A 是"特征提取器 + 学出来的线性分类器"，系统 B 是端到端 End-to-End 的神经网络。换个角度看它们差别不大，输入都是原始像素，输出都是分数或预测。区别在于哪部分由人设计，哪部分靠梯度下降学。系统 A 里，特征提取是人写的，可能是一堆很难读的 C 或 Matlab 代码，只有最后的分类器从训练数据中学。神经网络的思路是：梯度下降大概比你更会编程，大量数据大概比你更懂你的问题。从原始像素到最终分数，整个系统都通过梯度下降从训练数据中学出来。
+        </p>
+        <p>
+            人工设计特征可能有瓶颈：设计者对哪些因素重要的直觉可能是错的，也可能很难写出完美的特征提取器。端到端学习认为数据和算力能比人做得更好。他说过去十五年左右，这种范式在大量问题上一再胜出。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 卷积网络的结构和历史</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=1265s" target="_blank">0:21:05</a>–0:30:28</em></p>
+        <h3>人仍然要设计架构</h3>
+        <p>
+            端到端系统也不是一路全连接到底，那样有点傻，人还是要做一些设计。区别是：设计特征提取器是在写一个具体的函数；设计神经网络是在定义一整类函数，这类函数由计算图的结构、运算的顺序决定，权重留给数据去学。设计者要决定网络的架构 Architecture：用哪些运算、按什么顺序拼、每一步矩阵多大。
+        </p>
+        <p>
+            到目前为止我们只会一种架构：把图像像素拉平成一个长向量，做矩阵乘法、ReLU、再矩阵乘法、再 ReLU。最大的问题是它破坏了图像的空间结构。图像是二维的，二维结构对图像内容很重要，拉成向量再接线性层，等于在网络设计中忽略了输入数据的这个重要性质。所以要找能尊重二维结构的新运算。
+        </p>
+        <h3>卷积网络的一般结构</h3>
+        <p>
+            卷积网络 Convolutional Neural Network（CNN）是一类由线性层、非线性、卷积层、池化层（有时还有几种别的层）组成的网络，输入原始像素，输出预测或分数。一般结构是：前面是卷积、池化、非线性交替组成的主体，可以看成在提取有用的特征表示；后面接一个或多个全连接层，相当于在卷积部分提取的特征上做分类的 MLP。整个系统用梯度下降最小化训练集上的损失，端到端训练。
+        </p>
+        <h3>从 LeNet 到 AlexNet</h3>
+        <p>
+            幻灯片上画的这个架构来自 1998 年 Yann LeCun、Léon Bottou 等人的论文 Gradient-based learning applied to document recognition，用于数字识别。效果不错，但计算很贵，当时没有 GPU、TPU，也没有今天的算力。不过底层算法和网络结构，与 2010 年代人们用的架构很像。
+        </p>
+        <p>
+            2012 年出现了 AlexNet（Krizhevsky、Sutskever、Hinton），深度学习尤其在视觉领域爆发。AlexNet 和 LeNet 看起来也差不多，都是卷积层加全连接层，只是更大、层更多、每层单元更多，仍用反向传播端到端训练，损失函数也很简单。区别是这时有了 GPU 可以训练，互联网和 ImageNet 带来了更多数据。
+        </p>
+        <h3>2012 到 2020：卷积网络统治视觉</h3>
+        <p>
+            大约 2012 到 2020 年，几乎任何图像问题的最好方法都是卷积网络：
+        </p>
+        <ul>
+            <li>检测 Detection：不只给整张图分类，还要给每个物体画框并标类别（幻灯片引用 Farabet 等 2012；Faster R-CNN，Ren、He、Girshick、Sun 2015）。</li>
+            <li>分割 Segmentation：在像素级别给每个像素独立分配类别标签。</li>
+            <li>图像描述 Image Captioning：从图像生成一句自然语言描述，最早成功的一批方法也基于卷积网络（Vinyals 等 2015；Karpathy 与 Fei-Fei 2015）。幻灯片上的例句由 Justin 用 Neuraltalk2 生成，例如 "A cat sitting on a suitcase on the floor"。</li>
+            <li>文本生成图像：反过来，输入文字描述，从零生成一张图。Justin 说最早效果很好的版本也基于卷积网络，幻灯片用的是 Stable Diffusion 论文（Rombach 等，High-Resolution Image Synthesis with Latent Diffusion Models）的图。这项技术后来进步很多，后面的生成模型讲会再讲；扩散模型的细节也可以看本站 <a href="../CME296-Diffusion-and-Large-Vision-Models/04_潜空间与引导生成.html">CME296 第 4 讲：潜空间与引导生成</a>。</li>
+        </ul>
+        <p>
+            卷积网络当年重要到这门课 2015 年开设时的名字就叫 Convolutional Neural Networks for Visual Recognition。那时卷积网络几乎等于计算机视觉，视觉又是受益于深度学习最大的领域，所以整门课只讲卷积网络是合理的。
+        </p>
+        <h3>2021 年以后：Transformer</h3>
+        <p>
+            后来课名改了。2020 年前后发生了什么？Justin 自问自答：除了新冠，还有 Transformer。Transformer 是另一种网络架构，2017 年发表（Vaswani 等，Attention is All You Need），最初用于处理文本。2021 年有一篇重要论文（Dosovitskiy 等，An Image is Worth 16x16 Words，ICLR 2021）把几乎同样的架构用来处理图像。此后很多原本用 CNN 解决的问题，换成 Transformer、其他不变，效果往往更好，而且能更好地随数据和算力扩展。Transformer 第 8 讲细讲。
+        </p>
+        <p>
+            既然如此为什么还讲卷积网络？他给了四个理由：有历史意义；实践中仍然大量使用；能帮你建立关于图像什么最重要的直觉；它们也没完全死，很多系统是混合的，有时用卷积、有时用 Transformer、有时以各种方式混在一起。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 从全连接层到卷积滤波器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=1828s" target="_blank">0:30:28</a>–0:37:35</em></p>
+        <h3>全连接层是模板匹配</h3>
+        <p>
+            先回顾全连接层。一张 $32\times32\times3$ 的图（两个空间维度 32、32，三个 RGB 通道），拉成长度 3072 的向量。权重矩阵 $10\times3072$，10 是类别数。矩阵乘向量，得到 10 个类别分数。
+        </p>
+        <p>
+            为了推广到卷积，Justin 让大家换个角度看：输出的每个数，是权重矩阵的一行和整个输入向量的点积（一个 3072 维的点积）。两个向量方向一致时点积大，正交时为 0，所以凡是基于点积的运算都可以看成模板匹配 Template Matching。全连接层就是一组模板，每个模板和输入一样大，输出是每个模板与整个输入的匹配分数。
+        </p>
+        <h3>卷积：小模板在图上滑</h3>
+        <p>
+            卷积层保留模板匹配、学一组滤波器 Filter 的思路，改变的是模板不再和输入一样大，只看输入的一小块。具体说：
+        </p>
+        <ul>
+            <li>不再把图像拉平，保留三维结构：3 个通道（也叫深度 Depth 或通道 Channel 维度），宽 32，高 32。</li>
+            <li>一个滤波器是一张很小的低分辨率图，比如 $5\times5$。滤波器的通道数总是和输入相同，这里是 3，空间尺寸更小。</li>
+            <li>把滤波器放到图上某个位置，它和这个位置上 $5\times5\times3$ 的图像块对齐，算一次内积（$5\times5\times3 = 75$ 维的点积，再加偏置），得到一个标量，表示这块图像和模板有多吻合。</li>
+            <li>把滤波器滑到图上每一个位置，每处得到一个分数，收集起来就是一张二维平面，叫激活图 Activation Map。平面上每个点表示输入图像对应位置与这个滤波器的匹配程度。</li>
+        </ul>
+        <h3>多个滤波器</h3>
+        <p>
+            "这是深度学习，我们想要更多计算，怎么加？加更多滤波器。"第二个滤波器（幻灯片里画成绿色）同样是 $5\times5\times3$，同样滑过整张图，得到第二张激活图。可以一直加下去。
+        </p>
+        <p>
+            幻灯片的例子用 6 个滤波器，每个 $3\times5\times5$，合起来是一个四维张量 $6\times3\times5\times5$，第一维 6 是滤波器个数。卷积层的输入是三维图像和四维滤波器组，输出是把 6 张激活图沿第三维叠起来，形状 $6\times28\times28$：28 是空间维度，6 是通道维度。也可以把输出看成一张 $28\times28$ 的网格，每个点是一个 6 维向量。
+        </p>
+        <p>
+            和线性层一样，卷积层也有可学习的偏置。线性层是每行一个标量偏置，卷积层是每个滤波器一个标量偏置，所以这里是 6 维偏置向量。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 卷积层的细节和问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=2255s" target="_blank">0:37:35</a>–0:44:22</em></p>
+        <h3>课堂问答</h3>
+        <p>
+            这一段学生问题很多，Justin 逐个回答：
+        </p>
+        <ul>
+            <li>3 是 RGB 通道吗？是。</li>
+            <li>滤波器从哪来？靠梯度下降和反向传播。没人手动指定滤波器，随机初始化后在你要解决的问题上用梯度下降学。这一层计算量不小，但期待它被数据和训练填满，这是卷积层的力量所在。</li>
+            <li>滤波器大小 5 怎么定？这是超参数，属于架构超参数，一般用交叉验证之类的方法选。</li>
+            <li>能在一层里用不同大小的滤波器吗？既能也不能。下一讲的 Inception 就会有这种结构。这里有个"API 设计"问题：什么做成计算图的基本单元，什么由基本单元组合出来。单个卷积层通常固定滤波器大小，因为这样容易计算，也容易写高效的 GPU 内核；但可以在更大的网络结构里把不同大小的卷积层拼在一起，达到多尺寸的效果。</li>
+            <li>学的是什么？要分清参数 Parameter 和超参数。超参数在训练前设定，这里滤波器个数（输出通道数）和滤波器大小都是超参数，它们决定了张量的形状。训练开始时随机初始化，得到一个固定形状的张量，张量里的值在优化中不断变化，这些值是参数。</li>
+            <li>算的是什么梯度？反向传播算的永远是损失对网络内部各个量的梯度，这里是损失对卷积滤波器权重的梯度：每个滤波器里每个标量轻轻动一下，损失变多少。</li>
+            <li>偏置怎么用？每次滤波器和一块图像算完内积，加上对应的那个偏置标量。偏置向量的长度等于滤波器个数，每个偏置在空间维度上广播，只服务于一个滤波器。概念上，每个滤波器独立滑一遍得到一张激活图，然后把所有激活图叠起来。</li>
+            <li>每次梯度下降都会改变滤波器吗？会。训练永远是这样一个循环：取一批数据，前向，算损失，反向算梯度，用优化器走一步。每走一步滤波器都会变。</li>
+        </ul>
+        <h3>批处理</h3>
+        <p>
+            卷积层通常一次处理一批 Batch 图像，这样所有东西都变成四维：输入是一组图像（四维），滤波器是一组三维滤波器（四维），输出是每张图一个三维特征图堆（四维）。幻灯片例子：$2\times3\times32\times32$ 的一批图，输出 $2\times6\times28\times28$。
+        </p>
+        <h3>卷积层的一般形式</h3>
+        <p>
+            输入：$N\times C_{in}\times H\times W$，$N$ 张图，每张 $C_{in}$ 个通道（RGB 时是 3，一般可以是任意数），空间尺寸 $H\times W$。
+        </p>
+        <p>
+            滤波器：$C_{out}\times C_{in}\times K_w\times K_h$，即 $C_{out}$ 个滤波器（输出通道数），每个形状 $C_{in}\times K_w\times K_h$，$K_w$、$K_h$ 是卷积核 Kernel 的宽和高。另有 $C_{out}$ 维偏置。
+        </p>
+        <p>
+            输出：$N\times C_{out}\times H'\times W'$，每张图一个输出，每个输出有 $C_{out}$ 张特征平面，每个滤波器对应一张。
+        </p>
+        <p>
+            卷积网络就是包含一串卷积层的计算图。一个简单例子：输入 $3\times32\times32$；第一层卷积 6 个 $5\times5\times3$ 的滤波器，输出 $6\times28\times28$；第二层 10 个 $5\times5\times6$ 的滤波器，10 决定输出通道数，6 必须等于输入的通道数。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 非线性和滤波器学到了什么</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=2662s" target="_blank">0:44:22</a>–0:49:31</em></p>
+        <h3>上面这个网络有什么问题</h3>
+        <p>
+            Justin 问大家，刚才这个一层接一层的卷积网络有什么问题。学生先后说了尺寸会缩小、卷积只看局部、内存占用大、滤波器个数增加。他说前两个确实是问题，过几页就能解决；内存问题解决不了，"只能买更大的 GPU"；滤波器个数增加不一定是问题。他想要的答案是：全是线性的。
+        </p>
+        <p>
+            卷积就是点积，是线性运算，两个线性运算复合仍是线性运算。两个卷积层直接叠在一起，表示能力和一个卷积层相同。这和多层全连接网络遇到的是同一个毛病，修法也一样：在卷积层之间加非线性激活函数，比如 ReLU。所以卷积网络一般是卷积层、非线性和其他层的堆叠。
+        </p>
+        <h3>滤波器学到了什么</h3>
+        <p>
+            可以和线性分类器类比。线性分类器每类一个模板；MLP 是一组覆盖整张图的模板；卷积滤波器也是模板，只是每个模板只覆盖图像的一小块。
+        </p>
+        <p>
+            第一层滤波器可以直接画成小 RGB 图来看。幻灯片展示的是在 ImageNet 上训练做分类的 AlexNet 的第一层：64 个滤波器，每个 $3\times11\times11$。Justin 说，几乎所有卷积网络，只要任务合理，不管什么数据和任务，第一层学到的滤波器都长得差不多，大致两类：一类找颜色，尤其是对立色，比如绿和红的反差、粉色和绿色的色块；另一类找空间结构，比如竖边、横边、斜边。也就是在局部邻域里找颜色和边缘。
+        </p>
+        <p>
+            更高层的滤波器难以直接可视化，他没有解释那张图的具体做法（来自 Springenberg 等，ICLR 2015），只说明：每行是某个 ImageNet 模型第 6 层卷积的一个滤波器，每列是让这个滤波器响应强烈的一块输入图像。可以看到有的滤波器像在找眼睛，有的像在找文字，有的像在找轮子或圆形的上半部分。高层倾向于学更大的空间结构。这些都是梯度下降在大数据集上训练出来的，没人手动设计。
+        </p>
+        <h3>问答</h3>
+        <ul>
+            <li>知道所有滤波器的响应，能重建原图吗？可以，办法同样是梯度下降，后面几讲会讲相关方法。</li>
+            <li>滤波器之间怎么分化成不同的样子？靠随机初始化。每个滤波器的初始化必须不同，以打破对称性 Symmetry Breaking：如果所有滤波器一模一样，它们的损失相同，回传的梯度也相同，初始化成一样就会一直一样。</li>
+            <li>每层多少通道由谁定？由网络设计者写下运算顺序和各层通道数，这就是下一讲的架构设计问题。</li>
+            <li>为什么越深的层可视化出来的结构越大？和感受野有关，见下文。</li>
+        </ul>
+    </section>
+
+    <section id="t07">
+        <h2>07. 空间尺寸与填充</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=2971s" target="_blank">0:49:31</a>–0:51:51</em></p>
+        <h3>输出尺寸</h3>
+        <p>
+            为了看清空间尺寸，把卷积示意图转 90 度、略去通道维（通道朝纸面里），只看 $7\times7$ 的空间输入和 $3\times3$ 的卷积核。滤波器能放的位置一排数下来是 5 个，所以输出 $5\times5$。一般地，输入长度 $W$，卷积核长度 $K$：
+        </p>
+        $$\text{输出} = W - K + 1$$
+        <h3>填充</h3>
+        <p>
+            问题是特征图每过一层卷积就缩小一点。也能接受，有些架构就是这么处理的，但人们图省事，希望各层大小保持一致，方便思考。常用技巧是填充 Padding：卷积前在真实输入四周补一圈"虚拟"数据，通常是 0。填充 $P$ 后输出尺寸为：
+        </p>
+        $$\text{输出} = W - K + 1 + 2P$$
+        <p>
+            例如 $3\times3$ 卷积配 $P=1$，特征图大小不变。常见设置是让 $K$ 取奇数、$P = (K-1)/2$，输出和输入一样大（"same" 填充）。
+        </p>
+        <p>
+            为什么补 0？Justin 说，学过信号处理的人会知道这在信号处理意义上会带来一些怪问题，在边界上确实会出问题，但在很多情况下看起来没关系。课上忽略这一点，只看张量的形状。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 感受野与步长</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=3111s" target="_blank">0:51:51</a>–0:55:44</em></p>
+        <h3>感受野</h3>
+        <p>
+            为什么深层学到更大的结构？这是卷积结构本身决定的。核大小为 $K$ 时，输出的每个元素只依赖输入里一个 $K\times K$ 的区域，这个区域叫它的感受野 Receptive Field。第一层卷积的输出只能看到和卷积核一样大的一块图。
+        </p>
+        <p>
+            多层卷积叠起来，感受野会逐层放大。最后一层的每个值依赖前一层的一个局部区域，前一层的每个值又依赖再前一层的局部区域，依此类推。每层只看前一层的局部邻域，但它在原始输入上能"看到"的范围随深度增长，这叫有效感受野 Effective Receptive Field，即原图中有多少像素有机会影响后面某一个激活值。每多一层卷积，感受野增加 $K-1$；$L$ 层之后：
+        </p>
+        $$\text{感受野} = 1 + L\,(K-1)$$
+        <p>
+            幻灯片提醒要分清"在输入上的感受野"和"在前一层上的感受野"。
+        </p>
+        <h3>步长</h3>
+        <p>
+            感受野随层数线性增长是个问题：分类决策最终希望汇总整张图的全局信息，但对大图来说需要很多层，每个输出才能"看到"整张图。办法是在网络内部下采样 Downsample，让感受野长得更快。卷积的做法是步长 Stride：滤波器跳着放，隔几个位置放一次。
+        </p>
+        <p>
+            回到 $7\times7$ 输入、$3\times3$ 卷积，步长 2 时输出是 $3\times3$。一般地，输入 $W$、核 $K$、填充 $P$、步长 $S$：
+        </p>
+        $$\text{输出} = \frac{W - K + 2P}{S} + 1$$
+        <p>
+            Justin 拆着读这个"难看的公式"：大核让输入缩小，$2P$ 把一部分补回来，步长去除，再加 1，那是"栅栏柱"式的计数问题。
+        </p>
+        <p>
+            带步长的卷积相当于在网络内部对图像下采样，通常每层把特征图尺寸除以 2。这样的层叠起来，有效感受野随深度指数增长，用不多的层就能得到覆盖整张输入图的感受野。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 卷积算例、超参数和其他卷积</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=3344s" target="_blank">0:55:44</a>–0:59:29</em></p>
+        <h3>一个完整算例</h3>
+        <p>
+            输入 $3\times32\times32$，卷积层有 10 个 $5\times5$ 滤波器，步长 1，填充 2。
+        </p>
+        <p>
+            输出尺寸：通道数等于滤波器个数，10；空间尺寸代公式
+        </p>
+        $$\frac{32 + 2\times2 - 5}{1} + 1 = 32$$
+        <p>
+            所以输出 $10\times32\times32$。这符合前面的规律：核大小 $2k+1$、填充 $k$，空间尺寸不变。
+        </p>
+        <p>
+            可学习参数：每个滤波器 $3\times5\times5 = 75$ 个权重，加 1 个偏置，共 76；10 个滤波器，共 760 个参数。
+        </p>
+        <p>
+            乘加运算次数：Justin 的算法是看输出体积。输出有 $10\times32\times32 = 10{,}240$ 个值，每个值是一个 $3\times5\times5$ 滤波器和一块 $3\times5\times5$ 图像的点积，75 个元素。总共 $75\times10{,}240 = 768{,}000$ 次浮点乘加。他说这算不算多，取决于你对计算量有没有直觉。
+        </p>
+        <h3>卷积层小结</h3>
+        <p>
+            幻灯片把卷积层的超参数和公式汇成一页，供课后查：
+        </p>
+        <ul>
+            <li>输入 $C_{in}\times H\times W$。</li>
+            <li>超参数：核大小 $K_H\times K_W$、滤波器个数 $C_{out}$、填充 $P$、步长 $S$。</li>
+            <li>权重 $C_{out}\times C_{in}\times K_H\times K_W$，即 $C_{out}$ 个大小为 $C_{in}\times K_H\times K_W$ 的滤波器；偏置 $C_{out}$ 维。</li>
+            <li>输出 $C_{out}\times H'\times W'$，其中 $H' = (H - K + 2P)/S + 1$，$W' = (W - K + 2P)/S + 1$。</li>
+        </ul>
+        <p>
+            常见设置：$K_H = K_W$（小的正方形滤波器）；$P = (K-1)/2$（same 填充）；$C_{in}$、$C_{out}$ 取 32、64、128、256 这样的 2 的幂；以及以下几种组合：
+        </p>
+        <ul>
+            <li>$K=3,\ P=1,\ S=1$：$3\times3$ 卷积</li>
+            <li>$K=5,\ P=2,\ S=1$：$5\times5$ 卷积</li>
+            <li>$K=1,\ P=0,\ S=1$：$1\times1$ 卷积</li>
+            <li>$K=3,\ P=1,\ S=2$：下采样 2 倍</li>
+        </ul>
+        <p>
+            PyTorch 的卷积层（<code>torch.nn.Conv2d</code>）就有这些超参数，另外还有两个课上没讲的：groups 和 dilation。Justin 说 dilation 现在用得不多，groups 有时还会用，可能以后再讲。
+        </p>
+        <h3>其他维度的卷积</h3>
+        <p>
+            前面讲的是二维卷积，权重 $C_{out}\times C_{in}\times K\times K$。同样的思路可以推广：
+        </p>
+        <ul>
+            <li>一维卷积：输入 $C_{in}\times W$，权重 $C_{out}\times C_{in}\times K$，滤波器沿一个方向滑。</li>
+            <li>三维卷积：输入 $C_{in}\times H\times W\times D$（体数据中每个点是一个 $C_{in}$ 维向量），权重 $C_{out}\times C_{in}\times K\times K\times K$，滤波器在三维空间里到处滑。</li>
+        </ul>
+    </section>
+
+    <section id="t10">
+        <h2>10. 池化层</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=3569s" target="_blank">0:59:29</a>–1:04:36</em></p>
+        <h3>另一种下采样</h3>
+        <p>
+            池化层 Pooling Layer 是网络内部另一种下采样方法。带步长的卷积已经能下采样，下采样的好处是感受野长得更快；但卷积本身很贵，卷积网络里大部分计算量都在卷积上。池化是一种很便宜的下采样。
+        </p>
+        <p>
+            做法：给定一个 $C\times H\times W$ 的张量，比如 $64\times224\times224$（64 个通道，每个通道是一张 $224\times224$ 的平面），把每个通道的平面单独拿出来下采样，再叠回去。输出通道数不变，空间尺寸变小，比如 $64\times112\times112$。
+        </p>
+        <h3>最大池化</h3>
+        <p>
+            怎么下采样有几种选择，最常用的是最大池化 Max Pooling：把一张深度切片切成互不重叠的区域，每块取最大值。用卷积的术语说，"核大小 $2\times2$、步长 2"就是把输入切成不重叠的 $2\times2$ 小块。幻灯片的例子：
+        </p>
+        $$\begin{bmatrix}1&1&2&4\\5&6&7&8\\3&2&1&0\\1&2&3&4\end{bmatrix}\ \xrightarrow{\ 2\times2\ \text{max, stride } 2\ }\ \begin{bmatrix}6&8\\3&4\end{bmatrix}$$
+        <p>
+            幻灯片还写着：池化对小的空间平移有一定的不变性，而且没有可学习参数。可调的超参数有核大小、步长和池化函数：最大池化最常见，也有平均池化 Average Pooling，有时还有抗混叠 Anti-aliased 的下采样。
+        </p>
+        <h3>问答</h3>
+        <ul>
+            <li>池化用填充吗？一般不用。数学上没有障碍，但对最大池化来说补 0 很傻，效果相当于一个 ReLU，如果你本来就用了 ReLU 就重复了。他不确定 PyTorch 的池化层有没有填充选项。</li>
+            <li>步长调不调？它也是架构超参数，但通常不怎么调。最常见的需求就是把尺寸缩小一半，所以最常用 $2\times2$、步长 2，有时用 $4\times4$、步长 2。</li>
+            <li>输入图像必须同样大小吗？在目前的讲法里是的，不一样会出大问题。常见处理有：送进网络前把所有图像缩放到同样大小；用 0 或其他值把图像填充到同样大小（填充而不拉伸变形）；更复杂的训练系统里会按宽高比分桶 Aspect Ratio Bucketing，每次前向和反向用同一分辨率、同一宽高比的一批图，不同迭代之间可以换。他说这在一些较大的生产系统里能见到。</li>
+            <li>池化放在哪？通常和卷积层交错。典型的卷积网络是"卷积、卷积、池化"重复几次，再接两层全连接。</li>
+            <li>池化引入非线性吗？取决于池化方式。最大池化是非线性的，所以有的网络在最大池化附近不再用 ReLU；平均池化是线性运算，这时可能还需要 ReLU。</li>
+        </ul>
+        <h3>池化小结</h3>
+        <p>
+            超参数和卷积基本一样，只多一个池化函数（max 或 avg）。输入 $C\times H\times W$，核大小 $K$，步长 $S$，输出 $C\times H'\times W'$：
+        </p>
+        $$H' = \frac{H - K}{S} + 1,\qquad W' = \frac{W - K}{S} + 1$$
+        <p>
+            没有可学习参数。max、$K=2$、$S=2$ 得到 2 倍下采样。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 平移等变性</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=3876s" target="_blank">1:04:36</a>–1:07:27</em></p>
+        <p>
+            最后一个概念是平移等变性 Translation Equivariance。开头说过，我们要的是尊重图像空间结构的运算，而拉平成向量不尊重这种结构。卷积和池化共有的一个性质，可以把"尊重二维空间结构"这件事形式化。
+        </p>
+        <p>
+            设想两条路径。一条是先对图像做卷积或池化，再把结果平移（比如整体往旁边挪一点）；另一条是先平移图像，再做卷积或池化。两者结果相同：
+        </p>
+        $$\text{Conv}(\text{Translate}(X)) = \text{Translate}(\text{Conv}(X))$$
+        <p>
+            当然要满足一些边界条件之类的技术前提，在图像无限大之类的极限下成立。Justin 觉得有意思的是，空间平移和这些卷积、下采样运算的顺序可以互换。
+        </p>
+        <p>
+            它背后是关于图像的一个直觉：从图像中提取的特征应该只取决于图像内容，与内容出现在图中哪个绝对位置无关。他指着教室说，往这边看是人和长椅，往那边看也是人和长椅，在右边还是在左边，都应该用完全一样的方式处理。平移等变性用数学描述了这种结构是怎样内置在运算里的。这种对图像的直觉是通过运算的设计放进去的，不再像本讲开头那样通过特征提取方法放进去。
+        </p>
+        <p>
+            有学生问：那网络里要做平移吗？Justin 说不用，这只是一个数学上的有趣性质，你不该在网络里真的这么做。数学家把这种图叫交换图 Commutative Diagram，他们很喜欢这种东西。
+        </p>
+        <p>
+            本讲到此结束：讲了卷积网络为什么有意思，以及卷积和池化两种新运算。下一讲讲怎样把它们拼成 CNN 架构。
+        </p>
+    </section>
+
+    <section>
+        <h2>课上的原话</h2>
+        <ul>
+            <li>"the neural network approach is basically saying gradient descent is probably a better programmer than you, and lots of data probably knows more about your problem than you do."<br>神经网络的思路其实就是说：梯度下降大概比你更会编程，大量数据大概比你更了解你的问题。（<a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=1166s" target="_blank">0:19:26</a>）</li>
+            <li>"It wasn't COVID, it was transformers."<br>不是新冠，是 Transformer。（<a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=1720s" target="_blank">0:28:40</a>）</li>
+            <li>"So anything built on dot products is basically a template matching."<br>所以凡是建立在点积上的东西，基本上都是模板匹配。（<a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=1903s" target="_blank">0:31:43</a>）</li>
+            <li>"A lot of memory that is a problem, but not one we can fix. You just got to buy a bigger GPU."<br>内存占用大确实是问题，但不是我们能解决的。你只能去买块更大的 GPU。（<a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=2646s" target="_blank">0:44:06</a>）</li>
+            <li>"So if you initialize them the same, they will stay the same."<br>所以如果初始化成一样的，它们就会一直一样。（<a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=2925s" target="_blank">0:48:45</a>）</li>
+            <li>"And if you're a mathematician, you call this a commutative diagram."<br>如果你是数学家，你会管这个叫交换图。（<a href="https://www.youtube.com/watch?v=f3g1zGdxptI&t=4047s" target="_blank">1:07:27</a>）</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS231N · Lecture 5: Image Classification with CNNs · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

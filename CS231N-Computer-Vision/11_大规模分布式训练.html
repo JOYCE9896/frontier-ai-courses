@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 11 讲：大规模分布式训练 | Stanford CS231N 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="10_视频理解.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS231N 目录</a> · 11</span>
+    <span><a href="12_自监督学习.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 11 讲：大规模分布式训练</h1>
+        <p class="subtitle">以 Llama3-405B 为例：H100 内部的存储层级与 Tensor Core，GPU 十年快了一千倍，Meta 两万多卡的集群怎样搭起来；然后是数据并行、FSDP、HSDP、激活检查点、扩展配方与 MFU，最后简述上下文并行、流水线并行、张量并行和四维并行</p>
+        <div class="author-meta">
+            主讲：Justin Johnson（密歇根大学助理教授，Facebook AI Research 研究科学家）· 2025 年 5 月 6 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=9MvD-XsowsE" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs231n.stanford.edu/slides/2025/lecture_11.pdf" target="_blank">课程幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            前面的课默认模型在一块 GPU 上训练。Justin 说，十年前这门课刚开的时候确实如此，现在的常态是几十、几百、几千甚至几万块设备同时训练一个模型，这需要新的算法和新的思路。这一讲分两部分：先看 GPU 硬件本身和 GPU 集群长什么样，再看怎样把一个神经网络的训练拆到大量 GPU 上。
+        </p>
+        <p>
+            全讲的例子是 Meta 的 Llama3-405B，因为它的论文公开了大量训练系统的细节。后半段的并行方法主要针对 Transformer，它的结构见 <a href="08_注意力与Transformer.html">第 8 讲</a>。后半段和 CS336 的两讲并行课重叠很多，那里讲得更细：<a href="../CS336-Language-Modeling-from-Scratch/07_并行一集合通信与三种基本并行.html">CS336 第 7 讲</a>讲集合通信和三种基本并行，<a href="../CS336-Language-Modeling-from-Scratch/08_并行二大规模训练的并行策略.html">第 8 讲</a>讲大规模训练怎样组合这些并行。
+        </p>
+        <ol>
+            <li><a href="#t01">为什么要讲分布式训练：Llama3-405B</a> · <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">GPU 内部：H100 的存储层级与 Tensor Core</a> · <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=173s" target="_blank">0:02:53</a></li>
+            <li><a href="#t03">GPU 十二年快了一千倍</a> · <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=715s" target="_blank">0:11:55</a></li>
+            <li><a href="#t04">GPU 集群：Meta 的 Llama3 集群</a> · <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=909s" target="_blank">0:15:09</a></li>
+            <li><a href="#t05">GPU 之外的训练芯片</a> · <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=1400s" target="_blank">0:23:20</a></li>
+            <li><a href="#t06">拆分计算的几个维度</a> · <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=1573s" target="_blank">0:26:13</a></li>
+            <li><a href="#t07">数据并行 DP</a> · <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=1740s" target="_blank">0:29:00</a></li>
+            <li><a href="#t08">完全分片数据并行 FSDP</a> · <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=2373s" target="_blank">0:39:33</a></li>
+            <li><a href="#t09">混合分片数据并行 HSDP</a> · <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=2931s" target="_blank">0:48:51</a></li>
+            <li><a href="#t10">激活检查点</a> · <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=3160s" target="_blank">0:52:40</a></li>
+            <li><a href="#t11">扩展配方与模型 FLOPs 利用率 MFU</a> · <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=3347s" target="_blank">0:55:47</a></li>
+            <li><a href="#t12">上下文并行、流水线并行、张量并行</a> · <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=3782s" target="_blank">1:03:02</a></li>
+            <li><a href="#t13">ND 并行与总结</a> · <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=4249s" target="_blank">1:10:49</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 为什么要讲分布式训练：Llama3-405B</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=5s" target="_blank">0:00:05</a>–0:02:53 · Introduction to distributed training</em></p>
+        <p>
+            Justin 开场说，大规模分布式训练基本上就是今天所有神经网络实际被训练的方式。不论创业公司、大厂还是学术界，大规模已经是深度学习的新常态。十年前常见的是在一块 GPU 上训练所有模型，多设备训练并不常见；现在要同时用几十到几万块设备。
+        </p>
+        <p>
+            他选 Llama3-405B 做贯穿全讲的例子。他说它未必是最好或最有意思的模型，选它是因为它接近最先进水平，又公开了大量实现细节。Google、OpenAI、Anthropic 这几年训了很多很强的模型，但几乎不公开任何细节。他认为行业风向的转折点是 2023 年的 GPT-4 技术报告里这句话：
+        </p>
+        <blockquote>
+            “Given both the competitive landscape and the safety implications of large-scale models like GPT-4, this report contains no further details about the architecture (including model size), hardware, training compute, dataset construction, training method, or similar.”
+        </blockquote>
+        <p>
+            （鉴于竞争格局和 GPT-4 这类大模型的安全影响，本报告不再提供架构（包括模型大小）、硬件、训练算力、数据集构建、训练方法等方面的任何细节。）他说从那以后三年，大模型的通行做法就是什么都不说，能告诉你它是个 Transformer 就算运气好。
+        </p>
+        <p>
+            Llama3 是 Meta 在 2024 年 4 月开源的大语言模型，论文（“The Llama 3 Herd of Models”）对数据集讲得不多，对训练用的系统基础设施讲了很多，让人能看到大规模 LLM 现在是怎样训练出来的。2025 年 4 月 Meta 又发布了 Llama4，开源里已有稍好的模型，但还没有论文。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. GPU 内部：H100 的存储层级与 Tensor Core</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=173s" target="_blank">0:02:53</a>–0:11:55 · GPU hardware fundamentals / Inside the NVIDIA H100 / Tensor cores and mixed precision</em></p>
+        <h3>GPU 从哪来</h3>
+        <p>
+            GPU 是图形处理器 Graphics Processing Unit，最初是为计算机图形学开发的专用协处理器。画图要在屏幕上生成大量像素，要处理大量小的几何图元，天然适合大规模并行计算。2000 年代初，研究者想办法把显卡“扭”成通用并行计算设备；2000 年代末到 2010 年代，NVIDIA 开始把它们当作通用并行处理器来设计和推广。Justin 说当时 NVIDIA 未必清楚具体用途，只是认为并行计算会重要；2010 年代初深度学习兴起时，他们很早就看到了潜力并投入大量资源，此后十多年 NVIDIA 的芯片一直是训练大模型的主要方式。（他顺便提到上课的教室是 Huang 礼堂，以 NVIDIA 创始人兼 CEO 黄仁勋 Jen-Hsun Huang 命名。）
+        </p>
+        <h3>H100 的结构</h3>
+        <p>
+            H100 是当下深度学习训练的主力（下一代刚出，还不太能用上）。拆开看：
+        </p>
+        <ul>
+            <li>中间是计算核心，周围是 80 GB 的 HBM 高带宽内存 High-Bandwidth Memory。内存和计算核心是分开的，数据要通过总线在两者之间搬运，带宽约 3 TB/s（幻灯片写 3352 GB/s）。</li>
+            <li>计算核心中间有约 50 MB 的 L2 缓存，比 80 GB 小得多，但离计算单元近，访问快得多。</li>
+            <li>真正的核心是 132 个流式多处理器 SM（Streaming Multiprocessor），各自是独立的并行核心。和 CPU 核心比，SM 能做更多并行，但时钟频率低，分支预测之类的能力弱，很难一一对比；Justin 习惯把一个 SM 大致看成一个 CPU 核心。</li>
+        </ul>
+        <p>
+            照片上其实能数出 144 个 SM。只启用 132 个是因为分档 Binning：芯片晶体管太多，无论投多少钱，制造出来总有一部分单元有缺陷。所以设计上满配 144 个，只承诺 132 个可用，这样能卖出去的芯片比例高得多（良率问题）。
+        </p>
+        <h3>一个 SM 里面</h3>
+        <p>
+            Justin 开玩笑说：“你以为在学深度学习，其实在学计算机体系结构。”存储层级 Memory Hierarchy 对深度学习和所有高性能计算都很重要：离计算单元越远，存储越大越慢；越近，越小越快。写底层 GPU 算子时，要花大量时间在不同层级之间仔细搬运数据。H100 的三级存储是：
+        </p>
+        <ul>
+            <li>每个 SM 的 L1 缓存 256 KB（另有 256 KB 寄存器）；</li>
+            <li>L2 缓存 50 MB；</li>
+            <li>HBM 80 GB。</li>
+        </ul>
+        <p>
+            每个 SM 里有 128 个 FP32 核心，每个每个时钟周期能算一次 $a x + b$（a、x、b 都是标量），也就是一次乘法加一次加法，算 2 次浮点运算 FLOP。所以：
+        </p>
+        $$128 \times 2 = 256 \ \text{FLOP / cycle / SM}$$
+        <p>
+            真正的算力来自每个 SM 里的 4 个 Tensor Core。Justin 说这个名字有点名不副实，它其实是矩阵核心：专用电路，只做矩阵乘法。H100 的 Tensor Core 每个周期算一块固定大小的 $AX + B$，A 是 $16 \times 4$，X 是 $4 \times 8$，B 是 $16 \times 8$：
+        </p>
+        $$16 \times 4 \times 8 \times 2 = 1024 \ \text{FLOP},\qquad 1024 \times 4 = 4096 \ \text{FLOP / cycle / SM}$$
+        <p>
+            4096 对 256，相差 16 倍，GPU 的主要吞吐来自 Tensor Core。要充分用好 GPU，就要尽量让计算走 Tensor Core。
+        </p>
+        <h3>混合精度</h3>
+        <p>
+            Tensor Core 用混合精度 Mixed Precision：输入通常是 16 位浮点（有几种 16 位格式，这里不展开），乘法用 16 位做，累加用 32 位做，输出 32 位。这有实际后果：在 PyTorch 里如果忘了把模型转成 16 位，计算会跑在 FP32 核心上，比预期慢大约 20 倍。看似细枝末节，写错数据类型时就很具体了。
+        </p>
+        <p>
+            GPU 硬件和 Tensor Core 的更多细节可以看 <a href="../CS336-Language-Modeling-from-Scratch/05_GPU与TPU.html">CS336 第 5 讲 GPU 与 TPU</a>。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. GPU 十二年快了一千倍</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=715s" target="_blank">0:11:55</a>–0:15:09 · GPU performance evolution</em></p>
+        <p>
+            Justin 读博刚开始做深度学习时，最好的 GPU 是 2013 年的 K40，整卡只有 5 TFLOP/s 的 FP32 算力。幻灯片的图横轴是 2013 年到现在，纵轴是每块设备的峰值吞吐（TFLOP/s）：
+        </p>
+        <table>
+            <thead><tr><th>GPU</th><th>FP32 (TFLOP/s)</th><th>Tensor Core (TFLOP/s)</th></tr></thead>
+            <tbody>
+                <tr><td>K40（2013）</td><td>5</td><td></td></tr>
+                <tr><td>P100</td><td>10.6</td><td></td></tr>
+                <tr><td>V100</td><td>15.7</td><td>125</td></tr>
+                <tr><td>A100</td><td>19.5</td><td>312</td></tr>
+                <tr><td>H100</td><td>67</td><td>989</td></tr>
+                <tr><td>B200</td><td>83.3</td><td>5000</td></tr>
+            </tbody>
+        </table>
+        <p>
+            转折点是 V100（2016、2017 年前后，他博士快结束时），它是第一款带 Tensor Core 的设备。之后的设备 Tensor Core 更多、更大、占芯片面积更多，吞吐暴涨。最新的 B200 理论上 FP32 约 83.3 TFLOP/s，Tensor Core 混合精度约 5000 TFLOP/s。有学生问 B200 是不是有 5000 个 Tensor Core，他澄清那是 Tensor Core 上的 5000 TFLOP/s 算力。
+        </p>
+        <p>
+            也就是说，过去 12 年单卡算力提高了约 1000 倍。Justin 认为这就是 AI 这十年变强的答案：我们在利用一种新的算力来源，它十年涨了 1000 倍；世界上任何东西变化 1000 倍都值得留意，因为它会带来技术能力的大变化，他认为这是过去十年深度学习进步的主要推动力。他拿过 K40，没拿过最新的卡，但它们大小、重量、外观都差不多，今天的那块快了 1000 倍。更夸张的是，现在训练一个模型要用成千上万、有时几十万块 GPU 一起训练，再叠加单卡这 1000 倍。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. GPU 集群：Meta 的 Llama3 集群</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=909s" target="_blank">0:15:09</a>–0:23:20 · Modern GPU clusters / Data center infrastructure</em></p>
+        <h3>集群也是一层存储层级</h3>
+        <p>
+            走出单块 GPU，存储层级的规律继续成立：离计算越远，带宽越低。下面的数字来自 Llama3 技术报告，不同集群细节会有差异：
+        </p>
+        <table>
+            <thead><tr><th>层级</th><th>组成</th><th>GPU 之间带宽</th></tr></thead>
+            <tbody>
+                <tr><td>单块 H100</td><td>HBM 到计算核心</td><td>约 3352 GB/s</td></tr>
+                <tr><td>GPU 服务器</td><td>8 块 GPU</td><td>约 900 GB/s（任意两块之间）</td></tr>
+                <tr><td>服务器机架 Rack</td><td>2 台服务器 = 16 块 GPU</td><td></td></tr>
+                <tr><td>GPU Pod</td><td>192 个机架 = 3072 块 GPU</td><td>约 50 GB/s（Pod 内任意两块之间）</td></tr>
+                <tr><td>GPU 集群</td><td>8 个 Pod = 24,576 块 GPU</td><td>低于 50 GB/s（找不到确切数字）</td></tr>
+            </tbody>
+        </table>
+        <p>
+            从单卡内部到服务器内部带宽约降 3 倍，从服务器到 Pod 又降约 20 倍。机架大约一人高（6 英尺左右）。这远不是世界上最大的集群，只是他能找到精确数字的最大一个；5 万、10 万块 GPU 的集群已经存在，扩展方式就是接更多 Pod，或者再加一层 super pod。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>用这样的集群训练多久？他不记得 Llama3 的具体数字。过去十年的经验是最长的训练一般以月计，这更多是人的因素：计划、进展、人员安排都很难承受特别长的训练。他不意外最大的模型（他举了 GPT-4.5、GPT-5）已经接近一年，但大集群上几个月的训练很常见。</li>
+            <li>为什么用机架组织服务器？东西总得放在某处。机架几十年来就是数据中心的标准单位，GPU 服务器出现后，体积和功耗都大得多，但数据中心不可能一夜之间从头重新设计。</li>
+            <li>集群占多大地方？一个机架大约讲台那么大、和他差不多高，一个 Pod 192 个机架，整个集群再乘 8；实际还更大，因为机架要排成行留出过道，还要有专门放网络设备的机架和专门放存储设备的机架（训练数据要存在某处再送进 GPU）。</li>
+            <li>大集群里，小单元内部还保持高带宽吗？是的。系统设计的难点就在于能用快速通信时尽量用，规模变大时平稳地退到较慢的通信。</li>
+            <li>有多热？一块 4090 游戏卡打游戏就能让房间变热，几万块堆在数据中心，对散热的要求可想而知；可以风冷、水冷，硬件上可以做很多优化。</li>
+        </ul>
+        <h3>把整个数据中心当成一台计算机</h3>
+        <p>
+            Justin 说，换到大集群后的思维转变是不再想单个设备、单台服务器，而是把整个数据中心当作一台大计算机。这台 Llama3 计算机的总量（幻灯片）：
+        </p>
+        <ul>
+            <li>24,576 块 GPU；</li>
+            <li>1.875 PB 的 GPU 显存（他口头说成 1.8 TB，按幻灯片记）；</li>
+            <li>4.15 亿个 FP32 核心，1300 万个 Tensor Core；</li>
+            <li>24.3 EFLOP/s，即 $24.3 \times 10^{18}$ 次浮点运算每秒。</li>
+        </ul>
+        <p>
+            他说五年后这个数字不会再显得多。目标是：把这两万多块 GPU 当成一台超级计算机，在上面连续几个月训练一个吸收海量数据的巨大神经网络。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. GPU 之外的训练芯片</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=1400s" target="_blank">0:23:20</a>–0:26:13 · Alternative AI hardware</em></p>
+        <p>
+            NVIDIA 是主导，但也有别的。Justin 认为目前最大的竞争者是 Google 的张量处理器 TPU（Tensor Processing Unit，Google 自研的训练芯片），已经出了六代。幻灯片上的 TPU v5p：每芯片 459 TFLOP/s BF16、95 GB 内存，可以组成最多 8960 块芯片的 Pod，指标和 H100 同一量级。课上放了一张 TPU v2 Pod 的照片，只有 256 块芯片，四个比人略高的机架并排。他说 Google 的 Gemini 几乎肯定是在 TPU 上训练的，虽然 Google 没说，如果不是他会大吃一惊。TPU 的问题是买不到，只能在 Google 工作或者在 Google Cloud 上租；它很好，但用的人仍比 NVIDIA GPU 少。
+        </p>
+        <p>
+            他的判断是 NVIDIA 和 TPU 在易用性、性能、市场份额上远远领先，其他公司在追赶：
+        </p>
+        <ul>
+            <li>AMD MI325X：1300 TFLOP/s BF16，256 GB 内存，纸面指标和 H100 相当，但影响力远不及 H100；</li>
+            <li>AWS Trainium2：667 TFLOP/s BF16，96 GB 内存，以 64 块芯片为一组装进 UltraServer。他没用过，只知道 Anthropic 用它做一部分训练，不清楚比例。</li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. 拆分计算的几个维度</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=1573s" target="_blank">0:26:13</a>–0:29:00 · Five degrees of parallelism</em></p>
+        <p>
+            第二部分的问题是：怎样写出能用好几万块 GPU 的算法？基本策略是拆分计算。Justin 说，计算机在高层上只做两件事：计算（由输入比特算出新的输出比特）和通信（把比特从一处内存搬到另一处）。诀窍在于利用整个集群的多级存储层级，让通信和计算重叠 Overlap，并把计算拆开，让几万块 GPU、几百万个计算单元都有活干，再让它们以合适的方式交换结果。
+        </p>
+        <p>
+            他讲的并行方式主要针对 Transformer，因为它是大规模训练的主流结构。一个 Transformer 是 L 层的堆叠，每层处理形状为（Batch，Sequence，Dim）的三维张量：批维度是一个小批量里的多条序列，序列维度是每条序列里的 token，Dim 是每个 token 向量的维度。这给出四个可以切分的轴：
+        </p>
+        <ul>
+            <li>沿层数 L 切：流水线并行 Pipeline Parallelism（PP）；</li>
+            <li>沿 Batch 切：数据并行 Data Parallelism（DP）；</li>
+            <li>沿 Sequence 切：上下文并行 Context Parallelism（CP）；</li>
+            <li>沿 Dim 切：张量并行 Tensor Parallelism（TP）。</li>
+        </ul>
+        <p>
+            名字各不相同，但都是沿 Transformer 计算的四个轴之一拆分计算。（章节名叫“五种并行”，数据并行有 DP、FSDP、HSDP 几个变体。）
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 数据并行 DP</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=1740s" target="_blank">0:29:00</a>–0:39:33 · Data parallelism</em></p>
+        <h3>为什么数学上成立</h3>
+        <p>
+            训练时我们总在小批量 Minibatch 上计算：每个样本算一个损失，梯度是各样本损失梯度的平均。大多数网络里各样本的损失和梯度计算是相互独立的，看起来天然可以并行。思路是：一块 GPU 能放下 N 个样本的小批量，有 M 块 GPU，就用 $MN$ 个样本的大批量训练，每块 GPU 分 N 个。
+        </p>
+        <p>
+            损失是所有样本损失的平均（$x_{i,j}$ 是第 i 块 GPU 上的第 j 个样本，W 是全网权重）：
+        </p>
+        $$L = \frac{1}{MN}\sum_{i=1}^{M}\sum_{j=1}^{N} \ell(x_{i,j}, W)$$
+        <p>
+            梯度是线性的，求和、求梯度、取平均的顺序可以随意调换，于是可以写成：
+        </p>
+        $$\frac{\partial L}{\partial W} = \frac{1}{M}\sum_{i=1}^{M}\left(\frac{1}{N}\sum_{j=1}^{N}\frac{\partial}{\partial W}\ell(x_{i,j}, W)\right)$$
+        <p>
+            括号里是一次在 N 个样本上的普通前向反向传播，各 GPU 可以并行算；外面一层是对 M 块 GPU 的梯度取平均。这只是调换了代数运算的顺序，不是近似，和在一块足够大的 GPU 上计算完全一样。
+        </p>
+        <h3>六个步骤</h3>
+        <ol>
+            <li>每块 GPU 各有一份完整的模型权重、优化器状态和梯度；</li>
+            <li>每块 GPU 并行加载自己的一批数据。各 GPU 必须加载不同的数据。Justin 说他自己和学生都写出过让所有 GPU 加载同一批数据的 bug，这没有任何帮助；</li>
+            <li>每块 GPU 独立前向，算出本地损失，不需要通信；</li>
+            <li>每块 GPU 独立反向，算出本地损失对所有权重的梯度；</li>
+            <li>在所有 GPU 之间对梯度取平均，这一步需要通信，用的是 All-Reduce（全规约：每块 GPU 把梯度发给所有 GPU，同时收集所有 GPU 的梯度，最后每块都得到总和或平均），耗时通常随 GPU 数量对数增长；</li>
+            <li>每块 GPU 用这份相同的梯度更新自己的权重。初始权重相同、梯度相同，更新后权重依然相同（假设运算是确定性的）。</li>
+        </ol>
+        <h3>反向和通信重叠</h3>
+        <p>
+            第 4 步和第 5 步可以并行。反向传播从最后一层开始；算完最后一层的本地梯度后，计算单元转去算倒数第二层的反向，同时网络在做最后一层梯度的 All-Reduce。第 L 层的反向和第 L+1 层的通信交错推进，理想情况下反向一结束，所有梯度也已经规约完，可以立刻更新权重。通信相对慢，整个大规模训练的诀窍就是把通信成本藏在计算后面。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>第 4、5 步会不会成为瓶颈？会。取决于设备多快、模型多大、批量多大、设备间互连多快。到了大规模分布式训练，答案永远是“看你的情况”，需要针对自己的情况做基准测试。</li>
+            <li>为什么不让每块 GPU 各自走梯度步？以前有一类流行算法叫异步 SGD（Asynchronous SGD）：多个模型副本各自独立更新，隔一段时间平均一次。Google 在有 TPU Pod 之前这样训练过 2010 年代初的一些网络。缺点是更不稳定、很难调试和复现，效果也往往差一点。能同步就同步，更容易调试和理解。不过他说，如果未来几年异步 SGD 复兴，他不会太意外，因为它对分布式更友好。</li>
+            <li>计算和通信的重叠需要自己写代码吗？需要，硬件不知道你想做什么。好在常见用法 PyTorch 已经提供，比如 <code>DistributedDataParallel</code> 类，能在普通 PyTorch 代码上较透明地实现。有个有趣的不对称：在单块 GPU 上用 CUDA（NVIDIA 用来给自家 GPU 编程的类 C 语言）编程时，很多异步传输由硬件自动处理；到集群层面就要靠软件编排。PyTorch 本身就是一堆 CUDA 写的 GPU 算子，外面包上 C++ 和 Python。</li>
+            <li>下层的反向依赖上层的梯度，怎么能并行？每层的梯度有两种：本地梯度，即本地小批量损失对权重的导数；全局梯度，即整个大批量总损失对权重的导数。每块 GPU 做本地反向只需要本地的上游梯度，只有算全局梯度时才需要通信。</li>
+        </ul>
+        <h3>瓶颈：模型大小受显存限制</h3>
+        <p>
+            数据并行是人们最早用来并行训练神经网络的方式，但很快会撞上模型大小的瓶颈，因为每块 GPU 都存着完整的模型。每个权重要记 4 个数：权重本身、梯度、Adam 优化器的两个状态（幻灯片记作 β1、β2），有时还有权重的指数滑动平均，一共 4 到 5 个。按 16 位、每个数 2 字节算下限：
+        </p>
+        $$4 \times 2 = 8 \ \text{字节 / 参数},\qquad 10^9 \ \text{参数} \approx 8 \ \text{GB}$$
+        <p>
+            H100 只有 80 GB 显存，所以这种方式最多能训练大约 100 亿参数的模型，不够大。解决办法是把模型权重也切到不同 GPU 上。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 完全分片数据并行 FSDP</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=2373s" target="_blank">0:39:33</a>–0:48:51 · Fully sharded data parallelism</em></p>
+        <h3>每个权重有一个主人</h3>
+        <p>
+            完全分片数据并行 FSDP（Fully Sharded Data Parallelism，幻灯片引用 Rajbhandari 等人的 ZeRO，2019）：每个权重 $W_i$ 分配给唯一一块“所有者”GPU，它同时负责这个权重的全局梯度和优化器状态。实际按层划分，$W_i$ 指一整层的权重矩阵。幻灯片的例子是 4 层网络、2 块 GPU：GPU 1 拥有 $W_1, W_2$，GPU 2 拥有 $W_3, W_4$。
+        </p>
+        <p>
+            它仍然是数据并行：每块 GPU 加载自己的一批数据，做完整的前向反向，得到本地梯度，汇总梯度，更新权重。区别是权重分散了，需要额外通信。
+        </p>
+        <h3>前向</h3>
+        <ol>
+            <li>第 i 层前向之前，$W_i$ 的所有者把它广播给所有 GPU；</li>
+            <li>所有 GPU 跑第 i 层前向，得到这一层的激活值，然后非所有者删掉本地的 $W_i$ 副本，省显存；</li>
+            <li>算第 i 层前向的同时，预取 $W_{i+1}$，计算和通信重叠；</li>
+            <li>一直重复到最后一层。此时每块 GPU 都做完了完整前向，算出本地损失，各层激活值也都在显存里，准备反向。</li>
+        </ol>
+        <p>
+            一个常见优化：最后一层的权重在前向结束时不删，因为反向马上又要用，省得刚删就重新发。
+        </p>
+        <h3>反向</h3>
+        <ol>
+            <li>第 i 层反向之前，所有者把 $W_i$ 广播给所有 GPU；</li>
+            <li>所有 GPU 跑第 i 层反向，算出本地的 $\partial L / \partial W_i$，然后删掉 $W_i$；</li>
+            <li>所有 GPU 把本地的 $\partial L / \partial W_i$ 发给所有者，然后删掉本地梯度。这里不是 All-Reduce，只有所有者收集并求和，得到整个大批量对 $W_i$ 的完整梯度；例子里 GPU 1 把最后一层的本地梯度发给 GPU 2；</li>
+            <li>所有者用完整梯度更新 $W_i$。更新后的权重不用马上发出去，下一次前向时自然会再广播。这和 DP 不同。</li>
+        </ol>
+        <p>
+            在很深的网络里，反向的稳态是三件事同时进行：发送第 i+1 层的梯度并更新 $W_{i+1}$，用 $W_i$ 跑反向，预取 $W_{i-1}$。也就是任一时刻在三个相邻层上并行做三件事。如果重叠做得好，反向结束时所有梯度都已发出、所有权重都已更新；数据加载器 Data Loader 通常在服务器的 CPU 核心上异步运行，已经备好了下一批数据。Justin 说这些系统就是并行机器，要尽可能重叠一切，让 GPU 的 Tensor Core 一直满负荷。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 混合分片数据并行 HSDP</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=2931s" target="_blank">0:48:51</a>–0:52:40 · Hybrid parallelism techniques</em></p>
+        <p>
+            更复杂一点的变体是混合分片数据并行 HSDP（Hybrid Sharded Data Parallelism）。把 $N = M \times K$ 块 GPU 排成二维网格，分成 M 组、每组 K 块：
+        </p>
+        <ul>
+            <li>组内做 FSDP，模型权重切到组内 K 块 GPU 上，K 可以到 $O(100)$；</li>
+            <li>组间做普通 DP：每组算完反向得到本组梯度后，各组之间 All-Reduce，得到整个“大大批量”的梯度，各组再各自更新。</li>
+        </ul>
+        <p>
+            幻灯片例子是 M = 2 组、每组 K = 4 块 GPU。这是多维并行 Multidimensional Parallelism 的第一个例子：同时沿两个轴用两种策略。
+        </p>
+        <p>
+            为什么要这样？两种并行的通信量不同。FSDP 在一次前向反向里，前向要传一遍权重，反向要再传一遍权重再加一遍梯度，组内通信量约是权重大小的 3 倍。组间的 DP 每组各有完整权重，只需 All-Reduce 梯度，通信量约 1 倍。所以把通信量大的 FSDP 组放在同一台服务器或同一个 Pod 里（服务器内 8 块 GPU 有更快的互连），组间用较慢的跨服务器通信。这是第一个根据网络拓扑设计算法的例子。有学生问怎么选组的大小，Justin 说这些很难调，很难一般地回答。
+        </p>
+        <p>
+            有了 DP、FSDP、HSDP，可以走很远。比如 1000 亿参数的模型，按每参数 4 个数、每个 2 字节，需要 800 GB；分到 80 块 GPU 上，每块只要 10 GB。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 激活检查点</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=3160s" target="_blank">0:52:40</a>–0:55:47 · Activation checkpointing</em></p>
+        <h3>激活值也会塞满显存</h3>
+        <p>
+            模型权重分片之后，新的问题是激活值 Activation（前向时每层的中间输出，反向时要用）开始占满显存。Llama3-405B 是 126 层的 Transformer，模型维度 $D = 16{,}384$，序列长度 4096。幻灯片的估算，光 FFN 的隐藏层激活就要：
+        </p>
+        $$2 \times 126 \times (4 \times 16384) \times 4096 \ \text{字节} \approx 63 \ \text{GB}$$
+        <p>
+            还没算其他激活。解决办法是激活检查点 Activation Checkpointing：不把所有激活存在显存里，反向时现算。
+        </p>
+        <h3>计算量和显存的账</h3>
+        <p>
+            把每层看成两个函数：前向 $A_{i+1} = F_i^{\rightarrow}(A_i)$ 由本层激活算出下一层激活；反向 $G_i = F_i^{\leftarrow}(A_i, G_{i+1})$ 用本层激活和上游梯度算出本层梯度。设每个 $F^{\rightarrow}$、$F^{\leftarrow}$ 的计算量和显存都是 $O(1)$。
+        </p>
+        <ul>
+            <li>普通前向反向：4 层网络前向 4 步、记住所有激活，反向再 4 步。N 层网络是 $O(N)$ 计算、$O(N)$ 显存。</li>
+            <li>完全重算：前向时每算完一层就扔掉激活，到最后一层可以做最后一层的反向；接下来缺 $A_3$，就从头重算到 $A_3$，再反向一步，如此往复。总计算量是 $N + (N-1) + (N-2) + \dots + 1$，即 $O(N^2)$ 计算、$O(1)$ 显存。深网络上 $N^2$ 太差了。</li>
+            <li>折中：每 C 层存一个检查点，只在小段内重算。C 个检查点需要 $O(N^2 / C)$ 计算、$O(C)$ 显存。常见取法是 $C = \sqrt{N}$，得到 $O(N\sqrt{N})$ 计算、$O(\sqrt{N})$ 显存。</li>
+        </ul>
+        <p>
+            这是用计算换显存、以训练更大模型的常用手段。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 扩展配方与模型 FLOPs 利用率 MFU</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=3347s" target="_blank">0:55:47</a>–1:03:02 · Scaling and tuning recipes / Model flops utilization</em></p>
+        <h3>扩展配方</h3>
+        <p>有了 FSDP、HSDP 和激活检查点，Justin 给的配方是：</p>
+        <ol>
+            <li>大约 128 块 GPU、约 10 亿参数以内，用普通数据并行就行；</li>
+            <li>永远把每块 GPU 的本地批量开到占满显存；</li>
+            <li>模型超过约 10 亿参数，考虑 FSDP（具体取决于显存大小和互连速度）；</li>
+            <li>激活成为显存瓶颈时，加激活检查点。他说激活检查点让一切慢很多，很讨厌，但确实能训练大得多的模型，可以扩到几百块 GPU；</li>
+            <li>到几百块 GPU（视集群拓扑，大约 256 或 512 块）时，FSDP 通信太贵，换 HSDP。这能训到几百亿参数、约一千块 GPU、较长的序列；</li>
+            <li>超过一千块 GPU、模型超过 500 亿参数、或序列长度超过 16K（他口头说一万左右），就要用更高级的策略：CP、PP、TP。</li>
+        </ol>
+        <h3>旋钮太多怎么办</h3>
+        <p>
+            全局批量、本地批量、HSDP 维度、FSDP 维度、重算多少……旋钮太多。Justin 的回答是：最大化模型 FLOPs 利用率 MFU（Model FLOPs Utilization）。在 GPU 并行的海洋里迷路时，MFU 就是指路的灯。
+        </p>
+        <h3>硬件 FLOPs 利用率 HFU</h3>
+        <p>
+            先讲硬件 FLOPs 利用率 HFU（Hardware FLOPs Utilization）：理论上 H100 的 Tensor Core 能做 989.4 TFLOP/s 的 16 位矩阵乘，实际能拿到多少？HFU 是实际达到的矩阵乘性能占理论值的比例（概念出自 PaLM 论文，Chowdhery 等人 2022）。他前一天在 H100 上写了几行 PyTorch 做基准测试：循环做稠密矩阵乘并计时，矩阵边长从 512 到 32,000。矩阵到 8000 × 8000 左右时，HFU 约 80%。这是只有矩阵乘的最好情况。幻灯片提醒：要用 <code>CUDA_LAUNCH_BLOCKING=1</code> 运行，否则 GPU 算子异步启动，计时会错。
+        </p>
+        <p>
+            HFU 不算模型还要做的其他事：激活重算、数据加载、数据增强、优化器、预处理等“辅助”计算。
+        </p>
+        <h3>MFU 怎么算</h3>
+        <ol>
+            <li>按模型结构算出一次前向加反向的矩阵乘总 FLOP 数 $\text{FLOP}_{\text{theoretical}}$（反向可近似为前向的 2 倍；非线性、归一化、残差这类逐元素操作跑在 FP32 核心上，忽略）；</li>
+            <li>查设备的理论峰值吞吐 $\text{FLOP/s}_{\text{theoretical}}$（H100 是 989 TFLOP/s）；</li>
+            <li>$t_{\text{theoretical}} = \text{FLOP}_{\text{theoretical}} / \text{FLOP/s}_{\text{theoretical}}$，这是理论上最快的一次迭代；</li>
+            <li>实测 $t_{\text{actual}}$：一次完整迭代（数据加载、前向、反向、优化器步）的真实耗时，包括通信、重算等一切；</li>
+            <li>$\text{MFU} = t_{\text{theoretical}} / t_{\text{actual}}$，介于 0 和 1 之间。</li>
+        </ol>
+        <p>
+            含义是 GPU 的理论峰值里有多少用在了“有用的”模型计算上。他的例子是在一块 H100 上用很宽的 MLP（带 ReLU）、很大的批量跑前向反向，MFU 约 50%（幻灯片写约 49%）。调分布式训练的旋钮时，就以最大化 MFU 为目标。
+        </p>
+        <p>
+            经验值：MFU 超过 30% 算好，远低于 30% 多半有严重瓶颈；超过 40% 算很出色，基本是业界最高水平。Llama3-405B 最后的训练阶段在 8000 到 16000 块 GPU 上，MFU 在 30% 多到 40% 出头。在 H100 上很难再高多少。
+        </p>
+        <p>
+            反直觉的是，较新的设备有时 MFU 反而更低。上一代设备上有时能超过 50%（他口头说的是 H100，按上下文应指 A100）。原因是 GPU 算力增长快于通信能力增长：从 A100 到 H100，理论算力约涨 3.1 倍，显存带宽只涨约 2.1 倍。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 上下文并行、流水线并行、张量并行</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=3782s" target="_blank">1:03:02</a>–1:10:49 · Advanced parallelism strategies</em></p>
+        <p>
+            Justin 说他有意把大部分时间花在前面，因为在座的人实际能碰到的规模是几百块 GPU；谁有一万卡集群，下课来找他，他想交个朋友。后面三种并行他讲得较快，细节可以课后看幻灯片。三者的展开讲解见 <a href="../CS336-Language-Modeling-from-Scratch/08_并行二大规模训练的并行策略.html">CS336 第 8 讲</a>。
+        </p>
+        <h3>上下文并行 CP：沿序列切</h3>
+        <p>
+            一条很长的序列，让不同 GPU 处理不同片段。Transformer 的大部分好办：
+        </p>
+        <ul>
+            <li>归一化 LayerNorm 和残差连接：没有权重，沿序列天然可并行；</li>
+            <li>MLP/FFN：沿序列可并行，但有权重，每块 GPU 留一份权重，像 DP 那样同步梯度；</li>
+            <li>注意力里的 QKV 投影：和 MLP 一样处理；</li>
+            <li>注意力算子本身最难，因为要计算序列中所有元素两两之间的交互。</li>
+        </ul>
+        <p>注意力算子的两种做法：</p>
+        <ul>
+            <li>Ring Attention（Liu 等人，2023）：把完整的注意力矩阵切成块分给各 GPU，外层循环遍历查询，内层循环遍历键和值，按正确的顺序计算。实现复杂，但能扩展到极长的序列。</li>
+            <li>Ulysses（Jacobs 等人，DeepSpeed Ulysses，2023）：不切注意力矩阵，改为在多头注意力的头上并行，其余部分沿序列并行。概念更简单，但最大并行度等于头数。常用于长序列微调。</li>
+        </ul>
+        <p>
+            Llama3 预训练分两阶段：第一阶段序列长度 8192，不用上下文并行；第二阶段把序列长度拉到 131,072，用 16 路上下文并行，每块 GPU 处理 8192 个 token。相当于每块 GPU 的批量是 1/16 条序列。
+        </p>
+        <h3>流水线并行 PP：沿层切</h3>
+        <p>
+            把网络的层分给不同 GPU，在 GPU 边界处传递激活。问题是顺序依赖：每块 GPU 要等上一块的激活才能前向，反向时要等上游层的梯度。画成时间图（纵轴 GPU 1 到 4，横轴时间）：GPU 1 前向，把激活传给 GPU 2，再传 GPU 3、GPU 4；GPU 4 前向后紧接着反向，再把梯度依次传回 GPU 3、2、1。大部分时间 GPU 都闲着。N 路流水线并行时，每块 GPU 只有 $1/N$ 的时间在干活，最大 MFU 就是 $1/N$；8 路流水线最多约 12%。这些空等的区域叫气泡 Bubble（GPipe，Huang 等人 2018）。
+        </p>
+        <p>
+            办法是同时跑多个微批量 Microbatch，像流水线一样在 GPU 之间流动：GPU 1 对蓝色微批量做完前向，接着做黄色的，同时把蓝色的激活交给 GPU 2，依次级联；反向也是同样的交错模式。4 路流水线、4 个微批量时，最大 MFU 从 $1/4 = 25\%$ 提高到 $16/28 \approx 57.1\%$（时间图中非空白格子的比例）。微批量越多 MFU 越高，但每个微批量的激活都要存，于是又要激活检查点，又要考虑叠加数据并行。怎么调？还是最大化 MFU。
+        </p>
+        <h3>张量并行 TP：沿模型维度切</h3>
+        <p>
+            模型里反复做的是 $XW = Y$。张量并行把单个权重矩阵切到多块 GPU 上，用分块矩阵乘。这和 FSDP 不同：FSDP 计算前要把整个权重矩阵发给每块 GPU，TP 是每块 GPU 只用自己那一块权重、在完整输入上算出输出的一片。设 $X$ 是 $N \times D$，$W$ 是 $D \times D$，4 路 TP 把 $W$ 按列切成 $[W_1\ W_2\ W_3\ W_4]$（分块形状 $1 \times 4$），GPU i 计算：
+        </p>
+        $$X W_i = Y_i$$
+        <p>
+            问题是前向后要把各块的 $Y_i$ 汇集起来，才能做下一层，而且这次通信没法和计算重叠。
+        </p>
+        <p>
+            技巧：连续两层 TP 时，第一层权重按列切，第二层权重 $U$ 按行切成 $U_1, \dots, U_4$（分块形状 $4 \times 1$），两层之间就不用通信。由分块矩阵乘法：
+        </p>
+        $$Z = YU = Y_1U_1 + Y_2U_2 + Y_3U_3 + Y_4U_4$$
+        <p>
+            GPU i 手里已经有 $Y_i$，直接算 $Y_iU_i$ 这一项，最后再把各项发给所有 GPU 求和。这样每两层才通信一次。Transformer 的 FFN 恰好是两层 MLP，所以大 Transformer 里常在 MLP 上用这种两层 TP 技巧。
+        </p>
+    </section>
+
+    <section id="t13">
+        <h2>13. ND 并行与总结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=4249s" target="_blank">1:10:49</a>–1:12:53 · Summary and conclusion</em></p>
+        <p>
+            最大的模型该用哪一种？答案是全部一起用，即 ND 并行 ND Parallelism。HSDP 已经是二维并行的例子，现在最先进的做法是四维：把 GPU 排成 4D 网格，每块 GPU 在网格里的下标给出它在每个并行维度上的编号。Llama3-405B 最大的一次训练用了 16,000 多块 GPU，同时用了：
+        </p>
+        <ul>
+            <li>8 路张量并行；</li>
+            <li>16 路上下文并行；</li>
+            <li>16 路流水线并行；</li>
+            <li>8 路数据并行。</li>
+        </ul>
+        <p>
+            （$8 \times 16 \times 16 \times 8 = 16{,}384$。）不同并行方式对通信的要求不同，仔细安排各个并行轴在集群中的位置，就能利用集群里不同层级的通信速度。目标仍是最大化 MFU。
+        </p>
+        <p>
+            总结：一块 GPU 是有上百个核心的通用并行处理器；GPU 集群是有一万量级 GPU 的超大并行机器，要把它当作一个整体来编程。模型有很多层，处理（Batch，Seq，Dim）形状的张量，可以沿不同轴拆分计算：DP 切 Batch，CP 切 Seq，PP 切层，TP 切 Dim。激活检查点通过反向时重算来省显存。调整并行配方时，以最大化 MFU 为准。Justin 最后说，下次你们用几万块 GPU 训练时记得这些，也告诉他一声，好借来用用。
+        </p>
+    </section>
+
+    <section>
+        <h2>课上的原话</h2>
+        <ul>
+            <li>“So we need to develop new algorithms and new ways of thinking in order to do that.”（所以我们需要新的算法和新的思路来做到这一点。）· <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=5s" target="_blank">0:00:05</a></li>
+            <li>“You're actually learning computer architecture.”（你们其实在学计算机体系结构。）· <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=471s" target="_blank">0:07:51</a></li>
+            <li>“Anytime anything in the world changes by 1,000x, you should step up and pay attention because that's going to cause major changes in our technological capabilities.”（世界上任何东西变化一千倍，你都该留意，因为它会让我们的技术能力发生大变化。）· <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=801s" target="_blank">0:13:21</a></li>
+            <li>“I basically tried to think of the entire data center as one big computer.”（我基本上试着把整个数据中心当成一台大计算机来想。）· <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=1314s" target="_blank">0:21:54</a></li>
+            <li>“But this is not an approximation.”（但这不是近似。）· <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=1870s" target="_blank">0:31:10</a></li>
+            <li>“So the whole trick in these things is figuring out ways to hide the communication costs and do them at the same time as the compute.”（这些系统的全部诀窍就是想办法把通信成本藏起来，让它和计算同时进行。）· <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=2102s" target="_blank">0:35:02</a></li>
+            <li>“Activation check pointing sucks because it makes everything a lot slower, but it does let you train much bigger models.”（激活检查点很讨厌，因为它让一切都慢很多，但它确实能让你训练大得多的模型。）· <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=3406s" target="_blank">0:56:46</a></li>
+            <li>“Whenever you get lost in the sea of GPU parallelism, Model Flops Utilization is your guiding light.”（每当你在 GPU 并行的海洋里迷路，模型 FLOPs 利用率就是你的指路灯。）· <a href="https://www.youtube.com/watch?v=9MvD-XsowsE&t=3451s" target="_blank">0:57:31</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS231N · Lecture 11: Large Scale Distributed Training · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

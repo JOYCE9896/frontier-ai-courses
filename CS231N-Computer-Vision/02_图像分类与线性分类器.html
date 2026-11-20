@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 2 讲：图像分类与线性分类器 | Stanford CS231N 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="01_课程介绍与计算机视觉简史.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS231N 目录</a> · 02</span>
+    <span><a href="03_正则化与优化.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 2 讲：图像分类与线性分类器</h1>
+        <p class="subtitle">图像分类任务和它的难点，数据驱动方法，最近邻与 K 近邻、L1/L2 距离、超参数与交叉验证、CIFAR-10 实验，线性分类器的代数、模板和几何三种视角，以及 Softmax 损失和交叉熵</p>
+        <div class="author-meta">
+            主讲：Ehsan Adeli · 2025 年 4 月 3 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=pdqofxJeBN8" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs231n.stanford.edu/slides/2025/lecture_2.pdf" target="_blank">课程幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            第一讲说过，这门课分成深度学习基础、感知和理解视觉世界、重建视觉世界并与之交互三大块，最后还有以人为本的 AI。这一讲是第一块的开头，覆盖课程大纲上的前三项：数据驱动方法、K 近邻、线性分类。Ehsan Adeli 从图像分类这个核心任务讲起，先说清楚为什么没法手写规则去识别一只猫，然后介绍两种最基本的数据驱动分类器：最近邻和线性分类器。
+        </p>
+        <p>
+            最近邻本身在图像上几乎没人用，讲它是为了引出超参数和训练/验证/测试划分这些概念。线性分类器则是后面所有神经网络的基本部件。这一讲最后定义了 Softmax 损失，用它衡量一组参数有多差；怎样把损失降下来，是<a href="03_正则化与优化.html">第 3 讲</a>的内容。
+        </p>
+        <ol>
+            <li><a href="#t01">图像分类任务和语义鸿沟</a> · <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">视觉识别的难点</a> · <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=102s" target="_blank">0:01:42</a></li>
+            <li><a href="#t03">从手写规则到数据驱动方法</a> · <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=649s" target="_blank">0:10:49</a></li>
+            <li><a href="#t04">最近邻分类器</a> · <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=1016s" target="_blank">0:16:56</a></li>
+            <li><a href="#t05">K 近邻与 L1、L2 距离</a> · <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=1664s" target="_blank">0:27:44</a></li>
+            <li><a href="#t06">超参数怎么选：训练、验证、测试与交叉验证</a> · <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=2125s" target="_blank">0:35:25</a></li>
+            <li><a href="#t07">CIFAR-10 上的 K 近邻实验</a> · <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=2496s" target="_blank">0:41:36</a></li>
+            <li><a href="#t08">线性分类器的三种视角</a> · <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=2784s" target="_blank">0:46:24</a></li>
+            <li><a href="#t09">损失函数</a> · <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=3325s" target="_blank">0:55:25</a></li>
+            <li><a href="#t10">Softmax 分类器与交叉熵</a> · <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=3446s" target="_blank">0:57:26</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 图像分类任务和语义鸿沟</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=5s" target="_blank">0:00:05</a>–0:01:42 · Introduction to Image Class</em></p>
+        <h3>任务定义</h3>
+        <p>
+            图像分类 Image Classification 是计算机视觉的核心任务。Adeli 说这门课整个学期会反复回到这个任务，因为它是一个很好的基准，拿来说明各种算法怎样工作很方便。
+        </p>
+        <p>
+            定义很简单：给一张图，再给一组事先定好的标签，比如 {dog, cat, truck, plane, ...}，系统要从中选一个标签分配给这张图。这一讲的计划是先把任务定义清楚，然后介绍两种数据驱动的分类方法：最近邻和线性分类器。幻灯片的备用页里还列了别的方法，课上不讲。
+        </p>
+        <h3>语义鸿沟</h3>
+        <p>
+            对人来说这件事很容易，大脑和认知系统天生就会整体地理解一张图并给它起名字。换到计算机这边就完全是另一回事了。图像在计算机里是一个数字矩阵，更一般地说是一个张量 Tensor（多维数组）。每个像素值在 0 到 255 之间，也就是 8 位。一张分辨率 800×600 的彩色图有红、绿、蓝三个通道 RGB，所以是一个 800×600×3 的张量。
+        </p>
+        <p>
+            人看到的"一只猫"和机器看到的这一大堆整数之间的差距，叫语义鸿沟 Semantic Gap。
+        </p>
+        <p>
+            有学生问像素值代表什么、为什么是 0 到 255。Adeli 的回答是：存储图像有很多标准，网上几乎所有图片用的都是 RGB，这是 24 位格式（有时 32 位，多一个透明度通道 alpha），红、绿、蓝每个通道 8 位，所以每个通道取值 0 到 255。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 视觉识别的难点</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=102s" target="_blank">0:01:42</a>–0:10:49 · Challenges in Computer Vision</em></p>
+        <p>
+            为了说明这道鸿沟有多难跨，Adeli 列了一串让同一个物体的像素值大幅变化的因素。有几条是他让学生当场说出来的。
+        </p>
+        <ul>
+            <li><strong>视角变化 Viewpoint Variation。</strong>相机一动，比如镜头平移，就算猫一动不动，800×600×3 里每一个像素值都会变。对人来说还是同一个物体，对计算机来说是一个全新的数据点。</li>
+            <li>光照 Illumination。学过图形学或数字图像处理的人知道，RGB 值取决于表面材质、颜色和光源。同一只猫在暗屋里和在阳光下，数字完全不同，但它还是那只猫。</li>
+            <li>背景杂乱 Background Clutter：物体和背景混在一起。这是学生答出来的。</li>
+            <li>尺度 Scale：物体放大缩小。学生还提到分辨率，Adeli 说分辨率当然是个难点，但机器学习模型一般会把输入图像统一缩放到固定尺寸，所以除非涉及物体的缩放效果，分辨率本身没那么关键。</li>
+            <li>遮挡 Occlusion，他说这是主要难题之一。幻灯片最右边那张图只露出一条尾巴和一点爪子，单看可能是老虎，也可能是浣熊。但因为场景是客厅里的沙发，人会判断这多半是猫。</li>
+            <li>形变 Deformation。猫的身体很能变形，对一步步写规则去检测物体的算法来说很难处理。他特意说明，这对今天的算法已经不算难。</li>
+            <li>类内差异 Intraclass Variation。猫有各种大小、颜色、花纹和品种，全都要归成"猫"。</li>
+            <li>上下文 Context。幻灯片上有一张图，如果只看局部、不考虑上下文，很容易认成老虎；结合阴影等上下文才能分对。</li>
+        </ul>
+        <p>
+            他接着说，今天的分类器在识别图中物体上已经做得很好，这要归功于 ImageNet 这类工作，以及后续那些更大规模的基准数据集，它们让训练更大的模型成为可能。这门课剩下的部分，就是一步步搭起构建这些大模型所需的部件。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 从手写规则到数据驱动方法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=649s" target="_blank">0:10:49</a>–0:16:56 · Data-Driven Approach Explained / Steps in Data-Driven Approach</em></p>
+        <h3>为什么写不出分类规则</h3>
+        <p>
+            最基本的部件就是实现这样一个函数：输入一张图，返回一个类别标签。学过计算机算法课的人会想到排序这类算法，由 if-then-else 规则和 for 循环组成，有清楚的流程图。图像理解没有这样的流程，没法把识别一张图的步骤硬编码出来。
+        </p>
+        <p>
+            历史上有人试过。幻灯片引的是 John Canny 1986 年的边缘检测论文（IEEE TPAMI）：先找图里的边缘，再找角点这类重要模式，提取角点周围的特征，或者数某类角点的个数，再把这些映射到类别。Adeli 说这种做法在变化很小的图像上取得过一些成功，但有两个问题。第一，很难扩展，要识别的每一种物体都得单独写一套规则。第二，为每种物体找出这套逻辑本身就很费力。所以基于手写逻辑和流程的识别方法一直不太成功。
+        </p>
+        <h3>数据驱动方法的三步</h3>
+        <p>
+            机器学习带来了数据驱动方法 Data-Driven Approach，也就是让模型从带标签的样本里学出映射。流程分三步：
+        </p>
+        <ol>
+            <li>收集图像和标签组成的数据集。他说一二十年前大家是用搜索引擎和图片搜索在网上抓图来建这类数据集，现在已经有大量现成的数据集。</li>
+            <li>用机器学习算法训练分类器，也就是写一个 <code>train</code> 函数，输入训练图像和对应标签，输出一个能把图像和标签联系起来的模型。</li>
+            <li>在新图像上评估分类器，也就是写一个 <code>predict</code> 函数，输入模型和训练时没见过的测试图像，返回预测标签。</li>
+        </ol>
+        <pre><code>def train(images, labels):
+    # Machine learning!
+    return model
+
+def predict(model, test_images):
+    # Use model to predict labels
+    return test_labels</code></pre>
+    </section>
+
+    <section id="t04">
+        <h2>04. 最近邻分类器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=1016s" target="_blank">0:16:56</a>–0:27:44 · Nearest Neighbor Classifier</em></p>
+        <h3>算法</h3>
+        <p>
+            最近邻 Nearest Neighbor 是最简单的分类器。Adeli 说先讲它，是因为用它来解释构建分类器时的一些概念和细节比较容易。
+        </p>
+        <ul>
+            <li><code>train</code>：把所有训练数据和标签记下来，什么也不算。</li>
+            <li><code>predict</code>：对每张测试图，找出训练集中和它最相似的那张图，输出那张图的标签。相当于建了一张所有训练图和标签的查找表。</li>
+        </ul>
+        <p>
+            幻灯片上的例子是五张训练图（deer、bird、plane、cat、car）和一张待预测的查询图。要判断哪张训练图和查询图最像，需要一个距离函数 Distance Function：输入两张图，返回一个表示它们有多相似的数。
+        </p>
+        <h3>L1 距离</h3>
+        <p>
+            最常用的一种是 L1 距离：把两张图对应像素相减取绝对值，再全部加起来。
+        </p>
+        $$d_1(I_1, I_2) = \sum_p \left| I_1^p - I_2^p \right|$$
+        <p>
+            这里 $p$ 遍历所有像素位置。幻灯片上用一张 4×4 的小图演示：测试图减训练图逐像素取绝对差，再求和得到一个数，就是这两张图的距离。Adeli 说这是最基本的距离函数，但在很多应用里很有用，课上还会反复用到 L1 和它的各种变体。
+        </p>
+        <h3>实现</h3>
+        <p>
+            用 NumPy，<code>predict</code> 只要四行：算每个测试样本和全部训练数据的距离，取最小值的下标，输出那个下标对应的标签。
+        </p>
+        <pre><code>import numpy as np
+
+class NearestNeighbor:
+    def __init__(self):
+        pass
+
+    def train(self, X, y):
+        """ X is N x D where each row is an example. Y is 1-dimension of size N """
+        # the nearest neighbor classifier simply remembers all the training data
+        self.Xtr = X
+        self.ytr = y
+
+    def predict(self, X):
+        """ X is N x D where each row is an example we wish to predict label for """
+        num_test = X.shape[0]
+        # lets make sure that the output type matches the input type
+        Ypred = np.zeros(num_test, dtype=self.ytr.dtype)
+
+        # loop over all test rows
+        for i in range(num_test):
+            # find the nearest training image to the i'th test image
+            # using the L1 distance (sum of absolute value differences)
+            distances = np.sum(np.abs(self.Xtr - X[i, :]), axis=1)
+            min_index = np.argmin(distances)  # get the index with smallest distance
+            Ypred[i] = self.ytr[min_index]  # predict the label of the nearest example
+
+        return Ypred</code></pre>
+        <h3>训练快、预测慢</h3>
+        <p>
+            Adeli 问：训练集有 $N$ 个样本，训练和预测各要多快？用大 O 记号 Big O Notation（描述运算量随输入规模增长的速度）来回答。训练是 $O(1)$，因为什么都不做，连数据都不搬，只是在内存里留一份。预测每张测试图要和全部 $N$ 张训练图算距离，至少是 $O(N)$。
+        </p>
+        <p>
+            这正好反过来了。我们想要的分类器是预测快、训练慢一点没关系，因为训练可以离线做。他的比喻是：如果你每问 ChatGPT 一个问题，它都要把答案和网上所有可能的答案逐一比较，那要花好几年才能回你。幻灯片提到有很多快速或近似最近邻的方法，比如 Facebook 的 FAISS 库（Johnson et al., "Billion-scale similarity search with GPUs", 2017），用 GPU 加速，这超出了本课范围。
+        </p>
+        <h3>决策区域和离群点</h3>
+        <p>
+            把训练点画在二维平面上，五个类别（红、蓝、绿、紫、黄）各有一些点。按 1 近邻划分整个平面，每个区域的颜色表示落在这里的测试点会被分到哪一类。问题在于绿色区域中间有一个黄点，它多半是离群点 Outlier 或噪声，但因为只看一个最近邻，它在绿色中间撑出了一大块黄色区域。Adeli 说很多实际问题都有这种情况。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. K 近邻与 L1、L2 距离</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=1664s" target="_blank">0:27:44</a>–0:35:25 · K-Nearest Neighbors Algorithm</em></p>
+        <h3>多数投票</h3>
+        <p>
+            为了更稳健，可以多看几个邻居：取最近的 K 个训练点，按多数投票 Majority Voting 决定标签。最近邻就变成了 K 近邻 K-Nearest Neighbors（kNN）。幻灯片对比了 K=1、3、5，K 越大边界越平滑，那个孤立黄点的影响也消失了。
+        </p>
+        <p>
+            新的问题是图上出现了白色区域。在那里，几个类别的邻居数一样多，没法做出确定的判断。Adeli 说，如果你在自己的问题里画出这种图，白色区域就是值得去多收集数据的地方。课后有学生问遇到平票怎么办，他说通常在票数最高的几个类别里随机选一个；如果是在做基因组学或医学影像这类问题，看到特征空间里有样本稀少或存在歧义的区域，就去找落在那一块的更多样本。
+        </p>
+        <h3>L1 和 L2 距离</h3>
+        <p>
+            除了 K，另一个要做的选择是距离函数。
+        </p>
+        $$d_1(I_1, I_2) = \sum_p \left| I_1^p - I_2^p \right| \qquad d_2(I_1, I_2) = \sqrt{\sum_p \left( I_1^p - I_2^p \right)^2}$$
+        <p>
+            L1 距离在有些场合叫曼哈顿距离 Manhattan Distance；L2 距离是欧氏距离 Euclidean Distance，把绝对值换成平方，求和后再开方。画出到原点距离相等的点：L1 是一个旋转 45 度的正方形，L2 是一个圆。
+        </p>
+        <p>
+            幻灯片上的例子：原点 $O(0,0)$，点 $A(1,0)$，点 $B(0.5,0.5)$。按 L1，$d_1(O,A)=|0-1|+|0-0|=1$，$d_1(O,B)=0.5+0.5=1$，两者相等，都在那个正方形上。按 L2，和 $A$ 距离相同的点是 $B(1/\sqrt{2}, 1/\sqrt{2})$，在圆上。L1 是沿着网格走的距离，L2 是直线距离。
+        </p>
+        <h3>坐标轴旋转</h3>
+        <p>
+            Adeli 解释这两张图的用处：图里的 x、y 轴就是特征，比如两个像素值。如果把坐标轴旋转，也就是换一组特征，L1 距离的值会变，L2 不会，因为圆转了还是圆。所以 L1 对特征的取法很敏感。他的说法是，如果特征本身有具体含义、想保留各个特征的信息，L1 往往更好；如果特征比较随意，L2 更合适。
+        </p>
+        <p>
+            把 K=1 时两种距离的划分画出来也能看到区别：L1 下的决策边界大多和两条坐标轴平行，L2 下边界更平滑。课程网站上有一个交互演示（vision.stanford.edu/teaching/cs231n-demos/knn/），可以自己换距离函数和 K 值试。
+        </p>
+        <p>
+            第 3 讲开头 Zane Durante 说，课后不少学生对这部分有疑问，课程团队在 Ed 论坛上发了补充说明。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 超参数怎么选：训练、验证、测试与交叉验证</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=2125s" target="_blank">0:35:25</a>–0:41:36 · Hyperparameter Tuning</em></p>
+        <h3>什么是超参数</h3>
+        <p>
+            Adeli 说讲最近邻的主要原因，是借它引出超参数 Hyperparameter：跑算法之前必须由人定下来的设置，不从数据里学。在 kNN 里，K 的取值和距离函数都是超参数。超参数的最佳取值很依赖数据集，有时也依赖问题，需要针对每个问题去找，这个过程叫超参数调优 Hyperparameter Tuning。幻灯片的说法是：只能都试一遍，看哪个效果好。
+        </p>
+        <h3>四种做法</h3>
+        <ol>
+            <li>选在训练数据上效果最好的超参数。不行。对最近邻来说 K=1 永远最好，因为它记住了训练数据，在训练集上永远是 100% 准确率。</li>
+            <li>把数据分成训练集和测试集，选在测试集上效果最好的。好一点，但有大问题。学生答出来了：这相当于作弊，你挑的是在这份测试数据上最好的超参数，完全不知道模型在测试集以外的新数据上表现如何，也就是不知道它的泛化 Generalization 能力。幻灯片上写的是"Never do this!"。</li>
+            <li>从训练数据里再分出一部分作验证集 Validation Set。在剩下的训练部分上训练，在验证集上挑超参数，挑好以后再用这组超参数在测试集上跑一次、报告结果。这样好得多。它的缺点是验证集通常小得多，未必能代表数据的全貌。</li>
+            <li>交叉验证 Cross-Validation。把训练数据分成若干份 fold，例子里是 5 份，每份轮流当一次验证集，跑 5 次后把准确率取平均。对每个候选超参数都这样做一遍，选平均最好的，最后再用在测试集上。</li>
+        </ol>
+        <p>
+            交叉验证更可靠，结果也更好。但 Adeli 说在大规模深度学习里不太常用，因为在巨大的数据集上重复训练 5 次太难了，所以实践中往往靠直觉定超参数，或者只用一个验证集。在计算机视觉之外、数据集不那么大的领域，研究论文常常要求做交叉验证这类统计检验，以确保结果能在测试集上复现。幻灯片的总结是：交叉验证适合小数据集，在深度学习里用得不多。
+        </p>
+        <p>
+            CS229 的笔记里有一讲专门讲数据划分和交叉验证，可以对照看：CS229 第 8 讲。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. CIFAR-10 上的 K 近邻实验</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=2496s" target="_blank">0:41:36</a>–0:46:24 · CIFAR-10 Dataset Analysis</em></p>
+        <h3>CIFAR-10</h3>
+        <p>
+            CIFAR-10 是作业里会反复用到的数据集，出自 Alex Krizhevsky 2009 年的技术报告 "Learning Multiple Layers of Features from Tiny Images"。10 个类别，50,000 张训练图，10,000 张测试图，每张 32×32×3。幻灯片列出了一些测试图，以及每张测试图在训练集里最近的 10 个邻居。
+        </p>
+        <h3>用 5 折交叉验证选 K</h3>
+        <p>
+            第一个要回答的问题是 K 取多少。幻灯片上的实验对每个 K 做 5 折交叉验证，图上每个点是一折的结果，折线穿过均值，误差棒是标准差。K≈7 时最好，准确率接近 28% 到 29%。Adeli 说这不算差：10 分类问题随机猜只有 10%，所以它确实学到了东西，但提升空间很大。
+        </p>
+        <h3>像素距离没有意义</h3>
+        <p>
+            回头看最近邻的例子，错误很多。第四行的测试图是一只青蛙，最近的那张却是一只狗。原因是距离算在像素上，这两张图大部分像素颜色差不多，于是距离就近。他的结论是，基于像素值的距离不是好的选择，实践中从来不这样用，后面的课会讲更好的做法。
+        </p>
+        <p>
+            幻灯片还有一个例子：原图旁边放三张图，一张被遮挡，一张整体向右平移了一个像素，一张调了色调。人眼看平移那张和原图毫无区别，但这三张图和原图的 L2 距离全都一样。幻灯片标题是"k-Nearest Neighbor with pixel distance never used"。
+        </p>
+        <h3>小结</h3>
+        <p>
+            幻灯片的 kNN 小结：图像分类从一组带标签的训练图开始，要预测测试集的标签；kNN 根据最近的 K 个训练样本来预测；距离度量和 K 是超参数；用验证集选超参数，测试集只在最后跑一次。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 线性分类器的三种视角</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=2784s" target="_blank">0:46:24</a>–0:55:25 · Linear Classifiers Introduction</em></p>
+        <h3>参数化方法</h3>
+        <p>
+            Adeli 留了 25 分钟讲线性分类器 Linear Classifier，说它是几乎所有深度学习最重要的基本部件。和最近邻相比，它是参数化方法 Parametric Approach：要学一组参数，也叫权重 Weights，记作 $W$，用它把输入图像映射成输出的数字。这些输出是图像属于各个类别的得分，CIFAR-10 有 10 类，就输出 10 个分数。
+        </p>
+        <p>
+            CIFAR-10 的一张图是 32×32×3，共 3072 个数，展平成 3072×1 的列向量 $x$。输出是 10×1 的分数向量，所以权重矩阵 $W$ 是 10×3072。再加一个偏置 Bias $b$（10×1），它和输入无关：
+        </p>
+        $$f(x, W) = Wx + b, \qquad \underbrace{f}_{10\times 1} = \underbrace{W}_{10\times 3072}\,\underbrace{x}_{3072\times 1} + \underbrace{b}_{10\times 1}$$
+        <p>
+            他说偏置有很多用处，可以给各类分数加一个平移，帮助把各类分得更开，几何视角里会看得更清楚。
+        </p>
+        <p>
+            把这样的线性函数一个接一个叠起来，再加上一些别的东西，就得到大型神经网络。幻灯片上用一叠乐高积木表示：线性分类器是积木，神经网络是搭出来的东西。在 AlexNet（Krizhevsky et al. 2012）和 ResNet（He et al. 2015）的结构图里，线性层到处都是。
+        </p>
+        <h3>代数视角</h3>
+        <p>
+            为了好理解，把图缩成只有 4 个像素的 2×2 图，类别只有 cat、dog、ship 三个。图展平成向量 $x=[56, 231, 24, 2]^\top$，$W$ 是 3×4，$b$ 是 3 维：
+        </p>
+        $$\begin{bmatrix} 0.2 & -0.5 & 0.1 & 2.0 \\ 1.5 & 1.3 & 2.1 & 0.0 \\ 0 & 0.25 & 0.2 & -0.3 \end{bmatrix}\begin{bmatrix} 56 \\ 231 \\ 24 \\ 2 \end{bmatrix} + \begin{bmatrix} 1.1 \\ 3.2 \\ -1.2 \end{bmatrix} = \begin{bmatrix} -96.8 \\ 437.9 \\ 61.95 \end{bmatrix}$$
+        <p>
+            三个输出依次是猫、狗、船的分数。这就是代数视角 Algebraic Viewpoint：$W$ 的每一行乘上输入向量再加偏置，得到一个类别的分数。（按这组数字自己算一遍：猫 $-97.9+1.1=-96.8$，狗 $434.7+3.2=437.9$；船的乘积部分是 $0+57.75+4.8-0.6=61.95$，加上偏置 $-1.2$ 应为 $60.75$，幻灯片上的 61.95 漏加了偏置。课上没提这一点。）
+        </p>
+        <h3>视觉视角：模板</h3>
+        <p>
+            $W$ 的每一行对应一个类别，可以看成这个类别的模板 Template。把每一行重新排回图像的形状画出来，就是视觉视角 Visual Viewpoint。在 CIFAR-10 上训练后，10 个类别的模板画出来各有样子。Adeli 觉得有意思的是，比如 car 那一类，能看出一点汽车车头的样子，而这只是一个线性分类器学出来的。
+        </p>
+        <p>
+            第 3 讲开头有学生问这和 kNN 是不是一回事，模板是不是某个邻居。Durante 的回答是不一样，模板来自那条分界线的方向，不对应某个具体的数据点。
+        </p>
+        <h3>几何视角：超平面</h3>
+        <p>
+            几何视角 Geometric Viewpoint：在二维空间里，线性分类器找的是把一类和其他类分开的直线；在更高维空间里是超平面 Hyperplane。幻灯片上红、蓝、绿三类各有一条线。偏置的作用在这里看得见：没有偏置，所有这些直线都得穿过原点，这不合理；有了偏置，决策边界 Decision Boundary 就能放到更合适的位置。
+        </p>
+        <h3>线性分类器分不开的情况</h3>
+        <p>
+            线性分类器在很多应用里有用，也是复杂神经网络的部件，但有它自己的局限。幻灯片列了三种分不开的数据：
+        </p>
+        <ul>
+            <li>第一类在第一、三象限，第二类在第二、四象限（类似异或）；</li>
+            <li>第一类是 L2 范数在 1 到 2 之间的环形区域，其他都是第二类；</li>
+            <li>第一类有三个分散的聚集区（三个模态），其他都是第二类。</li>
+        </ul>
+        <p>
+            这几种情况都没法用一条直线（一个超平面）分开。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 损失函数</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=3325s" target="_blank">0:55:25</a>–0:57:26 · Loss Functions and Optimization</em></p>
+        <p>
+            线性分类器能把图像映射成各类的分数，剩下的问题是怎样选 $W$。分两步：
+        </p>
+        <ol>
+            <li>定义一个损失函数 Loss Function，有时也叫目标函数 Objective Function，用来量化分类器在训练数据上的分数有多差，Adeli 的说法是"不满意的程度"；</li>
+            <li>找一种高效的方法改变 $W$，让损失尽量小。这就是优化 Optimization，是下一讲的主题。</li>
+        </ol>
+        <p>
+            例子简化成 3 张训练图、3 个类别（cat、car、frog），在某个 $W$ 下的分数如下：
+        </p>
+        <table>
+            <thead>
+                <tr><th></th><th>猫的图</th><th>车的图</th><th>青蛙的图</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>cat 分数</td><td>3.2</td><td>1.3</td><td>2.2</td></tr>
+                <tr><td>car 分数</td><td>5.1</td><td>4.9</td><td>2.5</td></tr>
+                <tr><td>frog 分数</td><td>-1.7</td><td>2.0</td><td>-3.1</td></tr>
+            </tbody>
+        </table>
+        <p>
+            把问题参数化：数据集是 $\{(x_i, y_i)\}_{i=1}^N$，$x_i$ 是图像，$y_i$ 是整数标签。每个样本有一个损失 $L_i$，比较预测分数 $f(x_i, W)$ 和真实标签 $y_i$；整个数据集的损失是各样本损失的平均：
+        </p>
+        $$L = \frac{1}{N}\sum_{i=1}^{N} L_i\big(f(x_i, W),\, y_i\big)$$
+        <p>
+            他说除以 $N$ 做归一化不太要紧。$L_i$ 有很多种定义法，这一讲讲 Softmax。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. Softmax 分类器与交叉熵</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=3446s" target="_blank">0:57:26</a>–1:07:01</em></p>
+        <h3>把分数变成概率</h3>
+        <p>
+            以猫那张图为例，分数是 cat 3.2、car 5.1、frog -1.7。这些分数没有上下界，线性函数的输出不好控制。最好的办法是把它们变成概率：对每张图 $x_i$，给出它属于类别 $k$ 的概率。做法是 Softmax 函数，记 $s = f(x_i; W)$：
+        </p>
+        $$P(Y = k \mid X = x_i) = \frac{e^{s_k}}{\sum_j e^{s_j}}$$
+        <p>
+            分两步。先对分数取指数，结果一定是正数，满足概率必须非负；再除以总和做归一化，满足概率加起来等于 1。数字是：
+        </p>
+        <ul>
+            <li>指数：$e^{3.2}=24.5$，$e^{5.1}=164.0$，$e^{-1.7}=0.18$（未归一化的概率）；</li>
+            <li>归一化：0.13、0.87、0.00。</li>
+        </ul>
+        <p>
+            解读起来很直接：这组参数认为这张图是猫的概率是 0.13。显然它错了，说明 $W$ 不好，需要优化。原始分数 $s$ 是这些概率对应的未归一化对数概率 Unnormalized Log-Probabilities，通常叫 logits。
+        </p>
+        <p>
+            Adeli 说学过别的机器学习课的人会认出来，这和逻辑回归 Logistic Regression 是同一个框架；因为有多个类，它是多项逻辑回归 Multinomial Logistic Regression。CS229 笔记里逻辑回归在这一讲：CS229 第 3 讲。
+        </p>
+        <h3>负对数似然</h3>
+        <p>
+            目标是让正确类别的概率尽量大，也就是把 0.13 往上推。这是最大化问题，而我们习惯把目标都写成最小化，所以先取负号；再取对数，让数值更好处理。于是每个样本的损失是正确类别概率的负对数：
+        </p>
+        $$L_i = -\log P(Y = y_i \mid X = x_i) = -\log\left(\frac{e^{s_{y_i}}}{\sum_j e^{s_j}}\right)$$
+        <p>
+            猫那张图：$L_i = -\log(0.13) = 2.04$。他说学过 CS229 的人知道这也叫最大似然估计 Maximum Likelihood Estimation，是同一个算法。
+        </p>
+        <h3>KL 散度和交叉熵的视角</h3>
+        <p>
+            同一个损失还能从信息论的角度理解。我们有一组估计出来的概率 $Q$，还有一个代表正确答案的概率分布 $P$（正确类别为 1，其余为 0，即 one-hot 编码）。要让两个分布一致，就最小化 KL 散度 Kullback-Leibler Divergence（衡量两个概率分布差多少的量）：
+        </p>
+        $$D_{KL}(P \,\|\, Q) = \sum_y P(y) \log \frac{P(y)}{Q(y)}$$
+        <p>
+            在这个设定下，它化简出来就是上面的负对数。再进一步，交叉熵 Cross Entropy 定义为
+        </p>
+        $$H(P, Q) = H(P) + D_{KL}(P \,\|\, Q)$$
+        <p>
+            因为正确分布是 one-hot，它的熵 $H(P)=0$，所以交叉熵也化简成同一个负对数。这就是这个损失被叫作交叉熵损失的原因。Adeli 提到，用过神经网络框架的人会经常听到 BCE，即二元交叉熵 Binary Cross Entropy，是同一个框架。
+        </p>
+        <h3>两个检查题</h3>
+        <p>
+            Q1：$L_i$ 的最小值和最大值是多少？正确类别概率为 1 时损失为 0，这是最小值；概率趋近 0 时 $\log$ 趋于负无穷，取负号后损失趋于正无穷，这是最大值。
+        </p>
+        <p>
+            Q2：初始化时 $W$ 基本是随机的，各类分数 $s_j$ 差不多相等，有 $C$ 个类别时损失是多少？各类概率都约为 $1/C$，所以
+        </p>
+        $$L_i = -\log\frac{1}{C} = \log C$$
+        <p>
+            $C=10$ 时 $\ln 10 \approx 2.3$。这个数在训练刚开始时可以用来检查实现对不对。
+        </p>
+        <h3>幻灯片上留作阅读的 SVM 损失</h3>
+        <p>
+            幻灯片后面有一部分"Reading Assignment – SVM Loss"：多类 SVM 损失 Multiclass SVM Loss 的定义、例题和代码，以及 Softmax 和 SVM 的对比题。课上时间到了，没有讲，留给学生自己读。下一讲会讲正则化和优化。
+        </p>
+    </section>
+
+    <section>
+        <h2>课上的原话</h2>
+        <ul>
+            <li>"there is no way to hard code the steps for classifying images."<br>没有办法把图像分类的步骤硬编码出来。（Ehsan Adeli，<a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=731s" target="_blank">0:12:11</a>）</li>
+            <li>"So what we often want is to build classifiers that are fast during prediction."<br>所以我们通常想要的，是预测时很快的分类器。（Ehsan Adeli，<a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=1503s" target="_blank">0:25:03</a>）</li>
+            <li>"Those white regions are areas that we cannot make a decision"<br>那些白色区域是我们没法做出判断的地方。（Ehsan Adeli，<a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=1693s" target="_blank">0:28:13</a>）</li>
+            <li>"it's kind of cheating because you are trying to find the best hyperparameter that works on the testing data"<br>这有点像作弊，因为你在找的是在测试数据上效果最好的超参数。（Ehsan Adeli，<a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=2267s" target="_blank">0:37:47</a>）</li>
+            <li>"distances that work on pixels and pixel values are not the best choices."<br>作用在像素和像素值上的距离不是好的选择。（Ehsan Adeli，<a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=2648s" target="_blank">0:44:08</a>）</li>
+            <li>"This is the exact same framework as logistic regression."<br>这和逻辑回归是完全相同的框架。（Ehsan Adeli，<a href="https://www.youtube.com/watch?v=pdqofxJeBN8&t=3633s" target="_blank">1:00:33</a>）</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS231N · Lecture 2: Image Classification with Linear Classifiers · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

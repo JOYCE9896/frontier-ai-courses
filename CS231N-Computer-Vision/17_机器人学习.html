@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 17 讲：机器人学习 | Stanford CS231N 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="16_视觉与语言.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS231N 目录</a> · 17</span>
+    <span><a href="18_以人为本的AI.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 17 讲：机器人学习</h1>
+        <p class="subtitle">机器人学习的问题形式化（目标、状态、动作、奖励），机器人感知和计算机视觉的区别，强化学习与 DQN、AlphaGo 系列、足式运动的仿真到现实迁移，学习动力学模型做规划（像素、关键点、粒子，包饺子的 RoboCook），模仿学习与扩散策略，Pi-Zero 这类机器人基础模型，以及评估难题和世界模型</p>
+        <div class="author-meta">
+            主讲：Yunzhu Li（客座讲者，哥伦比亚大学计算机科学助理教授，负责 Robotic Perception, Interaction, and Learning Lab；在 Stanford 跟李飞飞和 Jiajun Wu 做博士后期间于 2023 年讲过 CS231N）· 2025 年 5 月 29 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=XSfmOH_xVSU" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs231n.stanford.edu/slides/2025/lecture_17.pdf" target="_blank">课程幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            这门课前面讲的都是从输入预测输出：监督学习有标签，自监督学习没有标签但要找数据里的隐藏结构。机器人学习多了一层：机器人的动作会改变世界，世界再给出新的观测和奖励，要找的是一串能让奖励最大的动作。Yunzhu Li 这一讲回答两个问题：机器人感知和通常的计算机视觉有什么不同，以及让机器人学会行动有哪几类方法、各自卡在哪里。
+        </p>
+        <p>
+            顺序按幻灯片的目录：问题形式化、机器人感知、强化学习、模型学习与基于模型的规划、模仿学习、机器人基础模型、尚未解决的挑战。他说每一项都可以单独开一门课，这里只讲要点。上一讲 Ranjay Krishna 讲视觉语言模型，最后用 Molmo 指点控制了机械臂；这一讲的机器人基础模型就建立在预训练的视觉语言模型上。下一讲是李飞飞的以人为本的 AI。
+        </p>
+        <ol>
+            <li><a href="#t01">机器人学习和监督学习有什么不同</a> · <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">问题形式化：目标、状态、动作、奖励</a> · <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=280s" target="_blank">0:04:40</a></li>
+            <li><a href="#t03">机器人感知：具身、主动、处境化</a> · <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=745s" target="_blank">0:12:25</a></li>
+            <li><a href="#t04">强化学习和监督学习的四点区别</a> · <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=1102s" target="_blank">0:18:22</a></li>
+            <li><a href="#t05">Q 学习、Atari 和 AlphaGo 系列</a> · <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=1423s" target="_blank">0:23:43</a></li>
+            <li><a href="#t06">真实机器人上的强化学习</a> · <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=1855s" target="_blank">0:30:55</a></li>
+            <li><a href="#t07">无模型强化学习的局限与仿真到现实</a> · <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=2103s" target="_blank">0:35:03</a></li>
+            <li><a href="#t08">模型学习与基于模型的规划</a> · <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=2515s" target="_blank">0:41:55</a></li>
+            <li><a href="#t09">RoboCook：用 15 种工具包饺子</a> · <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=2913s" target="_blank">0:48:33</a></li>
+            <li><a href="#t10">模仿学习：从行为克隆到扩散策略</a> · <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=3300s" target="_blank">0:55:00</a></li>
+            <li><a href="#t11">机器人基础模型与 Pi-Zero</a> · <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=3825s" target="_blank">1:03:45</a></li>
+            <li><a href="#t12">评估难题与未来方向</a> · <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=4424s" target="_blank">1:13:44</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 机器人学习和监督学习有什么不同</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=5s" target="_blank">0:00:05</a>–0:04:40 · Introduction / Supervised learning overview / Robot learning landscape</em></p>
+        <p>
+            Yunzhu Li 说上次在这里讲课是两年前的 2023 年，这一讲讲他自己在做的方向，也是"深度学习用于计算机视觉"这个大图景里的一块：怎样让机器人更好地感知物理世界、和物理世界交互，其中有哪些考虑和典型的计算机视觉任务不同。
+        </p>
+        <h3>三种学习设定</h3>
+        <ul>
+            <li>监督学习 Supervised Learning：数据是 $(x, y)$，$x$ 是输入，$y$ 是标签，学一个从 $x$ 到 $y$ 的映射。例子有分类、回归、目标检测、语义分割、图像描述。</li>
+            <li>自监督学习 Self-Supervised Learning：只有数据 $x$，没有标签，通过设计辅助损失去发现数据里隐藏的结构，比如自编码器 Autoencoder。</li>
+            <li>机器人学习 Robot Learning：智能体 Agent 在环境中执行动作 Action，收到奖励 Reward。它的特殊之处在于机器人要和世界发生物理交互，不管采取什么动作，世界都会因此改变，并给出新的观测和奖励。目标是在环境反馈下找出一串动作，让奖励最大或代价最小。</li>
+        </ul>
+        <h3>一个热门领域</h3>
+        <p>
+            近年机器人学习在学界和工业界都很受关注。他提到 Physical Intelligence、Tesla 的机器人、Figure 等初创公司放出的视频：叠衣服、处理咖啡豆、人形机器人做各种事。这个方向吸引了大量投资，初创公司在做通用机器人，Toyota Research Institute、Meta AI Research、Google Robotics、NVIDIA Research 等大公司也有自己的机器人项目。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 问题形式化：目标、状态、动作、奖励</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=280s" target="_blank">0:04:40</a>–0:12:25 · Lecture overview / Problem formulation / Learning applications</em></p>
+        <h3>框架</h3>
+        <p>
+            中间是智能体，它拿到一个任务目标，可以是人的语言指令，也可以是衡量它完成任务好坏的目标函数。智能体从物理世界拿到状态 $s_t$，决定在物理世界执行的动作 $a_t$；世界随之更新，给出新状态 $s_{t+1}$ 和奖励 $r_t$，告诉智能体做得怎么样。要牢记的四样东西是：目标、状态、动作、奖励。
+        </p>
+        <p>
+            他对两者差别的说法是：计算机视觉主要是从高维输入里学到环境的某种表示；机器人学是在解一个优化问题，约束是物理世界，目标函数定义在你的目标上，要找一串动作让目标函数最大或最小。
+        </p>
+        <h3>具体例子</h3>
+        <ul>
+            <li>倒立摆 Cart-Pole：目标是让杆在可移动的小车上保持平衡。状态是角度、角速度、位置、水平速度；动作是施加在小车上的水平力；杆竖直时每个时间步奖励 1。</li>
+            <li>机器人行走 Locomotion：目标是让机器人往前走。状态是所有关节的角度、位置、速度；动作是施加在各关节上的力矩 Torque；每个时间步保持直立并前进就奖励 1。图出自 Schulman et al., ICLR 2016（GAE 论文）。</li>
+            <li>Atari 游戏：目标是尽量高分通关。状态是游戏画面的原始像素；动作是上下左右等操作；奖励是每个时间步分数的增减（Mnih et al., 2013）。</li>
+            <li>围棋：目标是赢。状态是棋盘上所有棋子的位置；动作是下一手落在哪；最后一手时赢了奖励 1，输了奖励 0。</li>
+            <li>文本生成：目标是预测下一个词（幻灯片上的例句是"CS231n midterm was ___"）。状态是句子里已有的词；动作是下一个词；对了奖励 1，否则 0。</li>
+            <li>聊天机器人：目标是做个好的陪伴者。状态是当前对话；动作是下一句话；奖励由人评价，幻灯片上是满意 1、不满意 −1、中立 0。</li>
+            <li>叠衣服机器人：状态是机器人拿到的观测，可以是多视角的 RGB 或 RGB-D（带深度）图像；动作是末端执行器 End-effector（机械臂最前端的夹爪等部件）怎样移动、夹爪开还是合；人评价衣服叠好了奖励 1，没叠好奖励 0。</li>
+        </ul>
+        <p>
+            他的总结：机器人学习让智能体和世界交互，要考虑动作的效果，是序列决策问题 Sequential Decision-making，这和只需要预测输出的计算机视觉不同。
+        </p>
+        <h3>问答：奖励要定义得多具体</h3>
+        <p>
+            有学生问奖励要设计得多具体。他说很多任务的奖励可以有多种定义：自动驾驶可以是越快越好，也可以是乘客越舒服越好；叠衣服按用户偏好也有多种叠法，有人要面积最小，有人要最平整。这里讲的是笼统的"人看了觉得叠好没有"，真正做奖励设计时要满足具体应用的具体需要，细节很多。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 机器人感知：具身、主动、处境化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=745s" target="_blank">0:12:25</a>–0:18:22 · Transition to perception / Robot perception challenges / Embodied AI / Perception-action loop</em></p>
+        <h3>感知要从杂乱的世界里提取结构</h3>
+        <p>
+            物理世界给机器人的是高维的 RGB 或 RGB-D 观测，也可能有触觉 Tactile 等其他传感数据。机器人感知要做的是从这些高维数据里提炼出对下游决策有用的结构化知识，也就是弄懂非结构化的真实世界。幻灯片列了三个难点：
+        </p>
+        <ul>
+            <li>对物体和场景的了解不完整：有遮挡，传感器数据有误差；</li>
+            <li>不完美的动作会导致失败：抓东西不一定抓得住，不小心掉了，环境就会发生意料之外的变化，感知系统得能处理；</li>
+            <li>环境是动态的，有其他智能体：物体不全是刚体，还有衣服、绳子、颗粒物这些可变形物体，还有狗、小孩、其他人在同一个环境里把东西弄乱。</li>
+        </ul>
+        <h3>多传感器</h3>
+        <p>
+            所以机器人领域通常不只用相机，只要能提供有用信息的传感器都尽量加上：触觉、音频、深度等等。系统要让各传感器互补：触觉告诉你抓得稳不稳，相机告诉你环境整体的高层状态。怎样把这些传感器组合起来协同工作，对在真实世界里干活的机器人系统很重要。
+        </p>
+        <h3>机器人视觉和计算机视觉的区别</h3>
+        <p>
+            除了传感模态多，另一个重要区别是要理解动作的效果和环境的可供性 Affordance（物体能被怎样操作）。左边是计算机视觉里常见的实例分割 Instance Segmentation（把图中每个物体实例单独圈出来）：给一张 2D 图，在像素上画出各个实例的轮廓。右边是机器人场景（Zeng et al., IROS 2018）：一堆东西看起来可能是一个物体，也可能是好几块叠在一起，机器人要知道采取什么动作能更好地看清，比如推一推、主动去碰，从而知道到底是一块还是几块。
+        </p>
+        <p>
+            所以幻灯片说机器人视觉是具身的、主动的、处境化的：
+        </p>
+        <ul>
+            <li>具身 Embodied：机器人有物理身体，直接经验世界，它的动作是和世界动态交互的一部分，会立刻反馈到自己的感知上。</li>
+            <li>主动 Active：机器人是主动的感知者，知道自己为什么要感知，选择感知什么，决定怎样、何时、在哪里感知。他举的例子是想知道桌子后面有什么，走过去看就行。计算机视觉大多用的是被动收集的数据集。</li>
+            <li>处境化 Situated：机器人处在世界之中，处理的不是抽象描述，是当下此地直接影响系统行为的世界。</li>
+        </ul>
+        <h3>感知与行动的闭环</h3>
+        <p>
+            机器人要看见世界、理解目标、根据感知采取行动，这就是感知与行动的闭环 Perception-Action Loop，幻灯片说机器人学习的一个核心挑战是把这个环闭合。有时不需要知道环境的完整状态：他说自己扣衬衫扣子，只要知道扣子附近那一小块区域。所以感知往往要和任务、和下游决策系统一起设计，让机器人关注和任务相关的区域。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 强化学习和监督学习的四点区别</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=1102s" target="_blank">0:18:22</a>–0:23:43 · Reinforcement learning</em></p>
+        <p>
+            第一类让机器人学会行动的方法是强化学习 Reinforcement Learning（RL）：让智能体尽可能大量地和世界交互，收集所有经验，靠试错 Trial and Error 弄清哪些动作带来高奖励、哪些带来低奖励，再把智能体的行为往高奖励的方向调。
+        </p>
+        <p>
+            RL 的图是一条时间链：环境给状态 $s_t$，智能体出动作 $a_t$，环境给奖励 $r_t$ 和新状态 $s_{t+1}$，如此往复，智能体要做序列决策。监督学习的图是：数据集给模型输入 $x_t$，模型给预测 $y_t$，和真值比较算损失 $L_t$。幻灯片问"RL 为什么和普通监督学习不同"，他讲了四点：
+        </p>
+        <ol>
+            <li>随机性 Stochasticity：奖励和状态转移可能是随机的。他的例子是把箱子往前推，取决于支撑力的分布，完全相同的动作可能让箱子转到不同角度，奖励也就不一样。面对的是一个不确定的动态系统。</li>
+            <li>功劳分配 Credit Assignment：奖励 $r_t$ 未必直接取决于动作 $a_t$。监督学习里预测完马上就能算损失，知道错在哪；序列决策里奖励可能是延迟的，下围棋要到最后才知道输赢，而输赢可能是很早的几步、甚至第一步造成的。怎样把最终的奖励正确地分给沿途的各个动作，是 RL 要回答的一个棘手问题。</li>
+            <li>不可微 Nondifferentiable：不能对世界做反向传播，算不出 $\partial r_t / \partial a_t$。监督学习从输入经模型到损失全程可微，可以直接求损失对参数的梯度；RL 的环境通常不可微，有时只能靠大量采样做零阶 Zero-order 梯度估计（只用函数值、不用导数来估计梯度）。</li>
+            <li>非平稳 Nonstationary：智能体经历什么取决于它怎么行动。监督学习里你的预测不会影响数据集里别的样本；序列决策里你的动作会影响下一个状态。</li>
+        </ol>
+    </section>
+
+    <section id="t05">
+        <h2>05. Q 学习、Atari 和 AlphaGo 系列</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=1423s" target="_blank">0:23:43</a>–0:30:55 · RL in games / AI in strategy games / Q-learning details / Advanced gaming AI</em></p>
+        <h3>Q 函数</h3>
+        <p>
+            这个领域的典型算法有 Q 学习 Q-learning 和策略迭代 Policy Iteration 等。他以学 Q 函数为例。Q 函数衡量在状态 $s$ 下执行动作 $a$ 之后，未来累计奖励的折扣期望。写成公式是（$\gamma \in [0,1)$ 是折扣因子，越远的奖励权重越小）：
+        </p>
+        $$Q(s, a) = \mathbb{E}\left[\sum_{k \ge 0} \gamma^{k}\, r_{t+k} \;\middle|\; s_t = s,\ a_t = a\right]$$
+        <p>
+            Q 函数通过和游戏环境交互学出来。学好之后，看各个动作的 Q 值，执行 Q 值最高的那个：$a^* = \arg\max_a Q(s, a)$。时间关系他不展开 RL 算法细节，提到当前最先进的 RL 算法有 SAC（Soft Actor-Critic）和 PPO（Proximal Policy Optimization），网上有很多开源实现和教程。Q 学习的推导可以看 <a href="../CS224R-Deep-Reinforcement-Learning/06_Q学习.html">CS224R 第 6 讲：Q 学习</a>。
+        </p>
+        <h3>DQN 的网络结构</h3>
+        <p>
+            有学生问 Q 函数具体怎么算。Q 函数用神经网络表示，$Q(s, a; \theta)$，$\theta$ 是网络权重。状态是游戏画面的原始像素，处理图像最直接的办法是卷积网络。幻灯片上的结构（Mnih et al., "Playing Atari with Deep Reinforcement Learning", 2013）：
+        </p>
+        <ul>
+            <li>输入：最近 4 帧堆叠成 $4 \times 84 \times 84$（先转灰度、下采样、裁剪）；</li>
+            <li>Conv(4→16, 8×8, stride 4)；</li>
+            <li>Conv(16→32, 4×4, stride 2)；</li>
+            <li>FC-256；</li>
+            <li>FC-A，输出每个动作的 Q 值。有 4 个动作时最后一层给出 $Q(s_t, a_1), \dots, Q(s_t, a_4)$。</li>
+        </ul>
+        <h3>Breakout 里自己发现的策略</h3>
+        <p>
+            Google DeepMind 用 Q 学习训练智能体玩 Breakout。训练 10 分钟，挡板已经能碰到球，但常常漏接；训练 2 小时，几乎每次都能接住；训练 4 小时，它发现了一个新策略：把墙的左侧打出一条通道，让球钻到墙上方来回弹，高效地消掉砖块。他说 RL 的好处就在这里，让智能体充分探索、和世界充分交互，它完全可能找到比最好的人类玩家更好的策略。
+        </p>
+        <h3>AlphaGo 到 MuZero</h3>
+        <p>
+            他说 2016 年 1 月 AlphaGo 出来时，他正在决定研究方向，此前只做深度学习视觉，看到 AlphaGo 后觉得必须去做决策问题，于是转向强化学习、模仿学习，一直到今天做机器人学习，因为他不满足于被动收集的数据集，想要能主动和环境交互的智能体。幻灯片上的时间线：
+        </p>
+        <ul>
+            <li>AlphaGo（2016 年 1 月）：模仿学习 + 树搜索 + RL，击败 18 次世界冠军李世石 Lee Sedol。</li>
+            <li>AlphaGo Zero（2017 年 10 月）：AlphaGo 的简化版，不再用模仿学习做初始化，击败当时排名第一的柯洁 Ke Jie。</li>
+            <li>AlphaZero（2018 年 12 月）：同一套算法推广到国际象棋和将棋。</li>
+            <li>MuZero（2019 年 11 月）：不只是无模型 RL，还学一个潜空间里的动力学模型，在学出来的模型上做规划，性能更好。</li>
+        </ul>
+        <p>
+            他从 AlphaGo Zero 引出 Rich Sutton 的"苦涩的教训 The Bitter Lesson"：要找最简单、最能配合规模扩展的方法，把方法简化有时反而更好，因为它和用来扩展规模的基础设施更兼容。2019 年 11 月李世石宣布退役，幻灯片引了他的话："Even if I become the number one, there is an entity that cannot be defeated"。之后 StarCraft II 的 AlphaStar（2019 年 10 月）和 Dota 2 的 OpenAI Five（2019 年 4 月，只有博客没有论文）表明，只要算力够、算法和基础设施设计得好，比围棋复杂几个数量级的游戏也能做到很高水平。他的判断是：一个设计合理的游戏，投入足够资源，很可能就能做出很强的游戏智能体。AlphaGo 与 MCTS 的细节可看 <a href="../CS234-Reinforcement-Learning/14_MCTS与AlphaGo.html">CS234 第 14 讲</a>。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 真实机器人上的强化学习</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=1855s" target="_blank">0:30:55</a>–0:35:03 · Real-world RL</em></p>
+        <h3>足式运动</h3>
+        <p>
+            RL 也被用在真实物理世界的智能体上。左边是 ETH 发表在 Science Robotics 2020 的"Learning Quadrupedal Locomotion over Challenging Terrain"。他说这篇论文改变了他对 RL 在真实机器人上有多大用处的看法。游戏里可以开任意多局，训练和测试是同一个游戏；机器人在仿真里训练，就有仿真到现实的差距 Sim-to-Real Gap。这篇论文让他相信这个差距有时没那么要紧：仿真里没有模拟灌木丛，也没有模拟雪，但在仿真中用 RL 训练出来的策略，在雪地、湿滑地面等真实环境里表现很稳。
+        </p>
+        <p>
+            右边是 Unitree 2024 年 12 月放出的视频，靠仿真到现实迁移，机器人能做很激烈的动态动作，走过很崎岖的地形。他的判断是：机器人行走这个领域已经接近解决，解决办法就是强化学习。
+        </p>
+        <h3>灵巧操作</h3>
+        <p>
+            另一个领域是操作 Manipulation，机器人要在真实世界里摆弄物体。2019 年 OpenAI 还在做机器人时，在仿真里用 RL 训练、再迁移到现实，让机械手解魔方（"Solving Rubik's Cube with a Robot Hand"）。他提醒，视频做得很漂亮，但成功率很低，看论文会发现他们只测了很少的次数，按那个数字可靠性并不令人满意。之后有工作把灵巧操作扩展到对各种新物体做手内重定向 In-hand Reorientation，转到不同目标姿态（"Visual Dexterity", Science Robotics 2023），都得益于 RL 的发展。
+        </p>
+        <p>
+            但到目前为止，行走和手内操作的例子还解决不了"帮你在家叠衣服、洗衣服"这类问题，操作仍然停留在比较孤立的环境里。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 无模型强化学习的局限与仿真到现实</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=2103s" target="_blank">0:35:03</a>–0:41:55 · RL limitations / Sim-to-real transfer / Human control in RL</em></p>
+        <h3>无模型 RL 的问题</h3>
+        <p>
+            无模型 Model-free 强化学习（不学环境模型，直接从试错里学策略或价值）的瓶颈，幻灯片列了：
+        </p>
+        <ul>
+            <li>靠试错学习，需要大量交互。AlphaGo Zero 40 天学完了人类 3000 年的围棋知识，这很了不起，但仍然相当于很多年的计算量。如果仿真到现实差距大，只能在真实世界里做 RL，这就是很大的瓶颈。</li>
+            <li>安全问题：在真实环境里学有很多安全隐患。他放了一个控制人形机器人往前走的学习过程，最后能走，但中间有很多怪异动作，放到真实机器人上会出大事故。</li>
+            <li>可解释性有限，出了问题很难纠正。</li>
+        </ul>
+        <p>
+            他对比了人怎样学习和环境交互：人对环境有直觉性的模型，能想象施加某个动作后环境会怎样变化，这种预测能力让人能规划行为去达成目标，而这种能力本身是从日常和物理世界的交互中学来的。幻灯片的说法是人的直觉世界模型适用面广、样本效率高。这就引出下一类方法：让机器人也能想象动作的效果，做基于模型的规划。
+        </p>
+        <h3>行走为什么能仿真到现实：域随机化</h3>
+        <p>
+            行走常用的仿真器是 NVIDIA 的 Isaac Gym 或 Isaac Sim，基本是刚体仿真，地面只是多边形表示，不模拟灌木和雪。做法是对仿真环境做大量随机化：摩擦、几何形状和许多物理参数都随机。假设是：真实世界里遇到的情况只是你在仿真里随机出来的分布中的一个点。如果策略在这个分布里都能稳健地控制机器人，而真实世界只是其中一点，策略就能泛化。至少从经验上看这个假设成立，策略在真实世界里很可靠。（这种做法通常叫域随机化 Domain Randomization。）
+        </p>
+        <p>
+            他说从行走这条线上学到的最大教训是：仿真不必完美，只要随机化得够多，就能在真实环境里稳健地泛化。但这个教训在操作领域还没有很好地推广。操作里仿真要多准、仿真到现实的差距有多大影响，还是研究问题。例子：仿真里推箱子转了 10 度，现实里转了 12 度，可能关系不大；但如果现实里抓住了，仿真里物体因为数值问题飞走了，或者物体从指间滑走，那就有问题。操作里有些地方差距要紧，有些地方不要紧，大家还在弄清仿真需要具备哪些特性才能可靠迁移。
+        </p>
+        <h3>问答：给机器人的指令是什么</h3>
+        <p>
+            有学生问那些行走演示里给机器人的实际命令是什么。他说很多演示里有人在给高层指令，比如往哪个方向走、原地转还是继续向前；机器人在这个高层指令的条件下，用策略决定低层动作，通常是施加在每个关节上的力矩。
+        </p>
+        <p>
+            接着有学生问机器人能不能规划得比人好。他给了一个更细的说法：很多视频看起来很好，是因为有人类操作员在选路线。比如前面有一堆石头，操作员先让机器人往前爬，失败了就换个指令绕过去。人这边也在学习机器人的能力，选的是能展示低层控制器极限和能力的路线，所以视频才好看。怎样自主地做到这一点，也是有意思的研究问题。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 模型学习与基于模型的规划</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=2515s" target="_blank">0:41:55</a>–0:48:33 · Model-based planning / Pixel dynamics / Keypoint dynamics / Particle dynamics / Pile manipulation / Generalization in manipulation / Letters rearrangement / Tool manipulation</em></p>
+        <h3>前向模型和规划</h3>
+        <p>
+            RL 在操作上还没有大规模成功部署，而人也不只是靠试错学习，会在脑子里建模型。所以问题是：能不能从机器人和环境的交互中学出一个模型，再用它帮助机器人更好地交互？这相当于在虚拟域里学一个真实世界的近似，用它指导在真实世界里采取什么动作。
+        </p>
+        <p>
+            幻灯片上的定义：学习世界的状态转移函数 $P(s_{t+1} \mid s_t, a_t)$，再通过在模型上规划来做决策。前向模型 Forward Model 是给定当前状态和动作，预测下一个状态。规划是它的逆：给定当前状态和目标状态，找出能到达目标的动作。
+        </p>
+        <p>
+            具体过程：当前状态是蓝点，目标是红点。先猜一串动作，用学到的模型预测状态的演变（绿色轨迹），计算绿点和红点的距离，用这个距离对轨迹上所有动作的梯度做优化，让轨迹更接近目标。写成优化问题大致是（$f_\theta$ 是学到的前向模型，$H$ 是规划步数）：
+        </p>
+        $$\min_{a_t, \dots, a_{t+H-1}} \; \big\| \hat{s}_{t+H} - s_{\text{goal}} \big\|,\qquad \hat{s}_{k+1} = f_\theta(\hat{s}_k, a_k),\ \hat{s}_t = s_t$$
+        <p>
+            模型不一定够准，所以幻灯片给的执行方式是：只执行第一个动作，拿到新状态，再用梯度下降（或其他轨迹优化方法）重新优化动作序列。（这种滚动重规划通常叫模型预测控制 MPC。）他说近年的一个关键好处是 GPU 加神经动力学模型 Neural Dynamics Model，可以大规模并行地采样和优化动作序列，效率很高。
+        </p>
+        <h3>状态该用什么表示</h3>
+        <p>
+            幻灯片上的关键问题是 $s_t$ 应该是什么形式，以及在这个表示上怎样学模型。他按粒度从粗到细讲了几种：
+        </p>
+        <ul>
+            <li>像素动力学 Pixel Dynamics：直接用 2D 图像作为状态，学施加某个动作后图像会怎样变化。代表作是 Deep Visual Foresight（Finn and Levine, ICRA 2017），他说这项工作开启了世界模型 World Model 方向的一批早期工作。有了像素级动力学模型，机器人能找到让当前观测接近目标图像的策略，把物体推到目标位置、转到目标朝向（图里目标是绿色，当前状态是红色）。</li>
+            <li>关键点动力学 Keypoint Dynamics：用关键点表示环境（Manuelli, Li, Florence, Tedrake, "Keypoints into the Future", CoRL 2020）。在 3D 空间里跟踪箱子上关键点的运动，学推动作下关键点的神经动力学模型，再用这个前向模型规划，让箱子沿指定轨迹被推到目标位置。</li>
+            <li>粒子动力学 Particle Dynamics：对自由度更高的物体，再细一层，用一组粒子（一组点）表示。这是他在 Stanford 做博士后时的工作（Wang, Li, Driggs-Campbell, Fei-Fei, Wu, "Dynamic-Resolution Model Learning for Object Pile Manipulation", RSS 2023）：用粒子表示一堆颗粒物，预测施加动作后粒子怎样移动。</li>
+        </ul>
+        <h3>颗粒物堆的操作</h3>
+        <p>
+            有了这个前向模型，机器人能处理不同大小的各种颗粒物（幻灯片上是燕麦片、胡萝卜丁、米、糖果，视频是 24 倍速），把它们聚到右下角之类的目标区域。模型有误差时，靠环境的反馈修正，最终能可靠地把所有碎块聚到目标区域。同一个模型还能换目标形状：把颗粒物重新排成从 A 到 Z 的各个字母，机器人要先对颗粒做不简单的重新分配，再把细节对齐到目标形状。他说这是很难的任务。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. RoboCook：用 15 种工具包饺子</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=2913s" target="_blank">0:48:33</a>–0:55:00 · Dynamics modeling for tools / Dumpling making robot / Model planning mechanics / Policy distillation / Model accuracy / Model-based planning overview</em></p>
+        <h3>系统</h3>
+        <p>
+            后续工作是 RoboCook（Shi, Xu, Clarke, Li, Wu, "RoboCook: Long-Horizon Elasto-Plastic Object Manipulation with Diverse Tools", CoRL 2023 最佳系统论文奖），也是他在 Stanford 时参与的。机器人配了 15 种 3D 打印的工具，四个 RGB-D 相机对着工作区重建面团的几何形状。机器人要决定用哪个工具、做什么动作，把一团面变成一个饺子。
+        </p>
+        <p>
+            核心同样是用粒子表示的前向预测模型：红点表示工具形状，蓝点表示面团形状。幻灯片上对比了夹 Gripping、压 Pressing 等动作下的预测和真值，第一行是模型的开环预测 Open-loop Prediction（不看新观测、只靠模型往前推），第二行是真实发生的情况。这个直接从真实交互里学出来的模型，能准确预测不同工具、不同动作下面团形状的变化。
+        </p>
+        <h3>抗干扰</h3>
+        <p>
+            视频里有人一直在捣乱。机器人用实时视觉反馈理解面团当前的形状，结合学到的动力学模型做逆向决策。决策分两层：高层决定用哪个工具，是任务层的决策；选定工具后，低层决定具体做什么动作，推进到下一个任务阶段。人往上加面块、把面团折起来，机器人都能继续推进。最狠的一段是机器人刚切出圆形面皮，人把一切毁掉，机器人知道要从头再来。最后机器人把面皮放到饺子夹上，把馅放到面皮上，用钩子合上饺子夹，做出一个饺子。
+        </p>
+        <h3>这算不算强化学习</h3>
+        <p>
+            严格地说这里没有用强化学习，只是学模型再用模型做规划，规划的结果可以蒸馏成一个策略以便在真实环境里更高效地执行。也有人把这叫基于模型的强化学习 Model-based RL，看你来自哪个背景。核心想法是从机器人和真实世界的物理交互中学模型，用学到的模型决定行为。相关内容可看 <a href="../CS224R-Deep-Reinforcement-Learning/11_基于模型的强化学习.html">CS224R 第 11 讲：基于模型的强化学习</a>。
+        </p>
+        <h3>问答</h3>
+        <ul>
+            <li>高层和低层怎么做？由两个模型负责。高层给定当前观测和目标，本质是一个分类器，判断用哪个工具；低层以工具标签为条件，是一个决定具体动作的策略。</li>
+            <li>高层分类器怎么来的？这项工作是 2023 年做的，当时视觉语言模型还不够强，所以让人类操作员把任务演示 10 遍，用这些数据训练选工具的分类器。这让机器人能在任务链上前后跳转：面皮被毁后，它跳回到和当前观测相符的较早阶段，从干扰中恢复。</li>
+            <li>具体怎么规划？是基于采样的轨迹优化加策略学习。给定面团当前状态，用前向模型采样一批动作和工具，预测面团形状的演变，和目标比较（预测是绿点，目标是红点），选出最接近目标的动作。测试时采样很耗时，所以离线做大量采样得到数据集，再用它训练一个推理很快的策略。策略仍是神经网络，只是从模型在海量样本上的预测里蒸馏出来的。</li>
+            <li>用了物理仿真器吗？完全没有。他们有一个基线用了最先进的可变形物体仿真方法 MPM（Material Point Method，物质点法），即使做了大量系统辨识 System Identification（估计仿真器里的物理参数），辨识出的模型也明显不如直接从真实交互学出的模型准。</li>
+        </ul>
+    </section>
+
+    <section id="t10">
+        <h2>10. 模仿学习：从行为克隆到扩散策略</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=3300s" target="_blank">0:55:00</a>–1:03:45 · Imitation learning / Behavior cloning / Data collection strategies / Inverse RL / Early IRL examples / Modern imitation learning / Diffusion policies / Policy applications / Imitation learning summary</em></p>
+        <h3>把监督学习用在策略上</h3>
+        <p>
+            回顾一下：RL 直接通过试错学策略，有样本效率和安全问题；模型学习其实退回到了监督学习，用环境演变的数据监督训练模型，再拿模型做规划。那能不能直接对策略 Policy（从状态或观测到动作的映射）做监督学习？这就是模仿学习 Imitation Learning：有一个展示任务该怎样做的大数据集，用它训练策略，输入状态、输出动作，学习信号来自人给机器人做的大规模演示。幻灯片的定义是"从演示数据集做监督学习"。他说从演示中学习不是新东西，研究了几十年，人从很小的时候起学各种身体动作和社交活动也是这样。
+        </p>
+        <h3>行为克隆和累积误差</h3>
+        <p>
+            最早最经典的模仿学习算法是行为克隆 Behavior Cloning（BC）：学一个从当前观测 $o$ 到动作 $a$ 的映射，策略记作 $\pi_\theta(a \mid o)$，参数为 $\theta$。给定演示数据 $\{(o_i, a_i)\}$，常见的训练目标就是最大化演示动作的似然：
+        </p>
+        $$\max_\theta \sum_i \log \pi_\theta(a_i \mid o_i)$$
+        <p>
+            BC 的关键问题是累积误差 Cascading Error（也叫 compounding error）。机器人学习是序列决策，误差会随时间累积放大：一开始犯一个小错，到达的状态就略微偏离训练数据的分布，策略在那里会犯更大的错，误差沿时间不断放大，最后轨迹和演示轨迹差得很远。
+        </p>
+        <h3>迭代收集演示</h3>
+        <p>
+            所以实际做模仿学习通常是这样一个循环：专家收集演示，用作训练数据监督训练策略，把策略放到真实环境里跑，观察失败案例；然后补采数据，或者提供纠正行为，让数据集里不只有最初的演示，还有把策略从错误状态拉回正轨、仍能完成任务的纠正动作。他说这是在真实世界里开发模仿学习智能体的典型周期。
+        </p>
+        <h3>逆强化学习</h3>
+        <p>
+            模仿学习里任务本身没有显式定义，隐含在演示里。于是有一类算法叫逆强化学习 Inverse Reinforcement Learning（IRL）：普通 RL 是给定奖励学策略，IRL 是从演示中归纳出奖励函数，再用这个奖励做常规 RL。早期成功案例也出自 Stanford，Pieter Abbeel 和 Andrew Ng 用这种方法让直升机做很激烈的特技动作。他说这是很老的工作，在当时能让真实直升机做出这样灵活有效的动作很了不起。
+        </p>
+        <h3>隐式行为克隆</h3>
+        <p>
+            之后模仿学习越来越有效，一个方向是结合能量模型 Energy-based Model（给每个输入组合打一个"能量"分数、能量越低越合理的生成模型）。显式策略是直接从观测映射到动作；隐式行为克隆 Implicit Behavior Cloning（IBC）学一个以观测和动作为输入、输出分数的能量函数，推理时通过优化求动作，大致是 $\hat{a} = \arg\min_a E_\theta(o, a)$。这让机器人能处理多峰 Multi-modal 的演示（同一个观测下有好几种合理做法），以及优化地形不平滑的情况，从演示中学会接触丰富的操作任务。
+        </p>
+        <h3>扩散策略</h3>
+        <p>
+            他说近期机器人学习整体的成功，很大程度上来自扩散策略 Diffusion Policy（幻灯片上是 Chi et al.），同样借用了生成模型社区的进展：IBC 借的是能量模型，而深度学习里更强的一类生成模型是扩散模型 Diffusion Model，于是用扩散模型作为策略的函数类，让智能体继承扩散模型的优点。这项工作最初在哥伦比亚大学完成（他现在所在的地方），负责人现在到了 Stanford。扩散模型本身的原理见 <a href="../CME296-Diffusion-and-Large-Vision-Models/01_扩散模型DDPM与DDIM.html">CME296 第 1 讲：DDPM 与 DDIM</a>。
+        </p>
+        <p>
+            扩散策略展示了很多能力，不只是平面推动，还有许多精细操作：抓取放置、在面包上抹黄油、炒鸡蛋、削土豆、滑动书本。他说这套配方（收集一批演示，用最好的策略学习机制）能很高效地得到在真实世界里工作的策略：早上采数据，中午训练，下午就有能用的策略。当然策略有多可靠、多能泛化、初始配置能多多样，都有很多附加条件。但模仿学习仍是得到一个能在真实世界里做点有意思事情的策略的最高效方式；要让策略对真实世界的变化稳健，就需要前面那种迭代数据收集来覆盖意外和偏离的情况。更系统的模仿学习内容见 <a href="../CS224R-Deep-Reinforcement-Learning/02_模仿学习.html">CS224R 第 2 讲：模仿学习</a>。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 机器人基础模型与 Pi-Zero</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=3825s" target="_blank">1:03:45</a>–1:13:44 · Robotic foundation models / Foundation model landscape / Pi0 model details / Model evaluation / System efficiency / Model scaling / Model generalization</em></p>
+        <h3>什么是机器人基础模型</h3>
+        <p>
+            剩下的时间讲推动这一轮机器人学习热潮的机器人基础模型 Robotic Foundation Model。幻灯片的定义：没有对状态或转移函数的显式表示，它不学环境模型；它是一个把（观测或状态，目标）映射到动作的策略。函数类上它和 RL、模仿学习的策略一样，左边是模仿学习的例子（扩散策略），右边是 RL 的例子（OpenAI 解魔方）。
+        </p>
+        <p>
+            特别之处来自语言和视觉语言基础模型的发展：它是策略，但要比只做一个任务的策略泛化得好得多。他借视觉语言模型做类比给出定义：
+        </p>
+        <ul>
+            <li>现在的视觉语言基础模型：输出不一定完美，但总能生成合理的东西；</li>
+            <li>机器人基础模型：合成的动作不一定是最优的，但生成的轨迹总是"漂亮且合理"。漂亮指不抖动，平滑连续；合理指听从给机器人的语言指令。</li>
+        </ul>
+        <p>
+            名字很多：视觉-语言-动作模型 Vision-Language-Action Model（VLA）、大行为模型 Large Behavior Model（LBM），说的是同一个东西：以观测和语言指令（或别的任务描述）为输入，生成能在大量场景中广泛泛化的动作的策略。
+        </p>
+        <h3>这个领域很"嘈杂"</h3>
+        <p>
+            他说这个领域很难量化不同模型的进展。既然叫基础模型，就意味着期望它在广泛场景下泛化，那就需要大量证据证明它真能泛化，所以评估和定量衡量很难。不过从实际视频看，过去两年有实实在在的进展。幻灯片上的时间线：RT-1（2022 年 12 月）、RT-2（2023 年 7 月）、RT-X（2023 年 10 月）、OpenVLA（2024 年 6 月）、Pi-Zero（2024 年 10 月），大约每半年一个；今年又集中出现一批：Figure 的 Helix、Physical Intelligence 的 Hi-Robot 和 Pi-0.5、Gemini Robotics、NVIDIA 的 GR00T、DYNA-1 等。资本和人才都在大量投入。他说两个月前在一个会议上做过专门讲这些模型的教程（会议名字幕没听清），感兴趣可以去看。
+        </p>
+        <h3>Pi-Zero</h3>
+        <p>
+            他以 Physical Intelligence 的 Pi-Zero（2024 年 10 月首次发布）为例讲这类模型的关键组成。他说是这项工作让他相信机器人基础模型能在真实环境中可靠地做灵巧操作，比如叠衣服、折纸盒等任务。框架分几块：
+        </p>
+        <ul>
+            <li>数据：任何基础模型都需要燃料，燃料是数据。他们汇集了学界的数据和自己采集的数据，覆盖很多不同的本体 Embodiment（不同型号、构造的机器人），幻灯片上叫跨本体数据集 Cross-Embodiment Dataset，内容是机器人在真实环境中做有用的任务。</li>
+            <li>预训练：一个重要前提是从预训练好的视觉语言模型开始，它已经在海量视觉语言数据上训练过，能自然带来语义知识。他们做所谓的联合微调 Co-fine-tuning（字幕写作 code fine-tuning），同时用动作预测目标和来自视觉问答等任务的目标，既保留模型里的语义知识，又能预测机器人动作。</li>
+            <li>后训练 Post-training：这也借鉴了大语言模型社区。基础模型能给出合理的基线表现，但想在某个具体任务上做得很好，得收集这个任务的数据做微调。</li>
+        </ul>
+        <p>
+            他们在三类任务上评估：简单的分布内任务（预训练时可能见过），基础模型直接用就够好；复杂一些的分布内任务，做后训练能进一步提升；没见过的任务，通常要收集任务数据做后训练才能达到可用的水平。幻灯片上还有一段他前一天在 Physical Intelligence 录的视频。Pi-Zero 是开源的，可以直接下载检查点，他实验室的学生已经在做后训练，结果很有希望。
+        </p>
+        <h3>问答</h3>
+        <ul>
+            <li>为什么策略比人慢？一个主要原因在于演示数据怎样采集。这类数据通常是人遥操作 Teleoperation 同一台机器人采的，比如折盒子。即使练了几个小时，遥操作也比人直接用手慢：你用的不是自己最熟悉的身体；机械臂离你有段距离，有遮挡，有时得凑近、换视角才能判断该不该进入下一个阶段。现有数据采集方式有很多低效之处，直接用这些数据训练的策略就比人慢。怎样把数据采集做到人的速度，是很活跃的研究方向。</li>
+            <li>一个策略能不能扩展到更复杂的任务？他认为折盒子已经是很长时程 Long-horizon 的任务，一个策略能处理让他印象很深。但如果要在家里不只折盒子，还要叠衬衫、铺床、收拾地上的杂物，他个人不认为一个巨大的策略就能做到，需要更高层的抽象，比如场景图 Scene Graph 或某种符号表示，作为 VLA 的条件，来引导它做不同任务、扩展到更大的环境和更复杂的任务。</li>
+            <li>泛化从哪里来？因为从预训练的视觉语言模型开始，大规模视觉语言数据带来了很多语义知识，所以语义层面的一部分泛化是"白送"的，基础模型在语义层面的泛化出人意料地好；再用机器人数据微调，让它在动作层面也能泛化。</li>
+        </ul>
+    </section>
+
+    <section id="t12">
+        <h2>12. 评估难题与未来方向</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=4424s" target="_blank">1:13:44</a>–1:18:20 · Evaluation challenges / Simulation evaluation / Future directions</em></p>
+        <h3>真实世界评估：又贵又噪</h3>
+        <p>
+            整个领域公认的一大挑战是评估。现在评估主要在真实世界做。幻灯片上是 Google Robotics 的一排 ALOHA 2 遥操作系统，同时用来采数据和做评估。真实世界评估成本高、噪声大。他转述 Google 的人对他说的原话大意是："我们的预算够大，所以还能取得进展。"意思是换你我来做评估，结果可能差别很大，取决于初始配置怎么摆、光照怎么变，连摩擦参数都会显著影响策略的稳健性。评估要等两天才出结果。
+        </p>
+        <p>
+            另一个问题是训练损失和真实成功率之间的相关性很弱。这是监督学习和序列决策的又一个区别：监督学习里训练损失直接反映模型好坏；策略学习里训练损失衡量的是单步预测有多好，往往不能说明长时程任务上策略的表现，损失低了，长时程执行反而可能更差。幻灯片列的原因是训练目标和任务指标不一致、训练和测试的时程不一致。所以很难找到哪怕近似的离线指标，只能靠真实世界评估。
+        </p>
+        <h3>仿真评估</h3>
+        <p>
+            那在仿真里评估呢？已有很多尝试，比如 Stanford 做的 BEHAVIOR 和 Meta 的 Habitat 3.0。问题也不少：
+        </p>
+        <ul>
+            <li>仿真到现实差距：刚体、可变形物体、布料怎样仿真得准，和真实表现有良好相关；</li>
+            <li>资产 Asset（仿真里用的 3D 物体模型）的大规模高效生成很麻烦；</li>
+            <li>怎样把真实世界数字化；</li>
+            <li>怎样程序化生成真实而多样的场景；</li>
+            <li>仿真和真实之间的相关性。</li>
+        </ul>
+        <p>
+            他说大家在呼唤具身 AI 领域的 ImageNet。ImageNet 之所以成功，是因为至少有那么几年，在 ImageNet 上的进步就意味着深度学习和计算机视觉的进步。机器人学习也想要这样一个平台：在上面的进步就意味着机器人学习的进步。
+        </p>
+        <h3>从基础策略到基础世界模型</h3>
+        <p>
+            他快速带过了剩下的方向。现在大家在收集大规模、以动作为条件的机器人交互数据来训练基础策略，但这些数据里包含大量动力学知识，只拿来学策略太浪费了。所以也在研究怎样用同样的数据训练基础世界模型 Foundation World Model，以及它和基础策略怎样互相配合。幻灯片上他对世界模型的定义是"以动作为条件的未来预测"，例子有 NVIDIA Cosmos、DayDreamer、1X World Models，要考虑的问题有：要不要 3D，要不要结构先验，学习和物理各占多少，和真实世界的相关性。和第 8 节的模型学习是同一条思路的扩展。
+        </p>
+        <p>
+            幻灯片上还有几页没讲：现有基础模型（GPT、Segment Anything、DINOv2）不是为具身智能体设计的，在具身任务上会失败，对几何、具身和物理交互的理解有限，方向之一是从"人类反馈的 RL"走向"具身反馈的 RL"；适应新场景、适应人的偏好、自我改进和终身学习；以及实际系统层面的考虑，幻灯片原话是"Every robotics work is a system work"，要处理延迟、算力、模块间通信，例子是 Figure 的 Helix 和 Physical Intelligence 的 Hi-Robot。
+        </p>
+        <p>
+            他最后说，希望实现的未来是能在我们周围非结构化环境中广泛工作、泛化良好的基础机器人模型。
+        </p>
+    </section>
+
+    <section>
+        <h2>课上的原话</h2>
+        <ul>
+            <li>"I would say, in the domain of robot locomotion, it is close to be a solved problem."<br>我会说，在机器人行走这个领域，问题已经接近解决了。（<a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=1974s" target="_blank">0:32:54</a>）</li>
+            <li>"As long as you randomize it enough, it can generalize very robustly in the real environments."<br>只要随机化得够多，它就能在真实环境里稳健地泛化。（<a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=2345s" target="_blank">0:39:05</a>）</li>
+            <li>"But still, imitation learning is the most efficient way for you to get a policy that can do something interesting in the real physical world."<br>但模仿学习仍然是得到一个能在真实物理世界里做点有意思事情的策略的最高效方式。（<a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=3757s" target="_blank">1:02:37</a>）</li>
+            <li>"So this area is actually quite noisy."<br>所以这个领域其实相当嘈杂。（<a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=3946s" target="_blank">1:05:46</a>）</li>
+            <li>"So for any model to be called the foundation model, it needs a fuel for that foundation model."<br>任何模型要被称为基础模型，都需要燃料。（<a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=4086s" target="_blank">1:08:06</a>）</li>
+            <li>"And currently, there's very weak correlation between the training loss and real-world success rates."<br>目前训练损失和真实世界成功率之间的相关性很弱。（<a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=4454s" target="_blank">1:14:14</a>）</li>
+            <li>"If we just use those data to do policy learning, that would be such a waste."<br>如果这些数据只拿来做策略学习，那就太浪费了。（<a href="https://www.youtube.com/watch?v=XSfmOH_xVSU&t=4638s" target="_blank">1:17:18</a>）</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS231N · Lecture 17: Robot Learning · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 15 讲：三维视觉 | Stanford CS231N 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="14_生成模型二GAN与扩散.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS231N 目录</a> · 15</span>
+    <span><a href="16_视觉与语言.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 15 讲：三维视觉</h1>
+        <p class="subtitle">三维形状的各种表示（点云、网格、参数曲面、隐式函数、水平集、体素）及其取舍；三维数据集和任务；深度学习怎样一步步进入三维：多视角 CNN、体素卷积与 3D-GAN、八叉树、PointNet、AtlasNet、深度隐式函数、NeRF、3D 高斯泼溅，最后是结构化表示</p>
+        <div class="author-meta">
+            主讲：Jiajun Wu（客座讲者，Stanford 计算机系助理教授，Stanford Vision and Learning Lab 成员，几年前合教过这门课）· 2025 年 5 月 22 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=7lxrKDKtykM" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs231n.stanford.edu/slides/2025/lecture_15.pdf" target="_blank">课程幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            前面几周讲的卷积网络、Transformer、生成模型都建立在二维像素上。图像的表示没有争议，一个 $200\times200$ 的像素矩阵就行。三维物体就麻烦了：同一个物体有几何、纹理、材质，光几何就有一大堆表示方法，各有适合的任务。Jiajun Wu 这一讲的前半段几乎不碰深度学习，先把三维表示讲清楚，核心是显式表示和隐式表示的对比；后半段讲深度学习怎样进入三维，按时间顺序看每一步换了哪种表示、为什么换。
+        </p>
+        <p>
+            他给的主线是：最早做三维深度学习的是计算机视觉的人，他们从像素类比到体素；图形学的人觉得体素又慢又丑，推动了点云、参数曲面上的网络；2019 年前后大家意识到深度网络本身就是一个隐式函数，于是有了深度隐式函数，再到 NeRF 从二维图像里学三维，再到高斯泼溅把显式的点和隐式的场结合起来。最后简短谈了物体的结构（对称、重复、层次）和用大语言模型生成形状程序的新趋势。下一讲是 Ranjay Krishna 的视觉与语言。
+        </p>
+        <ol>
+            <li><a href="#t01">开场：三维物体怎样表示</a> · <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">点云与多边形网格</a> · <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=289s" target="_blank">0:04:49</a></li>
+            <li><a href="#t03">参数化表示与显式表示的取舍</a> · <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=664s" target="_blank">0:11:04</a></li>
+            <li><a href="#t04">隐式表示、构造实体几何与距离函数</a> · <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=1037s" target="_blank">0:17:17</a></li>
+            <li><a href="#t05">水平集与体素</a> · <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=1415s" target="_blank">0:23:35</a></li>
+            <li><a href="#t06">深度学习进入三维：数据集与任务</a> · <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=1651s" target="_blank">0:27:31</a></li>
+            <li><a href="#t07">多视角 CNN</a> · <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=2302s" target="_blank">0:38:22</a></li>
+            <li><a href="#t08">体素卷积、3D-GAN 与八叉树</a> · <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=2445s" target="_blank">0:40:45</a></li>
+            <li><a href="#t09">PointNet 与点云距离</a> · <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=2766s" target="_blank">0:46:06</a></li>
+            <li><a href="#t10">AtlasNet 与深度隐式函数</a> · <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=3091s" target="_blank">0:51:31</a></li>
+            <li><a href="#t11">神经辐射场 NeRF</a> · <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=3509s" target="_blank">0:58:29</a></li>
+            <li><a href="#t12">3D 高斯泼溅</a> · <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=3790s" target="_blank">1:03:10</a></li>
+            <li><a href="#t13">结构化表示与未来方向</a> · <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=4019s" target="_blank">1:06:59</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场：三维物体怎样表示</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=5s" target="_blank">0:00:05</a>–0:04:49 · Introduction to 3D Vision / 3D Data Representations / Explicit vs Implicit Surfaces</em></p>
+        <p>
+            主持人介绍，Jiajun Wu 是 Stanford 计算机系助理教授、Stanford Vision and Learning Lab 的成员，研究场景理解，侧重多模态感知、机器人与具身智能、视觉生成与推理，以及这一讲的主题三维理解。他自己补充说几年前合教过这门课，今年是课程十周年，所以请了各处的客座讲者。
+        </p>
+        <p>
+            他说三维这一讲和前几周很不一样。先讲三维表示，这部分离深度学习相当远；然后讲深度学习怎样改变了三维视觉、两者怎样结合，并看几个三维生成和重建的应用。
+        </p>
+        <h3>为什么三维表示是个问题</h3>
+        <p>
+            二维很直接，读一个 PNG 或 JPEG，就是 $200\times200$ 的像素，大家都用像素。三维物体千差万别：尺度可以很大（建筑、树），结构可以很复杂，放大后又有很多细节。物体除了几何 Geometry，还有纹理 Texture 和材质 Material。这一讲先只看几何，光几何就有很多表示，可以分成两大类（幻灯片引自 Ren Ng）：
+        </p>
+        <ul>
+            <li>显式表示 Explicit Representation：直接把物体的组成部分表示出来，比如点云 Point Cloud、多边形网格 Polygon Mesh、细分曲面 Subdivision、NURBS。</li>
+            <li>隐式表示 Implicit Representation：把物体或其几何表示成函数，比如水平集 Level Set、代数曲面 Algebraic Surface、距离函数 Distance Function。没有"一堆点"那么直观，但有自己的长处。</li>
+        </ul>
+        <p>
+            每种选择都有适合的任务和几何类型，放到深度学习里也有各自的优缺点。选表示时要考虑：怎么存进计算机（像素就是矩阵，点云不规则，函数怎么存也是问题）；怎么创建新形状（输入可能是一张图或一段语言描述）；支持哪些操作，比如编辑、简化、平滑、滤波、修补；怎么渲染 Rendering，也就是把三维物体变成二维像素，可以是光栅化、光线追踪、神经渲染（他说三维视觉某种意义上就是把这个过程反过来，从二维图像重建三维物体）；以及做动画，比如给三维人体或动物做动画。贯穿这些的是它们怎样和深度学习方法结合，用于形状编辑、渲染、逆渲染和动画。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 点云与多边形网格</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=289s" target="_blank">0:04:49</a>–0:11:04 · Point Cloud Data / Polygonal Mesh Data</em></p>
+        <h3>点云</h3>
+        <p>
+            点云是最简单的表示：只有点，没有连接关系。图像是一个像素值矩阵，点云则是一个 $3\times N$ 的矩阵，3 是每个点的 $(x, y, z)$ 坐标，$N$ 是点数。有时还会给每个点附上表面法向 Surface Normal，也就是该点表面朝向的方向。带朝向的点叫 surfel。要法向是因为渲染：要渲染就得指定光源，要看起来真实，就得考虑从某个方向来的光和这个点怎样相互作用，这要用到法向。
+        </p>
+        <p>
+            点云的好处之一是它常常是三维传感器的原始输出，比如深度传感器、三维扫描仪，现在 iPhone 上用 ARKit 一类软件也能扫描物体，原始输出都是点云。之后还要处理、融合，变成带纹理的物体。扫描结果可能很嘈杂，需要融合、合并、修补，还要考虑把多次扫描配准 Registration 到同一个点云里。
+        </p>
+        <p>
+            点云很灵活，点可以随便挪，能表示任何几何，不受拓扑限制，适合规模很大、物体种类很多的数据集。缺点：
+        </p>
+        <ul>
+            <li>点是预先采样好的。如果采样不均匀，比如兔子头上很多点、尾巴上很少，欠采样的区域就很难处理，所以采点时要设计算法保证各部位大致均匀。</li>
+            <li>不容易直接做简化、细分这类有用的操作。</li>
+            <li>不能直接做平滑渲染。</li>
+            <li>没有拓扑信息。给你一堆点，你甚至分不清它是一个环面还是一个环状的东西，因为不知道点和点怎么连。</li>
+        </ul>
+        <h3>多边形网格</h3>
+        <p>
+            想多记录一点信息，自然就到了多边形网格 Polygonal Mesh：除了点，还记录点怎样连成面，是物体的边界表示。Jiajun 说这大概是最常用的三维表示，图形引擎、电脑游戏里基本都用网格。
+        </p>
+        <p>
+            但表示面更复杂。原始网格里每个面的顶点数可能不同，三个、四个、五个都有。早期卷积网络总是假设固定分辨率，而网格的原始信息维度是可变的，怎样和深度学习结合是大难题。他说这就是三维深度学习起步较晚的原因：大家要想办法让深度学习方法适应这些不像图像那样统一的复杂表示。
+        </p>
+        <p>
+            网格可以做得很精细。Digital Michelangelo Project 扫描的大卫像网格有 28,184,526 个顶点、56,230,343 个三角形；Google Earth 用卫星和航拍照片重建的网格有上万亿个三角形，试图表示地球上所有建筑。网格支持很多操作：
+        </p>
+        <ul>
+            <li>细分 Subdivision（上采样）：通过插值提高分辨率，用更多面捕捉更多细节。</li>
+            <li>简化 Simplification（下采样）：降低分辨率，同时尽量保留形状和外观，处理起来更快。</li>
+            <li>规则化 Regularization：把不规则网格改成每个面都是三角形、大小大致相同、各区域采样大致均匀，方便后续处理。</li>
+        </ul>
+    </section>
+
+    <section id="t03">
+        <h2>03. 参数化表示与显式表示的取舍</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=664s" target="_blank">0:11:04</a>–0:17:17 · Parametric Surface Models / Explicit Representation Pros/Cons</em></p>
+        <h3>用函数表示曲线和曲面</h3>
+        <p>
+            点云和网格属于非参数化表示。网格很通用，但会丢掉很多信息，比如桌椅上那些笔直的线。人们设计这类物体时常用参数化表示 Parametric Representation：把形状表示成一个函数的值域。曲线、曲面的内在自由度比三维空间低，曲线只有一个自由度，所以可以用 $f(x)$，变 $x$ 得到 $y$；更一般地，用函数把一两个内在变量映射到三维空间。
+        </p>
+        <p>
+            例如二维里的圆，可以采很多点或连成线段，也可以直接写成参数 $t$（理解成角度）的函数：
+        </p>
+        <p>$$f(t) = (\cos t, \sin t)$$</p>
+        <p>
+            三维里的球面只需要两个自由度 $u, v$：
+        </p>
+        <p>$$s:\mathbb{R}^2\to\mathbb{R}^3, \qquad s(u, v) = r\,(\cos u \cos v,\; \sin u \cos v,\; \sin v), \qquad (u,v)\in[0, 2\pi)\times[-\pi/2, \pi/2]$$</p>
+        <p>
+            更复杂的有贝塞尔曲线 Bézier Curve 和贝塞尔曲面 Bézier Surface，用少量控制点 Control Point 表示相当灵活、光滑的曲面。多段贝塞尔曲线拼成分段曲线；用两条贝塞尔曲线的张量积得到一个曲面片 Patch，多个曲面片拼成整个曲面。这些表示也支持细分，可以往曲面里加细节。幻灯片把样条 Splines 和细分曲面都归入参数化的显式表示。
+        </p>
+        <h3>显式表示：采样容易，内外判断难</h3>
+        <p>
+            回到开头的两分法，到目前为止的点云、网格、参数曲面都是显式表示：所有点要么直接给出，要么由函数直接映射到物体表面上，一般形式是 $f:\mathbb{R}^2\to\mathbb{R}^3,\ (u,v)\mapsto(x,y,z)$。
+        </p>
+        <p>
+            显式表示让某些任务很容易。比如一个环面 Torus：
+        </p>
+        <p>$$f(u, v) = \big((2 + \cos u)\cos v,\; (2 + \cos u)\sin v,\; \sin u\big)$$</p>
+        <p>
+            问"给我一些表面上的点"，只要随机取几组 $(u, v)$ 代进去，得到的点保证在表面上。采样很容易。
+        </p>
+        <p>
+            难的是判断某个点在物体内部还是外部。即使是用参数函数表示的球面，问点 $(3/4, 1/2, 1/4)$ 在不在里面，从参数形式也不好直接回答。Jiajun 说这会带来麻烦：现在很多神经渲染方法需要大量这类查询，比如某点在不在物体里、那里的几何或密度是多少、材质是什么、辐射或颜色是什么。显式表示不方便做这些查询。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 隐式表示、构造实体几何与距离函数</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=1037s" target="_blank">0:17:17</a>–0:23:35 · Implicit Representations Defined / Constructive Solid Geometry</em></p>
+        <h3>用约束来"分类"点</h3>
+        <p>
+            于是有了另一种表示几何的方式：隐式表示。Jiajun 提醒，后面会看到神经渲染和深度学习方法把隐式表示从几何扩展到了颜色和外观。
+        </p>
+        <p>
+            隐式表示的思路是给点分类：物体表面上的点满足某种关系。单位球面上的点满足 $x^2 + y^2 + z^2 = 1$，更一般地写成
+        </p>
+        <p>$$f(x, y, z) = 0$$</p>
+        <p>
+            球面的情形 $f(x,y,z) = x^2 + y^2 + z^2 - 1$。复杂形状的 $f$ 可能根本没有闭式表达，那怎么办？他说那就把 $f$ 写成一个神经网络，希望网络能表示它。
+        </p>
+        <p>
+            缺点是采样变难了。比如环面的隐式形式
+        </p>
+        <p>$$f(x, y, z) = \big(2 - \sqrt{x^2 + y^2}\big)^2 + z^2 - 1$$</p>
+        <p>
+            要找几组满足 $f=0$ 的 $(x,y,z)$，就得解这个方程。这个还能用中学数学解，任意形状的复杂函数就很难了。
+        </p>
+        <p>
+            优点是内外判断变得很容易：把查询点代进函数就行。点 $(3/4, 1/2, 1/4)$ 代入球面函数得 $f = -1/8 < 0$。约定表面上 $f=0$，输出为负就在物体里面，为正就在外面。所以显式和隐式之间有一个清楚的取舍：一个采样容易、内外判断难，一个反过来。Jiajun 说这个对比很基础，后面深度网络用到三维数据时的发展都和它有关。
+        </p>
+        <h3>可以组合</h3>
+        <p>
+            代数曲面 Algebraic Surface 把表面定义成关于 $x, y, z$ 的多项式的零点集。全靠闭式写形状似乎很受限，一头牛的形状该写成什么函数？隐式表示的好处是不必一次写完，它很容易组合。每个函数对一点给出一个值，对两个物体的函数值做运算，就能得到并集、交集、差集。这叫构造实体几何 Constructive Solid Geometry（CSG），用布尔运算组合隐式几何，层层组合能做出很复杂的形状。他说工业设计里制造复杂零件用的 CAD（计算机辅助设计）模型，很多就是这样用简单逻辑运算组合隐式函数的。
+        </p>
+        <p>
+            还可以超出布尔运算。距离函数 Distance Function 给出空间任意一点到物体的最小距离（也可以是带符号的距离，即有符号距离函数），正负值都有含义，表示离表面多远。距离函数可以相加，从而平滑地混合形状。他举的一维例子：一个距离函数表示一条竖线，左边为负、右边为正；另一个函数表示另一条线；两者相加就自然成了两个形状之间的插值。三维里同理可以混合不同形状。幻灯片上有一个完全由距离函数构成的复杂场景（出自 Inigo Quilez），他说做出这样的场景不容易，但熟练的话表达能力很强。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 水平集与体素</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=1415s" target="_blank">0:23:35</a>–0:27:31 · Level Sets and Voxels</em></p>
+        <h3>水平集：把函数预先查询成网格</h3>
+        <p>
+            既然有显式的参数表示，也有隐式的参数表示（函数），能不能有隐式、但像点那样非参数化的表示？这就到了水平集方法 Level Set Methods。隐式曲面便于合并和拆分，但复杂形状难以写成闭式；用组合的办法表示一头牛，每次查询一个点都要算几百个函数、做一堆加减和与或运算，很慢。
+        </p>
+        <p>
+            办法是预先查询：在三维空间里采一个 $100\times100\times100$ 的网格，一共一百万个点，对每个点预先算出它在物体里还是外、到表面的距离是多少，存进一个三维矩阵。这仍然是隐式表示，但因为预先查询过，变成了非参数化表示。表面在哪？就在相邻两个值一正一负的地方，插值后等于零的位置满足 $f=0$。这样对形状有了更显式的控制，可以像纹理一样直接可视化。CT、MRI 这类医学数据常用水平集，比如编码某个恒定的组织密度。
+        </p>
+        <h3>体素</h3>
+        <p>
+            如果不关心具体距离，只关心在里面还是外面，就把预先查询的值二值化：正值记 1，负值（在物体内部）记 0，这是他课上随口举的记法，换成内 1 外 0 也一样。这就得到体素 Voxel：一个三维的 0/1 矩阵，比如 $100\times100\times100$，每个格子表示那个位置是否被物体占据。
+        </p>
+        <p>
+            Jiajun 承认他是绕了一大圈才引出体素，换个角度看体素最好懂：像素是二维矩阵，体素就是三维矩阵。他这样介绍，是为了说明体素和其他表示之间的联系，这和深度学习刚进入三维时的情形有关。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 深度学习进入三维：数据集与任务</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=1651s" target="_blank">0:27:31</a>–0:38:22 · Deep Learning on 3D Data / 3D Datasets Evolution / 3D Recognition Tasks</em></p>
+        <h3>为什么从体素开始</h3>
+        <p>
+            现代深度学习大约从 2010 年开始，Geoff Hinton 用在语音识别上；2012 年有了在 ImageNet 上训练的 AlexNet，这些都是二维的。很自然的想法是把它做到三维。那时还没有 Transformer，问题就是怎样把二维卷积网络用到三维数据上，选哪种表示开始？
+        </p>
+        <p>
+            最早做三维深度学习的是计算机视觉的人，不是图形学的人。他们一直处理像素，最简单的做法就是把二维矩阵扩成三维矩阵，把二维卷积网络换成体积卷积网络 Volumetric Convolutional Network。支持体积卷积的表示就是体素。图形学的人不同意，觉得体素算起来很慢，质量和网格、点云比差远了，为什么要从这个开始？Jiajun 说原因是像素和体素的类比太自然了，代码只要改一处：2D 卷积换成 3D 卷积。
+        </p>
+        <h3>三维数据集的演变</h3>
+        <p>
+            ImageNet 推动了 AlexNet，三维同样需要数据。深度学习之前常用的是 Princeton Shape Benchmark（Shilane et al., 2004），幻灯片上是 1814 个模型、182 个类别，平均每类只有十个左右，当时已经算大，那时也没什么机器学习。2014 年之前的数据集都比较小，最多有一万左右的模型，但分成很多类，每类十个到不足一百个。
+        </p>
+        <p>
+            之后有几项同期工作想做三维版的 ImageNet，最后汇成 ShapeNet（Chang et al., 2015），很大部分由 Stanford 的 Leo Guibas 和 Silvio Savarese 主导。ShapeNet 有 300 万个模型，ModelNet（Wu et al., 3D ShapeNets, CVPR 2015）后来并入其中。常用的子集 ShapeNetCore 有 5.13 万个模型、55 个类别，平均每类上千个，但不均衡，椅子特别多。Jiajun 说之后好几年的结果大多只在椅子和汽车上展示，因为这两类数据最多。
+        </p>
+        <p>
+            近几年西雅图艾伦人工智能研究所 AI2 做了更大的 Objaverse（80 万）和 Objaverse-XL（1000 万），类别更多、质量更高、带纹理（Deitke et al., 2022、2023）。这些是合成数据。
+        </p>
+        <p>
+            真实数据方面，2016 年有用三维扫描仪采的数据集（幻灯片是 Choi et al. 2016，10,933 个 RGBD 扫描、441 个模型；Jiajun 课上不太确定名字，说"大概叫 Redwood"）。更近的是 Meta 和牛津合作的 CO3D（Reizenstein et al., ICCV 2021）：鼓励甚至付钱让人用 iPhone 绕物体拍一段 360 度视频，第一版有 19,000 个视频、50 个类别。三维视觉算法可以从 360 度视频重建出三维物体，于是得到图像与三维几何、纹理的配对数据。后续版本更大，他估计大约 9 万个物体，并认为不会超过 10 万。
+        </p>
+        <p>
+            对比二维：LAION-5B 有 50 亿张图像，Google 和 OpenAI 手里的肯定更多。真实三维物体大约 10 万个，<strong>二维图像和视频的数据量与三维物体的数据量之间仍有巨大差距</strong>，他认为这是三维视觉往前走的一大挑战，不过现在的规模至少已经能训练一些深度模型了。
+        </p>
+        <p>
+            还有部件和场景的数据集。Stanford 的工作在 ShapeNet 上标注了物体部件及其对应关系和层级；PartNet（Mo et al., CVPR 2019）标注细粒度、实例级、层级化的部件，还带一点可动信息，比如笔记本电脑可以开合。室内场景有 ScanNet（Dai et al., CVPR 2017）：有人带着三维扫描仪进家里、办公室扫描并标注，1,500 个 RGBD 扫描中有 250 万个视角，带相机位姿、表面重建、实例级语义分割；最近有 ARKitScenes 和 ScanNet++（带单反图像），规模也就两三千个房间。场景数据比物体数据还少得多，靠自己扫描，总受人力和时间限制。
+        </p>
+        <h3>三维上的任务</h3>
+        <ul>
+            <li>生成模型 $p(x)$ 或 $p(x\mid y)$：像 Justin 讲的生成二维图像和视频那样，生成三维形状和场景，可以以语言或图像为条件；从一张输入图像重建三维物体；学习形状先验 Shape Prior；形状生成、补全（物体残缺时修补）和几何数据处理。</li>
+            <li>判别模型 $p(y\mid x)$：学形状描述子，做形状分类（是椅子还是桌子）、分割、视角估计等。他说现在很多分类其实是把三维物体渲染成图片，交给 GPT 这样的图像识别模型。但有些专门领域不好这样做，比如对细胞的三维扫描分类，数据也少。</li>
+            <li>二维与三维的联合建模：二维有大规模数据集和很好的预训练基础模型，知道图像、视频怎样看起来真实。如何把这些先验用到三维重建上越来越重要。神经渲染和可微渲染 Differentiable Rendering 把三维和二维连接起来：渲染过程可以做成可微的，或用神经网络近似，于是不同模态的数据能通过可微网络连起来，把二维基础模型的先验带进三维世界。</li>
+            <li>视觉之外的多模态联合建模，比如文本，机器人里的触觉数据，自动驾驶里的激光雷达 LiDAR 和深度数据。</li>
+        </ul>
+    </section>
+
+    <section id="t07">
+        <h2>07. 多视角 CNN</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=2302s" target="_blank">0:38:22</a>–0:40:45 · Multi-View Recognition</em></p>
+        <p>
+            其实在体素之前，最早把深度学习用到三维视觉上的想法更简单，而且 Jiajun 说它现在某种程度上又回来了。给一个三维形状（网格、体素都行），要识别它是什么，比如是椅子。在有三维深度学习方法之前，不如先把它渲染成图像，因为已经有很好的图像模型。
+        </p>
+        <p>
+            多视角 CNN（Multi-View CNN，Su et al., ICCV 2015）在不同位置放相机，渲染出物体的多个视角（View 1 到 View N），问题就变成二维问题。每个视角过一个卷积网络 CNN1 提取图像特征；然后做视角池化 View Pooling，在所有视角上逐元素取最大值；再过第二个卷积网络 CNN2 得到形状描述子，最后用 softmax 分类。唯一的区别是有多个视角。用二维网络是因为当时大家都在推 ImageNet，ImageNet 比三维数据集大得多，在它上面预训练的模型效果很好。
+        </p>
+        <p>
+            幻灯片上 ModelNet40 的结果（分类准确率 / 检索 mAP）：非深度方法 SPH 68.2% / 33.3%，LFD 75.5% / 40.9%；3D ShapeNets 77.3% / 49.2%；Fisher Vector 12 视角 84.8% / 43.9%；CNN 12 视角 88.6% / 62.8%；MVCNN 12 视角 89.9% / 70.1%；MVCNN 加度量学习 12 视角 89.5% / 80.2%；MVCNN 80 视角 90.1% / 70.4%；MVCNN 加度量学习 80 视角检索 79.5%。
+        </p>
+        <p>
+            优点是效果确实好，可以利用大量图像分类文献，可以用预训练特征。缺点是需要投影，而且输入嘈杂或不完整时（比如点云质量差），渲染出来的图也很糟。后来三维数据多了，大家转向原生三维方法，也有人通过神经渲染连接三维和二维。Jiajun 说现在这个趋势又回来了：图像和视频模型太强了（他提到前一天刚发布的 Veo 3），它们训练用的数据可能是三维数据的成千上万倍甚至百万倍，那就应该多依赖图像和视频基础模型。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 体素卷积、3D-GAN 与八叉树</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=2445s" target="_blank">0:40:45</a>–0:46:06 · Volumetric Convolution and GANs / Octree-based Processing</em></p>
+        <h3>从像素到体素</h3>
+        <p>
+            原生三维方法最简单的做法，就是把像素卷积网络换成体素上的体积卷积网络。幻灯片上的例子是 3D 卷积深度信念网络 3D Conv Deep Belief Network（Wu et al., CVPR 2015，即 3D ShapeNets，Jiajun 课上说是 Princeton 2015 年的工作）。它是生成网络，但用了三维卷积滤波器，能以较低分辨率的体素合成三维形状，还能以语义标签为条件生成（浴缸、书桌、桌子等）。因为是生成模型，也能用来做形状分类。他说这已经是十年前的工作，当时算相当惊艳。
+        </p>
+        <h3>3D-GAN 与 Visual Object Networks</h3>
+        <p>
+            后来他们做了一件很简单的事：GAN 能生成二维像素，就没理由不能生成三维体素。把 GAN 用到体素上，就是 3D-GAN（Wu et al., NeurIPS 2016），从一个形状编码出发，经形状网络生成三维形状，结果相当好，这是八九年前的工作。
+        </p>
+        <p>
+            再后来的扩展是 Visual Object Networks（Zhu et al., NeurIPS 2018，字幕里合作者的名字不清）：用 GAN 生成三维形状，再把它投影到二维，得到生成物体的轮廓和深度图，然后用 CycleGAN 把深度图转成彩色图像。这样对抗损失同时作用在三维形状和二维图片上：三维形状要和真实三维数据难以区分，二维图像要和真实汽车照片难以区分，三维生成和二维生成同时完成。形状、视角、纹理各有各的潜向量，所以有一定的可控性：可以改视角、改纹理、在潜空间插值，还能把一辆车的纹理迁移到另一辆车的形状上。这是 2018 年的工作。
+        </p>
+        <h3>八叉树</h3>
+        <p>
+            对体素的主要抱怨是慢：要预先采样，而很多采样点要么在空的空间，要么在物体内部，不提供信息。改进之一是八叉树 Octree（课上念作 octave tree）。它递归地划分空间，不再在统一尺度上表示每个点，体素可以大小不一：靠近物体表面的地方用很细的尺度，空的空间和物体内部这些不太关心的地方用很大的体素。思路是只存表面附近的稀疏信号，把计算限制在表面附近。代表工作有 OctNet（Riegler et al., CVPR 2017）和 O-CNN（Wang et al., SIGGRAPH 2017）。
+        </p>
+        <p>
+            幻灯片上比较了 O-CNN 和体素 CNN 在 $16^3$ 到 $256^3$ 分辨率下的 GPU 显存占用。Jiajun 说受限于 GPU 显存，体素大概能做到 $64\times64\times64$，八叉树能做到 256。八叉树也能用于生成：Octree Generating Networks（Tatarchenko et al., ICCV 2017）逐层生成八叉树，避免 $O(n^3)$ 的重建开销，生成的物体看起来像体素，但分辨率更高。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. PointNet 与点云距离</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=2766s" target="_blank">0:46:06</a>–0:51:31 · Point Cloud Learning</em></p>
+        <h3>图形学的人登场</h3>
+        <p>
+            这时图形学的人觉得前面都做错了：为什么要用体素、八叉树这种低效又难看的表示？已经有点云、网格、样条这些好表示了。难点在于点散落各处，怎么对点做卷积并不明显。幻灯片把这一步概括成从欧拉式 Eulerian（固定网格）到拉格朗日式 Lagrangian（跟着点走）。于是有了直接处理点云的网络。
+        </p>
+        <h3>PointNet</h3>
+        <p>
+            PointNet（Qi, Su, Mo, Guibas, CVPR 2017）同样来自 Stanford，Leo Guibas 的组。它是端到端处理不规则点数据的统一框架，可以做物体分类、物体部件分割、场景语义解析。点云网络要满足两个不变性：
+        </p>
+        <ul>
+            <li>置换不变性 Permutation Invariance：点云是无序集合，把点 1 和点 2 的编号对调，输出应该不变。图像有顺序，左上角是 (1,1)，右下角是 (100,100)；点没有。</li>
+            <li>采样不变性 Sampling Invariance：输出应该是底层几何的函数，和采样方式无关。有时兔子头上采 10 个点、尾巴采 5 个，有时反过来，网络应该不受影响。</li>
+        </ul>
+        <p>
+            PointNet 最主要的想法很简单：对点的嵌入用一个对称函数 Symmetric Function，也就是输入顺序打乱后结果不变的函数。先对每个点分别算一个嵌入（就像给图像的不同区域算特征），再用对称函数融合，比如逐维取最大值，或者求和；聚合后的嵌入再过几层全连接网络，判断这些点是椅子还是桌子。幻灯片上的形式是
+        </p>
+        <p>$$f(x_1, x_2, \dots, x_n) = \gamma \circ g\big(h(x_1), \dots, h(x_n)\big)$$</p>
+        <p>
+            只要 $g$ 是对称的，$f$ 就是对称的。$h$ 是逐点的网络，$g$ 是对称聚合（如最大池化），$\gamma$ 是聚合后的网络。最简单的形式是直接用对称算子聚合所有点，这样只能发现几何的一些简单的极值或聚合性质。
+        </p>
+        <p>
+            之后有很多改进，比如 PointNet++；也有人用图神经网络 Graph Neural Network（Wang et al., TOG 2019），把点当作图的节点，邻近关系当作边。Jiajun 说 PointNet 原始的想法很简单，结果也很强。
+        </p>
+        <h3>怎样比较两个点云</h3>
+        <p>
+            像素好办，输出图和真值图逐像素求差就行。分类任务也简单，输入点云、输出类别，用交叉熵。体素生成也能对 $100\times100\times100$ 的网格用交叉熵。但如果输出是 100 个点，怎么和真值点云比？需要专门的距离度量（幻灯片出自 "A Point Set Generation Network for 3D Object Reconstruction from a Single Image"）：
+        </p>
+        <p>
+            倒角距离 Chamfer Distance：对每个集合里的每个点，找它在另一个集合里的最近邻，把这些距离加起来最小化。
+        </p>
+        <p>$$d_{CD}(S_1, S_2) = \sum_{x\in S_1}\min_{y\in S_2}\|x - y\|_2 + \sum_{y\in S_2}\min_{x\in S_1}\|x - y\|_2$$</p>
+        <p>
+            推土机距离 Earth Mover's Distance（EMD）：要求两个集合大小相同 $|S_1| = |S_2|$，在两组点之间做二分图匹配，得到一一对应，最小化所有配对的距离和，其中 $\phi$ 是一个双射：
+        </p>
+        <p>$$d_{EMD}(S_1, S_2) = \min_{\phi: S_1\to S_2}\sum_{x\in S_1}\|x - \phi(x)\|_2$$</p>
+        <p>
+            两者都能做成可微的，可以算梯度来优化网络，用于点云生成。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. AtlasNet 与深度隐式函数</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=3091s" target="_blank">0:51:31</a>–0:58:29 · Neural Surface Parameterization / Deep Implicit Fields</em></p>
+        <h3>AtlasNet：用网络学参数曲面</h3>
+        <p>
+            从体素到点云之后，下一个问题是：神经网络生成的体素或点云总是很难看，没有光滑的表面。能不能把网络和样条这类函数表示结合起来？幻灯片称这一步为从非参数化到参数化。
+        </p>
+        <p>
+            代表是 AtlasNet（Groueix et al., CVPR 2018）。它学一个变换函数，不直接输出一组三维点。回想参数表示：把二维的 $(u, v)$ 空间变换到三维，球面这种简单形状能写出 sin、cos 的式子，复杂物体写不出闭式。那就用神经网络（一个 MLP）表示这个函数 $f$：输入 $u, v$（以及潜在的形状表示），输出三维空间里的一个点。用一个变换表示整个物体可能太难，所以用几个小网络，Jiajun 打的比方是一张纸可以按不同方式折好几次，这些片拼起来形成最终形状。
+        </p>
+        <p>
+            幻灯片对比了同一张输入图像的三种重建：体素受限于分辨率；点云不受分辨率限制、细节多一些，但点是无序的，得不到光滑表面；AtlasNet 学到的分片变换给出更光滑的表面。
+        </p>
+        <h3>深度网络本身就是隐式函数</h3>
+        <p>
+            Jiajun 换了个角度看深度网络在 ImageNet 分类时做的事：学一个很复杂的函数，把像素映射到类别标签。输入空间很大（$500\times500$ 的图大约 25 万维），输出空间很小（1000 维），函数写不出闭式，所以需要深度网络。用这个标准去看前面在三维形状上的做法，都不太符合这个模式。
+        </p>
+        <p>
+            大约 2019 年，人们意识到<strong>深度网络本身就是一个隐式函数</strong>，为什么不直接用它表示物体三维几何的隐式函数？体素本来回答的就是某处在不在物体里，与其预先查询整个空间得到体素再做卷积，不如让深度网络直接做查询：输入三维坐标 $(x, y, z)$，输出一维的结果，说这个点在形状里还是外。这一步从显式表示跳到了隐式表示，网络被当作水平集或隐式函数来用，不再处理体素。
+        </p>
+        <p>
+            2019 年有四篇论文几乎做了同一件事，都认为体素、点云、网格各有长短，正确的做法是把查询直接交给深度网络。幻灯片列出：Deep Level Sets（2019）、Liu et al. 的无三维监督学习隐式曲面（NeurIPS 2019）、DeepSDF（CVPR 2019）、Chen and Zhang 的 Learning Implicit Fields（CVPR 2019），以及 Occupancy Networks。Jiajun 说直到 2025 年，很多人还在用这个想法。
+        </p>
+        <p>
+            输出也可以超出内外的二分类：可以是有符号距离函数 Signed Distance Function（SDF，点到表面的带符号距离），可以是密度，后来还可以是颜色、辐射值。从 2019 年起，人们用一种类似分类的方式使用深度网络：把三维空间中的点当输入，查询这个点的某些属性。也有工作用一组小网络表示物体的隐式部件，组合成复杂形状（Genova et al., CVPR 2020，Collection of Implicit Functions），不同于 AtlasNet 那样把纸片变形到三维。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 神经辐射场 NeRF</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=3509s" target="_blank">0:58:29</a>–1:03:10 · Neural Radiance Fields (NeRF)</em></p>
+        <h3>查询密度和颜色</h3>
+        <p>
+            一两年后出现了 NeRF（Neural Radiance Fields，神经辐射场；Mildenhall*, Srinivasan* et al., ECCV 2020）。查询的输入除了 $(x, y, z)$ 坐标，因为要建模外观，还加上相机的观察方向 Viewing Direction。网络输出也从 0 或 1 换成了密度 Density 加颜色（辐射 Radiance）。
+        </p>
+        <p>
+            之前的隐式函数直接在三维形状上训练，需要三维监督：有一批三维物体，才知道每个点在里还是外的真值。NeRF 想在二维图像上训练，为此把隐式函数和体渲染 Volume Rendering 结合。体渲染就是计算机图形学里的体渲染，几乎没改，只是它的近似形式里每一步都可微。
+        </p>
+        <h3>可微的体渲染</h3>
+        <p>
+            从相机发出一条光线 $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$，沿光线采样点 $t_1, \dots, t_{n+1}$，在每个采样点查询网络得到颜色 $\mathbf{c}_i$ 和不透明度 $\alpha_i$（Jiajun 说可以把网络给出的密度理解成该点的不透明度）。像素颜色近似为
+        </p>
+        <p>$$\mathbf{c} \approx \sum_{i=1}^{n} T_i\,\alpha_i\,\mathbf{c}_i, \qquad T_i = \prod_{j=1}^{i-1}(1 - \alpha_j)$$</p>
+        <p>
+            $T_i$ 表示光线在到达第 $i$ 段之前被前面的点挡掉了多少（剩下的透射率），$\alpha_i$ 表示第 $i$ 段贡献了多少光，$T_i\alpha_i$ 是权重。这个式子对 $\mathbf{c}$ 和 $\alpha$ 都可微，所以能直接从二维图像学。
+        </p>
+        <p>
+            Jiajun 总结 NeRF 相对之前的深度隐式函数改了两件事：一是不必在三维形状上训练，可以借助体渲染方程在二维图像上训练；二是不只看几何或密度，还看三维中的辐射和外观。他说很多人觉得 NeRF 是凭空冒出来的，其实不是，作者后来写的文章里也说深受深度隐式函数这类工作的启发，那些工作只关注几何，NeRF 同时做几何和外观，并且从二维图像学习。课上展示了 NeRF 的重建和新视角合成 Novel View Synthesis 结果。
+        </p>
+        <h3>用 NeRF 做生成</h3>
+        <p>
+            回到前面 Visual Object Networks 那种先生成三维形状、再生成二维外观的框架。当时用的是体素，有了隐式表示就不必用体素，可以换成辐射场。他们做了一个生成式的神经网络，表示隐式的辐射场和密度，仍然套用 GAN 加渲染的框架，可以同时渲染三维物体和二维图片，同样有可控性：改相机视角、保持视角换物体身份。区别是现在能直接从图像学，不必局限于椅子、汽车这些三维数据多的类别，输出也真实得多。字幕把这项工作的名字记成 "pigeon"，听不清；Jiajun 说第一作者是 Eric Chen（字幕拼写），合作者大多来自 Gordon 的组，从这些信息看应是 Stanford Gordon Wetzstein 组的 pi-GAN，但这是整理者的推断，课上没有写明。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 3D 高斯泼溅</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=3790s" target="_blank">1:03:10</a>–1:06:59 · Gaussian Splatting</em></p>
+        <h3>NeRF 的问题：到处采样</h3>
+        <p>
+            NeRF 的问题是要在三维里采大量的点。它不再预先采样再做体积卷积，但和水平集一样，每次都要采所有点、反复查询网络，所以很慢。幻灯片上的说法（引自 Vincent Sitzmann）：NeRF 在空间每一点上稠密地参数化场景。就像体素里很多点表示的是空的空间，NeRF 的很多查询也在问空的空间，网络返回密度 0，却花了大量时间。
+        </p>
+        <h3>稀疏地参数化</h3>
+        <p>
+            又是图形学的人提出：点和网格的好处是自由地放在空间里，很高效，能不能把两者结合？保留隐式的表示，但不用固定的采样网格，只在知道有东西的地方采样。怎么知道哪里有东西？用点的表示。
+        </p>
+        <p>
+            这就是 3D 高斯泼溅 3D Gaussian Splatting（3DGS，Kerbl et al., ACM TOG / SIGGRAPH 2023）。场景表示成漂浮在空间中的一堆三维高斯团 Gaussian Blob，可以看成扩展了的点：每个点是一个有范围的团，带有不透明度（幻灯片例子里 $\sigma$ 为 1、0.5、0）和颜色。高斯泼溅只在密度不为零的地方稀疏地参数化场景。从相机发出光线时，因为知道这些团在哪，可以根据各个高斯的半径，只在确实有东西的地方采样，渲染效率高得多。
+        </p>
+        <h3>质量与效率</h3>
+        <p>
+            幻灯片上的对比（Instant-NGP、MipNeRF360、3DGS 训练 7K 和 30K 步）：SSIM 分别为 0.72、0.80、0.78、0.83；PSNR 分别为 24.92、27.11、25.2、26.91；渲染速度 FPS 分别为 9.0、0.07、167.9、137.3；训练时间分别为 7.5 分钟、48 小时、6.1 分钟、38.3 分钟。
+        </p>
+        <p>
+            Jiajun 提醒图的纵轴不是从 0 开始，有点误导，其实渲染质量的数字很接近，至少刚提出时，高斯泼溅和 NeRF 的质量相当。但高斯泼溅高效得多：每秒能渲染 150 张左右，NeRF 渲染一张可能要 20 秒左右，按论文的说法快了大约 1000 倍。原因就是不再把算力浪费在对空的空间采样和查询网络上。
+        </p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 结构化表示与未来方向</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=4019s" target="_blank">1:06:59</a>–1:11:50 · Future Directions and Structures</em></p>
+        <h3>元素几何与元素结构</h3>
+        <p>
+            最后两分钟，Jiajun 讲了前面没覆盖的一面：物体几何除了各个部件的具体细节（元素几何 Element Geometry），还有结构（元素结构 Element Structure，幻灯片引自 Daniel Ritchie），比如椅子是对称的。参数曲面能用闭式方程带来一点对称性，但对物体几何里的规律（重复、对称）有更系统的研究。点云、网格、隐式函数主要表示单个部件的几何细节，没有一个直接捕捉对称、重复这类规律。幻灯片列出几类结构化表示，主要来自图形学社区：
+        </p>
+        <ul>
+            <li>分割后的几何 Segmented Geometry：容易构造，可以复用非结构化几何的模型，但不能保证每个原子元素的完整性，生成模型得自己学会输出连贯的分割。</li>
+            <li>部件集合 Part Sets：保证部件完整，但部件之间没有关系，没什么能阻止部件"漂浮"。相关的有体积基元集合（Tulsiani et al., CVPR 2017）和隐式函数集合，用深度网络把物体表示成简单几何基元或隐式函数的组合。</li>
+            <li>关系图 Relationship Graphs：能强制连接性这类重要关系。场景里尤其需要，比如床通常靠墙，椅子通常在桌子旁边。但机器学习里图的生成模型总体上仍是开放问题。</li>
+            <li>层级 Hierarchies：树的生成模型比图的生成模型研究得更透，但不是所有结构都能自然地表示成树。Jiajun 举建筑设计的例子：设计一栋楼要考虑先建什么，教室里有桌椅，椅子又有部件，这就是层级。</li>
+            <li>层级图 Hierarchical Graphs：同时建模层级结构和同层之间的横向关系，每层的图更简单，比生成大而通用的图容易，但这种格式的数据难获取、标注代价高。他举的例子：椅子分底座、座面、靠背几层，底座下有几条腿；左右腿应该对称、形状相同，位置要对齐，不然椅子会倒。StructureNet（Mo et al., 2019，Leonidas Guibas 组）用层级图编码器和解码器，通过图卷积编码/解码度数可变的节点，生成满足这些约束、保持层级的三维椅子。</li>
+            <li>程序 Programs：能涵盖其他所有表示（程序可以生成它们中的任何一种），用自由参数表达自然的自由度，比如重复可以写成 for 循环；但这种格式的数据更难获取。可以用神经网络生成合成物体形状及部件关系的程序。</li>
+        </ul>
+        <h3>大语言模型生成形状程序</h3>
+        <p>
+            Jiajun 用一个新趋势收尾：过去一两年，深度网络和大语言模型理解能力很强，人们在探索能不能直接让 GPT 这样的大语言模型输出这些程序，因为它们懂语义，知道椅子应该是什么样、要满足哪些约束；再用隐式函数之类的方法捕捉各部件的具体几何细节。他说这是眼下正在兴起的研究方向。
+        </p>
+    </section>
+
+    <section>
+        <h2>课上的原话</h2>
+        <ul>
+            <li>"So you can see now, there is a clear trade-off between these implicit and explicit representations."<br>所以现在可以看到，隐式表示和显式表示之间有一个清楚的取舍。<a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=1226s" target="_blank">0:20:26</a></li>
+            <li>"It turns out that people will say, OK, yeah, the people who started doing deep learning on 3D data, they're the computer vision people. They're not the graphics people."<br>结果是，最早在三维数据上做深度学习的是计算机视觉的人，不是图形学的人。<a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=1697s" target="_blank">0:28:17</a></li>
+            <li>"So there's still a huge gap between the number of data points that you can have for 2D images or videos versus you can have for 3D objects."<br>二维图像或视频能拿到的数据量，和三维物体能拿到的数据量之间，仍有巨大差距。<a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=2020s" target="_blank">0:33:40</a></li>
+            <li>"But the original idea in the PointNet paper is so simple, and it turned out to be also very powerful."<br>PointNet 论文原始的想法很简单，结果也很强。<a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=2951s" target="_blank">0:49:11</a></li>
+            <li>"if we think more carefully, I think, around 2019, then people realize, oh, yeah, in some sense, deep network is an implicit function."<br>再仔细想想，大约 2019 年，人们意识到，某种意义上深度网络就是一个隐式函数。<a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=3323s" target="_blank">0:55:23</a></li>
+            <li>"So a lot of people feel like, oh yeah, NeRF has been great. It seems like out of nowhere. That's really not the case"<br>很多人觉得 NeRF 很棒，好像是凭空冒出来的。其实不是这样。<a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=3693s" target="_blank">1:01:33</a></li>
+            <li>"But Gaussian splats are just much more efficient."<br>但高斯泼溅就是高效得多。<a href="https://www.youtube.com/watch?v=7lxrKDKtykM&t=3974s" target="_blank">1:06:14</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS231N · Lecture 15: 3D Vision · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

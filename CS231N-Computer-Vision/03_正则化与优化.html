@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 3 讲：正则化与优化 | Stanford CS231N 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="02_图像分类与线性分类器.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS231N 目录</a> · 03</span>
+    <span><a href="04_神经网络与反向传播.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 3 讲：正则化与优化</h1>
+        <p class="subtitle">数据损失加正则项，L1 与 L2 正则化的偏好；损失地形、数值梯度与解析梯度、梯度下降和随机梯度下降，SGD 的三个问题，动量、RMSProp、Adam 与 AdamW，学习率调度与预热，二阶优化为什么不用在深度学习里</p>
+        <div class="author-meta">
+            主讲：Zane Durante（Stanford 计算机系博士生）· 2025 年 4 月 8 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=dyNGd06MWn4" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs231n.stanford.edu/slides/2025/lecture_3.pdf" target="_blank">课程幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            <a href="02_图像分类与线性分类器.html">第 2 讲</a>定义了线性分类器 $f(x,W)=Wx+b$ 和 Softmax 损失，能算出一组权重 $W$ 有多差。这一讲回答两个问题。第一，损失函数里除了衡量拟合程度的数据损失，还要加一个正则项，它让模型在训练集上表现差一点、换来在新数据上表现好一点。第二，怎样真正找到让损失最小的 $W$，这就是优化。
+        </p>
+        <p>
+            Zane Durante 从"蒙眼下山"的直觉讲起，经过数值梯度、解析梯度、梯度下降、随机梯度下降，再讲 SGD 遇到的三个问题，以及为了解决它们发展出来的动量、RMSProp、Adam 和 AdamW，最后讲学习率调度和二阶优化。这一讲的优化器在后面整门课的模型训练里都会用到。下一讲把线性模型换成神经网络，并讲怎样用反向传播算梯度。
+        </p>
+        <ol>
+            <li><a href="#t01">回顾：图像分类、K 近邻与线性分类器</a> · <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">损失函数与正则化</a> · <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=517s" target="_blank">0:08:37</a></li>
+            <li><a href="#t03">L1 与 L2 正则化</a> · <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=922s" target="_blank">0:15:22</a></li>
+            <li><a href="#t04">优化：损失地形与随机搜索</a> · <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=1463s" target="_blank">0:24:23</a></li>
+            <li><a href="#t05">计算梯度：数值梯度与解析梯度</a> · <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=1657s" target="_blank">0:27:37</a></li>
+            <li><a href="#t06">梯度下降</a> · <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=2023s" target="_blank">0:33:43</a></li>
+            <li><a href="#t07">随机梯度下降和它的三个问题</a> · <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=2165s" target="_blank">0:36:05</a></li>
+            <li><a href="#t08">SGD + 动量</a> · <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=2587s" target="_blank">0:43:07</a></li>
+            <li><a href="#t09">RMSProp、Adam 与 AdamW</a> · <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=2964s" target="_blank">0:49:24</a></li>
+            <li><a href="#t10">学习率与学习率调度</a> · <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=3557s" target="_blank">0:59:17</a></li>
+            <li><a href="#t11">二阶优化、实践建议和下一讲预告</a> · <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=3811s" target="_blank">1:03:31</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 回顾：图像分类、K 近邻与线性分类器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=5s" target="_blank">0:00:05</a>–0:08:37 · Introduction / Classification challenges / Data-driven approach / Linear classifiers</em></p>
+        <p>
+            Durante 开场说，正则化和优化在整个深度学习和机器学习里都很重要，在计算机视觉里尤其重要。他先用几分钟回顾上一讲。
+        </p>
+        <h3>任务和难点</h3>
+        <p>
+            图像分类：输入一张图，从一组标签（这里是 cat、dog、bird、deer、truck）里给它分配正确的那个。核心难点是语义鸿沟：人看到的是猫，计算机里存的是一个像素值组成的多维数组。此外还有光照（场景里的光在哪、物体有没有部分在阴影里）、形变（猫会扭来扭去）、遮挡（猫藏在坐垫下面只露出尾巴，人靠尾巴翘起的样子和猫的习性就能推断出来）、背景杂乱（物体和背景融在一起）、类内差异。所以没法写 if-else 规则来分类。
+        </p>
+        <h3>K 近邻和距离</h3>
+        <p>
+            数据驱动方法里最简单的模型是 K 近邻：看训练集中离新数据点最近的点，1 近邻直接用最近那个点的标签，K 近邻用 K 个邻居里最常见的标签。数据集分成训练、验证、测试三份，用验证集选超参数（主要就是 K），比如画出验证集准确率随 K 的变化，挑最高的那个；测试集留到最后，用来看模型在完全没见过的数据上表现如何。
+        </p>
+        <p>
+            他说上次课后大家对距离度量有些困惑，课程团队在 Ed 上发了详细解释。L2 距离就是日常说的直线距离。曼哈顿距离（L1）只能左右、上下走，不能斜着走：从原点走到 $(0.5,0.5)$ 要向上 0.5、向右 0.5，总共是 1，和直接走到 $(1,0)$ 一样远，所以 L1 下到原点距离相等的点连成一个菱形；L2 下可以直线走，等距点连成一个圆。
+        </p>
+        <h3>线性分类器的三种视角</h3>
+        <p>
+            32×32 的图，每个位置有红绿蓝三个值，展平成 3072 个数，乘以 10 行的权重矩阵 $W$，得到 10 个类别分数，通常再加一个 10 维的偏置。三种看法做的是同一件事：
+        </p>
+        <ul>
+            <li>代数视角：每一行独立代表一个类，和输入向量做点积再加偏置得到这一类的分数；</li>
+            <li>视觉视角：把每一行重新排回图像形状，画出来就是这一类的模板；</li>
+            <li>几何视角：每一行对应输入空间里的一条线，即令 $w^\top x + b = 0$ 得到的决策边界，线的一侧分数为正，另一侧为负。</li>
+        </ul>
+        <p>
+            几何视角的好处是，把数据画出来就能直观看出线性模型能做到什么。比如蓝点和红点没法用一条线完全分开，一眼就能看出来。
+        </p>
+        <p>
+            有学生问视觉视角里的模板和 K 近邻是不是数学上等价，模板是不是某个邻居。Durante 说不是，模板来自那条分界线，不对应某个具体数据点。另一个学生问 3072 怎么来的：$32 \times 32 \times 3 = 3072$。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 损失函数与正则化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=517s" target="_blank">0:08:37</a>–0:15:22 · Loss functions / Regularization</em></p>
+        <h3>数据损失</h3>
+        <p>
+            回到上一讲的例子：三张图在某个 $W$ 下的分数里，猫那张图分得不好，car 的分数比 cat 高；车那张图分对了；青蛙那张图错得最离谱，frog 的分数在三类里最低。直觉上能看出这组分数不好，损失函数 Loss Function 就是把这种直觉写成数学：它告诉你分类器有多差。
+        </p>
+        $$L = \frac{1}{N}\sum_{i=1}^{N} L_i\big(f(x_i, W),\, y_i\big)$$
+        <p>
+            $x_i$ 是第 $i$ 个训练样本，$y_i$ 是它的标签，把样本送进模型 $f(x_i, W)$ 得到预测，和真实标签比较得到 $L_i$，再对整个数据集取平均。最常用的分类损失是上一讲的 Softmax 损失，也叫交叉熵损失：正确类别的预测概率低时损失很高，概率高时损失很低。这一部分叫数据损失 Data Loss，衡量模型预测和训练数据有多吻合。
+        </p>
+        <h3>正则项：在训练集上差一点</h3>
+        <p>
+            完整的损失还有第二部分，正则项 Regularization：
+        </p>
+        $$L(W) = \underbrace{\frac{1}{N}\sum_{i=1}^{N} L_i\big(f(x_i, W),\, y_i\big)}_{\text{data loss}} + \underbrace{\lambda R(W)}_{\text{regularization}}$$
+        <p>
+            正则项的作用是防止模型在训练数据上表现得太好。Durante 反复强调这一点：它会让模型在训练数据上更差，目的是让模型在测试数据、没见过的数据上更好。
+        </p>
+        <p>
+            有学生问 $L_i$ 的下标 $i$ 是什么意思。他说 $L_i$ 表示第 $i$ 个训练样本的损失，用的是 $x_i$ 和 $y_i$；损失函数的形式对每个 $i$ 都一样，并不是每个样本有不同的损失函数。
+        </p>
+        <h3>玩具例子和奥卡姆剃刀</h3>
+        <p>
+            幻灯片上有一组 $(x, y)$ 数据点和两个模型。$f_1$ 穿过每一个数据点，数据损失几乎为零；$f_2$ 不经过每个点，但走势更简单。直觉上 $f_2$ 在新数据上会更好。拿同一分布下的新数据来测，确实是 $f_2$ 拟合得更好。幻灯片的说法是：正则化抵抗把数据拟合得过好，这样就不会去拟合数据里的噪声。这种在训练集上拟合过头、在新数据上变差的现象叫过拟合 Overfitting。
+        </p>
+        <p>
+            他还提到奥卡姆剃刀 Occam's Razor（William of Ockham，1285–1347）：有多个相互竞争的假设时，先选最简单的那个，确定它错了再试更复杂的。这可以作为正则化有用的一种直觉。
+        </p>
+        <h3>正则化强度 λ</h3>
+        <p>
+            $\lambda$ 是正则化强度 Regularization Strength，也是一个超参数，可以像上一讲那样用训练集和验证集来选。它取 0 到无穷之间的浮点数，0 表示没有正则化，越大正则化越强。他把它叫作一个可调的旋钮，用来决定你多大程度上要阻止模型拟合训练数据。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. L1 与 L2 正则化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=922s" target="_blank">0:15:22</a>–0:24:23 · L1 and L2 regularization / Regularization recap</em></p>
+        <h3>几种简单的正则项</h3>
+        $$\text{L2: } R(W) = \sum_k \sum_l W_{k,l}^2 \qquad \text{L1: } R(W) = \sum_k \sum_l |W_{k,l}| \qquad \text{Elastic net: } R(W) = \sum_k \sum_l \left(\beta W_{k,l}^2 + |W_{k,l}|\right)$$
+        <p>
+            L2 正则化把权重矩阵每个元素平方后求和，乘以 $\lambda$ 加到总损失里。L1 正则化把平方换成绝对值。弹性网络 Elastic Net 是两者的组合，幻灯片列了，课上没展开。幻灯片还列了更复杂的正则化方法：Dropout、批归一化 Batch Normalization、随机深度 Stochastic Depth、分数池化 Fractional Pooling 等，后面的课会讲到一部分。Durante 说怎样正则化模型是一个仍在活跃研究的方向，每年都有新论文，有些方法甚至会改动模型的层，课上只覆盖一小部分。
+        </p>
+        <h3>稀疏和分散</h3>
+        <p>
+            两者在实践中表现不同。L2 要平方，一个很小的值比如 0.001 平方后变得更小，所以 L2 对接近 0 的小值惩罚很轻，它允许大量很小但不为零的权重，权重分布比较分散。L1 不平方，小值的惩罚就是它本身，所以 L1 会让很多权重变成 0 或极接近 0，得到稀疏 Sparse 的权重。
+        </p>
+        <p>
+            有学生问为什么 L1 偏好稀疏。Durante 的解释是：如果某个权重变成 0 而模型表现差不多，优化就会把它推向 0；L2 下因为平方，这个值只会变得很小但不为零。又有学生问"推向 0"是什么意思。他说我们要最小化的是数据损失和正则项的和，这是一个权衡：如果某一项正则损失可以降下来，而数据损失几乎不变，那么整体损失更低，优化过程就会偏向这个方向。
+        </p>
+        <h3>为什么要正则化</h3>
+        <p>
+            幻灯片总结了三条：
+        </p>
+        <ul>
+            <li>表达对权重的偏好。如果你认为问题的解应该是分散的，或者应该有很多零，就选 L2 或 L1。</li>
+            <li>让模型更简单，在测试数据上效果更好。比如在前面的多项式例子里，重罚高次项，模型就会更简单。</li>
+            <li>通过增加曲率改善优化。$y=x^2$ 是抛物线，是凸 Convex 函数，有唯一的全局最小值，L2 正则项带来这类好的优化性质。他说这超出本课范围，但要知道在某些优化场景下，正则化也能让训练更快。</li>
+        </ul>
+        <h3>课堂投票</h3>
+        <p>
+            输入 $x = [1, 1, 1, 1]$，两组权重 $w_1 = [1, 0, 0, 0]$，$w_2 = [0.25, 0.25, 0.25, 0.25]$。两者和 $x$ 的点积都是 1，数据损失相同。
+        </p>
+        <p>
+            L2 正则化偏好哪个？大部分学生举了 2。$w_2$ 每项平方是 $1/16$，四项加起来 $1/4$；$w_1$ 是 $1$。$w_2$ 的正则损失低四倍，所以 L2 偏好分散开的权重。
+        </p>
+        <p>
+            L1 呢？大部分学生选了 $w_1$。Durante 说这是个陷阱题：L1 对两者都是把绝对值加起来，都等于 1，从损失的角度两者完全等价。实践中你可能更常看到 $w_1$ 这种解，因为 L1 倾向稀疏，但正则项本身的数值是一样的。
+        </p>
+        <h3>小结和问答</h3>
+        <p>
+            把整套东西串起来：有一个 $(x, y)$ 数据集；有一个打分函数，这里是线性模型 $s = f(x; W) = Wx$；有 Softmax 损失 $L_i = -\log\left(\frac{e^{s_{y_i}}}{\sum_j e^{s_j}}\right)$；完整损失是
+        </p>
+        $$L = \frac{1}{N}\sum_{i=1}^{N} L_i + R(W)$$
+        <p>
+            有学生问为什么一般用 Softmax。他说 Softmax 能把任意一组浮点数变成一个加起来为 1 的概率分布，相对大小保留：如果一个数很大而其他数都是很负的值，Softmax 后它接近 1，其余接近 0。
+        </p>
+        <p>
+            另一个学生说，L1、L2 是按权重大小来正则化的，这怎么就让模型更简单了？Durante 说 L1 的解释比较直接，零多了，就相当于系数更少的线性模型。但一般来说，正则化不一定给你更简单的模型，要看怎么用。在多项式例子里，你可以专门设计正则项去重罚高次项，那就明显偏向简单模型。正则化的核心是在训练数据上差一点、在测试数据上好一点；有很多正则化方法，比如 Dropout，反而让模型更复杂，但测试表现更好。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 优化：损失地形与随机搜索</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=1463s" target="_blank">0:24:23</a>–0:27:37 · Optimization basics</em></p>
+        <h3>蒙着眼睛走在损失地形上</h3>
+        <p>
+            现在能算出一个 $W$ 有多好了，下一个问题是怎样找到最好的 $W$，这就是优化 Optimization，这一讲的后半部分。
+        </p>
+        <p>
+            讲优化的人常用损失地形 Loss Landscape 的说法：把它想成地球上的地形，竖直方向是损失值，也就是要最小化的量；假设模型只有两个参数，它们就是你在地形上的横纵坐标。你是一个在地形上走来走去的人，想找到最低点。
+        </p>
+        <p>
+            Durante 说这个比喻有一点不准：人能看到远处，一眼就知道山谷最低处在哪。但如果把这个人想成蒙着眼睛，看不到任何东西，只能用脚感觉自己脚下地面的坡度，这个比喻就很贴切了。
+        </p>
+        <h3>策略一：随机搜索</h3>
+        <p>
+            一个很糟的想法：写一个循环，随机试 1000 个 $W$，选损失最低的那个。
+        </p>
+        <pre><code># assume X_train is the data where each column is an example (e.g. 3073 x 50,000)
+# assume Y_train are the labels (e.g. 1D array of 50,000)
+# assume the function L evaluates the loss function
+
+bestloss = float("inf")  # Python assigns the highest possible float value
+for num in range(1000):
+    W = np.random.randn(10, 3073) * 0.0001  # generate random parameters
+    loss = L(X_train, Y_train, W)  # get the loss over the entire training set
+    if loss &lt; bestloss:  # keep track of the best solution
+        bestloss = loss
+        bestW = W
+    print('in attempt %d the loss was %f, best %f' % (num, loss, bestloss))</code></pre>
+        <p>
+            数学上毫无章法，但比随机基线好。在 CIFAR-10 上能得到 15.5% 的准确率。作为对比，这个数据集基本已经被现代深度学习解决了，最好的结果约 99.7%。所以这不算糟，但也说不上好。
+        </p>
+        <h3>策略二：沿着坡往下走</h3>
+        <p>
+            蒙着眼睛，感受脚下的地面往哪边倾斜，一直朝下坡方向走。Durante 说这门课里所有模型、基本上所有深度学习模型，都是用这个思路训练的。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 计算梯度：数值梯度与解析梯度</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=1657s" target="_blank">0:27:37</a>–0:33:43 · Gradient computation</em></p>
+        <h3>导数和梯度</h3>
+        <p>
+            一维时，坡度就是导数 Derivative，用极限定义：
+        </p>
+        $$\frac{df(x)}{dx} = \lim_{h \to 0} \frac{f(x+h) - f(x)}{h}$$
+        <p>
+            多维时用梯度 Gradient：对每个维度分别求偏导数，得到一个向量，告诉你沿每个维度的变化方向。任意方向上的坡度等于这个方向和梯度的点积。梯度指向上坡最陡的方向，负梯度指向下坡最陡的方向，也就是我们要走的方向。
+        </p>
+        <h3>数值梯度</h3>
+        <p>
+            最简单的算法是直接用极限定义，取一个很小的 $h$。幻灯片的例子：当前 $W = [0.34, -1.11, 0.78, 0.12, 0.55, 2.81, -3.1, -1.5, 0.33, \ldots]$，损失 1.25347。
+        </p>
+        <ul>
+            <li>第一维加 0.0001，损失变成 1.25322，$(1.25322 - 1.25347)/0.0001 = -2.5$；</li>
+            <li>第二维加 0.0001，损失变成 1.25353，$(1.25353 - 1.25347)/0.0001 = 0.6$；</li>
+            <li>第三维加 0.0001，损失不变，梯度为 0。</li>
+        </ul>
+        <p>
+            对 $W$ 的每个元素重复这个过程，就得到数值梯度 Numerical Gradient。问题有三个：很慢，要遍历所有维度；只是近似值，算的并不是真正的导数；浮点运算还会带来不小的误差。
+        </p>
+        <h3>解析梯度</h3>
+        <p>
+            幻灯片上写着"This is silly"。损失只是 $W$ 的函数：把 $x_i$ 和 $y_i$ 看作常数，损失由打分函数、Softmax 里的指数和对数、正则项组成，说到底是 $W$、$x$、$y$ 的一个公式。我们要的是 $\nabla_W L$，即损失对权重的梯度（$\nabla$ 读作 nabla）。用微积分和链式法则 Chain Rule 直接求出它就行，这叫解析梯度 Analytic Gradient。具体推导是作业里的练习，课上不逐步演示。这样就能写出一个函数，输入数据和当前 $W$，返回 $dW$。
+        </p>
+        <h3>梯度检查</h3>
+        <p>
+            幻灯片的总结：数值梯度近似、慢、容易写；解析梯度精确、快、容易写错。实践中总是用解析梯度，再用数值梯度检查实现对不对，这叫梯度检查 Gradient Check：用很小的 $h$ 算一遍数值梯度，确认两者大致吻合。作业里也有梯度检查，用来确认你的实现正确。
+        </p>
+        <h3>学生问：不可微的损失能不能用数值梯度？</h3>
+        <p>
+            有学生问：我们总说要可微的损失函数才能算梯度，如果有一个更好但不可微的损失，能不能用数值方法算梯度？Durante 说一般很难构造出一个更好却不可微的损失，但也有可能。如果损失只是少数地方不可微，这种方法也许能用；如果损失处处不可微，像一堆互不相连的点，那么沿最陡下降方向走未必能找到最好的解。简单说，函数是凸的时候梯度下降这类方法很好用；不可微、非凸的函数就不太行，因为你未必在往正确的方向走。
+        </p>
+        <p>
+            另一个学生追问为什么解析梯度"容易出错"。他澄清说，代码写对了它不会出错，只是代码里有错误时不容易马上发现；而数值方法只要把 $h$ 设得很小、多算一次函数，实现起来不容易写错。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 梯度下降</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=2023s" target="_blank">0:33:43</a>–0:36:05 · Gradient descent</em></p>
+        <p>
+            梯度下降 Gradient Descent 是优化的基础算法：在损失地形上每一点算坡度，然后朝下坡方向走一步。
+        </p>
+        <pre><code># Vanilla Gradient Descent
+
+while True:
+    weights_grad = evaluate_gradient(loss_fun, data, weights)
+    weights += - step_size * weights_grad  # perform parameter update</code></pre>
+        <p>
+            先根据损失函数、数据和当前权重算出梯度，它告诉我们每个权重该怎样变才能往下走；再乘以一个步长 Step Size，也叫学习率 Learning Rate，决定往下坡方向走多远。负号表示往下走。
+        </p>
+        $$W \leftarrow W - \alpha \nabla_W L(W)$$
+        <p>
+            幻灯片上是俯视损失地形的等高图，紫色代表高处，红色代表谷底。从初始 $W$ 出发，算出负梯度方向，箭头表示固定的步长。步长是固定的，但梯度在接近谷底、地势变平的地方会变小，两者相乘，所以实际走的步子会越来越小。
+        </p>
+        <p>
+            有学生问什么时候停。按这段代码是永远不停的。实践中通常预先定好迭代次数；或者设一个容差，比如损失每步只下降 1e-5 或 1e-9 时，就认为够好了，停下来。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 随机梯度下降和它的三个问题</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=2165s" target="_blank">0:36:05</a>–0:43:07 · Stochastic gradient descent</em></p>
+        <h3>小批量</h3>
+        <p>
+            前面的梯度下降要对整个训练集的 $N$ 个样本求和，数据集很大时计算量太大：
+        </p>
+        $$L(W) = \frac{1}{N}\sum_{i=1}^{N} L_i(x_i, y_i, W) + \lambda R(W), \qquad \nabla_W L(W) = \frac{1}{N}\sum_{i=1}^{N} \nabla_W L_i(x_i, y_i, W) + \lambda \nabla_W R(W)$$
+        <p>
+            随机梯度下降 Stochastic Gradient Descent（SGD）每次只看数据的一个子集，叫小批量 Minibatch，用它的梯度近似整个数据集的梯度。幻灯片上的代码每次采 256 个样本，批大小 Batch Size 就是 256；幻灯片说 32、64、128 也常用。
+        </p>
+        <pre><code># Vanilla Minibatch Gradient Descent
+
+while True:
+    data_batch = sample_training_data(data, 256)  # sample 256 examples
+    weights_grad = evaluate_gradient(loss_fun, data_batch, weights)
+    weights += - step_size * weights_grad  # perform parameter update</code></pre>
+        <p>
+            叫"随机"是因为每一步都随机采一个子集。实践中一般会打乱顺序后把所有样本过一遍，然后再从头来。把全部样本按随机顺序过一遍叫一个 epoch。
+        </p>
+        <h3>问题一：病态条件</h3>
+        <p>
+            幻灯片上的等高线图里，每条曲线叫水平集 Level Set，线上各点损失相同。假设地形是一个很窄的山谷，两侧很陡，沿山谷中线方向却很平。Durante 问会出什么问题，学生答：会冲过头。如果两侧够陡、步长够大，每一步都在两侧之间来回跳，还越跳越高，直到跳出山谷。学习率太大时这真的会发生。
+        </p>
+        <p>
+            即使学习率不算太大，也会出现抖动：陡的方向上梯度大得多，于是一直在两侧来回晃，沿平坦方向朝谷底的进展却很慢。数学上说，这种损失函数的条件数 Condition Number 很高，条件数是海森矩阵 Hessian Matrix（二阶导数组成的矩阵）最大奇异值和最小奇异值之比。上下方向的二阶导数很大，左右方向很小，就造成了这种现象。
+        </p>
+        <h3>问题二：局部最小值和鞍点</h3>
+        <p>
+            如果损失函数有局部最小值 Local Minimum 或鞍点 Saddle Point，梯度为零，梯度下降就会卡住。幻灯片上一条曲线末端完全平坦，走到那里梯度为 0，走不动了；另一条曲线中间有一个平台，梯度为 0，其实再往前走一点损失还能大幅下降。
+        </p>
+        <p>
+            有学生问能不能改变迈步的方式，比如用海森矩阵来决定方向。Durante 说可以，最后有一页讲海森矩阵的方法，不过它在深度学习里不常用；另外五分钟后就会讲好几种应对办法。
+        </p>
+        <p>
+            他补充说，经验上，模型维度越高，鞍点越常见。幻灯片引的是 Dauphin et al., "Identifying and attacking the saddle point problem in high-dimensional non-convex optimization"（NIPS 2014）。鞍点得名于马鞍的形状，在中心点上各个方向的梯度都是 0，它在一个方向上是谷底，在另一个方向上是顶点。你可能卡在这里，尽管两侧不远处损失就能大幅下降。参数越多，这个问题越常见。
+        </p>
+        <h3>问题三：梯度噪声</h3>
+        <p>
+            每次只用一个小批量算梯度，看不到全部数据，所以梯度是有噪声的。每一步大致朝最小值走，但不是笔直地走过去，路线会歪歪扭扭。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. SGD + 动量</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=2587s" target="_blank">0:43:07</a>–0:49:24 · Momentum</em></p>
+        <h3>直觉</h3>
+        <p>
+            一个简单的技巧是加动量 Momentum。Durante 说可以把它想成一个滚下山的球，速度会越积越大，数学形式和物理模型也很像，至少是建立直觉的好办法。它对上面几个问题都有帮助：
+        </p>
+        <ul>
+            <li>局部最小值：球滚下来时速度够大，就能冲出小坑；</li>
+            <li>鞍点和平坦处：球一路滚下来带着速度，不会停在平地上；</li>
+            <li>病态条件：可能还会有些震荡，但在一致的方向上速度会一步步累积，更快到达中心；</li>
+            <li>梯度噪声：各个小批量梯度有一个共同方向，也就是指向最小值的方向，动量把它们平均起来，噪声相互抵消，收敛更快。</li>
+        </ul>
+        <h3>公式</h3>
+        <p>
+            普通 SGD 是 $x_{t+1} = x_t - \alpha \nabla f(x_t)$。加动量后，用速度 Velocity $v$ 而不是当前梯度来更新：
+        </p>
+        $$v_{t+1} = \rho v_t + \nabla f(x_t), \qquad x_{t+1} = x_t - \alpha v_{t+1}$$
+        <pre><code># SGD
+while True:
+    dx = compute_gradient(x)
+    x -= learning_rate * dx
+
+# SGD+Momentum
+vx = 0
+while True:
+    dx = compute_gradient(x)
+    vx = rho * vx + dx
+    x -= learning_rate * vx</code></pre>
+        <p>
+            速度是梯度的滑动平均。$\rho$ 是动量系数，决定过去和现在的权重：$\rho$ 越大，新速度越依赖上一步的速度。幻灯片说通常取 0.9 或 0.99（出自 Sutskever et al., "On the importance of initialization and momentum in deep learning", ICML 2013）。$\alpha$ 仍然是步长。改动很小，只是多算一个速度。
+        </p>
+        <p>
+            Durante 再把四个问题过了一遍：动量够大时能翻过局部最小值前的小坡；在鞍点会沿之前的方向继续走一段；在窄谷里，向右的分量每一步都一致，会累积起来，而上下来回的分量方向相反，会相互抵消。
+        </p>
+        <h3>问答</h3>
+        <ul>
+            <li>如果正好沿着鞍点的脊线滚过去呢？他说那样确实会卡在鞍点上，但实践中极不可能，除非初始位置特别不巧。这也是为什么人们训练时常用不同随机种子跑好几次。另外 SGD 本身的噪声也会把你推离那条线，所以他认为基本不会发生，只是理论上可能。</li>
+            <li>为什么鞍点只是 SGD 的问题？他说用全部数据做梯度下降也会遇到，甚至更常见。只要是不加任何改进、只靠梯度下降的方法，都会面对这个问题。</li>
+            <li>动量会不会因为冲过头再折回来，让收敛更难？他说是的，可能收敛得更慢，但平均来说能帮你找到更好的最小值，不会停在局部最小值里。他说这很多是经验结论，在这一类神经网络上动量确实有帮助；也有人发现在某些模型上不加动量的 SGD 效果更好。实践中大家会试几种，看哪个最好。</li>
+        </ul>
+        <p>
+            幻灯片还给了另一种等价写法 $v_{t+1} = \rho v_t - \alpha \nabla f(x_t)$，$x_{t+1} = x_t + v_{t+1}$，两种写法产生相同的 $x$ 序列，不同实现里会看到不同写法。为了节省时间他没讲为什么等价。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. RMSProp、Adam 与 AdamW</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=2964s" target="_blank">0:49:24</a>–0:59:17 · RMSProp optimizer / Adam optimizer / Weight decay</em></p>
+        <h3>RMSProp：逐元素缩放</h3>
+        <p>
+            RMSProp 是 2012 年 Geoffrey Hinton 组提出的（Tieleman and Hinton, 2012），Durante 说现在算比较老的方法了。思路是在动量那种滑动速度之外，对梯度做逐元素的缩放：
+        </p>
+        <pre><code>grad_squared = 0
+while True:
+    dx = compute_gradient(x)
+    grad_squared = decay_rate * grad_squared + (1 - decay_rate) * dx * dx
+    x -= learning_rate * dx / (np.sqrt(grad_squared) + 1e-7)</code></pre>
+        <p>
+            <code>decay_rate</code> 的作用和动量系数类似，只是现在作用在梯度的平方上，得到梯度平方的滑动平均。更新时除以它的平方根。效果是：某个权重的导数一直很大，分母就大，这个方向上走得少；导数小的方向分母小，走得多。所以在陡的方向上步子变小，在平的方向上步子变大。幻灯片把这叫作逐参数学习率 Per-parameter Learning Rates 或自适应学习率 Adaptive Learning Rates。
+        </p>
+        <p>
+            Durante 说这回答了前面那个"能不能改变迈步方向"的问题：除以梯度平方项，改变的就是前进的方向。他问学生那一行代码做了什么，然后自己解释：这些都是向量运算，一组导数逐元素地除以另一组梯度平方值，分母大则那个方向的有效步长变小，分母小则有效步长变大。这对窄谷特别有用，你想在平的方向上多走。
+        </p>
+        <p>
+            幻灯片上把 SGD、SGD+Momentum、RMSProp 的路径画在一起：动量会冲过头再折回来；SGD 更慢，因为它一直按固定方式走；RMSProp 因为在陡的方向上梯度平方大、走得少，很快就转向更平的中线方向。
+        </p>
+        <h3>Adam</h3>
+        <p>
+            Adam（Kingma and Ba, "Adam: A method for stochastic optimization", ICLR 2015）是现代深度学习里最流行的优化器，就是 SGD 动量和 RMSProp 的组合。先看"差不多是 Adam"的版本：
+        </p>
+        <pre><code>first_moment = 0
+second_moment = 0
+while True:
+    dx = compute_gradient(x)
+    first_moment = beta1 * first_moment + (1 - beta1) * dx  # Momentum
+    second_moment = beta2 * second_moment + (1 - beta2) * dx * dx  # RMSProp
+    x -= learning_rate * first_moment / (np.sqrt(second_moment) + 1e-7)</code></pre>
+        <p>
+            一阶矩 First Moment 就是动量，$\beta_1$ 是动量系数；二阶矩 Second Moment 是 RMSProp 里的梯度平方项。更新时用一阶矩代替梯度乘学习率，再除以二阶矩的平方根。他说"矩"这个叫法和物理、力学有关，但其实就是前面两件事的组合：在平的方向加速、在陡的方向减速，同时带上动量，持续朝同一方向走就会越来越快。
+        </p>
+        <h3>第一步的问题和偏差校正</h3>
+        <p>
+            Durante 问：这样写在第一步会出什么问题？提示是 $\beta_1$、$\beta_2$ 通常取很接近 1 的值（0.9、0.999），两个矩都初始化为 0。学生答出来了：分母几乎是 0。第一步时二阶矩 = $0.999 \times 0 + 0.001 \times dx^2$，很小，梯度不大的话这一项接近 0。除以一个接近 0 的数，会得到一个很大的初始步子，尽管梯度本身很小。这显然不是我们想要的。
+        </p>
+        <p>
+            完整的 Adam 加了偏差校正 Bias Correction，它依赖训练的时间步 $t$：
+        </p>
+        <pre><code>first_moment = 0
+second_moment = 0
+for t in range(1, num_iterations):
+    dx = compute_gradient(x)
+    first_moment = beta1 * first_moment + (1 - beta1) * dx  # Momentum
+    second_moment = beta2 * second_moment + (1 - beta2) * dx * dx
+    first_unbias = first_moment / (1 - beta1 ** t)  # Bias correction
+    second_unbias = second_moment / (1 - beta2 ** t)
+    x -= learning_rate * first_unbias / (np.sqrt(second_unbias) + 1e-7)  # AdaGrad / RMSProp</code></pre>
+        <p>
+            写成公式：
+        </p>
+        $$m_t = \beta_1 m_{t-1} + (1-\beta_1) g_t, \quad v_t = \beta_2 v_{t-1} + (1-\beta_2) g_t^2, \quad \hat m_t = \frac{m_t}{1-\beta_1^t}, \quad \hat v_t = \frac{v_t}{1-\beta_2^t}, \quad x_{t+1} = x_t - \alpha \frac{\hat m_t}{\sqrt{\hat v_t} + \epsilon}$$
+        <p>
+            偏差校正针对的是两个矩估计从 0 开始这件事。随着 $t$ 增大，$\beta^t$ 趋于 0，校正项就不太起作用了。作业里会实现它。幻灯片给的默认值：$\beta_1 = 0.9$，$\beta_2 = 0.999$，学习率 1e-3 或 5e-4，对很多模型都是很好的起点。Durante 说用这组值训练，可能行也可能不行，但是个好的开始，后面会讲怎么判断学习率等设置对不对。
+        </p>
+        <p>
+            把 SGD、SGD+Momentum、RMSProp、Adam 的路径画在一起，能看到 Adam 同时带有动量和 RMSProp 的特点，和直觉一致。
+        </p>
+        <h3>AdamW：正则化放在哪里</h3>
+        <p>
+            最后一个和 Adam 有关的话题是正则化怎样和优化器相互作用，比如 L2。Durante 说答案并不显然，有不同的做法。默认的 Adam 在算梯度时就把 L2 项算进去了，梯度里既有数据损失的部分也有正则损失的部分，二者都参与动量和二阶矩的计算。AdamW 只用数据损失的梯度去算这些矩和步子，在最后更新时单独加上正则项。
+        </p>
+        <p>
+            这种在最后单独加 L2 项、不让它进入速度和动量计算的做法，通常叫权重衰减 Weight Decay。在很多设置下 AdamW 效果稍好一些。他提到 Meta 的 Llama 系列都用 AdamW，他猜是因为对他们来说效果稍好。幻灯片引了 fast.ai 2018 年的一篇文章，图上是 ImageNet 准确率随训练 epoch 的对比。
+        </p>
+        <p>
+            有学生问：本来是一个优化函数，为什么要拆成两部分？他说合在一起就是 Adam 的做法，AdamW 专门把它拆开。拆开的原因是，你希望速度和动量只取决于损失，而不取决于权重本身的大小，也就是让在损失地形上的行进更独立于权重的值；但你仍然想要一个正则项，只是不想让它干扰矩的计算。最终还是经验问题，两种都试，看哪个好。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 学习率与学习率调度</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=3557s" target="_blank">0:59:17</a>–1:03:31 · Learning rates</em></p>
+        <h3>哪个学习率好</h3>
+        <p>
+            SGD、SGD+Momentum、RMSProp、Adam、AdamW 都有学习率这个超参数。幻灯片上画了几条损失随 epoch 变化的曲线：
+        </p>
+        <ul>
+            <li>学习率很高：损失变得很大，就是前面说的震荡出了山谷；</li>
+            <li>学习率很低：收敛很慢；</li>
+            <li>学习率偏高但没有发散：会在局部最小值附近来回撞，降不下去；</li>
+            <li>好的学习率：损失很快下降，继续训练还能持续改善。</li>
+        </ul>
+        <p>
+            但幻灯片的答案是：现实中，这些都可能是好的学习率，取决于具体情况，也取决于训练进行到哪一步。所以可以在训练过程中改变学习率，不必一直用固定步长。Durante 说几乎所有现代深度学习、所有最好的模型，在训练中都会用某种方式调整学习率。
+        </p>
+        <h3>几种衰减方式</h3>
+        <p>
+            记 $\alpha_0$ 为初始学习率，$\alpha_t$ 为第 $t$ 个 epoch 的学习率，$T$ 为总 epoch 数。
+        </p>
+        <ul>
+            <li>阶梯式 Step：在几个固定的点把学习率降下来。比如训练 ResNet 时在第 30、60、90 个 epoch 把学习率乘以 0.1。学习率太高、降不下去时，调低就能进到损失地形更低的地方。ResNet 是一种很流行的卷积神经网络，后面会讲。这种调度下能在损失曲线上直接看到每次降学习率的位置。</li>
+            <li>余弦 Cosine：从最大学习率开始，沿半个余弦波降到 0。也很流行。用余弦调度时，损失曲线在训练中段常有不错的持续下降。
+                $$\alpha_t = \frac{1}{2}\alpha_0\left(1 + \cos\frac{t\pi}{T}\right)$$
+            </li>
+            <li>线性 Linear：沿直线降。$\alpha_t = \alpha_0\left(1 - \frac{t}{T}\right)$</li>
+            <li>平方根倒数 Inverse Sqrt：$\alpha_t = \alpha_0 / \sqrt{t}$</li>
+        </ul>
+        <p>
+            幻灯片在各种调度旁引了用它们的论文：余弦引了 SGDR（Loshchilov and Hutter, ICLR 2017）、GPT 第一篇（Radford et al., 2018）、SlowFast（Feichtenhofer et al., 2018）、Sparse Transformers（Child et al., 2019）；线性引了 BERT（Devlin et al., 2018）；平方根倒数引了 "Attention is all you need"（Vaswani et al., NIPS 2017）。Durante 的说法是，调学习率的方式几乎无穷无尽，训练出来的损失曲线形状很大程度上取决于你用的调度器；按模型类型选效果好的那个。
+        </p>
+        <h3>线性预热</h3>
+        <p>
+            另一个很流行的做法是线性预热 Linear Warmup：先用固定的若干次迭代把学习率从 0 线性升到最大值，之后再接你选的调度，比如线性预热加平方根倒数，或者线性预热加余弦，后者是训练模型时很流行的组合。幻灯片的说法是，初始学习率太高会让损失爆炸，在前约 5000 次迭代里从 0 线性增加学习率可以防止这一点。
+        </p>
+        <h3>线性缩放规则</h3>
+        <p>
+            还有一条经验规则（Goyal et al., "Accurate, Large Minibatch SGD: Training ImageNet in 1 Hour", 2017）：批大小增大 $N$ 倍，初始学习率也增大 $N$ 倍。Durante 记不清它的正式名字，说大概叫线性缩放规律。他说背后的数学有点复杂，有人试图从批内梯度的方差等角度证明它，但它主要是经验结论，在大量问题上被证明有效。如果你有一套好用的配方，想加大批大小，就把学习率按同样倍数加大。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 二阶优化、实践建议和下一讲预告</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=3811s" target="_blank">1:03:31</a>–1:08:39</em></p>
+        <h3>一阶与二阶</h3>
+        <p>
+            前面所有方法都是一阶优化 First-Order Optimization：用梯度在当前点做一个线性近似，然后朝让近似值变小的方向走一步。动量、RMSProp 这些是在这个基础上加的改进。
+        </p>
+        <p>
+            二阶优化 Second-Order Optimization 用梯度和海森矩阵在当前点拟合一个二次函数，然后直接跳到这个二次近似的最小值。二阶泰勒展开 Taylor Expansion 是
+        </p>
+        $$J(\theta) \approx J(\theta_0) + (\theta - \theta_0)^\top \nabla_\theta J(\theta_0) + \frac{1}{2}(\theta - \theta_0)^\top H (\theta - \theta_0)$$
+        <p>
+            令导数为零，解出牛顿法 Newton's Method 的参数更新：
+        </p>
+        $$\theta^* = \theta_0 - H^{-1} \nabla_\theta J(\theta_0)$$
+        <h3>为什么深度学习不用</h3>
+        <p>
+            在某些优化问题上这很好用。但 Durante 说深度学习一般不用，有两个原因。一是要算二阶混合偏导，这本身就难。二是所有参数两两之间的混合偏导组成的矩阵，在几百万、几十亿参数的网络里大得不可能存下：幻灯片写的是海森矩阵有 $O(N^2)$ 个元素，求逆要 $O(N^3)$，而 $N$ 是几千万甚至上亿。你会把 GPU 显存用光。如果模型比较小，或者你愿意花更多时间换更好的每一步，可以考虑，小模型上它效果不错。对我们训练的大网络，基本从来不用，算海森矩阵的时间不如拿去多看一些数据。
+        </p>
+        <h3>实践建议</h3>
+        <ul>
+            <li>Adam 或 AdamW 是新问题上训练第一个模型的好默认选择，即使用固定学习率往往也能工作。常见做法是 Adam/AdamW 配固定学习率，或者线性预热加余弦衰减，后者很流行。</li>
+            <li>SGD + 动量有时能胜过 Adam，但通常要调更多：要试更多学习率，因为没有 RMSProp 那一项替你处理陡的方向，调度也要多试。Durante 的原话是 Adam 久经考验，大家在很多领域试过，它很能适应各种损失地形。</li>
+            <li>如果每一步都能把整个训练集放进一个批里做全批量更新，说明数据集或模型不大，可以考虑一阶以外的二阶方法。</li>
+        </ul>
+        <p>
+            幻灯片附录里还有往年的内容：Nesterov 动量、AdaGrad（RMSProp 就是"会泄漏的 AdaGrad"，AdaGrad 的步长长期会衰减到 0）、拟牛顿法 BFGS 和 L-BFGS。课上没讲。
+        </p>
+        <h3>下一讲：神经网络</h3>
+        <p>
+            这一讲优化的是线性模型 $f = Wx$。下一讲讲神经网络，比如两层神经网络
+        </p>
+        $$f = W_2 \max(0, W_1 x)$$
+        <p>
+            有两个权重矩阵，每层一个，中间夹一个非线性函数 Nonlinearity。这里用的是最简单的一种 ReLU，$\max(0, \cdot)$，即把负数变成 0。幻灯片注明实践中每层通常还会加一个可学习的偏置。
+        </p>
+        <p>
+            为什么需要非线性？幻灯片上红点和蓝点分布在两个同心圈上，线性分类器分不开。如果做一个特征变换，把 $(x, y)$ 换成极坐标 $f(x, y) = (r(x, y), \theta(x, y))$，这些点就能用一条线分开。Durante 说，通过模型的多层变换，可以逐步把数据变成能被一条线分开的样子，那条线就是模型的最后一层。"神经网络"是个很宽泛的词，这类网络更准确的叫法是全连接网络 Fully-Connected Network，有时也叫多层感知机 Multi-Layer Perceptron（MLP）。下一讲还会讲反向传播 Backpropagation，也就是怎样给神经网络算梯度。
+        </p>
+        <p>
+            CS229 笔记里梯度下降的推导在这里可以对照：CS229 第 2 讲。
+        </p>
+    </section>
+
+    <section>
+        <h2>课上的原话</h2>
+        <ul>
+            <li>"So worse on training but better on the test set. That's the point of regularization."<br>在训练集上更差，但在测试集上更好，这就是正则化的意义。（Zane Durante，<a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=705s" target="_blank">0:11:45</a>）</li>
+            <li>"But I think this analogy is actually pretty accurate if you think of the person as being blindfolded."<br>但如果你把这个人想成蒙着眼睛，我觉得这个比喻其实相当准确。（Zane Durante，<a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=1509s" target="_blank">0:25:09</a>）</li>
+            <li>"empirically, saddle points are actually much more common as you move to higher dimensional models"<br>经验上，模型维度越高，鞍点其实越常见。（Zane Durante，<a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=2448s" target="_blank">0:40:48</a>）</li>
+            <li>"So it's just a combination of the SGD momentum and RMSProp."<br>它就是 SGD 动量和 RMSProp 的组合。（Zane Durante，<a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=3204s" target="_blank">0:53:24</a>）</li>
+            <li>"In reality, actually, depending on the situation, a lot of these could be good learning rates"<br>现实中，看具体情况，这些里很多都可能是好的学习率。（Zane Durante，<a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=3579s" target="_blank">0:59:39</a>）</li>
+            <li>"you would rather just see more data during training."<br>（与其花时间算海森矩阵，）你宁可在训练中多看些数据。（Zane Durante，<a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=3950s" target="_blank">1:05:50</a>）</li>
+            <li>"Adam's best by test."<br>Adam 是久经考验的。（Zane Durante，<a href="https://www.youtube.com/watch?v=dyNGd06MWn4&t=3996s" target="_blank">1:06:36</a>）</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS231N · Lecture 3: Regularization and Optimization · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

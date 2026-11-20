@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 16 讲：视觉与语言 | Stanford CS231N 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="15_三维视觉.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS231N 目录</a> · 16</span>
+    <span><a href="17_机器人学习.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 16 讲：视觉与语言</h1>
+        <p class="subtitle">多模态基础模型：CLIP 的对比训练和零样本分类、CoCa 的描述损失、CLIP 的组合性缺陷，LLaVA 和 Flamingo 怎样把图像接进语言模型，开源的 Molmo 与 PixMo 数据，Segment Anything，以及 CuPL、VisProg 这类把多个模型串起来的做法</p>
+        <div class="author-meta">
+            主讲：Ranjay Krishna（客座讲者，华盛顿大学计算机科学与工程学院助理教授，RAIVN 实验室联合负责人，2020、2021 年讲过 CS231N）· 2025 年 5 月 27 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs231n.stanford.edu/slides/2025/lecture_16.pdf" target="_blank">课程幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            前面的课基本是一个任务训一个模型：收集训练集和测试集，训练一个专门的分类或描述模型，在测试集上评估。Ranjay Krishna 这一讲讲的是近几年的转向，先在大规模、多样的数据上预训练一个基础模型 Foundation Model，再用很少的数据（甚至不用数据）把它适配到各种任务上。他只讲视觉相关的多模态基础模型，语言模型（ELMo、BERT、GPT、T5）不在这一讲的范围内。
+        </p>
+        <p>
+            内容按幻灯片上的四类展开：做分类的基础模型（CLIP、CoCa）；视觉加语言模型（LLaVA、Flamingo、GPT-4V、Gemini、Molmo）；输出不止是文字的模型（这一讲讲 Segment Anything）；以及把多个模型串联 Chaining 起来做新事情（CuPL、VisProg）。CLIP 的训练目标直接沿用第 12 讲自监督学习里的 SimCLR。下一讲是机器人学习，Molmo 那一部分已经提前展示了几个机器人例子。
+        </p>
+        <ol>
+            <li><a href="#t01">从专用模型到基础模型</a> · <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">CLIP：把对比学习扩展到图像和文本</a> · <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=258s" target="_blank">0:04:18</a></li>
+            <li><a href="#t03">零样本分类：用文本编码器造一个分类器</a> · <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=636s" target="_blank">0:10:36</a></li>
+            <li><a href="#t04">CLIP 为什么泛化得好，以及 CoCa</a> · <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=876s" target="_blank">0:14:36</a></li>
+            <li><a href="#t05">CLIP 类模型的优点和缺点</a> · <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=1217s" target="_blank">0:20:17</a></li>
+            <li><a href="#t06">多模态语言模型与 LLaVA</a> · <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=1543s" target="_blank">0:25:43</a></li>
+            <li><a href="#t07">Flamingo 的架构：门控交叉注意力</a> · <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=1874s" target="_blank">0:31:14</a></li>
+            <li><a href="#t08">Flamingo 的训练数据和应用</a> · <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=2109s" target="_blank">0:35:09</a></li>
+            <li><a href="#t09">闭源模型与开源模型的差距，Molmo</a> · <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=2478s" target="_blank">0:41:18</a></li>
+            <li><a href="#t10">Molmo 为什么好：PixMo 数据和指向</a> · <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=2850s" target="_blank">0:47:30</a></li>
+            <li><a href="#t11">Segment Anything</a> · <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=3263s" target="_blank">0:54:23</a></li>
+            <li><a href="#t12">串联：CuPL 和 VisProg</a> · <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=3620s" target="_blank">1:00:20</a></li>
+            <li><a href="#t13">总结与问答</a> · <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=4016s" target="_blank">1:06:56</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 从专用模型到基础模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=5s" target="_blank">0:00:05</a>–0:04:18 · Introduction to lecture / Foundation model concepts</em></p>
+        <p>
+            Ranjay 开场说，他第一次在 Stanford 讲这门课是 2020 年，那年有三周要把所有材料搬到线上，之后每年都轻松多了。
+        </p>
+        <h3>两种范式</h3>
+        <p>
+            这门课到目前为止的套路是：对每个任务收集数据集，训练一个专用模型（比如作业里的图像分类模型、图像描述模型），然后在测试集上评估。过去几年的变化是转向基础模型：先在很多种技能、很多种任务上预训练一个模型，再根据需要把它适配到具体任务。幻灯片上的说法是"预训练一个模型，作为许多不同任务的基础"，适配方式有微调 Fine-tuning、零样本 Zero-shot（不给任何例子直接用）和少样本 Few-shot（只给几个例子）。
+        </p>
+        <p>
+            他举的例子是 GPT：在互联网的 Common Crawl 数据上训练，再微调去做数学题、符号推理、常识问答、翻译。基础模型的好处是适配这一步只需要很少的数据，常常一条训练数据都不用收集。
+        </p>
+        <h3>怎样判断一个模型算不算基础模型</h3>
+        <p>
+            他承认这个定义有争议。幻灯片上分了"总是"和"常常"两级：总是能看到的特征是通用、对很多不同任务都稳健，同一个模型可以用在各种场合；常常能看到的特征是参数量大、训练数据多、用自监督的预训练目标。
+        </p>
+        <p>
+            幻灯片上的基础模型分类图：语言类有 ELMo、BERT、GPT、T5；分类类有 CLIP、CoCa；语言模型加视觉有 LLaVA、Flamingo、GPT-4V、Gemini、Molmo；"更多输出"类有 Segment Anything、Whisper、DALL-E、Stable Diffusion、Imagen；串联类有 LM + CLIP、Visual Programming。这一讲覆盖后四类。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. CLIP：把对比学习扩展到图像和文本</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=258s" target="_blank">0:04:18</a>–0:10:36 · Clip and image classification</em></p>
+        <h3>从 SimCLR 讲起</h3>
+        <p>
+            第一个问题是：怎样做一个能解任意数据集图像分类的基础模型？Ranjay 先回顾自监督学习那一讲的 SimCLR。对比学习 Contrastive Learning 的目标是把相似的东西在表示空间里拉近，把不相似的推远：同一只猫的不同数据增强（裁剪、变色等）应该得到相近的表示，狗之类其他类别的表示要推开。希望是这样学到的表示足够通用，遇到没见过的东西，比如猫或狗的素描，也能落在容易分类的位置。
+        </p>
+        <p>
+            多模态的想法是在同一个表示空间里加入文本。如果"a cute fluffy cat"这句话的表示能靠近猫的图像表示，"my favorite dog is a golden retriever"能靠近金毛犬、离别的狗远一些，就可以同时用图像和文字来检索。
+        </p>
+        <h3>CLIP 的结构和目标</h3>
+        <p>
+            SimCLR 两边都是图像编码器，CLIP（Radford et al., "Learning Transferable Visual Models From Natural Language Supervision"，OpenAI，2021）把右边换成文本编码器 Text Encoder，用来编码描述图像的文字。训练时只需要大量图文对 Image-Text Pair：一个小批量 Mini-batch 里放 $N$ 对，用和 SimCLR 一样的对比目标，分子是配对的图文表示的相似度，分母是和其他所有文本的相似度。
+        </p>
+        <p>
+            他强调这个损失是对称的：每张图要离自己的文本最近、离别的文本远；反过来每段文本也要离自己的图最近、离别的图远。CLIP 原论文里这个目标常写成下面的形式（$I_i$、$T_i$ 是第 $i$ 对图像和文本经过编码器、归一化后的向量，$\tau$ 是温度参数）：
+        </p>
+        $$\mathcal{L}_{\text{img}\to\text{txt}} = -\frac{1}{N}\sum_{i=1}^{N}\log\frac{\exp(I_i^\top T_i/\tau)}{\sum_{j=1}^{N}\exp(I_i^\top T_j/\tau)},\qquad \mathcal{L}_{\text{txt}\to\text{img}} = -\frac{1}{N}\sum_{i=1}^{N}\log\frac{\exp(T_i^\top I_i/\tau)}{\sum_{j=1}^{N}\exp(T_i^\top I_j/\tau)}$$
+        $$\mathcal{L}_{\text{CLIP}} = \tfrac{1}{2}\left(\mathcal{L}_{\text{img}\to\text{txt}} + \mathcal{L}_{\text{txt}\to\text{img}}\right)$$
+        <p>
+            每一项都和第 12 讲的 InfoNCE 同形（见 <a href="12_自监督学习.html">第 12 讲：自监督学习</a>）。训练结束后得到的模型可以给任意一张图和任意一段文字打一个相似度分数。
+        </p>
+        <h3>数据从哪来</h3>
+        <p>
+            CLIP 的方便之处是只要图文关联，不要人工标签，而互联网上这种数据极多。幻灯片举了 Wikipedia 上 Mount Rainier 的页面：CLIP 的训练数据是从网上大规模抓取的图片和它们的 alt-text（网页里给图片写的替代文字）。OpenAI 2021 年就是这样收集数据、用对比目标训练出 CLIP 的。
+        </p>
+        <h3>两步流程：先预训练，再线性探测</h3>
+        <p>
+            用法和自监督那一讲一样分两步。第一步预训练；第二步取出图像编码器的权重，上面接一个线性层去做分类或检测，或者接一个解码器去出语义分割图。这种做法叫线性探测 Linear Probe：冻结编码器，只训练最上面的线性分类器。论文发表时让人兴奋的是，只在 CLIP 编码器上加一个线性分类器，性能就大幅提升。他展示的图是多个图像分类数据集上的平均表现，红色的 CLIP 模型都在最上面，而且训练用的图越多，表现越好。这说明找到了一个好用的预训练目标，而网上的图文数据又很充足，可以把模型训得很大。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 零样本分类：用文本编码器造一个分类器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=636s" target="_blank">0:10:36</a>–0:14:36 · Using clip out of the box</em></p>
+        <h3>和语言模型的差别</h3>
+        <p>
+            理想情况是连线性层都不训，直接拿 CLIP 用。语言模型训练的是自动补全：输入"I love"，模型补"cake"。到了新任务也不用重新训练，因为每个任务都是语言任务，都能写成补全，比如"The movie review 'I hated the movie' is ____"让模型补"negative"。CLIP 没有补全这个过程，它是用对比目标训出来的，要适配新任务，按上一节的做法还得有训练数据和一个线性层。
+        </p>
+        <h3>把类别名变成向量，做最近邻</h3>
+        <p>
+            大家想出来的巧办法是用文本编码器引导模型泛化到任意下游分类任务。假设新数据集的类别是 plane、dog、bird：把这三个词分别送进文本编码器，得到"plane"向量、"dog"向量、"bird"向量。新图来了，用图像编码器编码，再找最相似的文本向量。幻灯片上一张狗图和三个向量的相似度是 0.13、0.27、0.09，"dog"最高，于是分为狗。
+        </p>
+        <p>
+            他说可以把整个过程看成一个 1-NN 算法（一近邻：找离得最近的那一个训练样本，用它的标签），这些文本向量就是"训练数据"或类别中心。
+        </p>
+        <h3>提示词工程：用短语，再取平均</h3>
+        <p>
+            单个词得到的向量未必好。CLIP 是在网上抓来的短语上训练的，网上很少有词单独出现，所以换成"A photo of a plane""A photo of a dog"这样的短语，ImageNet 上就提升约 1.3%。
+        </p>
+        <p>
+            可是挑哪个短语也难，单个短语可能有偏。常见做法是写很多种短语，"a photo of a dog""a drawing of a dog"等等，每个类别得到多个向量，再对每个类别取平均向量，用平均后的"dog"向量、"plane"向量、"bird"向量做一近邻。幻灯片标的提升是 ImageNet 上 +5%。
+        </p>
+        <h3>问答</h3>
+        <p>
+            有学生问 CLIP 是不是在 ImageNet 上训练过。Ranjay 说大概训过，这里只是想说明可以适配到新任务，后面会给出肯定没训过的数据集上的例子。另一个问题是文本编码后怎么得到单个向量：取决于架构，用 ResNet 就取最后的向量表示，用 ViT 或 Transformer 就取 CLS token（序列开头专门用来汇总整段信息的那个 token）的输出。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. CLIP 为什么泛化得好，以及 CoCa</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=876s" target="_blank">0:14:36</a>–0:20:17 · Clip performance and limitations / Coca and captioning loss</em></p>
+        <h3>零样本结果</h3>
+        <p>
+            幻灯片上的第一个结果：在 4 亿图文对上训练后，CLIP 零样本在 ImageNet 上达到了在 ImageNet 上训练的 ResNet-101 的准确率，而 CLIP 没有用任何人工标签。Ranjay 说在 ImageNet 上表现一样好本身不算什么大事，但能做好已经值得兴奋。
+        </p>
+        <p>
+            更有意思的是 CLIP 发布之后才收集的数据集，比如 ObjectNet。这个数据集里的物体被拍在很奇怪的地方和角度：香蕉放在地上拍，或者拍一根烂掉的香蕉。ImageNet 里的类别大多是最典型的样子，所以在 ImageNet 上训练的模型在 ObjectNet 上表现差，而 CLIP 零样本几乎一样好。能泛化到没见过、甚至有些超出分布的数据集，这一点让很多人兴奋。
+        </p>
+        <h3>为什么</h3>
+        <p>
+            他问全班 CLIP 为什么比 ImageNet 训练泛化得好，复述了一位学生的回答，并说这是对的：网上下载的文本包含的信息比类别标签多得多，有结构信息、形状、颜色，这些都进了表示里，所以物体长得稍微不一样、稍微偏出分布时，模型还有别的线索可用。第二个原因是数据规模：ImageNet 只有约 130 万张图，网上的图文对是数十亿级别。
+        </p>
+        <p>
+            后续实验表明 CLIP 不只在自然图像上泛化好，在素描、图形图像、对抗数据集上也好。他还对比了零样本和线性探测：在大多数数据集上（图里绿色的）加一个线性分类器训练一下确实会更好，但不总是这样，有些数据集上 CLIP 零样本直接就很好。所以他说很多人把 CLIP 称作图像领域第一个基础模型。
+        </p>
+        <h3>没有标签为什么能赢过有标签：规模</h3>
+        <p>
+            幻灯片标题是"How can no labels beat labels?? Scale!"。两组数字：
+        </p>
+        <ul>
+            <li>模型：CLIP 把架构从 ResNet 换成 ViT，参数 3.07 亿；对比的 ImageNet ResNet 是 4450 万参数。</li>
+            <li>数据：CLIP 用约 4 亿网上抓来的图文对；ImageNet 训练集是 128 万张图。</li>
+        </ul>
+        <h3>CoCa：加一个描述损失</h3>
+        <p>
+            CLIP 出来后有很多变体，他挑了 2022 年的 CoCa（"Contrastive Captioners are Image-Text Foundation Models"）。CoCa 保留 CLIP 的结构和对比损失：图像编码器、文本编码器、两者之间的对比损失。新增的是一个解码器 Decoder，通过交叉注意力 Cross-attention（一组序列去查询另一组序列的注意力）读取图像编码器的特征，然后生成这张图的描述 Caption，训练时带上描述损失 Captioning Loss。
+        </p>
+        <p>
+            动机是：分辨猫和狗所需的信息不多，用文字把一张图描述出来需要模型学到多得多的东西，所以假设描述是更强的学习目标，能学到更好的特征。实验结果支持这一点：和 CLIP 相比，CoCa 在各种 ImageNet 变体上都有提升，所有数据集平均提升约 10%。
+        </p>
+        <p>
+            他说这是基础模型第一次超过所有监督学习训练出来的模型。在线排行榜上历年的模型一路往上，CoCa 这里是一个转折点，之后大家不再用监督目标训练图像编码器，转而只用网上数据加自监督方法做预训练。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. CLIP 类模型的优点和缺点</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=1217s" target="_blank">0:20:17</a>–0:25:43 · Clip performance and limitations</em></p>
+        <h3>优点</h3>
+        <ol>
+            <li>点积计算很高效。训练简单，只是一个对比目标，所以能扩大规模；推理快，把整个数据集先嵌入成表示，分类只需要在嵌入上做检索。幻灯片举的规模是在 50 亿张图上检索。所以 CLIP 不光能分类，也适合搜索和检索。</li>
+            <li>开放词表 Open Vocabulary：输入任何文字描述都能检索出对应的图，所以能用到很多不同领域。</li>
+            <li>容易和别的模型串联（幻灯片标的是 CuPL），这一点放到最后讲。</li>
+        </ol>
+        <h3>缺点一：太依赖批量大小</h3>
+        <p>
+            2022 年 4 月 Tristan Thrush 等人的工作发现，CLIP 分不清"there is a mug in some grass"（草里有个杯子）和"there is some grass in a mug"（杯子里有些草）这两张图。Ranjay 的解释是 CLIP 的学习目标依赖批量大小 Batch Size：批里的其他样本是负样本，批太小，它们就提供不了有用的监督。总是拿猫和卡车比，学不到猫的好表示。
+        </p>
+        <p>
+            幻灯片上的梯度是：批量 4 时只学到"animal"，批量 100 能学到"dog"，批量 32000、在很多 GPU 上训练时才能分出"Welsh Corgi"和别的柯基。原因是批里要有足够接近的负样本，也就是难负样本 Hard Negative，逼模型去学细节。
+        </p>
+        <p>
+            可是加大批量也不能保证学到好表示，你只能听凭训练数据的随机性。幻灯片说得直白：就算批量是 32K，同一批里同时出现"a mug in some grass"和"some grass in a mug"的可能性也很小。而且 32000 的批量对大多数实验室来说太大了。
+        </p>
+        <h3>组合性 Compositionality</h3>
+        <p>
+            这个问题在很多基准上被反复发现，叫组合性缺失：杯子、草这些概念，以及它们之间的关系，在 CLIP 的表示里没有被正确地组合起来。相关基准有 Winoground、CREPE、ARO，他说其中不少出自他的实验室。
+        </p>
+        <p>
+            社区的第一反应是手工构造批次，让批里一定有难负样本，比如有一种柯基就放进另一种柯基，或者把"horse eating grass"和"grass eating horse"放在一起做难负样本微调 Hard Negative Fine-tuning。这个做法流行了整整一年，直到他们发了后续论文，发现用难负样本训练反而会让模型忘掉不少语义，在不同环境和数据集上的泛化变差，原因至今在理论上还不清楚。幻灯片上的例子：图是"A black cat and a brown dog"，"A brown cat and a black dog"是错的，可"A brown dog and a black cat"换了语序意思没变，也该算对，他们把这类叫"hard positives"。所以怎样构造数据集、批次和训练信号，还有很多工作要做。
+        </p>
+        <h3>缺点二：整图级的描述不够</h3>
+        <p>
+            整图描述只能告诉你"有人在过马路"，不能告诉你人在哪、车在哪、街在哪。这类定位 Grounding 信息在 CLIP 里完全没有。幻灯片上一张客厅图只配了"living room"，"house plants""couch"都算错。一个解决方向是同时用带边界框坐标的区域描述训练。
+        </p>
+        <h3>缺点三：数据再多也覆盖不全</h3>
+        <p>
+            哪怕收集到 50 亿张图，也不够覆盖所有你关心的东西。所以现在有很多工作在做数据过滤，研究怎样从互联网上筛出最好的训练数据。幻灯片的结论是数据收集和过滤要有意图。他说这已经是这个领域的研究前沿，这一讲不展开。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 多模态语言模型与 LLaVA</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=1543s" target="_blank">0:25:43</a>–0:31:14 · Multimodal language models / Llava architecture and training</em></p>
+        <h3>动机和历史</h3>
+        <p>
+            第二类基础模型是最近两年半流行起来的视觉语言模型 Vision-Language Model（VLM），也叫多模态语言模型。动机是：做下一个 token 预测的语言模型能在推理时适配数学、情感分析、符号推理等各种任务，那能不能让模型同时接收图像和文本，输出文本，用同样的自回归方式在图像上做各种推理？他从 LLaVA 讲起，称它大概是最早流行起来的多模态语言模型之一。
+        </p>
+        <p>
+            为了历史准确，他补充说这个想法 2022 年前就有：2019 年的 ViLBERT 已经把图像模型和语言模型放在一起，想在不同任务间泛化，但那还是 Transformer 之前的东西，主要用 LSTM。幻灯片还指出，ViLBERT 每个任务都要单独微调，而且要用不简单的任务专用方法（比如 RefCOCO 上要用 Mask R-CNN 的边界框做重排序），仍然是这一讲开头说的那种很依赖具体任务的范式。现在 LLaVA 这一波换了更好的架构、更好的目标，在网上数据上预训练，面向多种任务。
+        </p>
+        <h3>核心想法：把图像 token 放进语言模型的上下文</h3>
+        <p>
+            他先回顾语言模型怎样解码：自注意力 Self-attention 关注过去的 token，输入"Cats are so"，模型关注这段历史，生成下一个词"cute"。视觉语言模型做的是给这段对话加上一张图作为上下文：把图像变成一串 token $V_1, V_2, \dots, V_N$，和"Cats are so"一起送进语言模型，再继续补全。LLaVA 的基本想法就是这样：喂图像 token 加上已生成的词，持续生成关于这张图的更多文字。
+        </p>
+        <h3>用 CLIP 的哪一层特征</h3>
+        <p>
+            问题是图像 token 用什么。LLaVA 的答案是 CLIP 的图像编码器。CLIP 的 ViT 把图切成小块（Patchify），每块展平、线性投影、加二维位置编码，和一个 CLS token 一起经过多层 Transformer，最后每个小块各有一个输出 token，再加上 CLS token 的输出。
+        </p>
+        <p>
+            到目前为止做分类只用了 CLS token。其他 token 的问题是从来没有被监督过：对比目标只作用在 CLS token 上，其他 token 就算是随机的，损失也不变，所以可能没有有用的信息。实验也表明最后一层的这些特征不太好用。但往回退一层，倒数第二层 Penultimate Layer 的特征很有用：它们是用来算最后一层 CLIP 嵌入的，保留了大量物体在图中位置的空间信息。幻灯片上写着，这些 token 最能为 LLM 保留空间和语言信息，去掉 CLS 还能略有提升。
+        </p>
+        <h3>LLaVA 的架构和训练配方</h3>
+        <p>
+            整体是：图像经过预训练的 CLIP 编码器，取出特征，再经过一个要训练的线性层，这个线性层的作用是把 CLIP 表示转换成 LLM 能理解的输入，然后把这些 token 和文本一起交给语言模型，生成关于这张图的对话。幻灯片上的配方分三步：
+        </p>
+        <ol>
+            <li>用预训练的语言模型（如 LLaMA）初始化 LLM 解码器，用预训练的图像编码器（如 CLIP）初始化视觉部分；</li>
+            <li>训练一个新的线性层，把 CLIP 特征接到 LLM 的输入空间；</li>
+            <li>LLM 和线性层一起微调。</li>
+        </ol>
+        <p>
+            幻灯片补充：有 10 万条以上"输入图像、输入指令、输出文本"的样本，就能得到还不错的效果。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. Flamingo 的架构：门控交叉注意力</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=1874s" target="_blank">0:31:14</a>–0:35:09 · Flamingo architecture</em></p>
+        <h3>不同的融合方式</h3>
+        <p>
+            LLaVA 之后 Google 很快发布了 Flamingo（Alayrac et al., "Flamingo: a Visual Language Model for Few-Shot Learning", 2022）。它沿用把视觉编码器特征和大语言模型结合的思路，创新在融合方式：LLaVA 把特征经过线性层后当作输入的一部分，Flamingo 把视觉编码器出来的特征送进 LLM 的每一层。为此要改 LLM 的架构。
+        </p>
+        <h3>两个新增的可训练部分</h3>
+        <p>
+            Flamingo 的大部分组件是冻结的：语言模型的权重全部冻结，视觉模型部分也冻结。只训练两样东西：
+        </p>
+        <ul>
+            <li>Perceiver Resampler（字幕里叫 perceiver sampler）：对图像表示做下采样，把数量可变的图像 token 变成维度更小、数量固定的 token。幻灯片说这是一种学出来的图像或视频表示下采样方法。</li>
+            <li>GATED XATTN-DENSE 层：加在 LLM 每一层之前的门控交叉注意力模块。</li>
+        </ul>
+        <h3>门控交叉注意力模块的内部</h3>
+        <p>
+            每个 LLM 层前面有一个交叉注意力组件，作用是看图像特征，决定保留哪些部分、哪些对语言模型有用。它由已经学过的组件拼成：先用交叉注意力关注图像特征，后面接一个 tanh 非线性，决定保留哪些、忘掉哪些；再经过一个全连接层（前馈层）稍作调整，再接一个 tanh。两个部分各有一条残差连接 Residual Connection（把输入直接加到输出上的旁路），之后才进入原本的语言模型层继续生成。Flamingo 论文里的写法大致是（$x$ 是语言侧的隐藏状态，$V$ 是重采样后的视觉 token，$\alpha$、$\beta$ 是可学习的标量）：
+        </p>
+        $$y = x + \tanh(\alpha)\cdot \text{XAttn}(x, V),\qquad y' = y + \tanh(\beta)\cdot \text{FFW}(y)$$
+        <p>
+            Ranjay 说用代码写这个改动只有两三行，加一个交叉注意力层，中间夹一个 tanh。代码上改动很小，对模型来说变化很大：它可以在处理的每一层自己决定什么时候、怎样关注视觉特征。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. Flamingo 的训练数据和应用</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=2109s" target="_blank">0:35:09</a>–0:41:18 · Flamingo training data / Applications of flamingo</em></p>
+        <h3>图文交错的数据和掩码</h3>
+        <p>
+            Flamingo 训练起来很难，他们的训练方式让模型能适配许多任务。训练数据是把很多图像拼在一起的长序列，组织方式和语言建模一样：开头一句"Here are some cute pictures of my pets"，然后是 &lt;image&gt; 标记、第一张图的描述，再是第二张图和它的描述，用 &lt;image&gt;、&lt;EOS&gt; 这样的特殊标记表示新图出现和文字结束。这种数据叫图文交错 Interleaved 数据。训练目标是补全最后一张图的描述。
+        </p>
+        <p>
+            描述某一张图时，不希望模型去看整个上下文里的所有图，只看那一张。所以他们设计了一个手工的掩码方案：生成"my puppy is sitting in the grass"这段话时，交叉注意力只看小狗那张图的特征；生成猫的描述时只看猫那张图。不过整段文字本身，模型在训练时能看到全部上下文。
+        </p>
+        <h3>这样训练带来的应用</h3>
+        <p>
+            这样做的好处体现在多轮对话和多图输入上。论文里的三个例子：
+        </p>
+        <ul>
+            <li>多轮对话：给一张图，Flamingo 说这是两只泰迪熊在月球上；用户问它们在做什么，它答在聊天；再问用的是什么东西，它说像是一台电脑。能做到这一点靠两件事：语言模型先预训练好再接进 Flamingo，推理能力被继承下来；训练数据里有很多图、很多轮，模型能适应长序列。</li>
+            <li>多图比较：给几张图问共同点，它会逐张看，然后说都是火烈鸟。</li>
+            <li>上下文学习 In-context Learning：像对 GPT 说"这是我要的例子，再给我类似的"那样，给几组"图像加描述"，再给一张新图，它会给出描述；给几组"图像、问题、答案"，再给新图加问题，它会给出答案。分类也行，给一张图说"this is Underground"，另一张说"this is Congress"，再问新图是什么。也能教它做 OCR 和算术：给一张图对应"2+1=3"，新图上它能读出"3×6"并算出结果。模型没有为这些任务训练过，只是被给了几个行为示例。</li>
+        </ul>
+        <p>
+            他解释，给几个例子再问新的叫少样本学习，把例子全拿掉就是零样本学习。论文里有很大的结果表，许多以前要适配 CLIP 才能做的难任务，Flamingo 零样本或少样本就能做，在很多基准上提升很大。他认为从这时起，领域从只报告几个分类基准，转向报告任何理解类任务：只要能写成问答形式，就能为各种能力建基准，过去两年这在计算机视觉里成了常态。
+        </p>
+        <h3>问答</h3>
+        <p>
+            有学生问多张图是不是拼接在一起输入。他说不是拼接，图像 token 经过 Perceiver Resampler 后送进 LLM 的每一层；拼接起来作为输入的只有文本，模型自己选择什么时候关注图像的哪部分。另一个问题是多轮对话时图像是不是每轮都要重新给：网页界面上用户只给一次，后台会缓存模型状态，假设用户还要继续聊，等着接收更多 token；如果不缓存，就要把整段对话重新作为输入。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 闭源模型与开源模型的差距，Molmo</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=2478s" target="_blank">0:41:18</a>–0:47:30 · Proprietary vs open models / Molmo open source model</em></p>
+        <h3>API 模型和"蒸馏出来的开放模型"</h3>
+        <p>
+            看到 LLaVA 的成功，很多公司重金投入这类模型，出现了一批只能通过 API 用的模型：GPT-4o、GPT-4V、Gemini 1.5 Pro、Gemini 1.5 Flash，Anthropic 也推出了 Claude 3 Opus，他补充说现在 Claude 4 Opus 也已经出来了。在 11 个常用视觉理解基准的平均成绩上差距很大：开源的 LLaVA 平均约 43%，GPT 等模型在 70 多到 80 左右。
+        </p>
+        <p>
+            看到差距，大家开始把 GPT 和 Gemini 蒸馏 Distill（用大模型的输出当训练数据训练小模型）成开放权重的模型发布出来：阿里巴巴的 Qwen，还有 InternVL、Phi 等，都是从 GPT 或 Gemini 蒸馏来的。他说这给领域带来了一个大问题，也是他自己的研究重点：研究社区其实不知道怎样做出高性能的视觉语言模型，诀窍只有 OpenAI 和 Google Gemini 团队知道。这些开放模型并不真的开放，因为是蒸馏出来的，没人知道怎样复现；有 GPT 才能做出它们，没有 GPT 就不知道怎么做。
+        </p>
+        <h3>完全开放的 Molmo</h3>
+        <p>
+            他的组过去半年到一年做了一类叫 Molmo 的模型（幻灯片上给的演示站点是 molmo.allenai.org）。它和其他模型的区别是完全开放：开放权重，可以下载模型；开放数据，训练集和评测集都能下载；开放代码，只要有足够的 GPU 就能自己从头训练；开放评测，可以加新评测、改造模型做新事情。在那张图上 Molmo 排在最上面。
+        </p>
+        <h3>人类偏好评测</h3>
+        <p>
+            学术基准不够，最终要看人们愿不愿意用它而不用 GPT。所以他们放出了 Molmo 的试用平台，做了一次大规模用户研究：870 位标注者，约 32.5 万次两两比较，问人们更喜欢哪个模型的输出。幻灯片称这是规模最大的 VLM 人类偏好评测之一。结果：
+        </p>
+        <ul>
+            <li>Molmo 72B 在视觉任务上排第二，Elo 分（一种按两两胜负算出的排名分）只比 GPT-4o 低 1 分，人们在两者之间的偏好差不多是抛硬币；它超过了 Gemini 1.5 Pro 和 Claude 3.5。</li>
+            <li>Molmo 7B 紧跟在这些大模型之后，超过 Gemini 1.5 Flash、LLaVA OneVision 72B、GPT-4V、Qwen-VL2 72B 等。7B 模型能放在一张 GPU 上，很多人可以用它、微调它。</li>
+        </ul>
+        <p>
+            他说一个小研究实验室打败了 Google 和 Anthropic 数十亿美元的投入，追平了 GPT。Molmo 在 2024 年 9 月 25 日发布，社区反响很热烈，他说这是第一次有高性能的多模态视觉语言模型以这种方式发布。反复出现的一个用法是拿 Molmo 做机器人应用。NVIDIA 的人也在说"never bet against open source"。之后 Meta 很快发布了 Llama 3.2 的视觉版（字幕里写作 LLaVA 3.2），很多人做了对比评测，他说 Molmo 也胜过了它。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. Molmo 为什么好：PixMo 数据和指向</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=2850s" target="_blank">0:47:30</a>–0:54:23 · Data quality for VLM training / Grounding and pointing / Chaining models together</em></p>
+        <h3>把推理落到像素上</h3>
+        <p>
+            Molmo 的诀窍是把决策落在像素上。一般问模型"数一数有几条船"，它给个数字，经常是幻觉 Hallucination（模型编出图里没有的内容）。Molmo 会先指出 Pointing 它数的每一条船，在图上生成点，再输出最终数字。
+        </p>
+        <h3>质量胜过数量</h3>
+        <p>
+            幻灯片上的对比：Meta 的 Llama 3.1V 用了约 60 亿图文对，Molmo 用的 PixMo 数据集只有 70 万图文对。差别在于这 70 万是人工精心整理的。
+        </p>
+        <p>
+            现在大家训练 VLM 的基础是从网上下载图片和附带的文字。他说互联网数据的问题是"incidental"，附带的文字往往写的是主观感受，或上传者对图片的感觉，很少描述图片内容本身。幻灯片上的例子是"pink, japan, aesthetic image""love this winter picture by person"。人工标注的数据则是有意为之的：一张图配一段密集描述 Dense Caption。幻灯片上的例子描述一张办公桌：桌子居中、长方形、抛光的深色木头横跨画面、四条 A 字形桌腿，一大一小两块显示器的相对位置，鼠标在右边，台灯在左边，书在左上角，墙是米白色，地面是粉色大理石，右侧有落地窗，窗外能看到砖墙和铁桶。
+        </p>
+        <p>
+            这些是人们在网上从来不说的东西。他举的例子是：我永远不会告诉你某样东西在另一样东西左边，因为太显而易见，说出来不自然。所以他们专门引导标注者说出尺寸（large）、形状（rectangular）、材质（polished、rich）、位置（横跨画面的水平方向）。另一个例子是平板电脑截图的描述：时间 11:48、电量 67%、信号四格、Wi-Fi 大约四分之三，屏幕 80% 是纯蓝色，底部几个文件夹里各有哪些应用图标，最下面三个导航键。这类信息对使用模型的人有帮助，网上却几乎没有。
+        </p>
+        <h3>怎样收集密集描述</h3>
+        <p>
+            他们花了两年做各种引导研究 Elicitation Study，找出网上缺哪些信息、怎样最有效地问出来。幻灯片上列的引导问题：第一眼看这张图是什么；有哪些物体、各有几个；文字写了什么；物体在什么位置；有哪些细节；背景里有什么；风格和颜色怎样。
+        </p>
+        <p>
+            很重要的一点是不让标注者打字，让他们说。幻灯片上写"People don't like to type … but they love to talk"：每张图让标注者说 60 到 90 秒，再自动把语音转成文字用于预训练。他说开口说话会打破打字时那些习惯（字幕里提到 Grice 的会话准则，听不太清），人们会说出平时根本不会打出来的内容。
+        </p>
+        <h3>模型本身和 LLaVA 没区别</h3>
+        <p>
+            架构上 Molmo 和 LLaVA 一样：现成的视觉编码器（CLIP 类）、只是一个线性层的连接器、一个大语言模型，接收所有 token 后输出你要的内容。最大的差别在数据的质量和密度。
+        </p>
+        <h3>指向能做的事</h3>
+        <p>
+            因为能把决策落在图上，Molmo 能做其他模型做不了的事：在网页截图上指出菜单在哪、在哪设置搜索选项、要调哪个选项去选中等规模的数据集；指着数；问公交车的线路号，它先指出图上写着号码的那块区域再回答；比较左边和右边各有几辆车；在深度图、俯视图、拥挤场景和体育场景上推理。幻灯片标题是"From perception To action"。
+        </p>
+        <h3>串联 Molmo 和 SAM 2，以及机器人</h3>
+        <p>
+            Molmo 的输出可以当作另一个模型的输入。让 Molmo 指出板球拍，把这个点交给做分割的 SAM 2，就能在整段视频里分割出这个球拍。他们在办公室里还试了机器人：让 Molmo 指出水瓶在哪，用简单的运动规划器 Motion Planner 把机械臂移过去；再让它指出脏盘子所在的地方，它指向水槽，机器人移到那里；再让它指出水槽里的空位，把瓶子放下。他说这类把 VLM 用于物理世界泛化的工作是他组里现在的重点，幻灯片上称之为面向导航与操作的具身 AI。
+        </p>
+        <p>
+            有学生问，如果图像总被缩放到固定分辨率，模型还能准确指向吗？他说现在已经可以让这类模型接受任意分辨率的输入（具体方法名字幕没听清），位置编码随图像大小变化，模型通常泛化得不错，也能在新的分辨率下指向。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. Segment Anything</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=3263s" target="_blank">0:54:23</a>–1:00:20 · Segment anything model</em></p>
+        <h3>分割基础模型意味着什么</h3>
+        <p>
+            最后二十分钟，他讲怎样让基础模型的输出不限于类别和文字。这里讲 Segment Anything Model（SAM，Kirillov et al., "Segment Anything", 2023），目标是做一个面向各种分割任务的基础模型：用户指出图里自己关心的任何东西，模型给出它的掩码 Mask（标出物体占哪些像素的二值图）。
+        </p>
+        <p>
+            幻灯片对比了 Mask R-CNN（He et al., 2017）：它在固定类别数的数据集上训练（COCO 是 80 类），输出图里所有属于这些类别的物体的掩码。SAM 要在类别数巨大的数据集上训练，输出用户关心的任意物体的掩码。两个难点：怎样收集覆盖极多类别的数据，以及怎样设计架构，让它准确输出用户想要的那个东西。
+        </p>
+        <h3>先解决"要分割哪个"：架构</h3>
+        <p>
+            分割请求很容易有歧义。图里有两只猫，用户说"给我猫的分割"，不清楚要哪只。如果能指，指一下就知道要哪只。所以光打字不够，需要更多的指定方式。SAM 的架构有三部分：
+        </p>
+        <ul>
+            <li>图像编码器 Image Encoder，比如可以是 CLIP 编码器；</li>
+            <li>提示编码器 Prompt Encoder，这是特别的部分，能编码文字、点、边界框等用户表达"我要什么"的各种方式；</li>
+            <li>一个很轻量的掩码解码器 Mask Decoder，结构和课上讲过的分割解码器类似，把图像编码和提示放在一起，输出掩码。</li>
+        </ul>
+        <h3>一个点也有歧义：输出三个掩码</h3>
+        <p>
+            就算用户点了一个位置，仍然有歧义。幻灯片上是一把剪刀：这个点可能指整把剪刀，可能指能握的把手部分，也可能指其中一个把手。这种歧义很难消除，模型选了另一种合理的解释也不该被惩罚。所以 SAM 一次输出三个不同粒度的掩码，只拿和真值最接近的那个算损失，其他两个不受惩罚。幻灯片补充，模型还被训练为每个掩码输出一个置信度分数。希望随着训练，模型学会输出各种粒度的掩码，由用户挑最合适的。
+        </p>
+        <h3>数据：模型在环的标注流程</h3>
+        <p>
+            剩下的就是数据。2023 年 SAM 出来时，分割数据集都很小。作者把分割数据的图像数量扩大了约 6 倍，掩码数量扩大了约 400 倍。他说这和 Flamingo、Molmo 的经验一样：要有大量高质量数据，而很多视觉任务的数据在网上完全没有，得自己去收集。
+        </p>
+        <p>
+            做法是一个循环：先人工标一批数据，训练模型，用模型去标更多数据，再让标注员修正模型给出的分割结果，反复迭代。他叫它人在环 Human-in-the-loop、模型在环 Model-in-the-loop 的流程：模型提议分割，人来修。数据集里的图很密：一堆蔬菜里每一个都有自己的掩码，一群伞每一把都单独标出，还有水下图像和绘画的分割。这样的数据收集成本很高，他们做了数百万张图。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 串联：CuPL 和 VisProg</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=3620s" target="_blank">1:00:20</a>–1:06:56 · Final thoughts and QA</em></p>
+        <h3>课堂小练习</h3>
+        <p>
+            串联的意思是把不同模型组合起来，做单个模型做不到的事。他给全班四张图和四个类别：marimba、viaduct、papillon、lorikeet（幻灯片上的提示是"A photo of a ..."）。这些类别有些同学没见过，CLIP 也没见过，在这上面会失败。同学们认出了第二张是马林巴琴 marimba，高架桥 viaduct 也容易，但哪个是狗（papillon，蝴蝶犬）、哪个是鸟（lorikeet，吸蜜鹦鹉）就难说了。他换成给出每个类别的文字描述，大家一下子就能对上。
+        </p>
+        <h3>CuPL</h3>
+        <p>
+            这就是串联的基本想法。CLIP 没见过这些图，但这些概念很可能在网上被讨论过，GPT 很可能能描述它们。GPT 生成的描述就成了分类的好工具。这个方法是 CuPL（CUstomized Prompts via Language models，Pratt et al., "What does a platypus look like? Generating customized prompts for zero-shot image classification", 2023），两步：先让 LLM 生成描述，再用描述分类。这样 CLIP 在花卉、汽车、各种场所、宠物品种这类细粒度专门类别的数据集上都有提升，前提是 GPT 学会了怎样描述这些东西。他说这个想法去年很流行，今年仍然流行。
+        </p>
+        <h3>VisProg：把问题写成程序</h3>
+        <p>
+            推广到任意问题。问"船上有三个人吗？"，可以直接问多模态语言模型，也可以用过去几十年做出来的上百个专用视觉模型：用目标检测器检测出人，三个检测框就是三个人。再问"两张图里一共有六个人吗？"，可以写个程序，对图 1 做检测，对图 2 做检测，再加起来。
+        </p>
+        <p>
+            这个做法由去年拿了最佳论文奖的 VisProg（Visual Programming，Gupta et al., "Visual Programming: Compositional visual reasoning without training", 2023）推广开来。给一张图和一个问题，生成一段 Python 程序，程序里调用已有的各个模型，比如对图 1 回答某个子问题，对图 2 回答某个子问题，再把答案合起来。幻灯片对比了两种做法：为任务训练一个新的多图 VQA 模型，或者用手头的模型写一段脚本：
+        </p>
+<pre><code>class MyMultiImageVQA():
+    def ProcessIms():
+        Ans1 = VQA(Image1)
+        Ans2 = VQA(Image2)
+        return Ans1 + Ans2</code></pre>
+        <p>
+            手写的脚本只能推广到两张图。VisProg 让 GPT 来写程序：比如判断"左右两张图里一共有六个人和两条船"是真是假，GPT 生成程序，执行后得出答案（幻灯片上是 False）。可以给 GPT 一些上下文示例，展示怎样用其他函数写程序，它会推广到新问题。必须做的一件事是告诉它有哪些函数可用：用目标检测器定位物体、用人脸检测器定位人脸，等等，这些都是别人已经做好的模型。另一个例子是图像编辑：要把沙漠换成茂盛的草地，现有的图像编辑模型还不成熟，可以先调分割模型找出沙漠，只替换那部分像素，再合成新图。
+        </p>
+        <h3>问答</h3>
+        <ul>
+            <li>上下文示例怎么选？他说有两种：静态的，给尽量多样的例子，希望能泛化；动态的，针对当前问题检索最合适的示例再让模型生成程序。后者通常好得多，前提是检索系统够好。</li>
+            <li>算力开销大吗？大。要通过 API 调 GPT，还要把各个模型加载进内存依次运行，成本可能高很多。所以大家在研究能不能把这些能力蒸馏进单个模型，他说这是 2025 年研究的重要部分，同时也有人在研究怎样更有效地串联。</li>
+            <li>这算不算智能体 Agent？他说可以这样看：一个智能体根据问题决定需要哪些模型帮忙，怎样把它们拼起来。</li>
+        </ul>
+    </section>
+
+    <section id="t13">
+        <h2>13. 总结与问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=4016s" target="_blank">1:06:56</a>–1:09:45 · Final thoughts and QA</em></p>
+        <h3>四类基础模型回顾</h3>
+        <p>
+            Ranjay 的回顾：基础模型是为一个任务训练，再从这个任务泛化到许多下游应用。分类方面，从网上拿大量图文对一起训练，就能泛化到在现实中没有标签的新数据集。和语言模型结合后，可以用上下文示例做描述、计数、OCR。输出不必是文字或类别，也可以是按不同用户输入给出的分割掩码。再进一步，可以用程序把多个基础模型甚至小模型组合起来做新事情。
+        </p>
+        <h3>幻觉怎么办</h3>
+        <p>
+            有学生问幻觉问题。他说各类模型都还有幻觉。他们的观察是指向似乎能明显减少幻觉，因为模型得为自己的输出找证据，但不能保证指得对。解决办法一是收集更多和所需推理相关的数据；更好的是加验证方法，根据指出的点判断输出可不可信。他说大公司的产品里，输出通常不由单个模型直接给到用户，要先经过其他验证器，这能缓解一部分问题。怎样减少幻觉、提高准确率仍是活跃的研究问题。
+        </p>
+        <h3>模型能不能自己造工具</h3>
+        <p>
+            另一个问题是：如果某个能力需要一个还不存在的工具，模型能不能自己造？他说可以，他们做过一些初步实验：告诉模型想要什么能力，系统自动去收集训练数据，为这个用途训练一个工具。这条线还在起步阶段，他们正在做，很多人对这个方向感兴趣。
+        </p>
+    </section>
+
+    <section>
+        <h2>课上的原话</h2>
+        <ul>
+            <li>"And this is why I think a lot of people talk about CLIP as the first foundation model for images."<br>所以我想很多人才把 CLIP 称作图像领域的第一个基础模型。（<a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=1034s" target="_blank">0:17:14</a>）</li>
+            <li>"If you're always comparing a cat versus a truck, you're not really going to learn a representation for a cat."<br>如果你总是拿猫和卡车比，你不会真正学到猫的表示。（<a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=1309s" target="_blank">0:21:49</a>）</li>
+            <li>"Because they're distilled, we don't actually know how to reproduce these models."<br>因为它们是蒸馏出来的，我们其实不知道怎样复现这些模型。（<a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=2617s" target="_blank">0:43:37</a>）</li>
+            <li>"But the problem with internet data is that it's incidental."<br>但互联网数据的问题在于，它是附带产生的。（<a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=2897s" target="_blank">0:48:17</a>）</li>
+            <li>"I will never tell you that something is to the left of something else, just because it's unnatural for us to do that."<br>我永远不会告诉你某样东西在另一样东西的左边，因为这么说对我们来说不自然。（<a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=2943s" target="_blank">0:49:03</a>）</li>
+            <li>"The biggest difference was in the data and the quality and density of the data itself."<br>最大的差别在数据，在数据本身的质量和密度。（<a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=3039s" target="_blank">0:50:39</a>）</li>
+            <li>"And for a lot of vision tasks, the data is completely missing from the internet, and you need to go out and find and collect that data to get these models to work very well."<br>对很多视觉任务来说，互联网上根本没有这样的数据，你得自己出去找、去收集，才能让这些模型好用。（<a href="https://www.youtube.com/watch?v=mQOK0Mfyrkk&t=3548s" target="_blank">0:59:08</a>）</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS231N · Lecture 16: Vision and Language · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

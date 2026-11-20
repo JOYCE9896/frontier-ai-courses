@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 9 讲：目标检测、图像分割与可视化 | Stanford CS231N 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="08_注意力与Transformer.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS231N 目录</a> · 09</span>
+    <span><a href="10_视频理解.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 9 讲：目标检测、图像分割与可视化</h1>
+        <p class="subtitle">先补完 ViT 和 Transformer 的四项常见改动（Pre-Norm、RMSNorm、SwiGLU、MoE），再讲语义分割（全卷积网络、上采样、U-Net）、目标检测（R-CNN 系列、YOLO、DETR）、实例分割（Mask R-CNN），最后讲怎样看懂网络：滤波器可视化、显著图、CAM 与 Grad-CAM</p>
+        <div class="author-meta">
+            主讲：Ehsan Adeli · 2025 年 4 月 29 日 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=PTypu6GqEd4" target="_blank">课堂录像</a>（Stanford Online 公开，2025 年春季，本文依据录像字幕整理）· <a href="https://cs231n.stanford.edu/slides/2025/lecture_9.pdf" target="_blank">课程幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            前几讲的任务都是图像分类：一张图对应一个标签。这一讲换成计算机视觉里另外几个核心任务：给每个像素打标签的语义分割，找出每个物体并画框的目标检测，以及把两者合起来、区分同类物体不同个体的实例分割。Ehsan Adeli 说，现在这些任务已经能用一行代码完成，但过去十到十五年里这方面进展很多，自己要设计新模型时，知道该去哪找思路、怎样设计。讲法上他挑重要的几个方法快速过，细节和计算留给大家课后看幻灯片。
+        </p>
+        <p>
+            开头先回顾上一讲末尾匆匆讲过的视觉 Transformer，补讲 Justin 没来得及讲的几项结构改动。最后十来分钟讲可视化与理解：网络到底学到了什么，判断时看的是图上哪些像素。他举医学影像的例子：判断有没有肿瘤之外，大家更关心肿瘤在图上哪里。录像简介里还列了特征反演、对抗样本、DeepDream 和风格迁移，这些课上没有讲到。下一讲讲视频理解。
+        </p>
+        <ol>
+            <li><a href="#t01">ViT 回顾：分块、位置嵌入和分类 token</a> · <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">Transformer 的四项常见改动</a> · <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=533s" target="_blank">0:08:53</a></li>
+            <li><a href="#t03">计算机视觉的几类任务</a> · <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=918s" target="_blank">0:15:18</a></li>
+            <li><a href="#t04">语义分割：从滑动窗口到全卷积网络</a> · <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=1057s" target="_blank">0:17:37</a></li>
+            <li><a href="#t05">网络内的上采样：反池化与转置卷积</a> · <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=1497s" target="_blank">0:24:57</a></li>
+            <li><a href="#t06">U-Net 与语义分割小结</a> · <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=1740s" target="_blank">0:29:00</a></li>
+            <li><a href="#t07">目标检测：单个物体与多个物体</a> · <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=1978s" target="_blank">0:32:58</a></li>
+            <li><a href="#t08">两阶段检测器：R-CNN、Fast R-CNN、Faster R-CNN</a> · <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=2263s" target="_blank">0:37:43</a></li>
+            <li><a href="#t09">单阶段检测器：YOLO</a> · <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=2637s" target="_blank">0:43:57</a></li>
+            <li><a href="#t10">用 Transformer 做检测：DETR</a> · <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=2923s" target="_blank">0:48:43</a></li>
+            <li><a href="#t11">实例分割：Mask R-CNN</a> · <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=3449s" target="_blank">0:57:29</a></li>
+            <li><a href="#t12">可视化与理解：滤波器和显著图</a> · <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=3679s" target="_blank">1:01:19</a></li>
+            <li><a href="#t13">CAM、Grad-CAM 与 ViT 的注意力图</a> · <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=4013s" target="_blank">1:06:53</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. ViT 回顾：分块、位置嵌入和分类 token</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=5s" target="_blank">0:00:05</a>–0:08:53</em></p>
+        <h3>上一讲回顾</h3>
+        <p>
+            Ehsan 先回顾：Transformer 由若干层组成，每层有多头自注意力、层归一化和 MLP，这一部分我们称作编码器，把序列编码成 token；如果输出也要是一个序列（一张图或一句话），就用结构类似的解码器，以编码器的 token 为输入，生成想要的输出。Justin 讲过三种处理序列的方式（RNN、卷积、自注意力），如今多数应用用的是自注意力，它比另两种效果好得多，代价是更多计算和显存。详见 <a href="08_注意力与Transformer.html">第 8 讲</a>。
+        </p>
+        <h3>ViT 的做法</h3>
+        <p>
+            视觉 Transformer ViT（Dosovitskiy et al., “An Image is Worth 16x16 Words”, ICLR 2021）处理图像的办法，是把图切成块 Patch，组成一个序列。幻灯片上是 $N$ 个形状为 $3\times16\times16$ 的块，Ehsan 口头举的是 3×3 共 9 块。每块变成一个 token：把块拉平成向量，再线性投影成一个 $D$ 维向量。
+        </p>
+        <p>
+            切块以后丢了什么？Ehsan 说丢了块在图上的二维位置，所以要加位置嵌入 Positional Embedding。做法很多：可以直接用序号 1、2、3……；也可以用 x、y 两个坐标的二维版本。幻灯片的写法是每个位置一个可学习的 $D$ 维向量，加到对应的 token 上。之后就和 NLP 里的 Transformer 完全一样：自注意力、层归一化、MLP，输出层给出输出向量，可以接任何应用。
+        </p>
+        <h3>两种分类头</h3>
+        <p>
+            ViT 最主要的应用之一是图像分类，问题是怎样在输出里得到代表类别的东西。第一种做法：额外加一个特殊输入，叫分类 token（class token），维度同样是 $D$，本身是可学习参数；它在输出端对应的向量经过线性投影，变成一个 $C$ 维的类别分数向量。Ehsan 说这是用 ViT 做图像分类最基本、最标准的方式。
+        </p>
+        <p>
+            第二种做法和第 8 讲末尾一致：不加分类 token，把所有输出向量做平均池化，从 $N\times D$ 变成 $1\times D$，再用线性层 $D\Rightarrow C$ 预测类别分数。因为整张图同时可见，不需要像语言那样加掩码；语言是序列，不能用到未来的信息。监督方式和之前一样：定义损失函数（softmax 交叉熵等），反向传播。
+        </p>
+        <p>
+            有学生问分类 token 是不是类似偏置。Ehsan 说不是，它本身是一个可训练参数，最后经过一个前馈网络或线性投影变成概率向量。中间那么多自注意力层会在所有图像 token 和这个分类 token 之间融合信息，从它这里接上损失函数做监督，它就代表了类别概率。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. Transformer 的四项常见改动</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=533s" target="_blank">0:08:53</a>–0:15:18</em></p>
+        <p>
+            ViT 这套结构多年来在各种应用里基本没变，许多现代结构用的组件都和上面差不多。但有一些改动能提升效果、让训练更稳定，Justin 上一讲没来得及讲，Ehsan 花几分钟过一遍。他说这些改动大多是经验上被证明更好，虽然也有一些解释，但采用它们的主要理由是训练更稳定。
+        </p>
+        <h3>Pre-Norm Transformer</h3>
+        <p>
+            原始结构里层归一化在残差连接外面（Post-Norm）：残差相加之后立刻归一化，特征值随之改变，所以模型学不出恒等函数，而 ResNet 想保留的就是恒等映射。解决办法（Baevski &amp; Auli, 2018）是把层归一化挪到自注意力之前和 MLP 之前，放进残差支路里面。这样既有归一化，又保留了恒等路径，训练更稳定。课后有学生追问为什么挪位置能学出恒等变换，Ehsan 让他看原结构：残差连接后面紧跟层归一化，特征永远会被改动，不可能是恒等的，所以要把它挪进去。
+        </p>
+        <h3>RMSNorm</h3>
+        <p>
+            用均方根归一化 RMSNorm（Root-Mean-Square Normalization，Zhang and Sennrich, NeurIPS 2019）替代层归一化。Ehsan 说它很简单，不减去特征的均值。输入 $x$ 和输出 $y$ 都是 $D$ 维，权重 $\gamma$ 也是 $D$ 维：
+        </p>
+        <p>$$y_i = \frac{x_i}{\mathrm{RMS}(x)}\,\gamma_i,\qquad \mathrm{RMS}(x) = \sqrt{\varepsilon + \frac{1}{N}\sum_{i=1}^{N} x_i^2}$$</p>
+        <p>幻灯片的评价是训练稍微更稳定一些。</p>
+        <h3>SwiGLU MLP</h3>
+        <p>
+            经典 MLP：输入 $X$ 为 $[N\times D]$，权重 $W_1$ 为 $[D\times 4D]$、$W_2$ 为 $[4D\times D]$，输出 $Y = \sigma(XW_1)W_2$。SwiGLU（Shazeer, “GLU Variants Improve Transformers”, 2020）用三个权重矩阵 $W_1, W_2$（$[D\times H]$）和 $W_3$（$[H\times D]$），做门控非线性 gated nonlinearity：
+        </p>
+        <p>$$Y = \big(\sigma(XW_1) \odot XW_2\big)W_3$$</p>
+        <p>
+            $\odot$ 是逐元素相乘。取隐藏维度 $H = 8D/3$ 时总参数量不变：经典 MLP 是 $2\times 4D^2 = 8D^2$，SwiGLU 是 $3\times D\times \tfrac{8D}{3} = 8D^2$。Ehsan 说，参数量不变，但这一层能学到更高维的非线性。
+        </p>
+        <h3>混合专家 MoE</h3>
+        <p>
+            混合专家 Mixture of Experts（Shazeer et al., “Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer”, 2017）在每个模块里学 $E$ 套独立的 MLP 权重，每套叫一个专家 Expert：$W_1$ 从 $[D\times 4D]$ 变成 $[E\times D\times 4D]$，$W_2$ 从 $[4D\times D]$ 变成 $[E\times 4D\times D]$。一个路由器 Router 把每个 token 分给其中 $A < E$ 个专家，叫激活专家。参数量增加 $E$ 倍，计算量只增加 $A$ 倍，模型更强，计算增加不多。幻灯片写，如今最大的大语言模型（GPT4o、GPT4.5、Claude 3.7、Gemini 2.5 Pro 等）几乎肯定都用 MoE，参数超过一万亿，只是已经不公开细节了。
+        </p>
+        <p>
+            有学生问不同专家在做什么，有没有直觉。Ehsan 说它们并行训练、初始化不同，往往各学一个方面，有时是很相关的方面；说到底是增加计算和参数，让网络在需要学多个概念时有能力分开学，比如要覆盖多个概率分布时，这些 MLP 能把数据的不同模式分开。又有学生问专家数是不是超参数，他说是，据他所知一般预先设定，不太会精细调。
+        </p>
+        <p>
+            这几项在语言模型里的细节，可以对照 <a href="../CS336-Language-Modeling-from-Scratch/03_架构与超参数.html">CS336 第 3 讲</a>（归一化位置、RMSNorm、门控激活）和 <a href="../CS336-Language-Modeling-from-Scratch/04_注意力的替代方案与混合专家模型.html">第 4 讲</a>（MoE）。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 计算机视觉的几类任务</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=918s" target="_blank">0:15:18</a>–0:17:37</em></p>
+        <p>
+            Ehsan 说这几项任务多年来是计算机视觉最核心的任务。如今要解决的问题难得多，他说现在已经没人在乎目标检测了，一行代码就能做；但过去十到十五年这方面进展很多，值得了解。之后还有可视化与理解，在很多应用里很重要，比如医学数据，可视化往往比分类本身更重要。
+        </p>
+        <p>幻灯片用一张图对比四类任务：</p>
+        <ul>
+            <li>分类 Classification：输出 “CAT”，没有空间范围。</li>
+            <li>语义分割 Semantic Segmentation：输出 GRASS、CAT、TREE、SKY，只有像素，没有物体的概念。</li>
+            <li>目标检测 Object Detection：输出 DOG、DOG、CAT 三个框，多个物体。</li>
+            <li>实例分割 Instance Segmentation：同样是 DOG、DOG、CAT，但给出每个物体的像素区域。</li>
+        </ul>
+        <p>
+            分类前几讲已经讲了很多：从像素到标签（假设有一组可能的标签，比如 {dog, cat, truck, plane, …}）。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 语义分割：从滑动窗口到全卷积网络</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=1057s" target="_blank">0:17:37</a>–0:24:57</em></p>
+        <h3>问题定义</h3>
+        <p>
+            语义分割要给图中每一个像素打一个标签，即这个像素属于哪个物体或场景类别。训练数据是成对的：每张训练图像的每个像素都标了语义类别。测试时，对新图像的每个像素分类，输出一张同样大小的标签图。
+        </p>
+        <h3>想法一：逐像素看</h3>
+        <p>
+            最基本的办法是只看每个像素本身来判断。Ehsan 说这几乎不可能，只看一个像素没有上下文，判断不了它属于什么物体。所以上下文很重要，要看周围区域。
+        </p>
+        <h3>想法二：滑动窗口</h3>
+        <p>
+            以每个像素为中心切一个小块，用 CNN 给中心像素分类（幻灯片示例输出 Cow、Grass；引用 Farabet et al., TPAMI 2013；Pinheiro and Collobert, ICML 2014）。这时就是在给一整块图分类，前面讲过的任何分类结构都能用：CNN、ResNet、ViT 都行。问题是太慢：每个像素都要跑一遍完整的网络，生成一张分割图要花很久。幻灯片补充：重叠的块之间本可共享特征，这种做法完全没有复用。
+        </p>
+        <h3>想法三：全卷积网络</h3>
+        <p>
+            不如训练一个网络，输入整张图，直接输出整张像素标签图，是一个标签矩阵。为此输入层要和图像一样大，输出端也要保持“膨胀”的尺寸，不能接全连接层，因为要生成的是一张图。这叫全卷积网络 Fully Convolutional Network（FCN）：只用卷积层，一次预测所有像素。幻灯片上的形状：输入 $3\times H\times W$，卷积后 $D\times H\times W$，得到分数 $C\times H\times W$，再对每个像素取 argmax 得到 $H\times W$ 的预测。
+        </p>
+        <p>
+            问题是图像很大，在原始分辨率上做卷积，层会很大，要优化的参数很多。早年 GPU 不够强，这是训练的瓶颈。所以结构演变成：先通过下采样把空间分辨率越变越小，中间某处分辨率低但通道数多，再从那里上采样回到图像原尺寸，生成逐像素输出（Long, Shelhamer, and Darrell, “Fully Convolutional Networks for Semantic Segmentation”, CVPR 2015；Noh et al., “Learning Deconvolution Network for Semantic Segmentation”, ICCV 2015）。下采样我们已经会了：池化、带步长的卷积。上采样怎么做，需要新的操作。
+        </p>
+        <h3>怎样训练：逐像素损失</h3>
+        <p>
+            Ehsan 问大家：网络从图像开始、以图像结束，损失函数怎样定义？有学生答：对每个像素算分类损失再求平均。他说对：每个像素都在做分类，所以对图中所有像素求和，每一项就是普通的 softmax 损失，然后反向传播，这就是需要的全部损失函数。用 $s_p$ 表示像素 $p$ 的类别分数、$y_p$ 表示它的真实类别：
+        </p>
+        <p>$$L = \sum_{p\,\in\,\text{像素}} -\log\frac{e^{s_{p,y_p}}}{\sum_{c} e^{s_{p,c}}}$$</p>
+        <p>
+            有学生问训练是否需要真值 Ground Truth。Ehsan 说需要，这类算法是全监督的，要有真值标签图。早年有大量工作是人坐下来手工标像素；他说现在有工具了，不再需要那样做。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 网络内的上采样：反池化与转置卷积</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=1497s" target="_blank">0:24:57</a>–0:29:00</em></p>
+        <p>Ehsan 说上采样其实不难。</p>
+        <h3>没有参数的上采样：反池化</h3>
+        <ul>
+            <li>最近邻 Nearest Neighbor：比如从 $2\times2$ 放大到 $4\times4$，每个值复制给它在低分辨率里对应的那几个位置。</li>
+            <li>钉床 Bed of Nails：每个值只放在放大后对应区域的一个位置上（左上角），其余全填 0。经过几层卷积，这些值会慢慢扩散开。</li>
+            <li>最大反池化 Max Unpooling：如果编码端用了最大池化，就记住每次被选中的最大值的位置；解码端上采样时，把值放回这些位置。下采样层和上采样层成对出现。</li>
+        </ul>
+        <h3>可学习的上采样：转置卷积</h3>
+        <p>
+            上面这些都只是操作，没有要学的参数。也可以让上采样可学习。先回忆卷积：$3\times3$ 卷积、步长 1、填充 1 时，滤波器和输入做点积得到一个输出像素，在所有位置重复。下采样时用步长 2 的卷积：输出每走一个像素，滤波器在输入上走两个像素。幻灯片的说法是，步长给出输入和输出移动距离的比例，所以带步长的卷积可以看成“可学习的下采样”。Ehsan 说这在第三讲左右讲过，记不清的可以回去看。
+        </p>
+        <p>
+            上采样把这个过程反过来：输入里的一个值对应放大后图上的一块区域，用这个值去加权滤波器，写到输出上；下一个输入值同样处理，输出区域会有重叠，重叠处求和。这叫转置卷积 Transposed Convolution，幻灯片示例是 $3\times3$ 转置卷积、步长 2、填充 1：输入每走一个像素，滤波器在输出上走两个像素。
+        </p>
+        <p>
+            一维例子：输入只有两个值 $a, b$，滤波器是 $x, y, z$，输出是滤波器被输入值加权后的拷贝，重叠处相加：
+        </p>
+        <p>$$\text{输出} = (ax,\ ay,\ az + bx,\ by,\ bz)$$</p>
+        <p>
+            Ehsan 说为了省时间，这部分有几张幻灯片挪到了最后的附加材料里。附加材料说明了“转置”这个名字的来历：卷积可以写成一个矩阵乘法（例子是一维卷积，核大小 3、步长 2、填充 1），转置卷积就是乘以同一个矩阵的转置（例子是一维转置卷积，核大小 3、步长 2、填充 0），所以会得到更大的输出。有学生问滤波器是否训练，他说是，和其他卷积层一样，所有滤波器都要训练。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. U-Net 与语义分割小结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=1740s" target="_blank">0:29:00</a>–0:32:58</em></p>
+        <p>
+            Ehsan 特别讲了 U-Net（Ronneberger et al., 2015），因为它用得很广。结构就是上面那种先下采样再上采样的网络，只是画成 U 形。他说直到今天，在医学影像分割这类应用里，如果不想用基础模型，U-Net 或它的变体仍然能给出最好的结果。
+        </p>
+        <ul>
+            <li>下采样阶段：扩大视野 field of view，代价是丢失空间信息。</li>
+            <li>上采样阶段：生成高分辨率的映射，回到图像分辨率。</li>
+            <li>U-Net 的区别：把下采样阶段的高分辨率特征图复制过来，和解码器对应层的输入拼接 Concatenate。</li>
+        </ul>
+        <p>
+            为什么要拼接？分割需要在解码端保留空间信息。下采样会损失分辨率，上采样时如果没有这些信息就比较难恢复，边界常常变得模糊。把编码端的特征图直接送进解码层，能保留图像里的结构信息，输出更锐利。
+        </p>
+        <p>
+            小结：语义分割给每个像素打类别标签，不区分实例，只关心像素。图里有两条狗时，它只知道这些像素是“狗”，分不清哪些像素属于哪一条。要分清，就需要先理解图里有多个物体，这引出了目标检测。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 目标检测：单个物体与多个物体</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=1978s" target="_blank">0:32:58</a>–0:37:43</em></p>
+        <p>
+            实例分割不仅关心像素类别，还要知道这些像素属于这一条狗，那些属于另一条狗。Ehsan 说目标检测是继图像分类之后最核心的视觉任务之一，多年来提出过大量算法，深度学习时代也有大量工作他不会讲到，这里只挑几个重要的。
+        </p>
+        <h3>单个物体：分类加定位</h3>
+        <p>
+            如果图里只有一个物体，任务就是同时输出类别分数和一个边界框 Bounding Box 的坐标 $(x, y, w, h)$。幻灯片上，CNN 得到一个 4096 维向量后分两支：一个全连接层 $4096\to1000$ 输出类别分数（比如 Cat: 0.9，Dog: 0.05，Car: 0.01），另一个全连接层 $4096\to4$ 输出框坐标。
+        </p>
+        <p>
+            损失也分两部分：类别用 softmax 损失，框坐标用 L2 损失（一种简单的距离，也就是把定位当回归问题做），和真实框 $(x', y', w', h')$ 比较。两者相加得到多任务损失 Multitask Loss：
+        </p>
+        <p>$$L = L_{\text{softmax}} + L_{\text{L2}}(\text{box})$$</p>
+        <h3>多个物体的麻烦</h3>
+        <p>
+            多个物体就难了。一个物体输出 4 个数，三个物体（CAT、DOG、DUCK）输出 12 个数，再多就是很多很多数，而且每张图需要的输出个数都不一样。这种把分类扩展成检测的办法没法扩展。
+        </p>
+        <h3>滑动窗口</h3>
+        <p>
+            另一种办法是看一个个框，不看整张图。每个框只对应一个标签：猫、狗或者背景。有了给框分类的能力，就可以做滑动窗口：把框从坐标 $(0,0)$ 开始，滑过所有 $x, y, w, h$ 的组合，看哪里能检测到物体。幻灯片上同一张图的几个裁剪分别得到“背景？是”“狗？是”“猫？是”。问题是框的组合太多（位置、尺度、长宽比），要对海量位置跑 CNN，计算代价太高，同样没法扩展。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 两阶段检测器：R-CNN、Fast R-CNN、Faster R-CNN</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=2263s" target="_blank">0:37:43</a>–0:43:57</em></p>
+        <h3>候选区域</h3>
+        <p>
+            2014 年及以前有很多研究在找可能含有物体的区域，叫候选区域 Region Proposals。幻灯片举了 Selective Search（Uijlings et al., IJCV 2013）：找图上“一团一团”的、可能含物体的区域，跑起来相对快，几秒内在 CPU 上就能给出约 2000 个候选区域；同类方法还有 Alexe et al.（TPAMI 2012）、BING（CVPR 2014，300fps）、Edge boxes（ECCV 2014）。
+        </p>
+        <h3>R-CNN</h3>
+        <p>
+            有了候选区域，问题就变得“相对容易”：把每个区域那块图裁出来，跑一个 CNN 给它分类，还可以修正边界框。这就是 R-CNN（Girshick et al., “Rich feature hierarchies for accurate object detection and semantic segmentation”, CVPR 2014）。幻灯片上的流程：
+        </p>
+        <ol>
+            <li>输入图像，用候选方法得到约 2k 个感兴趣区域 RoI（Region of Interest）。</li>
+            <li>把每个区域变形成 $224\times224$ 像素。</li>
+            <li>每个区域分别送进一个 ConvNet（ImageNet 预训练）。</li>
+            <li>用 SVM 给区域分类。</li>
+            <li>框回归 Bbox reg：预测对 RoI 的“修正”，4 个数 $(d_x, d_y, d_w, d_h)$。</li>
+        </ol>
+        <p>
+            它能用，但很慢：每张图要做约 2000 次独立的前向传播。
+        </p>
+        <h3>Fast R-CNN</h3>
+        <p>
+            Ehsan 说卷积操作会保留空间信息，不管下采样还是上采样，我们总能追踪到特征对应像素空间的哪个位置。所以不必对每个块分别跑 CNN，可以先对整张图跑一个大卷积网络，再在特征图上找到候选区域对应的位置，在这些区域上跑一个较小的网络，输出两样东西：框要怎样偏移，以及物体类别。这就是 Fast R-CNN（Girshick, ICCV 2015）。幻灯片上的结构：整图经过骨干网络 Backbone（AlexNet、VGG、ResNet 等）得到 “conv5” 特征；把候选区域投到特征上，裁剪并缩放特征；每个区域过一个小网络（Per-Region Network），一支线性层加 softmax 输出类别，一支线性层输出框偏移。
+        </p>
+        <p>
+            附加材料里讲了“裁剪并缩放”怎样做。RoI Pool：把候选框投到特征图上，对齐到网格单元，再把区域（比如 $512\times5\times4$）分成大致相等的 $2\times2$ 子区域，每个子区域内做最大池化，得到固定大小的区域特征（这里是 $512\times2\times2$，实际中比如 $512\times7\times7$）。不管输入区域多大，输出大小都一样。它的问题是对齐到网格会让特征略微错位，RoI Align 去掉了这种对齐，改为在每个子区域里的规则采样点上用双线性插值 Bilinear Interpolation 取特征：点 $(x,y)$ 的特征是它周围四个网格单元特征的线性组合。
+        </p>
+        <h3>区域候选网络与 Faster R-CNN</h3>
+        <p>
+            有学生问候选区域的个数是不是事先定好的。Ehsan 说简短的回答是“是”，接着讲区域候选网络 Region Proposal Network（RPN）。前面两种方法，一个把候选框放在图像上，一个放在卷积特征图上，但都要先有一个外部的候选方法告诉我们去图上哪里找。RPN 让 CNN 自己出候选框：在特征图的不同位置开始，经过卷积层，提升那些更可能含物体的区域的得分，并修正框坐标；因为训练数据有物体标签和位置，这一步可以监督。最后取得分最高的前 $K$ 个作为这张图的候选。
+        </p>
+        <p>幻灯片上 RPN 的具体形状：</p>
+        <ul>
+            <li>输入图像 $3\times640\times480$，得到图像特征 $512\times20\times15$。</li>
+            <li>设想特征图每个点上都有一个固定大小的锚框 Anchor Box。</li>
+            <li>每个点预测对应锚框里是否有物体（二分类），输出 $1\times20\times15$。</li>
+            <li>对正样本框，还要预测从锚框到真实框的修正，每个像素回归 4 个数，输出 $4\times20\times15$。</li>
+            <li>实践中每个点用 $K$ 个不同大小、比例的锚框：$K\times20\times15$ 的物体性分数和 $4K\times20\times15$ 的框变换。</li>
+            <li>把 $K\times20\times15$ 个框按“物体性”objectness 分数排序，取前约 300 个作为候选。</li>
+        </ul>
+        <p>
+            把 RPN 插进 Fast R-CNN，其余部分不变（对每个候选裁特征、分类），就是 Faster R-CNN（Ren et al., NIPS 2015）。附加材料写到它联合训练 4 个损失：RPN 判断是否物体、RPN 回归框坐标、最终类别分数、最终框坐标。还有许多细节被略过：用非极大值抑制 Non-Max Suppression（NMS，去掉和高分框重叠太多的框）忽略重叠的候选；锚框怎样定；怎样为 RPN 采样正负样本；框回归怎样参数化。Ehsan 说这些坐标和维度的细节留给大家课后自己算一遍。
+        </p>
+        <p>
+            Faster R-CNN 是两阶段目标检测器 Two-stage Object Detector：第一阶段每张图跑一次（骨干网络、RPN），第二阶段每个区域跑一次（裁剪特征、预测类别、预测框偏移）。幻灯片的问题是：真的需要第二阶段吗？
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 单阶段检测器：YOLO</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=2637s" target="_blank">0:43:57</a>–0:48:43</em></p>
+        <p>
+            Ehsan 说 R-CNN、Mask R-CNN 这类算法如今已经不怎么用了，计算太重。原因之一是要两个网络，一个候选网络，一个分类加框修正网络，每张图至少两遍。于是出现了单阶段目标检测器，其中最流行的之一是 YOLO（Redmon et al., “You Only Look Once: Unified, Real-Time Object Detection”, CVPR 2016）。他说做计算机视觉的人大概都听说过 YOLO，至少早期版本是以卷积为主的网络；因为检测速度快、效果好，到今天很多工业应用仍然以它为检测基础。幻灯片把 SSD（Liu et al., ECCV 2016）和 RetinaNet（Lin et al., “Focal Loss for Dense Object Detection”, ICCV 2017）也列为同一类。
+        </p>
+        <h3>做法</h3>
+        <p>
+            名字的意思就是“只看一次”：对图像做一次前向就生成所有边界框。把图像分成 $S\times S$ 的网格，例子里是 $7\times7$。对每个格子，一个全卷积网络输出：
+        </p>
+        <ul>
+            <li>$B$ 个边界框 $(x, y, h, w)$，$B$ 是新的超参数，是对这个格子里物体的框的修正；</li>
+            <li>每个框含有物体的概率 $P(\text{object})$；</li>
+            <li>物体的类别概率 $P(\text{class})$。</li>
+        </ul>
+        <p>
+            课上的例子取 $B=2$，每个格子生成两个框，概率不同（图上用框线的粗细表示）。所有格子同时用同一个网络算出来，于是得到大量带概率的框，再做阈值筛选，加上论文里用的非极大值抑制等算法，留下概率最高的那些。
+        </p>
+        <p>
+            幻灯片上的写法更具体：每个格子中心有一组基准框（那张图上 $B=3$），从每个基准框回归到最终框，给出 5 个数 $(d_x, d_y, d_h, d_w, \text{confidence})$；再预测 $C$ 个类别的分数（背景也算一类）。输出张量形状：
+        </p>
+        <p>$$7\times7\times(5B + C)$$</p>
+        <p>
+            幻灯片的评语是：看起来很像 RPN，只是区分类别。
+        </p>
+        <p>
+            有学生问第二张图（满是框的那张）是怎么来的。Ehsan 说每个格子都生成两个框，每个框都带一个含物体的概率，所有格子的框放在一起就是那张图。他建议有时间去看看 YOLO 的代码库，现在有很多新版本，用在医学、机器人和许多工业场景里。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 用 Transformer 做检测：DETR</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=2923s" target="_blank">0:48:43</a>–0:57:29</em></p>
+        <p>
+            较新的一种方法是 DETR，检测 Transformer（Carion et al., “End-to-End Object Detection with Transformers”, ECCV 2020）。它完全基于 Transformer，用的是上一讲和今天开头讲的自注意力与交叉注意力模块。Ehsan 说这篇论文距今快五年，现在已经过时，实际应用里没人用，但它是用 Transformer 做检测的好例子。幻灯片的概括：流程简单，Transformer 直接输出一组框；没有锚框，也不回归框的变换。
+        </p>
+        <h3>结构</h3>
+        <ol>
+            <li>图像经过 CNN 得到特征，切成块变成 token，再像前面那样加位置编码。</li>
+            <li>这些 token 进入 Transformer 编码器（若干层自注意力、归一化和 MLP），得到输出 token。</li>
+            <li>巧妙的地方在解码器：除了以编码器输出为输入，还定义一组查询，叫物体查询 Object Queries，它们本身是可训练参数。放 5 个、10 个或 20 个查询，就表示要在这张图里找最多 20 个物体。</li>
+            <li>解码器开头用自注意力，再和编码器输出做交叉注意力，为每个查询生成一个输出。</li>
+            <li>每个输出经过一个前馈网络 FFN，得到类别标签和边界框；也可以输出“没有物体” no object。</li>
+        </ol>
+        <p>
+            监督方面，Ehsan 说类别用类别概率向量，框用和真实框之间的 L2 损失。幻灯片还写到一个课上没展开的步骤：用二部图匹配 Bipartite Matching 把预测框和真实框一一配对，再训练回归框坐标。
+        </p>
+        <h3>课堂问答</h3>
+        <p>这一段学生问题很多，Ehsan 的回答大意如下。</p>
+        <ul>
+            <li>是不是把所有可能的框都输入 Transformer？不是。输入里没有框，查询只是可训练参数，表示“我想在这个查询的位置输出一个物体”；类别和框坐标是输出的一部分。</li>
+            <li>查询是否编码了要找什么、去哪找？要找什么由预定义的类别决定，体现在输出端的类别概率向量和监督上。查询里没有告诉网络去哪里找，一切靠反向传播学。</li>
+            <li>查询是图像块吗？不是。它们只是可学习的参数，初始化后由网络自己找到最好的值。</li>
+            <li>“查询”的意思是“给我最多 9 个物体”吗？是的，再经过自注意力和交叉注意力，生成的输出 token 由 FFN 变成类别和框坐标。</li>
+            <li>哪个 FFN 输出对应哪个框，有直觉吗？没有，结构上没有东西阻止网络重复输出同一个物体。但有许多自注意力和交叉注意力层让各个查询相互作用，使每个查询对上一个输出，不会都给出一样的结果；而且对这些 FFN 的输出也有监督。</li>
+            <li>训练要不要像素级分割标注？不需要，只用类别标签和边界框监督。有像素级分割的话也可以转成框来训练。</li>
+            <li>能不能推广到没见过的物体（新类别）？这类全监督算法通常不行，因为输出是固定类别的概率向量，加不进事先不知道的类；只有“背景”或“没有物体”这一类。有很多扩展用于零样本学习 Zero-shot Learning（训练数据里没有某类的样本也能识别它），超出了这一讲的范围。</li>
+            <li>场景里的物体比查询多怎么办？通常会输出置信度最高的那些框；这种情况下应该多加查询。</li>
+        </ul>
+    </section>
+
+    <section id="t11">
+        <h2>11. 实例分割：Mask R-CNN</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=3449s" target="_blank">0:57:29</a>–1:01:19</em></p>
+        <p>
+            回到前面有人问的问题：怎样用检测算法做实例分割？Ehsan 说不难。R-CNN 系列里，先对图像跑 CNN，区域候选网络给出框，每个框再变成类别标签和框修正。在这个结构上再加一个输出，变成更多任务的网络，同时预测掩码 Mask（标出物体占哪些像素的二值图），就是 Mask R-CNN（He et al., “Mask R-CNN”, ICCV 2017）。
+        </p>
+        <p>
+            具体就是多加一层卷积，在像素级生成这个物体的掩码。如果用全卷积网络，掩码可以在那一层上直接得到。幻灯片上的细节：
+        </p>
+        <ul>
+            <li>候选框经过 RoI Align 得到 $256\times14\times14$ 的区域特征。</li>
+            <li>原有分支：类别分数 $C$ 个，框坐标每类 4 个即 $4C$ 个。</li>
+            <li>新加的小掩码网络作用在每个 RoI 上，为 $C$ 个类各预测一个 $28\times28$ 的二值掩码，输出 $C\times28\times28$。</li>
+        </ul>
+        <p>
+            幻灯片展示了训练用的掩码目标：同一张图里，不同的框（椅子、床、人、婴儿）各对应一个掩码。Ehsan 说 Mask R-CNN 在检测训练过的已知类别物体上效果很好；幻灯片还显示它也能做姿态估计。
+        </p>
+        <h3>开源框架和这些任务今天的位置</h3>
+        <p>
+            GitHub 上有很多好的实现：TensorFlow Detection API（Faster RCNN、SSD、RFCN、Mask R-CNN 等），Detectron2（PyTorch；Mask R-CNN、RetinaNet、Faster R-CNN、RPN、Fast R-CNN、R-FCN 等），可以用预训练模型在自己的数据集上微调。附加材料里还有一张图（Huang et al., CVPR 2017）比较了骨干网络、检测结构等许多变量对速度和精度的影响，以及一篇综述（Zou et al., “Object Detection in 20 Years: A Survey”, 2019）。
+        </p>
+        <p>
+            Ehsan 说如今的计算机视觉已经不局限于这些任务，但工业应用里仍然需要它们。他举的例子是质检：流水线上把烂番茄和好番茄分开，要先检测出物体再分好坏，所以仍然要懂这些步骤和流程，以及怎样实时运行。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 可视化与理解：滤波器和显著图</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=3679s" target="_blank">1:01:19</a>–1:06:53</em></p>
+        <p>
+            最后十分钟讲可视化与理解。Ehsan 说这本身可以讲一整讲，大约 2013、2014 年到 2020 年代，可视化神经网络是很热的方向，帮我们理解网络学到了什么。他只挑最重要、应用中可能用到的几种。
+        </p>
+        <h3>可视化滤波器</h3>
+        <p>
+            先回到线性分类器。那时把每个类别的权重画出来，能看到一个模板，比如汽车类的模板像一辆正面朝前的车。神经网络也能这样做：把第一层的滤波器画出来，会看到网络学到的一些基本图案，比如不同朝向的边缘和简单形状。幻灯片对比了 AlexNet（$64\times3\times11\times11$）、ResNet-18（$64\times3\times7\times7$）、ResNet-101（$64\times3\times7\times7$）、DenseNet-121（$64\times3\times7\times7$）第一层的滤波器。
+        </p>
+        <p>
+            这种办法只适用于通道很少的层：3 个通道可以直接当 RGB 图画出来。CNN 中间层往往有很多通道，就没法画成人眼能看的东西了。大致规律是浅层学到图案，深层学到更整体、更大的图案；用一种叫引导反向传播 Guided Backpropagation 的方法也能可视化中间层，但没那么简单。附加材料里写了做法（Zeiler and Fergus, ECCV 2014；Springenberg et al., ICLR Workshop 2015）：挑中间层某一个神经元，比如 $128\times13\times13$ 的 conv5 特征图里的一个值，计算它对图像像素的梯度；反向传播经过每个 ReLU 时只让正梯度通过，得到的图会更好看。
+        </p>
+        <h3>显著图：哪些像素要紧</h3>
+        <p>
+            第二种是显著性 Saliency。很多应用里，要知道哪些像素要紧。Ehsan 又举医学的例子：分类肿瘤和非肿瘤时，大家要看图上哪部分是肿瘤；如果要自动化，没人只在乎有没有肿瘤，大家都在乎肿瘤在图上哪里。
+        </p>
+        <p>
+            做法（Simonyan, Vedaldi, and Zisserman, “Deep Inside Convolutional Networks: Visualising Image Classification Models and Saliency Maps”, ICLR Workshop 2014）：先做一次前向，算出 “dog” 的分数。训练时我们一直在算损失或类别分数对权重的导数，用来更新权重；现在换成问：每个像素的值变一点，dog 的分数变多少？这就是梯度的含义。于是求类别分数对像素的梯度，不再对权重求，把它画出来，亮的地方就是判断“狗”时要紧的像素，改动它们，狗的分数就会变。幻灯片写的步骤是：计算（未归一化的）类别分数对图像像素的梯度，取绝对值，再在 RGB 三个通道上取最大值。设 $S_y$ 是类别 $y$ 的分数、$I$ 是输入图像：
+        </p>
+        <p>$$M_{i,j} = \max_{c\,\in\,\{R,G,B\}} \left|\frac{\partial S_y}{\partial I_{c,i,j}}\right|$$</p>
+        <p>
+            对训练过的各种物体都跑一遍，就得到幻灯片上那些显著图。Ehsan 说这在很多情况下很有效。
+        </p>
+    </section>
+
+    <section id="t13">
+        <h2>13. CAM、Grad-CAM 与 ViT 的注意力图</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=4013s" target="_blank">1:06:53</a>–1:13:43</em></p>
+        <p>
+            有时我们想看的是每个类别怎样激活特征，不必一路回到像素。这就是类激活映射 Class Activation Mapping（CAM），以及稍后的 Grad-CAM。Ehsan 说它们是理解 CNN 最常用的算法之一，也能用在其他结构上；对 Transformer 有更好的办法。
+        </p>
+        <h3>CAM</h3>
+        <p>
+            CAM 出自 Zhou et al., “Learning Deep Features for Discriminative Localization”, CVPR 2016。设最后一个卷积层的特征是 $f\in\mathbb{R}^{H\times W\times K}$，经过全局平均池化 Global Average Pooling 得到 $F\in\mathbb{R}^{K}$，再经过权重为 $w\in\mathbb{R}^{K\times C}$ 的全连接层得到类别分数 $S\in\mathbb{R}^{C}$：
+        </p>
+        <p>$$F_k = \frac{1}{HW}\sum_{h,w} f_{h,w,k}$$</p>
+        <p>$$S_c = \sum_k w_{k,c}F_k = \frac{1}{HW}\sum_{h,w}\sum_k w_{k,c}\,f_{h,w,k}$$</p>
+        <p>
+            把数学展开，类别分数就写成了一个对空间位置的加权和。所以能把类别预测一路追回到特征图的具体位置；卷积层在空间上和图像一一对应，又能追回图像空间。定义类激活图 $M\in\mathbb{R}^{C\times H\times W}$：
+        </p>
+        <p>$$M_{c,h,w} = \sum_k w_{k,c}\,f_{h,w,k}$$</p>
+        <p>
+            幻灯片上同一张图对 palace、dome、church、altar、monastery 五个类别各有一张激活图，显示卷积层上哪些区域在推高这些类别的分数；也有同一个类别在不同图像上的激活图。
+        </p>
+        <p>
+            问题是它只能用在最后一个卷积层，因为上面的推导要求最后一个卷积层后面直接是全局平均池化和全连接层。多数 CNN 并不是这样，中间还有全连接层等其他操作。
+        </p>
+        <h3>Grad-CAM</h3>
+        <p>
+            梯度加权类激活映射 Grad-CAM（Selvaraju et al., “Grad-CAM: Visual Explanations from Deep Networks via Gradient-based Localization”, CVPR 2017）解决这个问题：权重改用梯度来算，不再直接拿 $W$ 和特征相乘。步骤：
+        </p>
+        <ol>
+            <li>选任意一层，它的激活是 $A\in\mathbb{R}^{H\times W\times K}$。</li>
+            <li>计算类别分数 $S_c$ 对 $A$ 的梯度：$\dfrac{\partial S_c}{\partial A}\in\mathbb{R}^{H\times W\times K}$。</li>
+            <li>对梯度做全局平均池化，得到每个通道的权重 $\alpha\in\mathbb{R}^{K}$：$$\alpha_k = \frac{1}{HW}\sum_{h,w}\frac{\partial S_c}{\partial A_{h,w,k}}$$</li>
+            <li>计算激活图 $M^c\in\mathbb{R}^{H\times W}$，用 ReLU 只保留正的部分：$$M^c_{h,w} = \mathrm{ReLU}\Big(\sum_k \alpha_k A_{h,w,k}\Big)$$</li>
+        </ol>
+        <p>
+            这样中间夹着别的操作也能把类激活带到卷积层，再映射回图像空间，为每个物体画出热力图。
+        </p>
+        <h3>ViT：注意力本身就是激活图</h3>
+        <p>
+            Ehsan 说上面这些是给 CNN 用的。Transformer 天生就带着激活图：还记得 Justin 展示的翻译注意力矩阵吗，每个输出词在输入上都有注意力权重。对像素也可以这样做，为每个输出在像素空间画出注意力图，在像素空间可视化 ViT 的特征（幻灯片引用 Chen et al., ICLR 2022；Paul and Chen, AAAI 2022）。所以用 ViT 和 Transformer 时，可视化容易得多，注意力权重已经现成；用 CNN 时，通常要用 Grad-CAM 这类算法。
+        </p>
+        <p>
+            Ehsan 最后说，他原以为讲不完今天想讲的内容，结果讲完了。下一讲是视频理解。
+        </p>
+    </section>
+
+    <section>
+        <h2>课上的原话</h2>
+        <ul>
+            <li>“Again, these are all empirically shown to be better options.”<br>再说一遍，这些都是经验上被证明更好的选择。· <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=625s" target="_blank">0:10:25</a></li>
+            <li>“And nobody cares about object detection anymore, because now, we can just do it with one line of code.”<br>现在没人在乎目标检测了，因为一行代码就能做。· <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=964s" target="_blank">0:16:04</a></li>
+            <li>“Upsampling is actually not that hard.”<br>上采样其实没那么难。· <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=1497s" target="_blank">0:24:57</a></li>
+            <li>“In many even industrial applications, YOLO is being used as the base for object detection because it's a fast object detector.”<br>即使在很多工业应用里，YOLO 也被当作目标检测的基础，因为它是一个快速的检测器。· <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=2685s" target="_blank">0:44:45</a></li>
+            <li>“I'm seeking up to 20 objects to be detected in that image.”<br>（放 20 个查询）就是要在这张图里找最多 20 个物体。· <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=3065s" target="_blank">0:51:05</a></li>
+            <li>“Everybody cares about where in the image the tumor is.”<br>大家都在乎肿瘤在图上的哪个位置。· <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=3870s" target="_blank">1:04:30</a></li>
+            <li>“So basically, with ViTs and transformers, this is much easier.”<br>所以用 ViT 和 Transformer，这件事要容易得多。· <a href="https://www.youtube.com/watch?v=PTypu6GqEd4&t=4352s" target="_blank">1:12:32</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS231N · Lecture 9: Object Detection, Image Segmentation, Visualizing and Understanding · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>
