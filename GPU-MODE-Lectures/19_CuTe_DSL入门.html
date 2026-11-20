@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CuTe DSL 入门 | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="18_FlashAttention4怎么工作.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 19</span>
+    <span><a href="20_生产环境的Megakernel.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 86 · CuTe DSL 入门</h1>
+        <p class="subtitle">用 Python 写 CuTe 内核：借 GPU MODE NVFP4 比赛的四个模板（GEMV、GEMM、Dual GEMM、Group GEMM），讲装饰器、布局切分、TensorSSA、TMA/S2T/T2R 拷贝、Tensor Core、流水线、编译缓存和调试</p>
+        <div class="author-meta">
+            主讲：Vicki Wang（NVIDIA 工程师，为 GPU MODE 比赛写了 CuTe DSL 模板）· 主持：Alex · 发布日期：2025 年 12 月 7 日 · 时长：1 小时 13 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=9-dfte_N3yk" target="_blank">讲座录像 Lecture 86: Getting Started with CuTe DSL</a>（GPU MODE YouTube 频道公开）· 幻灯片：<a href="https://github.com/gpu-mode/lectures/tree/main/lecture_086" target="_blank">lecture_086（cute_dsl_introduce.pdf）</a>（本文依据录像字幕和幻灯片整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>讲座录制时 GPU MODE 正在举办 Blackwell NVFP4 内核比赛，主持人 Alex 说大多数参赛方案会用 NVIDIA 新的 CuTe DSL，也就是 CUTLASS 4 的 Python 接口。NVIDIA 的 Vicki Wang 为比赛写了四个 CuTe DSL 模板，这一讲就借这四个例子（批量 GEMV、block-scaled GEMM、Dual GEMM、Group GEMM）把 CuTe DSL 最常用的功能过一遍，最后讲编译缓存、打印、调试工具和内联 PTX。</p>
+        <p>前置知识：第 16 篇（Lecture 57）里 Cris Cecka 讲的 CuTe 布局、分区、MMA atom 是这一讲的地基，Vicki 在结尾也推荐先看那一讲。还要大致知道 Hopper/Blackwell 的 TMA、Tensor Core、共享内存 swizzle 和 warp 专用化，第 13、15、18 篇有更多细节。需要说明：这份幻灯片里的代码几乎都是截图，文字版只有标题和要点，所以下面的代码细节按她口头讲解整理，没有逐行代码。</p>
+        <ol>
+            <li><a href="#t01">为什么是 CUTLASS，CuTe DSL 在哪一层</a> · <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">GEMV 例子：两个装饰器和布局切分</a> · <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=405s" target="_blank">0:06:45</a></li>
+            <li><a href="#t03">Tensor、TensorSSA 和控制流</a> · <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=663s" target="_blank">0:11:03</a></li>
+            <li><a href="#t04">GEMM 例子：TMA 加载和 swizzle</a> · <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=1140s" target="_blank">0:19:00</a></li>
+            <li><a href="#t05">S2T 拷贝、Tensor Core、T2R 拷贝和编程模型小结</a> · <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=1581s" target="_blank">0:26:21</a></li>
+            <li><a href="#t06">优化思路、流水线和 cute.struct</a> · <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=2130s" target="_blank">0:35:30</a></li>
+            <li><a href="#t07">Dual GEMM：静态参数和 epilogue 融合</a> · <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=2834s" target="_blank">0:47:14</a></li>
+            <li><a href="#t08">Group GEMM：在内核里更新 TMA 描述符</a> · <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=2960s" target="_blank">0:49:20</a></li>
+            <li><a href="#t09">编译缓存和打印调试</a> · <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=3444s" target="_blank">0:57:24</a></li>
+            <li><a href="#t10">调试开关、Nsight 源码对应和内联 PTX</a> · <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=3762s" target="_blank">1:02:42</a></li>
+            <li><a href="#t11">资源和最后的问答</a> · <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=4058s" target="_blank">1:07:38</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 为什么是 CUTLASS，CuTe DSL 在哪一层</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=0s" target="_blank">0:00:00</a>–0:06:45 · Introduction to cutlass / Understanding cute architecture</em></p>
+        <h3>高层生成器和 PTX 之间</h3>
+        <p>Vicki 先讲背景。现在有很多流行的高层代码生成器和编译器，用户不必懂太多硬件细节就能写内核，迭代新算法很快。但它们藏起了很多细节，用户很难完全控制硬件特性；想要极致的光速（speed of light）性能时，也很难弄清编译器做了哪些优化。另一端是 PTX（NVIDIA GPU 的虚拟汇编），能控制所有硬件特性，但抽象太底层，细节太多，很难快速编程。CUTLASS 在两者之间：抽象比 PTX 简单，同时把控制权留给用户。幻灯片补充：算法创新需要更底层的抽象，PDL（programmatic dependent launch，让后一个内核提前启动的特性）这类高级特性需要细粒度控制；CUTLASS 在新硬件第 0 天就可用，设计模块化，跨代 GPU 都稳健。</p>
+        <h3>CUTLASS 的层次</h3>
+        <p>幻灯片上的层次图和第 16 篇相同：最上面是高层接口，用户按调好的配置挑优化过的内核，不用操心硬件细节；最底下黄色和灰色的方块是 CuTe 的抽象。灰色是 atom 抽象，让用户在不同架构上使用不同的 Tensor Core 等硬件特性；黄色是 CuTe 编程模型，想在不同架构代际上提供一致的编程方式。CuTe DSL 是建在这两层上的 Python 方案，目标是让 AI 研究者和工程师快速做原型。她提到今年 GTC 也有一场相关报告。</p>
+        <h3>快速开始</h3>
+        <p><code>pip install nvidia-cutlass-dsl</code>，写 Python 代码直接运行，程序就跑在 NVIDIA GPU 上。幻灯片上的 hello world（原幻灯片最后一行多了一个右括号，这里去掉了）：</p>
+        <pre><code>import cutlass
+import cutlass.cute as cute
+
+@cute.kernel
+def kernel():
+    tidx, _, _ = cutlass.nvvm.thread_idx()
+    if tidx == 0:
+        cute.print_("Hello world")
+
+@cute.jit
+def host():
+    kernel().launch(
+        grid=(1, 1, 1), block=(32, 1, 1))
+
+host()
+
+# python3 hello_world.py</code></pre>
+        <p>（第 16 篇里 Cris 的幻灯片版本用的是 <code>cutlass.arch.thread_idx()</code>，并多了一行 <code>cutlass.cuda.initialize_cuda_context()</code>；两份幻灯片写法不同，以你安装的版本文档为准。）</p>
+        <p>接下来她围绕给 GPU MODE 准备的四个题目讲，用它们把 DSL 的功能串起来。</p>
+        <h3>问答：和 CUTLASS 3 有什么区别</h3>
+        <p>Alex 问 CuTe DSL 和 CUTLASS 3 等以前的东西有什么区别。她说 CUTLASS 主要是 C++ 模板库，C++ 本身没问题，但模板太重，难调试、难构建，用了很多花哨的特性，编译时间长，他们测过一个内核要编译 10 到 20 秒，会挡住研究者的快速迭代。业界在转向 PyTorch 这类 Python 生态，Python 更容易做原型，内核用 Python 写也大幅减少集成进 Python 框架的工作。所以有了 CUTLASS 4，想为 CUTLASS 建一整套 Python 生态，第一步先放出最底层，足够让用户试用并完全控制硬件。Alex 又问灵活性上有没有差别，CUTLASS 3 能做的 CuTe DSL 是否都能做。她说从功能上看，她认为两者灵活性相同。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. GEMV 例子：两个装饰器和布局切分</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=405s" target="_blank">0:06:45</a>–0:11:03 · Gemv example and layout</em></p>
+        <p>第一个例子是批量 GEMV（矩阵乘向量）。模板很简单：用普通的全局加载指令把数据从全局内存读到寄存器，用 FMA 指令做计算，最后把结果写回全局内存。它刻意不用 Tensor Core，用来展示几样最常用的 DSL 功能。</p>
+        <h3>@cute.jit 和 @cute.kernel</h3>
+        <ul>
+            <li><code>@cute.jit</code>：主机端入口，为内核准备参数，包括怎么算 grid 大小、block 大小、用哪种 cluster。内核接收的是 CuTe 张量表示，CuTe 张量通常带着 Tensor Core 指令和硬件要求的布局，她希望大家从这里开始熟悉这个流程。它也可以被其他 DSL 函数调用，当作 <code>@cute.kernel</code> 里的内联函数。</li>
+            <li><code>@cute.kernel</code>：GPU 内核本身，相当于 CUDA C++ 的 <code>__global__ void kernel(…)</code>。</li>
+        </ul>
+        <p>幻灯片上有一张表列出谁能调用谁。她的概括：jit 函数既是主机入口，也能被 kernel 当内联函数调用；kernel 是全局入口，按她的说法只有 kernel 装饰器能调用另一个 kernel 装饰器（字幕这一句不太清楚，具体规则以幻灯片表格和文档为准）。</p>
+        <h3>先分区，再切片</h3>
+        <p>第二个要熟悉的是 CuTe 布局操作，主要是一串除（divide）和切片（slice）。幻灯片要点：在调用 <code>cute.copy</code> 和 <code>cute.gemm</code> 之前先做分区，把缓冲区拆开；再用切片或 <code>[]</code> 为每个 block、warp 或线程索引自己那一份。</p>
+        <p>例子里把全局张量 A 按 M、K 两个维度分块，块大小是配置里给的 block M 和 block K，它们是编译期常量。变量名沿用了 “MMA tiler”，虽然这个例子没用 Tensor Core，只是为了让大家学会怎样用分块参数切全局张量。分块后得到层级坐标：block M、block K 是最内层；外面一层是 M 方向有多少个 block M（rest M）、K 方向有多少个 block K（rest K）；还有一层 rest L 是批维度，图里为了简单只画了 batch 为 1。</p>
+        <p>然后按坐标切片：用 block 编号在 rest 维度上切，把每个 CTA（cooperative thread array，即线程块）移到它要算的那一块；在块内再用线程编号切出每一行。图上从每个线程的角度看，它定位到 A 里一行深绿色、B 里一段黄色，累加得到输出里深蓝色的那个元素。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. Tensor、TensorSSA 和控制流</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=663s" target="_blank">0:11:03</a>–0:19:00 · Tensor ssa and debugger</em></p>
+        <h3>Tensor 和 TensorSSA</h3>
+        <p>Tensor 是迭代器和布局的组合，支持全局内存、共享内存、寄存器和张量内存（tensor memory，TMEM，Blackwell 上给 Tensor Core 存累加器等数据的片上存储）。TensorSSA 是 CuTe 张量在线程本地的值语义表示，不可变。幻灯片要点：基于向量，支持嵌套的 CuTe 形状；把张量元素作为向量加载、把向量存回张量；运算符重载，做向量化运算。</p>
+        <p>GEMV 里的用法：切片后得到一个全局张量；按它的形状建一个寄存器张量；把全局张量加载成 TensorSSA，底层就是向量操作；然后用各种向量运算做类型转换和逐元素运算；最后存回寄存器张量，寄存器张量可以读写。</p>
+        <h3>控制流：Python 到 Python 的代码生成</h3>
+        <p>CuTe DSL 支持 <code>for</code>、<code>while</code>、<code>if</code>，用户可以写普通的 Python 控制流。幻灯片的说明：CuTe DSL 遍历 Python 的 AST，把遇到的每个控制流结构转成结构化的中间表示（IR）；如果是编译期就能确定的原生 Python 控制流，就在编译时求值，如果是动态的，就生成 IR。她的说法：条件是编译期常量时，就是普通 Python 求值；条件是运行时才知道的值时，会经过改写，生成 IR 里的 if（scf）节点。<code>if</code> 和 <code>for</code> 规则相同。</p>
+        <h3>cutlass.range 和软件流水线</h3>
+        <p><code>for</code> 有一个特殊的 <code>cutlass.range</code>，和 Python 的 <code>range</code> 几乎一样，区别是支持更高级的展开和流水线控制。她举的例子：左边是一个简单的 GEMM 循环，每轮先 copy 加载 A、copy 加载 B，数据从全局内存到本地后再做 gemm。在这个循环上加一个预取级数（prefetch stages）的标注，效果差不多等于手工把它改写成软件流水线（software pipelining）：循环被拆开，先发出若干个 TMA 预取加载，提前把几份数据读进来；之后每轮计算时，可以和后面阶段的数据预取并行执行。她说想深入可以看他们的软件流水线示例。到这里 GEMV 例子覆盖了最常用的基础功能。</p>
+        <h3>问答：为什么把 NVFP4 转成 FP32 算</h3>
+        <p>聊天区有人问为什么 NVFP4 被转成 FP32 计算（指上一张 TensorSSA 幻灯片）。她说那只是为了展示 TensorSSA 的用法，是最开始的简单例子。GEMV 模板完全没用 Tensor Core 或 Blackwell 的高级特性，只是让参赛者熟悉常用 DSL 功能和 CuTe 的代数与布局表达，所以全部用 FP32 的 FMA 模拟计算。</p>
+        <h3>问答：Tensor 里的迭代器</h3>
+        <p>又有人请她展开讲 Tensor 包含迭代器这件事。她指着代码说，左边的 <code>tAgA</code> 这类变量就是全局内存张量切片后的结果，是典型的张量操作，里面有迭代器和布局。真想操作迭代器，可以从张量里取出迭代器，做布局变换，再 make tensor 变回张量，就像 PyTorch 的张量也有底层存储和布局一样。Alex 补充 CuTe/CUTLASS 文档有专门一节讲这个。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. GEMM 例子：TMA 加载和 swizzle</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=1140s" target="_blank">0:19:00</a>–0:26:21 · Generic matrix multiplication</em></p>
+        <h3>整体流程</h3>
+        <p>第二个例子是 GEMM。要在 GPU 上达到光速性能，必须用很多 Blackwell 芯片的高级特性，所以这个例子用来让参赛者熟悉 CuTe 编程模型。幻灯片列出流程：</p>
+        <ol>
+            <li>用 TMA 加载把 A、B、scaleA、scaleB（A 和 B 的缩放因子，NVFP4 是块缩放格式，每一小块元素共享一个缩放因子）从全局内存读到共享内存。</li>
+            <li>Tensor Core 硬件要求缩放因子来自张量内存，所以再用 S2T 加载把 scaleA、scaleB 从共享内存搬到张量内存。</li>
+            <li>用 Tensor Core 指令计算，结果也存在张量内存里。</li>
+            <li>用 T2R 加载把累加结果从张量内存读到寄存器。</li>
+            <li>从寄存器写回全局的 C 张量。</li>
+        </ol>
+        <h3>TMA：主机端</h3>
+        <p>TMA（Tensor Memory Accelerator，Hopper 起的硬件拷贝单元，用一个描述符和一组坐标搬运整块多维数据）的代码分两部分。主机端（在 <code>@cute.jit</code> 里）要建 TMA atom 和 TMA 坐标张量，因为这个硬件要求代码给出要加载的张量坐标。她说主机端的工具函数里，用户要选对 atom 指令；例子用的是 1 个 CTA 的版本，为了达到最高访存效率，优化时可能要用 2 个 CTA 的版本。传入的东西有：带布局的全局张量；共享内存布局，其中带着 swizzle 信息，告诉 TMA 从全局内存搬到共享内存时按什么规则打乱数据，以便后面 Tensor Core 消费；共享内存张量的分块大小；共享内存里有几个 stage，供预取优化用；还有 Tensor Core 指令配置（tiled MMA），后面会看到 TMA 用它把全局张量分成适合 Tensor Core 计算模式的形状，它也把数据搬运和之后的计算耦合起来。主机端建好 TMA atom 和 TMA 张量后，作为参数通过 jit 装饰器传给内核。</p>
+        <h3>TMA：设备端</h3>
+        <p>设备端第一步是 <code>local_tile</code>，和 GEMV 一样，用 MMA tiler 把全局张量切成块。第二步是 TMA 分区（<code>tma_partition</code>），基于主机端建好的 TMA atom、共享内存布局和全局张量，得到 TMA 拷贝所需的共享内存和全局内存布局。最后对每个 K block 迭代调用 <code>cute.copy</code>，把数据从全局内存拷到共享内存，满足所有 TMA 硬件要求，并把数据在共享内存里排成 Tensor Core 指令能直接消费的样子。A、B 和两个缩放因子张量都按同样的模式分区和加载。</p>
+        <h3>问答：swizzle 是什么，和 warp 有什么关系</h3>
+        <p>有人问她能否解释建 TMA atom 时提到的 swizzle。她说要讲清楚需要画数据布局，简单说：数据在全局内存里按 M-major 或 K-major 存。搬到共享内存时，按一个个小块（图上的绿色方块，是全局拷贝的粒度）拷贝。如果直接流式拷贝，共享内存里第一行、第二行会和全局内存的排法一样。但 Tensor Core 消费数据的粒度更小，一次可能只取这一块里的一部分，这时原样的排法不一定满足共享内存最好的对齐和访问要求。比如共享内存希望 128（字幕说 128 accessing）的访问分散到不同的 bank，让线程之间没有 bank 冲突（bank conflict：共享内存分成多个 bank，同一时刻多个线程访问同一个 bank 的不同地址会被串行化）。所以拷进共享内存时要把这块数据做 swizzle，让它符合避免 bank 冲突的模式。她说之后会找公开文档里的 swizzle 细节分享。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. S2T 拷贝、Tensor Core、T2R 拷贝和编程模型小结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=1581s" target="_blank">0:26:21</a>–0:35:30 · Generic matrix multiplication / Programming model and pipeline</em></p>
+        <h3>S2T 拷贝：共享内存到张量内存</h3>
+        <p>缩放因子 A、B 从全局内存到了共享内存，但 Tensor Core 要求它们在张量内存里，所以要做 S2T 拷贝。步骤：</p>
+        <ol>
+            <li>选对 S2T copy atom。不同 S2T 拷贝指令的配置可以在 CUDA 编程指南里查到。</li>
+            <li>用它构造 tiled copy 对象。</li>
+            <li><code>partition_S</code> 分区源（共享内存），<code>partition_D</code> 分区目标（张量内存）。</li>
+            <li>对每个 k block 调用 copy。</li>
+        </ol>
+        <p>分区后，共享内存和张量内存里的数据都遵循 CuTe 布局惯例：第一个模是 atom 集合，表示每条指令拷贝的粒度；其余模表示沿 M、N 或 K 怎样一块块移动，把小粒度数据从共享内存搬到张量内存。切片时她把每个 k block 的全部数据都拷到张量内存。她说模式总是：选对 atom，得到 tiled copy，用它 partition_S、partition_D，再 copy。TMA 分区只是一个更简单的封装，把 partition_S（全局张量）和 partition_D（共享内存张量）合在一起，一次返回两个结果。</p>
+        <h3>Tensor Core</h3>
+        <p>同样先选 Tensor Core 指令：指令级的形状，用 1 个 CTA 的配置，并告诉它操作数来自共享内存（A、B 都来自共享内存）。配好 tiled MMA 后，用它从共享内存张量构造描述符（operand 类型），让 <code>cute.gemm</code> 能消费：共享内存 A、B 转成描述符类型，累加器转成张量内存类型。幻灯片：A、B 来自 Smem，Acc 来自 TMEM。</p>
+        <p>然后对每个 K block 迭代。她说一个 K block 是 256（字幕“to 50 six”），但一条指令每次只算一小部分，所以在 k block 里循环，每次为 tiled MMA 更新缩放因子的迭代器，再调用 <code>cute.gemm</code> 累加。这里用到了前面“张量是迭代器和布局的组合”的概念：设置的是迭代器。</p>
+        <h3>问答：为什么要选 Tensor Core 指令</h3>
+        <p>Alex 问：要选对 Tensor Core 操作，是不是说有好几种可用，有的更好？她说是，硬件提供不同尺寸的 Tensor Core 指令供用户选。比如 GEMV 里 N 等于 1，用很宽的指令就浪费大量算力。所以要选不同尺寸，在计算资源和访存之间平衡。</p>
+        <h3>T2R 拷贝和 epilogue</h3>
+        <p>计算完成后结果在累加器里，epilogue（GEMM 计算完之后处理并写回结果的阶段）要做张量内存到寄存器的拷贝。顺序同样是构造合适的 T2R copy 指令。有一点不同：<code>get_slice</code> 时传的是线程编号，因为 T2R 是 SIMT 指令（每个线程各自执行），按线程把累加结果分到不同的分区。然后 partition 源（张量内存）、partition 目标（全局内存），并按全局内存分区的形状构造一个寄存器张量。最后把张量内存拷到寄存器，为最后的全局写回做准备。模板只是演示，所以直接从寄存器写到全局内存，寄存器张量和全局内存分区布局相同，存储很简单。</p>
+        <p>想进一步优化可以改寄存器张量的构造方式，做一些 swizzle 重排，先把寄存器存到共享内存，再从共享内存写到全局内存。</p>
+        <h3>CuTe 编程模型小结</h3>
+        <p>她说所有拷贝都遵循同一套编程模型：选对 atom，分区源，分区目标，然后 copy。幻灯片的总结：</p>
+        <ul>
+            <li>Copy：<code>local_tile</code>（给全局张量分块）→ <code>partition_S</code>、<code>partition_D</code> 或 <code>tma_partition</code> → <code>cute.copy</code>。</li>
+            <li>MMA：<code>make_fragment_A</code>、<code>make_fragment_B</code>、<code>make_fragment_C</code> → <code>cute.gemm</code>。</li>
+            <li>变量命名约定 <code>tXaY</code>：分区模式 tX 作用在张量 aY 上。a 是 r（寄存器）、g（全局内存）、s（共享内存）、c（坐标）、p（谓词）、t（张量内存）。比如 <code>tAgA</code> 就是 A 的分区模式作用在全局内存 A 上。</li>
+        </ul>
+        <p>她说顺序和逻辑都很相似，差别在怎样调 atom 选择和 swizzle 模式，保证访存带宽和计算效率最大化，这是留给参赛者去探索的优化问题。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 优化思路、流水线和 cute.struct</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=2130s" target="_blank">0:35:30</a>–0:47:14 · Optimization tips and structs</em></p>
+        <h3>问答：比赛里怎样把模板改快</h3>
+        <p>Alex 问：例子里能选的指令、块大小很多，都能得到正确结果，第一次参赛的人怎样在模板之外把代码改快？她分享了 GitHub 上的一个教程示例链接，那个教程讲的是半精度 GEMM 的优化技巧。她列了几条：</p>
+        <ul>
+            <li>atom 的大小。不同 atom 取决于问题尺寸会浪费多少内存和计算，这是很多人可以探索的配置。</li>
+            <li>软件流水线。所有计算模板都是简单的 for 循环：先加载，再计算。每个 K block 迭代里计算都要等数据先到本地内存。理想情况是把数据拷贝和数学运算并行：提前预取，计算时数据已经就绪，同时把后面的数据预取到其他缓冲区。</li>
+            <li>warp 专用化（warp specialization，让不同的 warp 分别只负责搬数据或只负责计算）。TMA 指令和 Tensor Core 指令都是异步指令，所以 Blackwell 上典型的编程模型是 warp 专用化：不同 warp 发不同的拷贝和计算指令，因为是异步的，彼此不会阻塞，并发更好，负载更均衡。</li>
+            <li>更细粒度的优化，比如 epilogue。例子里 epilogue 以 block 为粒度：每个 block 直接把累加器从 TMEM 拷到寄存器，再把寄存器存到全局内存。优化的 epilogue 会对 epilogue 也分子块，让 T2R 拷贝和全局写回并发，就是软件流水线里的那种技巧。</li>
+        </ul>
+        <p>她总结：软件流水线和选对 atom 配置是用户想在这些问题尺寸上拿到更高性能时最该尝试的优化。</p>
+        <h3>流水线：生产者和消费者</h3>
+        <p>她跳到流水线那张幻灯片。有一组流水线操作，在拷贝/加载指令和计算指令之间做生产者-消费者控制：TMA 和 Tensor Core 之间是 <code>PipelineTmaUmma</code>，Tensor Core 和 epilogue 之间是 <code>PipelineUmmaAsync</code>。异步流水线让生产者和消费者并发工作，同时保证内存顺序和操作正确。她说这是用户需要探索的部分。</p>
+        <h3>@cute.struct 和 SmemAllocator</h3>
+        <p><code>@cute.struct</code> 把一个 Python 类变成内存映射的结构体，精确控制内存布局、对齐和偏移；成员可以是标量、MemRange 或嵌套 struct；可以自定义对齐，这对性能很重要。通常用它来分配 mbarrier（共享内存里的硬件屏障对象，流水线里生产者和消费者靠它同步数据是否就绪）：把一组屏障放进一个结构体，保证对齐，之后访问更高效。幻灯片上的 SharedStorage 例子依次是 <code>ab_mbar_ptr</code>（大小 8 * 2 * num_ab_stage，对齐 8）、<code>acc_mbar_ptr</code>（8 * 2 * num_acc_stage，对齐 8）、<code>tmem_holding_buf</code>（对齐 4），每种类型按自然对齐。<code>SmemAllocator</code> 管理共享内存分配，可以分配原始字节、数值类型，以及带静态布局的张量缓冲区。</p>
+        <h3>问答：不规则或很小的矩阵怎么切</h3>
+        <p>有人问对于不常见或很小的矩阵尺寸，切分内存的方式该怎么改。她说要看多小。如果极小（她的原话是 really very tiny），多半已经不是计算密集的情形，会落到访存受限，这时怎样用满内存带宽最重要，可以暂时少管 Tensor Core 那些技巧，想想访存操作的最佳配置，从一种内存搬到另一种内存怎样最好。即使只是拷贝，通常也要从全局内存搬到本地内存，中间做 swizzle，再拷到别的内存空间。简言之，试试软件流水线，让访存操作也并发起来，隐藏延迟，提高搬运效率。</p>
+        <h3>问答：用 Nsight Compute 分析 warp 专用化内核看什么</h3>
+        <p>她说通常先看 Speed of Light 一节，它先告诉你内核是访存受限还是计算受限。如果访存受限，再看 Memory 一节：如果瓶颈在本地内存而不是 DRAM，就查本地内存流量，看是否从全局内存往本地内存做了太多冗余加载。这让她想起刚才忘了说的一个优化：cluster。cluster 是另一个硬件特性，可以把数据从全局内存加载到本地内存后做广播（multicast），进一步减轻压力。Memory 一节会给出全局到本地、各本地内存之间的流量细分，据此判断内存瓶颈在哪。如果已经是计算受限，就看指令统计，找出计算部分里拖后腿的指令，再继续分析。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. Dual GEMM：静态参数和 epilogue 融合</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=2834s" target="_blank">0:47:14</a>–0:49:20 · Dual gemm implementation</em></p>
+        <p>Dual GEMM 有一个 A 矩阵和两个 N 维相同的 B 矩阵，算出两个累加结果。写回全局张量 C 之前，对其中一个结果做 SwiGLU 里的激活（字幕作“three gall”，幻灯片写 swiglu），再和另一个结果逐元素相乘。按幻灯片“对 Acc1 做 swiglu，再把 Acc1 和 Acc2 逐元素相乘”的描述：</p>
+        $$C = f(\text{Acc}_1) \odot \text{Acc}_2, \qquad \text{Acc}_1 = A B_1,\ \ \text{Acc}_2 = A B_2$$
+        <p>其中 $f$ 是 epilogue 里传入的激活函数，$\odot$ 是逐元素乘。它和 GEMM 很像，区别是要多管理一份张量，代码里会看到额外的 tiler 和分区。</p>
+        <h3>静态参数和动态参数</h3>
+        <p>这个例子想让大家看的是 epilogue 里的 lambda 表达式。内核签名里既有编译期参数也有动态参数。幻灯片：静态参数是编译期已知的值，不进入生成的 JIT 函数签名；动态参数只在运行时知道（默认行为）；用 <code>cutlass.Constexpr</code> 标记静态参数。动态参数就是内核参数，静态参数可以是内联到内核里的函数，效率更好。模板就用 Constexpr 传入一个 lambda，定义 epilogue 里融合的 swiglu 操作。</p>
+        <p>这里又能看到 TensorSSA 的作用：把寄存器张量加载成向量，直接对它应用激活函数，不用一个个元素地处理；再在两个 TensorSSA 之间做逐元素乘法。她说这个例子计算量更大，应该重点研究怎样用好 Tensor Core。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. Group GEMM：在内核里更新 TMA 描述符</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=2960s" target="_blank">0:49:20</a>–0:57:24 · Group gemm and on-the-fly updates</em></p>
+        <p>她说这是最复杂的例子。Group GEMM 有多组矩阵乘法，每组的尺寸不同，所以代码要在运行时算出每个 CTA 要处理哪些数据。和其他例子不同，代码一开始每个 CTA 要弄清该从哪加载数据、算哪一块、结果存到哪个全局张量；定下组和坐标后，要在内核里在线更新 TMA 描述符。工具是 <code>TensorMapManager</code>，提供管理 TensorMap（TMA 描述符）初始化和更新的一组工具。</p>
+        <p>模板用了很朴素的模型：每个 CTA 算输出的一个块。步骤按幻灯片：</p>
+        <ol>
+            <li>每个 CTA 拿到自己在全局内存里的 tensormap 指针，分别对应 A、B、SFA、SFB 四个张量。她用 grid 的一个维度表示组编号。</li>
+            <li>在共享内存里构造 TMA 描述符：把主机端建好的 tensormap 从常量内存拷到共享内存。这份描述符里分块大小（box size）是静态的真值，但全局地址、全局维度、全局步长是假的。</li>
+            <li>用设备上在线构造的真实 A、B、SFA、SFB 张量信息（真实全局地址和问题尺寸）更新描述符，再存回开头拿到的全局 tensormap 位置。</li>
+            <li>确保所有 TMA 描述符都已写进全局内存。</li>
+        </ol>
+        <p>之后的部分和 GEMM、Dual GEMM 类似：TMA 加载、缩放因子加载、Tensor Core 计算。她说难点全在 TMA 描述符的更新和管理上，用户有时很难弄明白。从单个 CTA 的角度看，想通描述符更新逻辑后，其余和 GEMM 一样，所以 GEMM 和 Dual GEMM 上的优化可以照搬过来。</p>
+        <h3>问答：Dual GEMM 的数据该怎样过共享内存</h3>
+        <p>Alex 补了一个之前关于 Dual GEMM 的提问：第一个 GEMM 的输出应该留在共享内存给第二个用，还是溢出到寄存器以减轻共享内存压力？她说两个输出都在张量内存里，做逐元素运算时它们必须在寄存器里。Blackwell 上 epilogue 之前的访存和 Tensor Core 运算都在本地内存里，寄存器用得少，可以试试把整份数据读进寄存器。但如果选了很大的 MMA 块，寄存器可能会溢出（register spilling，寄存器不够时编译器把变量放到慢得多的本地内存）。所以她建议给 epilogue 分子块：每次取一个子块读进寄存器，做逐元素运算，存到共享内存做后续工作，并让不同阶段的寄存器和共享内存搬运并发。不建议把数据直接放进共享内存，因为共享内存要用来预取 A、B；epilogue 占太多共享内存，主循环的 stage 数就会减少，Tensor Core 会吃不饱。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 编译缓存和打印调试</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=3444s" target="_blank">0:57:24</a>–1:02:42 · Compilation and debugging</em></p>
+        <h3>自定义编译缓存</h3>
+        <p>模板里用了自定义的编译缓存键。因为是 Python DSL，编译时间有时较长，做基准测试时不想每次都重新编译。可以自定义缓存键，用来判断内核是否已在全局缓存里，或者某个静态编译期配置变了需要重编。Group GEMM 里她用问题尺寸当键，因为不同问题尺寸的组数不同，会改变启动内核的签名。编译时用假张量准备参数：用空指针（nullptr）构造指针，保证用正确的签名编译，但不带运行时信息。编译好放进缓存；真正启动时先查缓存里有没有这个配置，有就省掉编译，从缓存取出编译好的内核，换上真实的运行时参数再启动。幻灯片四个标注：按组大小缓存内核；检查缓存里是否已有 cubin；用 nullptr 编译；运行时传入真实数据。</p>
+        <h3>三种打印</h3>
+        <ul>
+            <li>Python 的 <code>print</code>：只能显示编译期的静态值。运行时的值会显示成问号。</li>
+            <li><code>cute.printf</code>：主机端和 GPU 上都能用，能显示静态和动态值，包括运行时参数。她说可以用它检查分区结果里 rest M、rest K 等是否符合预期。</li>
+            <li><code>cute.print_tensor</code>：把张量内容打出来。只支持 Float16/Float32/Float64。想检查窄精度数据在本地内存里是否正确，要先用 TensorSSA 把它加载成向量，转成 FP32 再打印。她说这也是 GEMV 用 FMA 写的原因之一，帮大家熟悉这一套，之后调试用得上。</li>
+        </ul>
+        <p>她演示打印全局张量内容（准备阶段填的随机值）；分区后对张量切片，只打印一个分区块（128 个元素）的数据，检查选到的数据对不对；加 verbose 标注会打出全部 128 个元素的细节。她说调试功能问题时很有用。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 调试开关、Nsight 源码对应和内联 PTX</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=3762s" target="_blank">1:02:42</a>–1:07:38 · Advanced tools and questions</em></p>
+        <h3>保留中间产物</h3>
+        <pre><code>export CUTE_DSL_KEEP_IR=1     # keep generated CuTe IR
+export CUTE_DSL_KEEP_PTX=1    # keep ptx in a *.ptx file
+export CUTE_DSL_KEEP_CUBIN=1  # keep cubin in a *.cubin file</code></pre>
+        <p>熟悉 MLIR 的话，可以看导出的 IR，有明显的 bug 能很快发现。保留 PTX 或 cubin 后，可以用 CUDA 工具包检查是否有寄存器溢出或不好的 SASS（GPU 实际执行的机器指令），但这要求对 PTX 和 SASS 比较了解。</p>
+        <h3>lineinfo 和 Nsight Compute</h3>
+        <p>给编译函数传 lineinfo 选项，Nsight Compute 里就能显示源码和 SASS 的对应。要保证 Nsight 报告和源代码在同一个目录。点击一条指令，比如她的 T2R 共享内存拷贝，会跳到对应的源码行。做指令级优化时，如果发现某段 SASS 不好，可以点进去看是哪段源码生成的，比如忘了做循环展开，生成了意外的循环条件。她说这个功能还在完善，可能会看到 SASS 和源码对不上，可以到 GitHub 报 issue。</p>
+        <h3>内联 PTX</h3>
+        <p>CuTe DSL 是 Python 前端，后端建在一套 MLIR 框架上，用户看不到。做很底层的细粒度优化时，可能发现某个特性 wheel 里还不支持。这时可以用内联 PTX 绕过去，前提是熟悉 PTX 语法。幻灯片的例子是 hstu_attention。</p>
+        <h3>问答：只用 CuTe DSL 能接近光速吗</h3>
+        <p>有人问只用 CuTe DSL 能否接近光速，还是顶尖方案通常要用 CUDA 或 PTX。她认为 CuTe DSL 能达到光速性能，他们已经发布了很多这样的例子。但 wheel 还在开发，有些硬件特性在发布版里还没准备好；比赛用哪个版本取决于 GPU MODE 是否更新 wheel，有些边角情况可能缺功能，就得用内联 PTX 这类技巧。</p>
+        <h3>问答：cute.printf 需要寄存器吗</h3>
+        <p>有人说用 setmaxnreg 重新分配寄存器后 <code>cute.printf</code> 用不了，问它是否需要寄存器空间。她说不需要，她例子里打印的都是全局内存。但要看打印的是什么：老版本的 print 可能只能打印比较简单的布局，打印复杂的组合布局或 swizzle 布局时，需要先切片保证打的是线性化的缓冲区，才会得到正确结果。最新版本已经改进，但比赛是否更新版本另说。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 资源和最后的问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=4058s" target="_blank">1:07:38</a>–1:13:18 · Conclusion and resources</em></p>
+        <h3>推荐资源</h3>
+        <ul>
+            <li>CuTe 的创始人 Chris（即 Cris Cecka）在 GPU MODE 讲过 CuTe 介绍（本合集第 16 篇），包含 CuTe 代数和布局变换的全部细节。</li>
+            <li>CuTe DSL 文档，详细讲了这份幻灯片里的大多数功能。</li>
+            <li>CuTe DSL 示例。她说大多数示例已经展示了怎样达到光速性能，但优化细节太多，第一次看会很难。所以她给比赛写的模板只展示算法的简单逻辑，先用模板理解常用功能，再去看 GitHub 上的公开示例，把优化应用到比赛里。</li>
+        </ul>
+        <p>Alex 说她讲的这些内核都会出现在比赛里；GEMV 已经有很多很酷的方案，GEMM 还在进行，大概还剩两周或更久。</p>
+        <h3>问答</h3>
+        <ul>
+            <li>能否在 CuTe DSL 里写运行时断言？她说可以，参照文档里静态（编译期）功能那部分，可以在代码里写运行时断言。</li>
+            <li>幻灯片会公开吗？会，Alex 说会放到 lectures 仓库。</li>
+            <li>和新出的 cuTile（字幕作 Qile / cout）有什么区别？她说 CuTe DSL 是更底层的 Python 原语，能完全控制所有硬件特性；据她所知 cuTile 是更高层的 Python 方案，示例里没有太多硬件细节，后端编译器替你做那些花哨的优化，在 API 层面会简单很多。有用户反馈 CuTe DSL 底层细节太多，难学，也难写出好内核，cuTile 会让 Python 原型探索容易得多。</li>
+            <li>调试流水线和操作顺序有什么技巧？她说可以用 Compute Sanitizer 一类的工具（字幕说“inside... not inside the computer too”，所指工具不清）检查竞争和非法内存访问；然后多打印，把和流水线相关的代码注释掉，看能否定位根因；最后可以用 CUDA-GDB 下断点，停在出问题的地方，查是哪个线程出的问题，再推断根源。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“Uh from feature side I I believe they are they have the same flexibility.”（从功能上看，我认为两者灵活性相同。）<a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=405s" target="_blank">0:06:45</a></li>
+            <li>“So if you use a vir wider tensor actually we are wasting a lot of computation power.”（如果用更宽的 Tensor Core 指令，其实会浪费大量算力。）<a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=1899s" target="_blank">0:31:39</a></li>
+            <li>“if we look at all the copy uh sequence it all follow the similar uh program model that we picking the right atom to the partition source partition destination and then to the copy.”（看所有拷贝的顺序，都遵循相似的编程模型：选对 atom，分区源，分区目标，然后拷贝。）<a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=2065s" target="_blank">0:34:25</a></li>
+            <li>“Usually I probably will start from the speed of light section”（我通常从 Speed of Light 那一节开始看。）<a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=2708s" target="_blank">0:45:08</a></li>
+            <li>“But please pay attention the cute print tensor only support limited data.”（但请注意，cute.print_tensor 只支持有限的数据类型。）<a href="https://www.youtube.com/watch?v=9-dfte_N3yk&t=3573s" target="_blank">0:59:33</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 86: Getting Started with CuTe DSL · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

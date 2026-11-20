@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPU 编程基础与 ThunderKittens | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="16_CuTe布局与张量.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 17</span>
+    <span><a href="18_FlashAttention4怎么工作.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 75 · GPU 编程基础与 ThunderKittens</h1>
+        <p class="subtitle">前半场从硬件出发重新理解 CUDA 程序：SM、warp 调度器、SIMD、时间复用和延迟隐藏，用它们解释两个性能谜题；后半场讲 ThunderKittens 怎样用 16×16 tile、tile 函数库、生产者-消费者模板和持久化网格把高性能 AI 内核写简单，以及“硬件偏好什么模型架构”</p>
+        <div class="author-meta">
+            主讲：William Brandon（Anthropic 性能工程师，MIT 博士在读、休学中，参与创建 MIT 6.S894 Accelerated Computing 课程）、Simran Arora（刚在 Stanford Chris Ré 组完成博士，ThunderKittens 作者之一）· 发布日期：2025 年 8 月 31 日 · 时长：2 小时 39 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA" target="_blank">讲座录像 Lecture 75 [ScaleML Series] GPU Programming Fundamentals + ThunderKittens</a>（GPU MODE YouTube 频道公开）· 幻灯片：<a href="https://docs.google.com/presentation/d/1ypi4IjEF36PUZGOJSaFxjNzk7BpO61TicdTBBf77oqc/" target="_blank">Brandon 的幻灯片（Google Slides）</a>、<a href="https://github.com/gpu-mode/lectures/tree/main/lecture_075" target="_blank">lecture_075（两份 PDF）</a>（本文依据录像字幕和幻灯片整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>这是 GPU MODE 和 Scale ML 合办的五天系列讲座的最后一天，一共两位讲者。第一位 William Brandon 在 Anthropic 做让 Claude 跑得更快的性能工作，读博前在 NVIDIA 做过深度学习编译器。他的内容改编自 MIT 6.S894 前两周的课：不讲 API 怎么用，先讲 GPU 硬件长什么样，再用硬件解释两个常见的性能现象（每块线程数砍到四分之一速度不变；线程块多 4% 速度却慢一倍）。这一部分不讲内存，只讲计算侧的指令发射和调度。</p>
+        <p>第二位 Simran Arora 讲 ThunderKittens（简称 TK），一个用 C++ 写、以 16×16 tile 为基本数据类型的内核 DSL。她按 GPU 的并行层级（线程、warp、线程块、网格、多卡）逐层说明每一层的难点，再讲 TK 在每一层给出的抽象；最后讲她们怎样用 TK 研究“硬件喜欢什么样的模型”，得到 Based 线性注意力。前置知识：本站 CS149 讲过的 SIMD、多线程、延迟隐藏，以及 CS2680 里的注意力和 KV cache。读过本目录第 2 讲（计算与内存架构基础）和第 13 讲（FlashAttention 3）会更容易跟上后半场。</p>
+        <ol>
+            <li><a href="#t01">开场：这一讲给谁听</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">CUDA 眼里的程序和两个性能谜题</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=246s" target="_blank">0:04:06</a></li>
+            <li><a href="#t03">GPU 是一堆小方块：SM 和 warp 调度器</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=497s" target="_blank">0:08:17</a></li>
+            <li><a href="#t04">账算不平：几十万线程和几百个调度器</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=915s" target="_blank">0:15:15</a></li>
+            <li><a href="#t05">问答：线程与块、分支、warp 为什么是 32</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=1166s" target="_blank">0:19:26</a></li>
+            <li><a href="#t06">隐式 SIMD：读 CUDA 代码要按 32 个线程一起想</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=2012s" target="_blank">0:33:32</a></li>
+            <li><a href="#t07">时间复用和延迟隐藏</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=2270s" target="_blank">0:37:50</a></li>
+            <li><a href="#t08">问答：程序计数器、多内核并发、缓存</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=2716s" target="_blank">0:45:16</a></li>
+            <li><a href="#t09">单个 warp 内的重叠：循环展开</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=3196s" target="_blank">0:53:16</a></li>
+            <li><a href="#t10">需要多少线程，回头解两个谜题</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=3387s" target="_blank">0:56:27</a></li>
+            <li><a href="#t11">问答：编译器、SM 映射、GPU 有没有上下文切换</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=3836s" target="_blank">1:03:56</a></li>
+            <li><a href="#t12">Simran 开场：为什么关心内核，处理器和存储的基本概念</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=4443s" target="_blank">1:14:03</a></li>
+            <li><a href="#t13">SM 里的异构单元：算力都在 Tensor Core</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=4953s" target="_blank">1:22:33</a></li>
+            <li><a href="#t14">每一层并行的难点：布局、异步、专用化、内核边界</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=5202s" target="_blank">1:26:42</a></li>
+            <li><a href="#t15">为什么要 ThunderKittens：编程抽象的光谱</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=5772s" target="_blank">1:36:12</a></li>
+            <li><a href="#t16">16×16 tile 和内存布局，bank 冲突</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=6513s" target="_blank">1:48:33</a></li>
+            <li><a href="#t17">tile 上的函数库</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=7090s" target="_blank">1:58:10</a></li>
+            <li><a href="#t18">块级模板、持久化网格和 megakernel</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=7274s" target="_blank">2:01:14</a></li>
+            <li><a href="#t19">评测和使用情况</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=7587s" target="_blank">2:06:27</a></li>
+            <li><a href="#t20">硬件偏好的架构：线性注意力和 Based</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=7829s" target="_blank">2:10:29</a></li>
+            <li><a href="#t21">未来方向：从硬件出发设计模型，多种芯片</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=8309s" target="_blank">2:18:29</a></li>
+            <li><a href="#t22">问答：编译器、CuTe DSL、Mojo、生产者-消费者</a> · <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=8552s" target="_blank">2:22:32</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场：这一讲给谁听</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=0s" target="_blank">0:00:00</a>–0:04:06 · Introduction</em></p>
+        <p>主持人介绍：William Brandon 是 Anthropic 的性能工程师，MIT 博士读到一半休学，研究方向是通过内核优化和模型架构改进让 LLM 更高效；去年秋天他参与创建并讲授了 MIT 第一门加速计算课，负责设计其中基于 CUDA 的编程作业。</p>
+        <p>Brandon 说听众里一部分偏系统、一部分偏机器学习，这一讲的目标听众是“打算写内核或者将来可能写内核、还在打地基的人”。他讲的是硬件平台本身的性能规律，所以不管直接写 CUDA，还是用 Triton、NVIDIA 新出的 CUTLASS 4 这类更高层的 DSL，道理都一样。</p>
+        <p>他的经历：读博前在 NVIDIA 做深度学习编译器；在 MIT 做 LLM 效率研究，和导师 Jonathan Ragan-Kelley、另一位博士生 Nikita Lazarev 一起做了 6.S894 这门课；现在在 Anthropic 让 Claude 更快更省。这一讲的内容取自 6.S894 前两周课的精华，课程材料全部在线，他推荐 Lab 1 和 Lab 2，说它们就是这一讲的加长版。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. CUDA 眼里的程序和两个性能谜题</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=246s" target="_blank">0:04:06</a>–0:08:17 · CUDA program structure / Performance puzzles</em></p>
+        <h3>按字面理解的 CUDA 程序</h3>
+        <p>如果只看 CUDA 的编程接口，一个 CUDA 程序就是：用类 C 语言定义一个函数（内核，kernel），再用启动语句并行地跑很多份。启动时要给两个参数：线程块（thread block）的个数，和每个块里的线程数。</p>
+        <pre><code>__global__ void my_kernel(...) {
+   ...
+}
+my_kernel&lt;&lt;&lt;128, 1024&gt;&gt;&gt;(...);   // 128 = number of "blocks", 1024 = number of "threads per block"</code></pre>
+        <p>按这个说法，脑子里的图是一排块，每个块里一排线程，每个线程是一个小程序，和别的线程并行干活。</p>
+        <h3>谜题一：每块线程数从 1024 降到 256</h3>
+        <p>假设有个内核（比如向量加法）用 <code>&lt;&lt;&lt;128, 1024&gt;&gt;&gt;</code> 启动，跑得不错。1024 是 NVIDIA 允许的每块最大线程数。现在把每块线程数改成 256，每个线程多做一些串行的活。他说自己刚学 CUDA 时以为这样只用了 25% 的硬件，会慢 4 倍。实际上很多内核这样改完速度几乎一样。那剩下四分之三的线程原来在干什么？</p>
+        <h3>谜题二：块数从 128 增加到 133</h3>
+        <p>回到原配置，这次改块数：128 改成 133，只多了约 4%。直觉上只是把问题切得稍微不同，性能不该变多少。但在某些内核上，尤其是在 H100 上，这样会慢大约 2 倍。</p>
+        <p>他说这两个谜题说明“块和线程”这套模型有用（NVIDIA 给的就是这套抽象，绕不开），但要预测和推理性能，它是不完整的。对初学者来说，比“CUDA 是什么、怎么用”更好的问题是“GPU 是什么，它能做什么”。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. GPU 是一堆小方块：SM 和 warp 调度器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=497s" target="_blank">0:08:17</a>–0:15:15 · GPU hardware overview / The warp scheduler / Thread mapping</em></p>
+        <h3>一个固定数量的方块阵列</h3>
+        <p>他先放一张 NVIDIA GPU 板卡的照片，再放大到芯片本身：最显眼的视觉特征是芯片由一堆小方块组成。他认为，如果只能用一句话描述 GPU，“固定数量的一堆小方块”比“能跑任意数量线程块的一团东西”更好用。</p>
+        <p>这些方块叫流式多处理器（streaming multiprocessor，SM），是 GPU 上独立执行计算的单元。数量级大约 100 个。照片里的芯片上有 144 个；买来的 H100 会告诉你它有 132 个，因为有些 SM 没能在制造中“活下来”，被软件禁用了。市面上大多数 GPU 的 SM 数都在 100 左右、相差不到两倍。整场用的都是 NVIDIA 术语，AMD 有相似概念但叫法不同。</p>
+        <h3>一个 SM = 4 个 warp 调度器</h3>
+        <p>一个 SM 里面是 4 个更小的东西。他说这是 GPU 最重要的组织单位之一，却没有统一的名字：ThunderKittens 那边的研究者叫它 quadrant（象限），NVIDIA 文档偶尔叫 partition（分区），他们的课叫它 warp scheduler（warp 调度器）。可以把它们看成 SM 里的 4 个计算核心。</p>
+        <p>从计算机体系结构的角度，warp 调度器最接近的类比是 CPU 核心，最大的差别是它专门为执行 SIMD（单指令多数据，一条指令同时处理一组数据）而设计。共同点有三条（幻灯片原样）：</p>
+        <ul>
+            <li>按顺序发射一条指令流：每个时钟周期有一次机会发射一条指令，让功能单元开始干活。</li>
+            <li>保存正在运行的程序的执行状态：程序计数器（program counter，指向当前执行到哪条指令）和寄存器。和 CPU 核心在硬件里记录这些信息一样，warp 调度器也记录。</li>
+            <li>有功能单元（functional units）：整数运算、浮点运算、访问主存的电路，近几年大家最关心的是做矩阵乘法的专用硬件。发射的指令被调度到功能单元上执行，结果写回寄存器文件。</li>
+        </ul>
+        <p>他把 AMD CPU 的芯片照片和 NVIDIA GPU 并排放：都是一片核心，每个核心有寄存器文件、控制逻辑和功能单元。最大的区别是 GPU 多了一层，就是把 4 个调度器编成一组的 SM。为什么有这一层他这场不展开，简短的回答是：SM 是共享内存资源的那一级。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 账算不平：几十万线程和几百个调度器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=915s" target="_blank">0:15:15</a>–0:19:26 · Thread mapping / SIMD execution</em></p>
+        <p>到这里，有 CUDA 经验的人会觉得不对劲。前面那次启动有 $128 \times 1024 = 131{,}072$ 个线程，而 H100 只有 $132 \times 4 = 528$ 个 warp 调度器。如果每个调度器像一个 CPU 核心，几十万线程怎么能并行跑在只有它千分之一数量的核心上？他给出三个答案：</p>
+        <ol>
+            <li><strong>调度器的指令是 SIMD 的。</strong>硬件把 32 个连续线程的数据编成一个大向量，调度器每发射一条指令，就在向量的 32 个 lane 上做 32 个线程的活。</li>
+            <li>调度器可以在不同线程组之间做时间复用（time multiplex）。虽然每个周期只能为 32 个线程发一条指令，但这个周期发给一组 32 个线程，下个周期可以发给另一组。所以一个调度器上同时驻留的线程状态可以超过 32 个。</li>
+            <li>块太多就串行跑。让 CUDA 启动成千上万个线程块不会崩溃，它会把这些块一个接一个地放到各个 SM 上运行。</li>
+        </ol>
+        <p>他说这几点后面还有幻灯片细讲，先停下来回答问题。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 问答：线程与块、分支、warp 为什么是 32</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=1166s" target="_blank">0:19:26</a>–0:33:32 · Q&amp;A: Threads to blocks / Warp scheduler / Warp size tradeoffs / Functional units</em></p>
+        <h3>问答：线程和块是什么关系</h3>
+        <p>他先强调：块和线程都是软件抽象，硬件不是按块和线程组织的。第一近似下，一个 CUDA 内核是在说“我要跑这么多线程，请按 32 个一组切开”，每 32 个一组叫 warp，这也是 warp 调度器名字的由来；然后把这些 warp 映射到各个调度器上尽快执行。块是额外的一层组织：比如总共 131,000 个线程，每 1024 个连续线程属于同一个块。</p>
+        <p>为什么在乎块？同一块里的线程可以通过共享内存（shared memory，SM 上一块由程序显式管理的高速暂存区，“共享”指块内线程之间共享）高效通信，还能互相同步，同步是通信能正确进行的前提。这样就可以做生产者-消费者队列：一些 warp 往共享内存里的队列写，另一些 warp 从队列里取，用同步原语协调。块是线程之间高效协作的单位。</p>
+        <h3>问答：调度器里有没有 32 个核心处理 32 个独立上下文</h3>
+        <p>他说取决于“核心”指什么。有些部件有 32 份或很多份，有些只有一份。只有一份的最显眼的是指令译码和发射逻辑，每周期只能译码并发射一条指令，所以物理上不可能在一个周期给 32 个线程发 32 条不同的指令。它能做的是发一条指令，对 32 份独立数据做同一种运算：比如一条加法指令从寄存器文件取 32 个左操作数、32 个右操作数，逐元素相加，再把 32 个结果写回。寄存器文件则按线程分别保存每个线程的数据寄存器。</p>
+        <p>如果线程走了不同的分支，比如偶数线程做加法、奇数线程做减法，硬件用掩码（masking）处理：花一个周期发一条只作用于一半线程的加法，再花一个周期发一条作用于另一半的减法，始终只发射一条指令。这就是 warp 分支发散（warp divergence）。如果一个 warp 里 32 个线程做 32 件不同的事，就要花 32 个周期发 32 条指令，代价巨大。后面有人追问：这种奇偶分支下调度器吞吐是不是减半？他答基本是：每条指令只完成 16 个线程的活，按线程算的指令发射吞吐减半。</p>
+        <h3>问答：为什么 warp 是 32 个线程，大小有什么取舍</h3>
+        <p>这是硬件里固定的设计决定，他认为从第一代能跑 CUDA 的 NVIDIA 可编程 GPU 起就是 32。架构师怎么选这个数？要先有一批想跑好的目标程序，再做经验分析。两股力量方向相反：</p>
+        <ul>
+            <li>warp 越小，控制流越自由。如果 warp 是 8 个线程，不同的 8 线程组可以各做各的而没有惩罚；在实际的 32 线程硬件上这样做，要花 4 个周期发 4 条指令，有 4 倍的发射惩罚。</li>
+            <li>warp 越大，控制逻辑越划算。发射指令、追踪指令依赖的控制逻辑占芯片面积、耗电，每份控制逻辑服务的线程越多，单位控制成本处理的数据越多。</li>
+        </ul>
+        <p>两者合起来是一条 U 形曲线，NVIDIA 认为某种期望成本的最低点在 32。</p>
+        <h3>问答：最底层直接干活的部件是什么，“调度”在调度什么</h3>
+        <p>他说 warp 调度器就是芯片上真实存在的物理部件，用显微镜看，SM 那个小方块的四分之一就是一个调度器在跑你的代码，中间没有别的抽象。它做的“调度”是追踪指令之间的依赖，依赖一就绪就发射。例子：他认为在大多数（也许全部）NVIDIA GPU 上加法指令的延迟是 4 个周期。连续两条加法、第二条依赖第一条时，调度器发出第一条后发现第二条要等 4 个周期才有输入，就保证第二条在第一条结果可用之后才执行。因为调度器同时在轮换多个 warp 的指令流，一个 warp 卡住时它会去发其他 warp 的指令，这样硬件利用率就能保持高。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 隐式 SIMD：读 CUDA 代码要按 32 个线程一起想</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=2012s" target="_blank">0:33:32</a>–0:37:50 · SIMD and multiplexing</em></p>
+        <p>中高端的现代 CPU 几乎都有 SIMD 指令：做算术或逻辑运算，但操作的是宽向量寄存器，一次处理很多元素。幻灯片左边是 CPU 上显式 SIMD 的伪代码（他说明这不是真实存在的 API），右边是 GPU 上的普通标量代码：</p>
+        <pre><code>// CPU - explicit SIMD (pseudocode, not a real API)
+fp32x16 x = {...};
+fp32x16 y = {...};
+fp32x16 z =
+  vector_add_fp32x16(x, y);
+// Single instruction issued -&gt; 16 scalar additions in parallel
+
+// GPU - implicit SIMD
+float x = ...;
+float y = ...;
+float z = x + y;
+// Single instruction issued -&gt; 32 scalar additions in parallel
+// (serving 32 consecutive threads)</code></pre>
+        <p>在 CPU 上，用这种一次做很多事的指令，算术吞吐比坚持标量运算高得多。他说 GPU 在硬件实现层面用的是同一个技巧，几乎所有 GPU 代码都这样执行，电路设计上的理由也一样。差别只有两点：GPU 基本上只能跑 SIMD 指令，指令集里没有非 SIMD 指令；暴露给软件的方式不同，你写的是描述单个线程行为的程序。</p>
+        <p>所以要有准确的心智模型，读 CUDA 代码时得在脑子里把右边翻译成左边（16 换成 32）：看起来是一串标量运算，物理上是 32 份独立程序副本上的 32 个并行标量运算。他说读 CUDA 代码不能按字面理解，不能期待它和长得一样的 C 程序性能一样，要“像处理器那样想”，想象每 32 个连续线程怎样一起前进。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 时间复用和延迟隐藏</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=2270s" target="_blank">0:37:50</a>–0:45:16 · Latency hiding</em></p>
+        <h3>一个调度器上驻留多个 warp</h3>
+        <p>他说根据学 CUDA 和教这门课的经验，这可能是建立 GPU 性能心智模型时最难、最微妙的一点。核心思想：调度器每个周期只能为一个 warp 的 32 个线程发指令，但同一周期里，它还保存着其他 warp 的寄存器状态和程序计数器。它会在这些 warp 之间轮换：发一条 warp A 的指令，再发一条 warp B 的，再回到 A。他凭记忆说大多数 GPU 上一个调度器最多能同时轮换大约 8 个 warp 的指令流（整理注：按 NVIDIA 公开规格，H100 每个 SM 最多驻留 64 个 warp，平均到每个调度器是 16 个，这里以他的口述为准、标为凭记忆）。</p>
+        <p>为什么需要这个功能？因为一个 warp 内部的指令可能有依赖链。如果某条指令发出后结果不能在下个周期立刻用，依赖它的指令就得等。一个 warp 的指令流如果是很长的串行依赖，只跑这一个 warp，调度器大部分时间都在空等。如果有别的独立 warp，它们的指令可以填进空档，硬件就能回到满吞吐。这就是延迟隐藏（latency hiding）：用别的独立工作把等待时间盖住。所以当你知道有大量独立工作（比如对几百万元素的向量逐元素做运算），就把不同部分映射到不同 warp 上，调度器会用就绪的 warp 填补没就绪的 warp 留下的空档。幻灯片画的就是时间轴上“线程 0–31 发射、线程 32–63 发射、再回到 0–31……”，每次发射后面拖着一段指令延迟。</p>
+        <h3>功能单元是有限的共享资源</h3>
+        <p>另一块拼图是：功能单元的数量是有限的。浮点乘法器、加法器、整数移位电路、访问主存做 load/store 的接口等，各类单元的吞吐规格不同，能同时服务的指令数也有上限。他说 32 位浮点加法基本上每个周期都能发一条，永远压不满加法单元；64 位浮点加法 SM 配的资源少得多。几个独立 warp 都在发 FP64 加法时会互相争抢这一种稀缺资源，4 个 warp 一起不会比 1 个 warp 快 4 倍，因为碰到了共享单元的吞吐上限。具体分析很深，要查 NVIDIA 底层文档里各类指令的吞吐表，有时还要写微基准测试去反推文档里没写的东西。</p>
+        <p>最后他补充：手机、笔记本里的 CPU 核心也能这样做（同时多线程），只是并发度低，常见是每个核心 2 个线程，这在 CPU 性能工程里同样是要考虑的问题。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 问答：程序计数器、多内核并发、缓存</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=2716s" target="_blank">0:45:16</a>–0:53:16 · Q&amp;A: Program counter / Q&amp;A: Kernel concurrency</em></p>
+        <h3>问答：一个 warp 里所有线程的程序计数器一样吗</h3>
+        <p>他说答案很微妙。第一近似下，至少就指令发射而言是一样的：有一条指令是 warp 里至少一个线程想执行的，用一个指向程序二进制的程序计数器标识，就为这个值发一条指令，哪些线程参与由一个布尔掩码记录（每个线程一位，表示是否活跃）。复杂情况出现在奇怪的同步模式里：warp 里一部分线程阻塞在某个信号量上等它到达某个值，另一部分线程必须越过这个点继续执行才能把前者唤醒。这方面的行为在不同代 GPU 之间变过，不同指令的语义也不完全一样。简短的回答是：存在一些边界情况，处理器必须为每个线程追踪独立的程序计数器才能避免死锁。主持人问写 CUDA 时是不是不用关心，他说取决于做什么同步：有的程序如果硬件不能逐线程追踪程序计数器就会死锁，实际上不会死锁，原因就是硬件能做到。</p>
+        <h3>问答：线程编号是不是总落在同一个 warp</h3>
+        <p>是。线程有整数 ID，warp 按定义就是 32 个连续 ID 的线程，起点对齐到 32 的倍数。0 到 31 号线程按定义总是同一个 warp。</p>
+        <h3>问答：时间复用发生在一个内核里，还是可以跨并发的内核</h3>
+        <p>都在一个内核内部。他说根据最近和一些人的交流，他相信 NVIDIA 硬件有一个没写进文档的限制：一个 warp 调度器不能同时跑来自不同内核的 warp，所以想要时间复用得在一个内核里实现。另外，一个 SM 里的 4 个调度器彼此完全独立地做这件事（他认为它们必须跑同一个二进制里的程序），每个都像一个有自己控制逻辑的核心，和另一个调度器的独立程度如同两个 CPU 核心。交错的粒度是按调度器，不是按 SM。</p>
+        <h3>问答：怎样避免缓存未命中、照顾数据局部性</h3>
+        <p>他说这一讲故意没讲内存，主题太大；简短的回答是没有简短的回答，要看具体工作负载的结构。他自己遵守的一条通用规则是：基本不要依赖隐式的 L1 缓存，优先用可显式寻址的共享内存暂存区来获得局部性和数据复用。其余就是积累经验后会看到反复出现的模式，比如凡是矩阵乘法类的计算，都要切成大致正方形的 tile，再把 tile 的加载和对其他 tile 的计算做流水线重叠。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 单个 warp 内的重叠：循环展开</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=3196s" target="_blank">0:53:16</a>–0:56:27 · Intra-warp latency</em></p>
+        <p>他接着说，只要代码符合合适的模式，一个 warp 内部也能做到同样的延迟隐藏，取决于指令之间的依赖图长什么样。如果所有指令排成一条直线、每条依赖上一条，而每个调度器只有一个 warp，那就没办法，大量时间在等上一条完成。如果依赖图是分叉再汇合的宽图，有些事情可以相互独立地做，调度器很擅长用同一条指令流里的其他独立指令填空档。幻灯片标题是“没有多个线程也能重叠指令（如果模式对的话）”，时间轴上连续几次发射都来自线程 0–31。</p>
+        <p>所以只要用心安排，往往只要较少的 warp 也能让硬件满载，关键是看处理器是不是卡在长的串行依赖链上。一个常用办法是展开循环（loop unrolling）：单次循环体内部可能都是串行依赖，但相邻两次迭代往往彼此独立（比如处理数组里不相交的元素）。靠手工、编译器和调度器三方配合，展开后不同迭代的指令延迟可以交错重叠。他说这是更进阶的一类优化，重要的是知道：调度器卡在串行依赖链上时，多开独立 warp 不是唯一的出路。</p>
+        <p>CPU 也能这样做，而且比 GPU 强得多，因为它必须如此：CPU 线程少、独立工作少，唯一的提速途径就是从单线程的指令里拼命挖并行性。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 需要多少线程，回头解两个谜题</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=3387s" target="_blank">0:56:27</a>–1:03:56 · Saturation analysis / Threshold effects</em></p>
+        <h3>两个值得记住的数</h3>
+        <p>让一个 SM 不闲着最少需要多少线程：$4 \text{ 个调度器} \times 32 = 128$ 个线程，少于这个数就有调度器空闲。让整块 GPU 忙起来呢，以 H100 为例：$132 \times 128 = 16{,}896$，约 17,000 个线程。这只是理论上可能压满吞吐的下限；实际上为了利用时间复用、更好地隐藏延迟，每个调度器多放几个 warp 往往更好。</p>
+        <h3>解谜题一</h3>
+        <p>他补了一个前面没说的约束：块是通过共享暂存区通信的单位，所以物理实现上一个块的所有线程必须在同一个 SM 上，块永远不会跨 SM。<code>&lt;&lt;&lt;128, 1024&gt;&gt;&gt;</code> 最多只能占 128 个 SM，在 H100 上一定有几个 SM 没用上。每个 SM 内，线程会被分配到各个调度器。只有 4 个调度器，1024 个线程能压满它们，256 个线程通常也足够安全，有时 128 个都可以。所以 1024 和 256 两种配置都很可能压满 128 个 SM，速度差不多。</p>
+        <h3>块太多时串行执行</h3>
+        <p>如果在 132 个 SM 的 GPU 上启动 396 个块，GPU 会在 SM 空出来时把块依次排上去。396 恰好是 $3 \times 132$，所以 GPU 大概会让每个 SM 先后跑 3 个块。</p>
+        <h3>解谜题二</h3>
+        <p>从 128 块增加到 133 块，跨过了一个阈值：原来块比 SM 少，每个块各占一个 SM；现在比 SM 多一个，就会有一个掉队者（straggler）。前 132 个块在 132 个 SM 上并行跑完，第 133 个块之后才开始，独自在一个 SM 上跑到结束，如果没有别的内核可跑，另外 131 个 SM 在这段时间全部闲着，总时间接近翻倍。他说这又是一个 CUDA 软件模型掩盖重要细节的例子：块数看起来像一个能随意调的连续参数，实际上有离散的阈值效应，只有想清楚硬件的物理结构才能解释。</p>
+        <p>幻灯片最后的“附加闲聊”列了三点：线程控制流不同怎么办（第一近似：掩码）；为什么要有 SM 而不只有调度器（共享暂存区）；线程块簇、Tensor Core、TMA 等更奇特的功能（留给问答）。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 问答：编译器、SM 映射、GPU 有没有上下文切换</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=3836s" target="_blank">1:03:56</a>–1:14:03 · Q&amp;A: Compilation and context</em></p>
+        <h3>问答：不手动展开循环，CUDA 编译器交错指令的能力怎么样</h3>
+        <p>他说“还行”，看法因人而异。他自己比较多疑，倾向于把代码写成让编译器怎么优化都没有悬念的样子。一个很轻量的办法是显式循环展开：CUDA 编译器和现代 C 编译器一样，写一行 <code>#pragma unroll</code> 加一个数字，编译器就按这个倍数展开，结果有保证、你能明确控制。</p>
+        <pre><code>// sketch based on the talk: explicit unrolling with a pragma
+#pragma unroll 4
+for (int i = 0; i &lt; n; ++i) {
+    ...
+}</code></pre>
+        <p>他建议主动找这类“把决定从编译器手里拿回来、但脏活仍让编译器干”的手段。要真正确定发生了什么，就得编译后看生成的汇编，PTX 层或者硬件指令集层的 SASS，有时编译器的选择会和你想要的很不一样。</p>
+        <h3>问答：能不能写代码把 warp 映射到指定的 SM</h3>
+        <p>第一近似下不能，他说这很烦，API 给出更明确的物理 SM 控制会很有用。一个冷门做法：块开始运行时用一条内联汇编指令查询自己的物理 SM ID，然后根据它决定自己在算法里的逻辑身份，这样可以把控制权拿回来。API 这样设计是因为各个 SM 基本可以互换（有一点例外，他没展开）。</p>
+        <p>他更想要但 CUDA 也不给的，是控制不同块<em>什么时候</em>被排到 SM 上。所有 SM 共享一个 L2 缓存：一个 SM 从主存读的数据进了 L2，另一个 SM 不久后读同样的数据就能命中。对很多内核来说，这种 L2 局部性对避免主存带宽瓶颈至关重要。但要命中，第二个 SM 得在差不多同一时间读，而块到 SM 的调度算法你无法直接控制，只能猜测谁什么时候运行，再围绕这些近似的猜测设计访存模式。他说这是一种让人抓狂的编程方式，但 NVIDIA 给的工具就是这样。</p>
+        <p>提问者澄清，问的是 warp 映射到 SM 内哪个调度器。他说大多数时候基本是轮转：前 4 个 warp 依次进 0 到 3 号调度器，接下来 4 个再从头开始。他不确定哪里明确写过，但近几代 GPU 的一些高级功能，只有在底层这样工作时 API 设计才说得通，所以一定是这样。</p>
+        <h3>问答：GPU 怎样调度和做上下文切换，和 CPU 有什么不同</h3>
+        <p>简短回答：没有 CPU 意义上的上下文切换。CPU 上一个进程在寄存器和 L1 里积累了状态，被操作系统抢占，状态存回主存，恢复时寄存器被还原，缓存只能重新填。GPU 上没有这回事：一个线程块一旦在 SM 上开始运行，就保证跑到结束，不会被抢占或换成别的块。主要原因是 GPU 大多用显式的共享内存暂存区而不是隐式的 L1，要想切出去再切回来行为不变，就得保存整个暂存区的内容，代价很大，而且会让内核性能更难推理。调度器在 warp 之间轮换，在更低一层有点像上下文切换，但很不一样；CPU 单核多线程的时间复用也不叫上下文切换（他说要再核对一下术语惯例）。操作系统抢占式的切换和单核多线程是两回事，GPU 只有后者。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. Simran 开场：为什么关心内核，处理器和存储的基本概念</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=4443s" target="_blank">1:14:03</a>–1:22:33 · Hardware efficiency</em></p>
+        <h3>动机：软件差会浪费几十亿美元的算力</h3>
+        <p>Simran Arora 刚在 Stanford 跟 Chris Ré 读完博士，这一讲的题目是“面向硬件高效 AI 内核编程的简单抽象”。她给的理由（幻灯片）：</p>
+        <ul>
+            <li>NVIDIA 2025 年第二季度收入超过 470 亿美元。</li>
+            <li>AI 内核在价值上亿美元的 GPU 集群上跑好几个月，训练和推理都是。比如 Llama 论文里 405B 模型用 16,000 块 GPU 训练约 55 天。</li>
+            <li>为一代硬件做的高效算法到下一代就严重退化。FlashAttention 从 Ampere 到 Hopper 要完全重写，从 Hopper 到 Blackwell 又重写一次，这还只是一家厂商。</li>
+        </ul>
+        <p>结论是软件不好会浪费几十亿美元的算力，而 AI 算力贵，因为目前基本只有一家主导厂商。她还说 AI 的进步来自数据效率、算法效率、硬件效率等多方面，但她甚至愿意说最大的进步来自更好的硬件和从硬件里榨出更多性能，并引用了 Bill Dally 几年前在 NVIDIA 的报告图。</p>
+        <p>她的提纲：AI 硬件简介；ThunderKittens（基于 tile 的 AI 内核编程）；硬件偏好什么架构；未来方向。第三部分是反过来的思路：AI 领域传统上先追求质量和理论驱动的建模，她想问“在这块硬件上能跑得最好的 AI 模型是什么”。</p>
+        <h3>最简单的处理器和存储层级</h3>
+        <p>最简单的处理器：用不同线程（执行者）执行指令；指令修改执行状态，寄存器保存程序变量的值；取指/译码块决定下一条执行什么；ALU 执行指令规定的运算，可能修改寄存器或内存。内核（kernel）是在硬件上运行的软件基本单位：加载数据、计算、存回结果。</p>
+        <p>AI 里模型参数和 KV cache 动辄几百 GB，远超寄存器的容量，所以处理器要连接大容量内存（按地址编号的字节数组）。从内存取数据到寄存器再计算可能很慢，所以内存做成层级结构：少量很快的存储和大量较慢的存储。她用简单的物理解释：处理器周围小半径内面积小、访问快，越远空间越大但越慢。缓存就是给经常复用的数据降低访问延迟。</p>
+        <p>评价一个硬件平台看三种带宽：内存带宽（每秒能在内存和处理器之间搬多少数据）、计算带宽（每秒能完成多少浮点运算）、通信带宽（每秒能和其他设备之间搬多少字节）。她强调这三者是硬件属性，不是软件、内核或算法的属性。</p>
+        <h3>H100 芯片图</h3>
+        <p>她用 NVIDIA 营销材料里的 Hopper 示意图：彩色小点是 SM，约 132 个，在一块芯片上一起工作；每个 SM 上很多线程一起干活，整块 GPU 上有几万个线程按层级组织。靠近 SM 的是 L2 缓存，速度和容量都居中。更远的黑色长方块是 HBM（高带宽显存），慢但大得多：H100 上 80 GB、3 TB/s。其余部分是管理电流的电感、电容、供电级。</p>
+    </section>
+
+    <section id="t13">
+        <h2>13. SM 里的异构单元：算力都在 Tensor Core</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=4953s" target="_blank">1:22:33</a>–1:26:42 · Tensor cores</em></p>
+        <p>放大到一个 SM，它是高度异构的：有整数、浮点、双精度计算管线，有 Tensor Core，有负责加载和存储的 LD/ST 单元，有做数学函数的特殊功能单元（SFU）。还能看到寄存器文件（存储层级里最快最小的一层）和共享内存（第二层）。</p>
+        <p>这些单元的性能差别很大。以 H100 为例（她口述的数字）：</p>
+        <ul>
+            <li>SFU，做 exp 这类特殊函数：约 7.5 TFLOPS。</li>
+            <li>FMA 单元：约 60 TFLOPS。</li>
+            <li>Tensor Core，BF16：989 TFLOPS，接近 1 PFLOPS。</li>
+        </ul>
+        <p>Tensor Core 是 GPU 上专门做矩阵乘法的单元。她的经验法则是：Tensor Core 在跑时 GPU 利用率算 100%，不跑时算 0%。幻灯片上的图是 P100、V100、A100、H100（2016–2022）通用算力和 Tensor Core 算力随时间的变化，Tensor Core 一代比一代甩得更远，在 H100 上 BF16 比其他计算快 16 倍。</p>
+        <p>所以硬件感知 AI 的黄金法则只有一条：让 Tensor Core 吃饱。难处在为此要做的所有工作。以 Llama 405B 为例，张量可达 16,000 × 50,000 量级（BF16），远超快速存储层能放下的量，所以要关注数据怎样分布在线程之间，要把大张量切块（tile），每次只在一部分上计算。机器学习里不只有矩阵乘法，还有归一化、归约、加法和逐元素运算。幻灯片的例子：X' 做 cumsum 得 Z1，Z1 和 Y 做 matmul 得 Z2（Tensor Core 操作），exp(X') 得 Z3，Z2 + Z3 得 Z4，后面几个都是非 Tensor Core 操作；对策是数据切块、算子融合。AI 内核开发的难点就是把这些非 Tensor Core 操作（访存和其他数学运算）的延迟压到最小。</p>
+    </section>
+
+    <section id="t14">
+        <h2>14. 每一层并行的难点：布局、异步、专用化、内核边界</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=5202s" target="_blank">1:26:42</a>–1:36:12 · Parallelism levels / Specialization / Kernel fusion</em></p>
+        <h3>warp 层：逻辑数据到线程的映射</h3>
+        <p>几万个线程被分成 32 个（NVIDIA 的 warp）或 64 个（AMD 上叫 wave）一组，锁步执行指令。这一层的难题是内存布局（memory layout）：逻辑上的数据元素怎样对应到物理上哪个线程持有。每个线程处理 tile 的一部分，这个对应关系很复杂，后面细讲。</p>
+        <h3>块层：多个 warp 怎样分用执行单元</h3>
+        <p>多个 warp 合作完成内核的一部分。这里要考虑不同 warp 怎样分配到不同的执行单元：某个单元被太多 warp 用会饱和，因为每个单元的带宽有限。现代 GPU 暴露了大量异步机制，让不同 warp 同时在不同执行单元上做不同的事，而且她说可惜的是这些机制大多都有用，得懂：</p>
+        <ul>
+            <li>占用率（occupancy）：同一套执行硬件上驻留多个软件 warp（类似超线程），让不同 warp 同时使用不同执行单元来提高吞吐。幻灯片上的取舍是“并行执行的线程数”和“每线程可用资源”。</li>
+            <li>异步加载：从 Ampere 起（AMD 也有对应功能），可以发起一次直接加载到共享内存的操作，跳过寄存器，之后再检查是否完成。</li>
+            <li>Hopper 起的 TMA（Tensor Memory Accelerator，张量内存加速器，专门在显存和共享内存之间搬块状数据的硬件单元）：异步地址生成，异步存储和归约。</li>
+            <li>异步矩阵乘法：多个线程协作，直接从共享内存发起异步矩阵乘。</li>
+        </ul>
+        <p>怎样组合这些机制来最大化吞吐、隐藏延迟、尽量用 Tensor Core，在这么多选项里很难。</p>
+        <h3>warp 专用化：生产者和消费者</h3>
+        <p>在占用率的基础上，流行的做法是 warp 专用化（warp specialization，AMD 叫 wave specialization）：让一些 warp 只做慢存储和快存储之间的加载和存储，另一些 warp 只做计算或快速的存储间搬运，也叫生产者-消费者范式。更进一步，不同角色需要的资源不同。寄存器最快但数量很少，而只在 HBM 和共享内存之间搬数据的加载/存储 warp 根本用不到多少寄存器，可以把寄存器让给计算 warp，让后者用更大的 tile、算得更有效。</p>
+        <h3>网格层：块的启动和收尾开销，内核边界</h3>
+        <p>线程块跑在 SM 上，由一个调度器把块分配到 SM。每个块有启动开销和收尾（teardown）开销，追求极致性能时这些延迟会冒出来。一个块可以理解为注意力里的一个头，或 GEMM 的一个输出 tile。</p>
+        <p>端到端模型里有归一化、位置编码、MLP、注意力等很多算子，每个内核也有启动和收尾时间。内核边界还是人为的：一部分 SM 做完当前内核后只能闲着，等所有 SM 都做完才能开始下一个。她举 Llama 1B 在 GPU 上的例子，内核依次是 RMSNorm、QKV 矩阵乘、RoPE 旋转位置编码、注意力等。如果没有这些边界：做 QKV 矩阵乘时，某个头的输出算完，一些 SM 就能立刻开始这个头的注意力；做 RMSNorm 时，一部分 SM 还在算激活，另一部分可以提前把很大的 MLP 权重预取到快速存储里。打破网格上的内核边界能带来大得多的调度灵活性，但开发时很难想清楚。</p>
+        <h3>多卡层</h3>
+        <p>现在 AI 是几千块 GPU 一起工作，多卡通信至关重要，要考虑 scale-up 网络（机柜内高速互联）和 scale-out 网络（节点之间）上做什么。</p>
+    </section>
+
+    <section id="t15">
+        <h2>15. 为什么要 ThunderKittens：编程抽象的光谱</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=5772s" target="_blank">1:36:12</a>–1:48:33 · ThunderKittens / Layout challenges</em></p>
+        <h3>FlashAttention 的例子和理论效率的鸿沟</h3>
+        <p>把算法和架构映射到硬件上是 AI 的关键难题。原始的 FlashAttention 是为 A100 设计的，拿到 H100 上 TFLOPS 利用率下降了 47%；从 H100 发布到有高性能内核（FlashAttention 3 和 ThunderKittens 发布的新 FlashAttention 内核）花了 2 年。连 Transformer 都难拿到峰值性能，新架构更难。</p>
+        <p>幻灯片列了一长串 Transformer 替代方案：S4、DSS、GSS、S4D、Liquid S4、H3、S5、BIGS、Hyena、RWKV、RetNet、M2、Mamba、Based、GLA、GateLoop、Hawk/Griffin、“Transformers are RNNs”等。这些架构在设计时考虑了效率，渐近意义上比 Transformer 省内存、省计算，但在硬件上的实际挂钟速度（wall-clock）不一定更快。图上横轴是挂钟时间（毫秒）或工作内存大小，纵轴是信息回忆准确率，序列长度 4096、batch 256（数据来自 HazyResearch 的 zoology 仓库）。TK 的目标之一是缩小这道鸿沟，让 AI 研究者能快速原型新想法、理解硬件偏好什么。</p>
+        <p>研究问题（幻灯片原文）：<em>How concise a set of programming abstractions can we use to support fast, simple kernels for a breadth of AI workloads?</em>（用多精简的一组编程抽象，能支撑覆盖广泛 AI 负载的快速、简单的内核？）</p>
+        <h3>现在的峰值内核是怎么写的</h3>
+        <ul>
+            <li>直接写汇编。她最近几个月在深入研究 AMD GPU，一个体会是很多峰值内核（比如 AMD 的 FA3 和 GEMM）是手写汇编。她展示了 rocprofiler 的追踪图：绿色是矩阵乘，橙色是共享内存到寄存器的加载，每行是线程块里一个 warp 在跑什么，不同指令极细粒度地交错。性能高，但难写、慢，只有少数专家能做。</li>
+            <li>NVIDIA 用 CUTLASS 写的 FA3 主内核的 SASS（机器码）：同样是细粒度交错，但出现规律的重复模式，比如 F2FP 和 FMUL 一遍又一遍。她说重复的规律暗示应该用更大的编程原语抓住这种规律，往上提一层抽象。</li>
+            <li>Modular 的 Mojo 在 MI300X 上写的 GEMM：底部有调度提示（scheduling hints），程序员不写交错的指令，而是提示调度器按某种方式交错。</li>
+        </ul>
+        <p>她的结论：要的是快、可复用、能扩展到各种 AI 负载、并且用尽可能大的基本 tile 或数据类型把细粒度细节藏起来的东西。问题是编程的边界该划在哪里：C++、内联汇编、编译器，在这些积木之上再写内核调度（生产者-消费者、激进的内核融合如 megakernel）；以及哪些经验能延续到多种芯片并存的未来（现在 NVIDIA 主导，但还有 Cerebras、Etched、SambaNova、AMD、Trainium 等）。</p>
+        <h3>两个难点和抽象的光谱</h3>
+        <p>新架构的理论效率转化不成实际效率，一是架构选择和硬件偏好不符：有些理论上高效的架构不用 Tensor Core，有些需要非结构化访存，和硬件要的合并、大块加载相反（幻灯片还列了并行 scan，不用矩阵乘而且物化开销高）。二是工具和软件支持。</p>
+        <p>她画了一张图：纵轴是能拿到的峰值性能，横轴是对 AI 研究者的简单易用程度。最右边是 PyTorch、TensorFlow、torch.compile，研究者用它们写新算法、迭代质量。Triton 同样是 Python 接口，提供对存储层级的更低层访问，简单易用，但在她们做这项工作时，Triton 选的那一层不足以拿到峰值：不能控制寄存器里放什么，也没有机制指定细粒度的异步执行策略。她承认现在 Triton 有了 linear layouts、Gluon 等新东西，但当时就是这个情况。另一端是汇编、CUDA/HIP C++，以及基于深度嵌套 C++ 模板的 CUTLASS 和 Composable Kernel（CK）。后两者虽有一些抽象，但不 Pythonic，和 AI 研究者习惯的 PyTorch 风格不一致，深层模板难以思考，她说这一点更多是观点，也来自和很多写内核的人交流。</p>
+        <p>TK 想要的位置是图上性能高、又相对简单的那一角。一个很粗的简单性指标是库的大小：2022 年 10 月 CUTLASS 22 MB、Triton 12.6 MB、TK 不到 1 MB。仓库就四个文件夹，尽量保持精简，尽量让每个抽象在做什么、硬件上发生什么都是透明的。下面她按 GPU 并行层级逐层讲 TK 的抽象。</p>
+    </section>
+
+    <section id="t16">
+        <h2>16. 16×16 tile 和内存布局，bank 冲突</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=6513s" target="_blank">1:48:33</a>–1:58:10 · Layout challenges / Banking issues</em></p>
+        <h3>tile 是核心数据类型</h3>
+        <p>针对 warp 层“哪个线程持有哪个元素”的难题，TK 把一个 16×16 的 tile 作为核心数据类型，理念上像在 PyTorch 里用张量编程。tile 里线程怎样分配元素等内存管理细节对用户隐藏，库自动选择最符合硬件偏好的布局，以减少 bank 冲突、鼓励使用 Tensor Core。</p>
+        <p>最初版本选 16×16，是因为 NVIDIA 那边底层的 HMMA SASS 指令是 16×8×16 的矩阵乘。AMD 的 GPU 上有很多不同的、有时更小的 Tensor Core 形状，在 MI300、MI325、MI355 上要用的指令也不同。所以 tile 大小要和底层矩阵乘指令的基本形状协同设计，围绕 Tensor Core 来定。</p>
+        <h3>问答插曲：HIP 和 CUDA 差多少</h3>
+        <p>聊天区有人问 HIP 和 CUDA 在编程和语法上差多少。她说两者很像，用 hipify 很快就能把 CUDA 代码转过去而且效果不错；真正不同的是 Tensor Core 指令长什么样、有哪些数据搬运能力等细节。</p>
+        <h3>三层存储各自的要求</h3>
+        <ul>
+            <li>寄存器：Tensor Core 指令由一组线程协作调用，它要求特定线程持有输入矩阵的特定部分。她对比了 AMD 16×16×16 BF16 指令的 A 矩阵寄存器布局（黄色是线程 0 持有的部分，粉色线程 1，另有线程 16、17）和 NVIDIA 的 BF16 A 矩阵布局，两家的对应关系很不一样。TK 让寄存器布局是“急切的”（eager register layouts）：预先把线程持有关系分配成 Tensor Core 指令期望的样子。这是最上层的约束，会一路影响共享内存和全局内存的布局。</li>
+            <li>全局内存：硬件鼓励大的、合并的、对齐的全局到共享内存加载。大是为了减少指令发射，合并（coalesced，相邻线程访问相邻地址，硬件能合成少量大事务）和对齐是硬件友好的跨步方式。</li>
+            <li>共享内存：夹在两者中间，它是分 bank 的，也就是被切成比如 32 或 64 个能同时服务的分块。好处是能同时提供多份数据、吞吐高；坏处是多个线程同时访问同一个 bank 时会被串行化，即 bank 冲突（bank conflict），严重拖慢内核。</li>
+        </ul>
+        <p>怎样在共享内存里摆放数据，既让线程能按急切的寄存器布局取数，又能用大的合并对齐全局加载，很难想清楚。全局加载的粒度和寄存器布局一起决定了能在多大程度上避免 bank 冲突。</p>
+        <h3>例子：MI355X 上的 FP6 GEMM</h3>
+        <p>她和 Stanford 硕士生 Will 最近在研究 MI355X 上的 FP6 GEMM。幻灯片上的约束：</p>
+        <ul>
+            <li>全局到共享内存的加载，希望用最大的 16 字节粒度，也就是 4 个 bank。</li>
+            <li>共享内存有 64 个 bank。</li>
+            <li>32×32×64 的 FP6 矩阵指令，每个线程要持有 6 个寄存器，也就是 6 个 bank 的数据。</li>
+        </ul>
+        <p>全局侧按 4 个 bank 一份写入，寄存器侧每个线程要取 6 个 bank，粒度错位，又不能完全控制全局加载写到共享内存的哪里，就很难避免线程从共享内存取数到寄存器时的冲突。图上线程 0–15 各需要 6 个 bank，而加载以 4 个 bank 为粒度，其中标红的两条就出现了 bank 冲突。她说这说明为什么 TK 把选择布局的原则提炼出来、对用户隐藏很有价值：用户只说“我要一个寄存器 tile、一个共享内存 tile”，这些决定由库完成。</p>
+    </section>
+
+    <section id="t17">
+        <h2>17. tile 上的函数库</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=7090s" target="_blank">1:58:10</a>–2:01:14 · Kittens library</em></p>
+        <p>有了 tile，就需要在 tile 上做运算。为了让 AI 研究者觉得熟悉，TK 的函数从 PyTorch 和 NumPy 的库函数借来：在 tile 上做 MMA（矩阵乘累加）、exp、加载和存储、置零、置一、各种归约、从张量里按行减去一个向量等。幻灯片把“TK 在 tile 上的操作”和“PyTorch 在张量上的操作”并排放。</p>
+        <p>实现上是高度模板化的。仓库的核心文件里定义了 tile map、tile reduction 这样的模板，于是 tile 相加、相减、相乘、相除都能包装同一套底层指令模板；rowmax、rowmin、rowsum 这类函数用一个“行归约”模式实现。这让代码保持整洁、易懂，加新操作很容易。</p>
+        <p>设计原则（幻灯片）：</p>
+        <ul>
+            <li>函数没有副作用，TK 几乎就是一套指令集（ISA）：每个函数都是 <code>func(dest, src1, src2)</code> 的形式，尽量只是 PTX 或 CDNA ISA 汇编指令的简单包装。</li>
+            <li>函数集可扩展。TK 用 CUDA 或 HIP 写，所以能“优雅地失败”：新硬件出来或者需要库里还没有的函数时，开发者可以马上用 CUDA/HIP 写自己的内联函数，不用等上游公司更新仓库。她说 Blackwell 出来时，合作者 Ben（Spector）、Dan Fu 等人大约两天就实现了 Blackwell 支持。</li>
+        </ul>
+    </section>
+
+    <section id="t18">
+        <h2>18. 块级模板、持久化网格和 megakernel</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=7274s" target="_blank">2:01:14</a>–2:06:27 · Kernel templates</em></p>
+        <h3>生产者-消费者模板</h3>
+        <p>在线程块这一层，TK 提供一个通用的内核模板来协调块内多个 warp 的异步执行，建立在生产者-消费者范式上：哪些 warp 加载和存储、哪些计算、两组之间怎样同步，都由模板处理。她们观察到 AI 内核只有几种简单的数据流模式（软件流水线、worker 专用化），所以把它们模板化。开发者只需填几个样板函数，类似在 PyTorch 里用 <code>nn.Module</code> 时填 <code>__init__</code> 和 forward：一个 load 函数、一个 compute 函数、一个 store 函数，说明这个内核要加载什么、计算什么、存什么。warp 的编排和同步由 TK 负责，就像 PyTorch 那边有 autograd。幻灯片有一页对比了“标准的同步 GPU 代码”和 TK 模板写法（只有图，字幕里她没有逐行讲）。问答里她提到这个模板叫 LCSF（整理注：TK 仓库里 LCSF 指 load、compute、store、finish 四类函数）。</p>
+        <p>模板有可调的旋钮：多少个 warp 一起工作，生产者和消费者之间的缓冲区能有多大以减少同步。她展示了一个 FlashAttention 2 风格的简单注意力内核在模板里的调参示例：改变消费者 warpgroup 的个数和生产者与消费者之间的流水线级数（stages），TFLOPS 随这几个整数变化。用生产者-消费者的 worker 专用化，还是用占用率风格的技术，因硬件平台而异。她说在 Hopper 和 Blackwell 上，这种 warp 专用化几乎总是你想要的，在各种负载上都如此；AMD 上找到的调度方式很不一样，但一旦在某个平台上选定了一种调度，它在该平台的不同负载上都相当稳健。</p>
+        <h3>网格层：持久化内核和块的顺序</h3>
+        <p>针对块启动和收尾的开销，TK 的模板用持久化内核（persistent kernel）：启动固定数量的线程块，每个块做完一块工作就去取下一块，不再反复启动新块。上一场也提到，安排各个 SM 上的块做什么任务很重要：GEMM 或注意力里块处理工作的顺序直接影响缓存复用，而缓存复用能大幅影响性能。所以模板给了足够的控制，让你决定持久化网格里块的启动顺序。</p>
+        <h3>多卡层：megakernel</h3>
+        <p>最后一层是打破人为的内核边界。她的实验室同学 Ben Spector 和 Jordan Juravsky 主导（她参与指导）在 TK 之上做了 megakernel：把 Llama 1B、Llama 70B 等整个模型的前向放进一个内核里跑。去掉内核启动边界、用上前面说的细粒度调度机会后，解码吞吐超过了 vLLM 和 SGLang 这些优化得很好的工程实现。她说她们还在继续探索这一层该用什么抽象。</p>
+    </section>
+
+    <section id="t19">
+        <h2>19. 评测和使用情况</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=7587s" target="_blank">2:06:27</a>–2:10:29 · Evaluation</em></p>
+        <p>回到研究问题，她重述 TK 的三条原则（幻灯片）：AI 负载只有少数几种模式，TK 只用少量原语；原语对底层硬件是透明的；原语只保留能带来高性能的那些。有些函数写内核偷懒时很想要，她们会故意从库里去掉，引导开发者走正路。</p>
+        <p>评测覆盖了卷积、次二次复杂度架构、线性注意力、状态空间模型、不同精度的 GEMM、注意力，以及位置编码和归一化这类访存受限的内核，跨多种硬件。她们关心速度，也关心代码是否简单：同样的 TK 函数积木被复用得多不多，以及一个粗略的指标，代码行数。结果是：比 CUDA/HIP、CUTLASS、CK 这类高复杂度做法少用很多行代码，性能相当或有竞争力；和 Triton 这类简单框架代码行数相近，有时性能高出很多。她展示的数字覆盖 H100、4090、Apple，还支持 Blackwell，也在和 Intel、AMD、Rivos 的人合作。</p>
+        <p>使用情况（幻灯片）：一年里 GitHub 2.6K+ 星；是 Meta 和 GPU MODE 内核竞赛可选的三种 DSL 之一（她提到最近还有新的 AMD 竞赛）；ICLR 2025 Spotlight；Stanford、NVIDIA、UCSD、UT Austin、UC Berkeley 等的论文用过；Cursor、Cruise、Jump Trading、Together AI 等用它写定制的生产内核。她说最重要的目标是让她们 Hazy 实验室这些关心新架构的人写内核更容易。</p>
+        <p>TK 借鉴了 Triton、Halide、CUTLASS、FlashAttention 等很多前人工作。自 2024 年 5 月 TK 首次发布以来，出现了更多 Python 风格的高性能内核 DSL：幻灯片列了 TileLang（2024 年 12 月）、Triton Linear Layouts（2025 年 1 月）、NVIDIA 的 Pythonic CuTe DSL / CUTLASS 4.0（2025 年 5 月）和 Modular 的 MAX 内核库。她说这个问题正在被多种方式解决。</p>
+    </section>
+
+    <section id="t20">
+        <h2>20. 硬件偏好的架构：线性注意力和 Based</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=7829s" target="_blank">2:10:29</a>–2:18:29 · Future directions / Based architecture</em></p>
+        <h3>注意力的代价</h3>
+        <p>对 $Q, K, V \in \mathbb{R}^{N \times d}$，标准注意力是</p>
+        <p>$$y = \mathrm{Softmax}(QK^\top)V, \qquad y_i = \frac{\sum_{j=1}^{i} e^{Q_i \cdot K_j} V_j}{\sum_{j=1}^{i} e^{Q_i \cdot K_j}}$$</p>
+        <p>$QK^\top$ 是 $N \times N$ 的矩阵，softmax 作用在它上面。内存复杂度 $O(Nd)$（随序列长度线性增长），计算复杂度 $O(N^2 d)$（二次增长），长上下文因此很难。内存上的线性增长来自 KV cache（推理时缓存的历史 token 的 key 和 value）。她说 128k token 的序列 KV cache 可达约 8400 GB（字幕记作这个数，可能指某种 batch 设置，她没细说），对比 Llama 70B 参数约 140 GB，单条序列的 KV cache 已接近甚至超过模型本身。幻灯片上的图是 Llama 3.2 3B 和 Llama 3.1 8B 的峰值吞吐（tokens/s）随缓存大小变化，相差从 1× 到 121×，说明 KV cache 大小和吞吐紧密相关。</p>
+        <h3>线性注意力</h3>
+        <p>2020 年前后的一类做法：不用 softmax，改用分别作用在 query 和 key 上的特征映射 $\phi(\cdot): \mathbb{R}^{N\times d} \to \mathbb{R}^{N\times f}$，使 $\phi(Q)\phi(K)^\top \approx \exp(QK^\top)$：</p>
+        <p>$$y_i = \frac{\sum_{j=1}^{i} \phi(Q_i)^\top \phi(K_j)\, V_j}{\sum_{j=1}^{i} \phi(Q_i)^\top \phi(K_j)}$$</p>
+        <p>好处是能改变矩阵乘的顺序。softmax 要求先乘 Q 和 K 才能做 softmax；特征映射分开后，可以先乘 key 和 value：</p>
+        <p>$$y_i = \phi(Q_i)^\top \Big(\sum_{j=1}^{i} \phi(K_j) V_j^\top\Big)$$</p>
+        <p>这样内存是 $O(df)$，计算是 $O(Ndf)$，对序列长度线性。怎么选特征映射要在质量和效率之间权衡：如果 $f = N$，复杂度回到和 softmax 注意力一样；$f$ 小得多就高效得多，但有信息瓶颈，状态太小就记不住序列里发生的一切，质量下降。幻灯片引用了 Dao 等 2024、Arora 等 2023、Zhang 等 2024 几种变体。</p>
+        <h3>Based：围绕 Hopper 设计的线性注意力</h3>
+        <p>她们用 TK 研究“硬件偏好哪种特征映射”，探索过 Hedgehog 线性注意力、优化过 Mamba，最后提出 Based 线性注意力架构。Based 能在各种序列长度下拿到很高的 TFLOPS 和利用率，同时用相当大的状态（内存），兼顾质量和效率。设计上围绕 Hopper 及以后的特性：用 WGMMA（Hopper 上以 warpgroup 为单位发起的异步矩阵乘指令）；数据在全局内存和共享内存之间的搬运量很小，特征维度 $f$ 的扩展（状态扩张）在已经位于共享内存和寄存器里的数据上完成。</p>
+        <p>结果（序列长度 4096、batch 256 的回忆准确率对挂钟时间图）：和 Hyena、H3、Mamba 等当时流行的架构比，Based 能用到其中一些架构 8 倍的内存，同时在 Hopper 及以后的 GPU 上跑出 5 倍的硬件利用率。</p>
+    </section>
+
+    <section id="t21">
+        <h2>21. 未来方向：从硬件出发设计模型，多种芯片</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=8309s" target="_blank">2:18:29</a>–2:22:32 · Multi-silicon future</em></p>
+        <h3>理论效率和硬件效率</h3>
+        <p>幻灯片：在 Pile 上训练 10B token、350M 参数（用 EleutherAI 的 GPT-NeoX 训练）时，Based 的困惑度接近注意力，很多模型都能做到这一点，问题是硬件更喜欢哪个。这些年注意力和高效替代方案的质量差距在缩小，也出现了超过普通注意力质量的方法；但她认为对“硬件偏好哪些建模选择”的理解还差得远。大家做了很多“什么提升质量、理论上什么提升质量”的工作，而如果从一个具体硬件或一种负载（低延迟、高吞吐）出发，能不能从硬件这头开始设计？</p>
+        <p>她说这个思路已经流行起来：Based 围绕 Tensor Core 和最新 GPU 特性设计，其中很多技术被后来的流行模型采用。幻灯片的时间线是 Based（2023 年 12 月）、Mamba-v2（2024 年 6 月）、RWKV-v6（2024 年 9 月）、MiniMax（2025 年 1 月）、NVIDIA Nemotron-H、腾讯混元 T1、Liger attention（2025 年 3 月）。她说 Mamba 理论上快但挂钟速度不快、没用好 Tensor Core，后来也转向更接近线性注意力的做法；MiniMax 用了和 Based 相似的技术。</p>
+        <h3>多种芯片的未来：通信和内存</h3>
+        <p>她认为通信和内存是剩下最多有趣工作的地方。幻灯片数字：</p>
+        <ul>
+            <li>NVIDIA NVL72：72 个 superchip（每个含 Blackwell 和 Grace CPU），单向 900 GB/s；NVL72 机柜之间 100 GB/s。</li>
+            <li>AMD：XGMI scale-up，64 GB/s 点对点网状互联；scale-out 节点之间 50 GB/s。</li>
+        </ul>
+        <p>传统上一个节点是 8 块 GPU，NVL72 把 72 块 GPU 用高速 scale-up 网络连在一起，scale-up 和 scale-out 速度差距大，这对专家并行、流水线并行是巨大优势。她认为怎样在 AMD 和其他没有这种优势的硬件上做快速、大规模训练，需要算法创新，是重要问题。</p>
+        <p>致谢：TK 由她和 Ben Spector、Aaryan Singhal、Dan Fu、Chris Ré 一起做；Will Hu 做 AMD TK，Sabri Eyuboglu 做 Based，Jordan Juravsky、Stuart Sul、Dylan Lim 等做 megakernel，Conner Takehana 等做 ThunderMittens（Apple 版）。仓库：HazyResearch/ThunderKittens、ThunderMittens，ThunderKittens-HIP 即将发布。</p>
+    </section>
+
+    <section id="t22">
+        <h2>22. 问答：编译器、CuTe DSL、Mojo、生产者-消费者</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=8552s" target="_blank">2:22:32</a>–2:39:22 · Q&amp;A: Compiler roles / TVM and adaptation / Compiler reordering / Producer-consumer</em></p>
+        <h3>问答：编译器不会自动融合内核、做数据流水线吗</h3>
+        <p>她说 CUDA Graph 对隐藏内核启动和收尾开销很好用，她们有博客写过。但像“某个头的 QKV 矩阵乘做完就开始这个头的注意力”“提前预取 MLP 权重”这类机会，靠编译器内置的规则很难做到，有了细粒度控制才行。CUDA Graph 很有效，能处理大部分启动开销，她们感兴趣的是在它之上靠手写调度还能做什么。</p>
+        <h3>问答：CuTe DSL 在那张性能-易用性图上的位置，JAX/Flux 呢</h3>
+        <p>她主要读过 CuTe DSL 的代码，比如最近出来的 FA4 内核，觉得很干净、很有前景，比 2024 年初她们开始看 CUTLASS 时进步很大，实现了很多目标：Pythonic、简单、好读。但它还是偏 NVIDIA，扩展到 Apple 或 AMD 时哪些设计决定要改，值得观察。她认为基于 tile 的编程会长期存在，已体现在很多框架里。JAX 和 Flux 她用得不多，不评论。</p>
+        <h3>问答：TK 底层用 NVCC 吗</h3>
+        <p>是编译型代码，NVIDIA 上用 NVCC，AMD 上用 Clang/LLVM 那一套。她说两边体验不同：NVIDIA 这边从 CUDA 或内联汇编编到 SASS，看不到太多指令重排，编译器对内联 PTX 处理得很好，能围绕它做优化。AMD 上大量用 <code>asm volatile</code> 内联汇编时，对编译器像黑盒，难以在周围重排指令；也可以给编译器调度提示让它重排。TK 用的是默认编译器。</p>
+        <h3>问答：有没有试过不同的任务划分方式，看哪种模板更好</h3>
+        <p>不同 GPU 上适合的模板不同。比如 AMD GPU 没有寄存器重分配（register reallocation，生产者把寄存器让给消费者）这类功能，所以生产者-消费者的 wave 专用化会浪费很多寄存器，整体模板要很不一样。她们设计 LCSF 模板时考虑过很多种，所以答案是试过。</p>
+        <h3>问答：TVM、Halide 这类算法与调度分离的语言怎么看；TK 怎样快速适配新硬件</h3>
+        <p>主持人问了两个问题：一是 TVM、Halide 这种“算法 + 调度”分离、编译器背后有大量调度算法的哲学，和 TK 的直写方式比怎么看；二是编译器跟不上新芯片，TK 适配很快，秘诀是什么。</p>
+        <p>她认为趋势是：调度（megakernel 模式、生产者-消费者、占用率风格的调度）会在 Python 框架里实现，因为有了核心积木这很容易；积木（tile 数据结构、它的内存布局等）适合在 CUDA/HIP C++ 这边定义，这也回答了第二个问题：C++ 这一层能在新 PTX 或新 CDNA ISA 出来时直接拿来插进库里，即插即用，再在上面搭比细粒度汇编交错更粗的积木如 tile。编译器适合做的是簇内的细粒度交错：调度先决定哪些 warp 做哪一簇加载、哪一簇计算，簇内的细粒度交错交给编译器或编译器提示，前面说的内联 <code>asm volatile</code> 被当黑盒的问题也属于这里。总结起来：调度在 Python 侧，积木在 HIP/CUDA 侧，簇内交错交给编译器。</p>
+        <p>追问：NVIDIA 每一代都在加专用硬件原语，从 Ampere 到 Hopper 到 Blackwell 概念上似乎越来越好编程；将来有了 TK 这类工具，内核编程会更容易，还是编排这些原语会更难？她答会越来越容易。一个极端是，如果最终就是 Transformer，可以直接做成硬件，就不需要内核编程了；另一边，异步、更大更快的 Tensor Core 这些趋势在各种通用硬件上都出现，社区会围绕这些核心维度总结出原则；模型写内核的能力也会很快变强。主持人开玩笑说那我们的饭碗呢，她说硬件会有很多种；她还说值得考虑哪些设计完全不适合现有硬件范式、逼我们建全新的栈，这是“从硬件出发设计架构”的推论：能不能打破 NVIDIA、AMD 给的模型，告诉他们这才是他们一直该想的东西。</p>
+        <h3>问答：NVIDIA 有 CUTLASS、AMD 有 CK，TK 想在哪方面竞争</h3>
+        <p>她说 TK 更像一个研究项目，围绕那个研究问题，被用于开发是好事，但不是要和 CUTLASS、CK 竞争，后两者是生产级、广泛使用的平台。不过她读这两者的内核时，逻辑要穿过很多文件、很多依赖、深层嵌套模板，学习曲线更陡（她说这是观点）。TK 尽量减少需要的抽象：Hopper 上只有一个生产者-消费者内核模板，而 CUTLASS 有一系列模板；CK 没有干净的基于 tile 的抽象。它们功能更全但很笨重，不适合只想知道“最少需要什么”的人入门。</p>
+        <h3>问答：怎么看 Mojo</h3>
+        <p>她玩过一些，做了 Modular 发的 GPU puzzles，前面也展示了他们的 MI300 GEMM。她觉得 Mojo 很让人兴奋：支持多种芯片、可扩展、Pythonic、抽象干净、能拿到峰值性能；不足是有时打印不方便（她喜欢打印调试），出错时有些报错难懂。</p>
+        <h3>问答：近来的 GPU 架构里，什么让生产者-消费者内核比占用率内核更好</h3>
+        <p>她列了几点：</p>
+        <ul>
+            <li>寄存器重分配：只做全局到共享内存加载的生产者 warp 如果占着很多寄存器，会造成寄存器压力。Hopper 上生产者 warp 可以把寄存器从共享寄存器池让给消费者 warp。</li>
+            <li>细粒度同步：要能只同步消费者 warp 或只同步生产者 warp，设置各种屏障。Hopper 起的 mbarrier（放在共享内存里的硬件异步屏障对象）很好用，不过也许用共享内存自己实现也行。</li>
+            <li>异步内存流水线。</li>
+            <li>足够的共享内存，让生产者和消费者之间的缓冲区够深，这对计算受限的负载尤其重要。</li>
+        </ul>
+        <p>主持人随后结束了这一场，也结束了为期一周的系列讲座。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“a GPU being a being a bunch of tiny squares uh a fixed number of them is is a is a better mental picture to have”（把 GPU 看成固定数量的一堆小方块，是更好的心智图像。）<a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=553s" target="_blank">0:09:13</a></li>
+            <li>“don't try to rely on the implicit L1 cache much at all and instead prefer to use the like explicitly addressable shared memory scratch pad”（基本不要依赖隐式的 L1 缓存，优先用可显式寻址的共享内存暂存区。）<a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=3133s" target="_blank">0:52:13</a></li>
+            <li>“It feels like this number of blocks parameter is this like continuous parameter that you can just kind of tune arbitrarily but actually it has these like really discreet threshold effects”（块数看起来像一个可以随意调的连续参数，实际上它有很离散的阈值效应。）<a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=3773s" target="_blank">1:02:53</a></li>
+            <li>“Once a thread block starts running on an SM uh it it is like guaranteed to run to completion”（线程块一旦在 SM 上开始运行，就保证会跑到结束。）<a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=4318s" target="_blank">1:11:58</a></li>
+            <li>“poor software costs billions of dollars worth of compute”（软件不好会浪费几十亿美元的算力。）<a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=4506s" target="_blank">1:15:06</a></li>
+            <li>“the GPU runs at 100% utilization when the tensor cores are running and 0% when they're not”（Tensor Core 在跑时 GPU 利用率是 100%，不跑时是 0%。）<a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=5017s" target="_blank">1:23:37</a></li>
+            <li>“TK is almost an ISA”（TK 几乎就是一套指令集。）<a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=7148s" target="_blank">1:59:08</a></li>
+            <li>“I think it's going to get easier and easier.”（我认为（内核编程）会越来越容易。）<a href="https://www.youtube.com/watch?v=Cl2B_hmg4gA&t=9123s" target="_blank">2:32:03</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 75: GPU Programming Fundamentals + ThunderKittens · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

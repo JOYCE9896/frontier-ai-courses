@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>在 PyTorch 里剖析 CUDA 内核 | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="index.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 01</span>
+    <span><a href="02_计算与内存架构基础.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 1 · 在 PyTorch 里剖析 CUDA 内核</h1>
+        <p class="subtitle">GPU MODE 第一讲：怎样正确给 GPU 代码计时，用 autograd profiler、PyTorch profiler 和 Nsight Compute 看清 PyTorch 调了哪些内核；用 load_inline 把自己的 CUDA 内核接进 PyTorch，用 Triton 写内核、调试、看 PTX，以及让 torch.compile 替你生成 Triton 代码</p>
+        <div class="author-meta">
+            主讲：Mark Saroufim（PyTorch 团队，做性能和编译器）· 主持：Andreas Köpf · 发布日期：2024 年 1 月 13 日 · 时长：56 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=LuhJEEJQgUM" target="_blank">讲座录像 Lecture 1 How to profile CUDA kernels in PyTorch</a>（GPU MODE YouTube 频道公开）· 幻灯片/代码：<a href="https://github.com/gpu-mode/lectures/tree/main/lecture_001" target="_blank">lecture_001（幻灯片 PDF 和全部脚本）</a>（本文依据录像字幕、幻灯片和代码整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>这是 CUDA MODE（后来改名 GPU MODE）的第一讲，2024 年 1 月录制。前几分钟是联合发起人 Andreas Köpf 和 Mark Saroufim 的自我介绍和系列安排；正文由 Mark 讲，目标只有两个：把一个自定义 CUDA 内核接进 PyTorch 程序；学会给它做性能剖析（profiling）。</p>
+        <p>他的出发点是：先不用懂 GPU 的全部细节，借助剖析工具把 PyTorch 当黑盒来看，就能做很多有用的事。所有例子都围绕一个最简单的逐元素运算：对矩阵每个元素求平方。读完这一篇，就能看懂后面各讲里出现的 profiler 截图、<code>load_inline</code> 写法和 <code>ncu</code> 输出。</p>
+        <ol>
+            <li><a href="#t01">开场：两位发起人</a> · <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">系列安排，和“CUDA 教程地狱”</a> · <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=313s" target="_blank">0:05:13</a></li>
+            <li><a href="#t03">CUDA 是异步的：怎样正确计时</a> · <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=556s" target="_blank">0:09:16</a></li>
+            <li><a href="#t04">autograd profiler：square 其实调的是 pow</a> · <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=683s" target="_blank">0:11:23</a></li>
+            <li><a href="#t05">PyTorch profiler 和 Chrome trace</a> · <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=800s" target="_blank">0:13:20</a></li>
+            <li><a href="#t06">load_inline：在 Python 里加载 C++</a> · <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=1054s" target="_blank">0:17:34</a></li>
+            <li><a href="#t07">写一个 CUDA 内核并接进 PyTorch</a> · <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=1232s" target="_blank">0:20:32</a></li>
+            <li><a href="#t08">Numba 和 Triton</a> · <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=1467s" target="_blank">0:24:27</a></li>
+            <li><a href="#t09">Triton 的解释模式调试器</a> · <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=1808s" target="_blank">0:30:08</a></li>
+            <li><a href="#t10">读 Triton 生成的 PTX</a> · <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=1997s" target="_blank">0:33:17</a></li>
+            <li><a href="#t11">让 torch.compile 生成 Triton 内核</a> · <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=2175s" target="_blank">0:36:15</a></li>
+            <li><a href="#t12">Nsight Compute（ncu）</a> · <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=2303s" target="_blank">0:38:23</a></li>
+            <li><a href="#t13">小结</a> · <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=2644s" target="_blank">0:44:04</a></li>
+            <li><a href="#t14">问答：torch.compile 怎么生成 Triton，能编译多复杂的代码</a> · <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=2697s" target="_blank">0:44:57</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场：两位发起人</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=0s" target="_blank">0:00:00</a>–0:05:13 · Introduction and journey / Guest speaker introduction</em></p>
+        <p>录像从 Andreas 自我介绍的中段开始。他讲到早年因为一个项目被邀请去 NVIDIA 参观；那时神经网络还在“寒冬”，卷积网络还没称霸 ImageNet。后来他创业做机器学习 SaaS，再转做机器人，大量使用 Lua Torch（机器人要处理点云，他扩展了 Point Cloud Library，写了到 torch 张量的包装）。他重写了 Lua Torch 调用 torch 内核的接口，让它们能通过 LuaJIT 的外部函数接口直接调用，这后来成了 PyTorch 的一块基础：把已有的内核做成可以 C 导入、能方便地从 Python 使用的形式。他因此也署名在 PyTorch 论文上。他发起 CUDA MODE 的个人动机是刚加入德国 AI 公司 Aleph Alpha 做 AI 工程师，需要把 CUDA 知识刷新到最新。</p>
+        <p>Mark 说他做 PyTorch 大约三年，兴趣主要在性能。PyTorch 好用但历史上慢，所以做了很多让它变快的工作，比如编译器。他注意到很多顶尖 AI 公司都有一个“CUDA 专家”，传说中拉着窗帘、不出门、年薪几百万美元，因为懂 CUDA 很深的东西。他不喜欢这种故事，别人说什么东西很难，他通常会生气，然后出于赌气去学会它。更直接的理由是：他们做 GPT-fast、SAM-fast 这些例子时，在需要的地方写一个自定义 CUDA 内核，成了“秘方”的重要部分。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 系列安排，和“CUDA 教程地狱”</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=313s" target="_blank">0:05:13</a>–0:09:16 · Course overview and logistics</em></p>
+        <ul>
+            <li>主持人：Andreas Köpf、Thomas Viehmann、Mark Saroufim。</li>
+            <li>大约两周一讲，内容有三类：教材章节；结对编程式的实践课（这一讲就是）；特别项目，邀请做有意思 CUDA 工作的人来讲。</li>
+            <li>教材是 <em>Programming Massively Parallel Processors</em>（PMPP）。Mark 说他读过很多书，大多不好，这本很好。读法是读完一章，做完章末所有习题；做不出来说明没读懂，再读一遍。系列会讲前 11 章左右。</li>
+            <li>其他资源在 resource-stream 仓库；所有沟通在 Discord；所有讲座录像上传到新建的 YouTube 频道 CUDA MODE，这是第一个视频。</li>
+        </ul>
+        <p>目标听众是“厌倦了 CUDA 教程地狱的 torch 程序员”。教程地狱是指一篇接一篇地读教程，希望能入门，却感觉原地打转。他认为人们困在里面有真实原因：一是要先学大量术语，GPU 怎么工作、它的编程模型，还要学 C/C++，而这不是 PyTorch 程序员平时在做的；二是因为前期太长，人们不清楚给定一个 PyTorch 程序，怎样把自己的 CUDA 内核插进去并跑起来，也不知道自己的问题能不能靠自定义内核解决。这一讲就是要解决后者。</p>
+        <p>他说自己读到大量术语就会迷失、气馁，转身去干别的；但剖析工具能让他很直观地、以黑盒方式看懂东西，不必先弄懂 GPU 或 CUDA 的所有细节。这是他想传达的视角。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. CUDA 是异步的：怎样正确计时</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=556s" target="_blank">0:09:16</a>–0:11:23 · CUDA async profiling</em></p>
+        <p>例子是逐元素平方：遍历矩阵每个元素，乘以它自己。这是逐元素（pointwise）运算，在机器学习里很重要，正弦、余弦等很多函数都属于这一类。他想比较三种写法哪个快：<code>torch.square(a)</code>、<code>a * a</code>、<code>a ** 2</code>。</p>
+        <p>他说关于给 CUDA 做剖析，也许是关于 CUDA 最重要的一件事：CUDA 是异步的。如果用 Python 的 <code>time</code> 模块计时，量到的只是启动内核的开销，而不是内核实际运行的时间。正确做法：</p>
+        <ul>
+            <li>用 CUDA event 记录开始和结束；</li>
+            <li>先预热，因为 PyTorch 第一次调用 CUDA 时要初始化 CUDA 上下文，会扭曲测量；</li>
+            <li>结束后调用 <code>torch.cuda.synchronize()</code>，等 GPU 真正做完，再读取时间。</li>
+        </ul>
+        <pre><code>def time_pytorch_function(func, input):
+    # CUDA IS ASYNC so can't use python time module
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+
+    # Warmup
+    for _ in range(5):
+        func(input)
+
+    start.record()
+    func(input)
+    end.record()
+    torch.cuda.synchronize()
+    return start.elapsed_time(end)
+
+b = torch.randn(10000, 10000).cuda()
+
+def square_2(a):
+    return a * a
+
+def square_3(a):
+    return a ** 2
+
+time_pytorch_function(torch.square, b)
+time_pytorch_function(square_2, b)
+time_pytorch_function(square_3, b)</code></pre>
+    </section>
+
+    <section id="t04">
+        <h2>04. autograd profiler：square 其实调的是 pow</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=683s" target="_blank">0:11:23</a>–0:13:20 · Autograd profiler analysis</em></p>
+        <p>第一个剖析工具是 torch autograd profiler：用一个上下文管理器包住要跑的操作，再把结果转成表格，排序，只看最耗时的几个内核。表里列出所有运行的内核，CPU 上和 GPU 上各花了多少时间、总时间、每个内核被调用了几次。</p>
+        <pre><code>with torch.profiler.profile() as prof:
+    torch.square(b)
+
+print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))</code></pre>
+        <p>光看这张表就能学到东西：</p>
+        <ul>
+            <li><code>aten::square</code> 调用了 <code>aten::pow</code>。aten 可以理解为 PyTorch 底层的 C++ 算子层。也就是说并没有一个真正干活的 square 函数，而是调用 pow，把指数设为 2。</li>
+            <li><code>a * a</code> 走的不是 pow，而是乘法，而且比 pow 略快。他没有很好的解释，猜测乘法更常用，花在优化它上的人更多。</li>
+            <li><code>a ** 2</code> 直接调用 <code>aten::pow</code>。</li>
+        </ul>
+        <p>完全不懂 PyTorch 内部，跑一下 profiler 就能大致看出发生了什么。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. PyTorch profiler 和 Chrome trace</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=800s" target="_blank">0:13:20</a>–0:17:34 · PyTorch visual profiler</em></p>
+        <p>更有意思的是可视化的 PyTorch profiler：导出一个 JSON 格式的 Chrome trace，拖进 Chrome 的 tracing 页面查看。最简单的写法是指定剖析 CPU 和 GPU 活动，跑完调用 <code>export_chrome_trace</code>；实际中要加预热和调度，代码长一些：</p>
+        <pre><code>def trace_handler(prof):
+    print(prof.key_averages().table(
+        sort_by="self_cuda_time_total", row_limit=-1))
+    prof.export_chrome_trace("/tmp/test_trace_" + str(prof.step_num) + ".json")
+
+with torch.profiler.profile(
+    activities=[
+        torch.profiler.ProfilerActivity.CPU,
+        torch.profiler.ProfilerActivity.CUDA,
+    ],
+
+    # In this example with wait=1, warmup=1, active=2, repeat=1,
+    # profiler will skip the first step/iteration,
+    # start warming up on the second, record
+    # the third and the forth iterations,
+    # after which the trace will become available
+    # and on_trace_ready (when set) is called;
+    # the cycle repeats starting with the next step
+
+    schedule=torch.profiler.schedule(
+        wait=1,
+        warmup=1,
+        active=2,
+        repeat=1),
+    on_trace_ready=trace_handler
+    # on_trace_ready=torch.profiler.tensorboard_trace_handler('./log')
+    # used when outputting for tensorboard
+    ) as p:
+        for iter in range(10):
+            torch.square(torch.randn(10000, 10000).cuda())
+            # send a signal to the profiler that the next iteration has started
+            p.step()</code></pre>
+        <p>trace 里 square 分两部分：</p>
+        <ol>
+            <li><code>Memcpy HtoD (Pageable -&gt; Device)</code>：主机到设备的拷贝，对应把张量 <code>.cuda()</code> 送到 GPU。从 <code>aten::copy_</code> 一路分发到 <code>cudaMemcpyAsync</code>，生成一个 GPU 上的 memcpy 内核。pageable 指主机上的可分页内存，可以理解为 RAM，但可以被自由地换入换出。</li>
+            <li>真正的平方：trace 里的箭头是 PyTorch profiler 的 flow event，表示一次 CUDA 内核启动（<code>cudaLaunchKernel</code>）。<code>aten::square</code> 分发到 <code>aten::pow</code>，启动了一个名为 <code>native_vectorized_elementwise_kernel&lt;4, ...&gt;</code> 的内核。幻灯片上的注解是：4 是块的数量。</li>
+        </ol>
+        <p>这种视图的局限是：只告诉你内核叫什么，不告诉你它有多快、还能怎样改进。这些内核大多能在 PyTorch 仓库里找到源码，比如逐元素内核；仓库里有至少四十来个 CUDA 内核文件，他建议当学习材料：与其看教科书里的内核，不如看机器学习代码里的内核，比如 sin、cos 这些，更有共鸣。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. load_inline：在 Python 里加载 C++</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=1054s" target="_blank">0:17:34</a>–0:20:32 · CUDA kernel implementation / Integrating custom kernels</em></p>
+        <p>CUDA 通常用 C/C++ 写，怎样在 Python 程序里加载一个 C++ 函数？一种办法是 pybind，给 C++ 文件生成 Python 绑定，有点麻烦。他承诺的最简单办法是 PyTorch 的 <code>torch.utils.cpp_extension.load_inline</code>：传入一段 C++ 源码（这里是字符串，也可以是文件路径），说明要暴露哪个函数，加载后就能像 Python 函数一样调用。hello world 例子调用后会在控制台打印 “Hello World!”。</p>
+        <p>他觉得最妙的是可以看到它在底层做了什么：</p>
+        <ul>
+            <li>它会生成一个临时目录，里面有 <code>main.cpp</code>，包含你的函数和自动生成的 pybind 代码。想学 pybind 怎么用，这比教程好：写一个玩具 C++ 程序，就能看到绑定是怎么写的。</li>
+            <li>还会生成 <code>build.ninja</code> 脚本，相当于自动生成的 makefile：用哪些编译选项编译 <code>main.cpp</code>，生成目标文件，等等。手写这些很烦，要写 pybind 模块路径、<code>-isystem</code> 之类，他说大家只关心调用一个 C++ 函数，学构建系统不是世上最有趣的事。</li>
+        </ul>
+        <pre><code>#include &lt;torch/extension.h&gt;
+std::string hello_world() {
+  return "Hello World!";
+}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+m.def("hello_world", torch::wrap_pybind_function(hello_world), "hello_world");
+}</code></pre>
+        <p>（上面是幻灯片上展示的、<code>load_inline</code> 自动生成的 <code>main.cpp</code>。）</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 写一个 CUDA 内核并接进 PyTorch</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=1232s" target="_blank">0:20:32</a>–0:24:27 · Writing a custom CUDA kernel</em></p>
+        <p>CUDA 版的平方内核：用行索引和列索引算出一个线性下标（把矩阵摊平成向量），对每个元素乘以它自己。除了内核本身，还需要一个包装函数，把 PyTorch 张量转成内核需要的形式（取尺寸、分配输出、算网格大小、启动内核）；<code>main.cpp</code> 里只需要函数声明。<code>load_inline</code> 同时接收 C++ 源码和 CUDA 源码，可以传额外的 CUDA 编译选项，比如 <code>-O2</code>（编译器优化）。</p>
+        <pre><code>cuda_source = '''
+__global__ void square_matrix_kernel(const float* matrix, float* result, int width, int height) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row &lt; height &amp;&amp; col &lt; width) {
+        int idx = row * width + col;
+        result[idx] = matrix[idx] * matrix[idx];
+    }
+}
+
+torch::Tensor square_matrix(torch::Tensor matrix) {
+    const auto height = matrix.size(0);
+    const auto width = matrix.size(1);
+
+    auto result = torch::empty_like(matrix);
+
+    dim3 threads_per_block(16, 16);
+    dim3 number_of_blocks((width + threads_per_block.x - 1) / threads_per_block.x,
+                          (height + threads_per_block.y - 1) / threads_per_block.y);
+
+    square_matrix_kernel&lt;&lt;&lt;number_of_blocks, threads_per_block&gt;&gt;&gt;(
+        matrix.data_ptr&lt;float&gt;(), result.data_ptr&lt;float&gt;(), width, height);
+
+    return result;
+    }
+'''
+
+cpp_source = "torch::Tensor square_matrix(torch::Tensor matrix);"
+
+# Load the CUDA kernel as a PyTorch extension
+square_matrix_extension = load_inline(
+    name='square_matrix_extension',
+    cpp_sources=cpp_source,
+    cuda_sources=cuda_source,
+    functions=['square_matrix'],
+    with_cuda=True,
+    extra_cuda_cflags=["-O2"],
+    build_directory='./load_inline_cuda',
+    # extra_cuda_cflags=['--expt-relaxed-constexpr']
+)
+
+a = torch.tensor([[1., 2., 3.], [4., 5., 6.]], device='cuda')
+print(square_matrix_extension.square_matrix(a))
+# tensor([[ 1.,  4.,  9.],
+#         [16., 25., 36.]], device='cuda:0')</code></pre>
+        <p>生成的目录里会有一个 <code>.cu</code> 文件，内容就是上面那段字符串，还有 pybind 了 <code>square_matrix</code> 的 <code>main.cpp</code>。</p>
+        <h3>问答：生成的代码能看到吗？编译要多久？</h3>
+        <p>Andreas 问。Mark 说生成的代码不是隐藏的，设置 <code>build_directory</code> 参数就能看到，刚才展示的全是 <code>load_inline</code> 生成的，他一行没写。编译时间取决于内核，在线编译内核通常要一会儿，这也是从源码构建 PyTorch、构建 FlashAttention 很痛苦的原因，要一个个编译所有内核。好在不用每次都重新编译，知道怎么直接调用的话可以复用。他这里优化的是“让你先跑起来”，所以没讲怎样缓存编译产物。<code>load_inline</code> 第一次用有点难弄对，建议照着他的例子改。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. Numba 和 Triton</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=1467s" target="_blank">0:24:27</a>–0:30:08 · Alternatives to C++ CUDA / Introduction to Triton</em></p>
+        <h3>Numba</h3>
+        <p>另一条路是直接写 Python，比如 Numba。概念上完全一样，只是样板代码（设置网格）不同，用 device array 代替 <code>.cuda()</code>，术语略有差别。用哪个顺手就用哪个，但这个系列里他不会用 Numba，会用 C/C++ 或 Triton。</p>
+        <h3>Triton</h3>
+        <p>Triton 是 Python 里的一门 DSL（领域专用语言）。它并不生成 CUDA 代码，而是生成 PTX，也就是 CUDA 的汇编。接进 PyTorch 很简单，因为它就是一个 Python 函数，在 <code>nn.Module</code> 的 forward 里调用就行。</p>
+        <p>他的 Triton 平方内核是照着 Triton 第一个教程（融合 softmax）改的：每个程序实例处理一行，把一行加载进 SRAM，乘以它自己，再写回全局内存。概念上和 CUDA 内核相似，只是操作单位从线程变成了行。</p>
+        <pre><code># Adapted straight from https://triton-lang.org/main/getting-started/tutorials/02-fused-softmax.html
+import triton
+import triton.language as tl
+import torch
+
+@triton.jit
+def square_kernel(output_ptr, input_ptr, input_row_stride, output_row_stride, n_cols, BLOCK_SIZE: tl.constexpr):
+    # The rows of the softmax are independent, so we parallelize across those
+    row_idx = tl.program_id(0)
+    # The stride represents how much we need to increase the pointer to advance 1 row
+    row_start_ptr = input_ptr + row_idx * input_row_stride
+    # The block size is the next power of two greater than n_cols, so we can fit each
+    # row in a single block
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    input_ptrs = row_start_ptr + col_offsets
+    # Load the row into SRAM, using a mask since BLOCK_SIZE may be &gt; than n_cols
+    row = tl.load(input_ptrs, mask=col_offsets &lt; n_cols, other=-float('inf'))
+
+    square_output = row * row
+
+    # Write back output to DRAM
+    output_row_start_ptr = output_ptr + row_idx * output_row_stride
+    output_ptrs = output_row_start_ptr + col_offsets
+    tl.store(output_ptrs, square_output, mask=col_offsets &lt; n_cols)
+
+
+def square(x):
+    n_rows, n_cols = x.shape
+    # The block size is the smallest power of two greater than the number of columns in `x`
+    BLOCK_SIZE = triton.next_power_of_2(n_cols)
+    num_warps = 4
+    if BLOCK_SIZE &gt;= 2048:
+        num_warps = 8
+    if BLOCK_SIZE &gt;= 4096:
+        num_warps = 16
+    # Allocate output
+    y = torch.empty_like(x)
+    # Enqueue kernel. The 1D launch grid is simple: we have one kernel instance per row
+    square_kernel[(n_rows, )](
+        y,
+        x,
+        x.stride(0),
+        y.stride(0),
+        n_cols,
+        num_warps=num_warps,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+    return y</code></pre>
+        <h3>自己写的内核反而更慢</h3>
+        <p>他在 A10G 上跑，发现自己的 Triton 内核比 <code>torch.square</code> 慢一点。慢的 CUDA 内核没有用处，之所以忍受 CUDA 的复杂和 GPU 的价格，就是为了性能，所以必须有“性能第一”的心态。他也试了 <code>torch.compile</code>，有意思的是它也让性能变差，而且和 Triton 的表现很接近，因为 <code>torch.compile</code> 生成的就是 Triton 内核。他怀疑是 A10G 的问题，换到 4090 上，结果也很相似。</p>
+        <p>他又奇怪，Triton 教程里的 softmax 明明比 Torch JIT 和原生 PyTorch 快得多，同样是逐元素类操作，表现应该相近。剖析了一番后，他怀疑是内核的启动参数选得太差，把块大小固定为 1024，结果完全反转（幻灯片 “After fixing the block size to 1024”）。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. Triton 的解释模式调试器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=1808s" target="_blank">0:30:08</a>–0:33:17 · Debugging Triton kernels</em></p>
+        <p>Triton 现在有调试器：写 <code>@triton.jit(interpret=True)</code>，就能在内核里加普通的 Python 断点，逐行查看。几乎所有变量都是 <code>WrappedTensor</code> 类型，用 <code>var_name.tensor</code> 查看，就能看到 program ID、列偏移这些到底长什么样。Triton 是基于块的语言，能直接看到块很有帮助。不用这个的话，只能把想看的变量存到全局内存，再从驱动程序里打印，又烦又慢。他说这个功能没有文档，也有一个环境变量，大概是 <code>TRITON_INTERPRET=1</code>（仓库代码注释里也是这么写的）。</p>
+        <p>在内核里直接加 print 会崩，语言里没有这种东西；内核运行时是个黑盒，只能先存到全局内存再读。所以他认为调试模式在易用性上是一大步，作为学习工具也很棒。</p>
+        <p>有人问：用调试器时内核是并行还是串行执行？他说不清楚底层怎么做，会去问 Triton 团队的朋友。Andreas 说即使不是完全优化的真实内核，能拿到状态反馈就很好，索引错误太容易犯了；他以前的办法是让内核崩掉，从崩溃信息里拿到所有信息。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 读 Triton 生成的 PTX</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=1997s" target="_blank">0:33:17</a>–0:36:15 · Triton assembly analysis</em></p>
+        <p>Triton 运行时会把所有中间表示存进缓存目录（Triton 大量借助 LLVM），可以打开单个文件夹查看各层 IR，包括 PTX。他常听人说不用学 PTX，但他觉得挺有用。平方内核的 PTX 看着长，其实不难，关键部分是：</p>
+        <pre><code>mul.f32   %f9, %f1, %f1;
+mul.f32   %f10, %f2, %f2;
+mul.f32   %f11, %f3, %f3;
+mul.f32   %f12, %f4, %f4;
+mul.f32   %f13, %f5, %f5;
+mul.f32   %f14, %f6, %f6;
+mul.f32   %f15, %f7, %f7;
+mul.f32   %f16, %f8, %f8;</code></pre>
+        <p>也就是 8 个寄存器放输入、各自乘以自己，另外 8 个放输出，一次处理 8 个元素。他原以为会用多得多的寄存器，觉得这一点很有意思。还能看到 <code>st.global</code> 这类把变量写回全局内存的指令，所以能分辨内核哪部分用了共享内存、哪部分用了全局内存；线程 ID 存在 <code>%r25</code> 之类的寄存器里。他读汇编的一个小技巧：把整段贴进 ChatGPT，让它加注释，刚上手 PTX 时很有帮助。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 让 torch.compile 生成 Triton 内核</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=2175s" target="_blank">0:36:15</a>–0:38:23 · Code generation for optimization</em></p>
+        <p>另一个“作弊”技巧：不自己写内核，而是生成它。写一个 <code>torch.compile(torch.square)</code> 的小程序，加环境变量 <code>TORCH_LOGS="output_code"</code> 运行，控制台会打印 <code>torch.compile</code> 为它生成的代码。不用学怎么写 Triton 内核，写 PyTorch 程序、拿到 Triton 内核，作为起点去优化、学习、修改。</p>
+        <pre><code># TORCH_LOGS="output_code" python compile_square.py
+torch.compile(torch.square)</code></pre>
+        <p>生成的代码有几点：</p>
+        <ul>
+            <li>它不像他那样按行操作，代码简单得多；能看到 <code>tmp1</code>，一个值乘以它自己，就是逐元素平方。</li>
+            <li>有一些启发式信息，比如用的是 FP32，可以改成 FP16 或 BF16；还传入元素个数等编译器提示，帮助自动调优。</li>
+        </ul>
+        <p>入门时，写一两行的玩具程序用这个模式看生成了什么。机器学习代码最重要的优化往往是融合（fusion）：从内核的角度，就是让越来越多的事情在同一个内核里完成。生成的内核名字以 <code>triton_</code> 开头，就是你在 profiler 里看到的名字。如果连续做两次平方，期望看到 <code>tmp1</code>、然后 <code>tmp2 = tmp1 * tmp1</code>，这就确认它们被融合了。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. Nsight Compute（ncu）</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=2303s" target="_blank">0:38:23</a>–0:44:04 · Nvidia compute profiler / Visualizing profiling data</em></p>
+        <p>他说这是他碰到过最有用的 CUDA 剖析器：NVIDIA Nsight Compute，命令是 <code>ncu</code>。他提前警告：在绝大多数云厂商上用不了，因为它们不给这些剖析信息；在自己的 GPU 上没有任何问题。</p>
+        <pre><code>ncu python train.py
+ncu --set full -o output $(which python) train.py</code></pre>
+        <h3>文字日志</h3>
+        <p>日志会显示 L1、L2 缓存吞吐等指标，告诉你“这个内核的计算吞吐和内存带宽利用率相对峰值较低”，并给出百分比，比如达到峰值的 60%。这给了一个类似屋顶线的目标：如果在这里多做点工作，可能提升 40%，那里 30%，于是你知道内核到底算不算快，理论上能达到什么。最可操作的一条提示是：</p>
+        <blockquote>OPT   This kernel grid is too small to fill the available resources on this device, resulting in only 0.4 full waves across all SMs. Look at Launch Statistics for more details.</blockquote>
+        <p>要彻底理解这句话，得一起读完教材；但从实践角度，就是把内核启动得更大，比如补齐（pad）输入。它给出具体可试的方向，试了看性能变不变，再继续，需要时再学 CUDA 的基础。</p>
+        <h3>可视化界面</h3>
+        <p>加 <code>--set full -o</code> 输出文件后，用图形界面打开，能看到内核的内存吞吐、计算吞吐、块大小等。这个例子给了三条可操作的提示：改善尾部效应（tail effect）可提速 50%；达到的占用率（achieved occupancy）和长记分板停顿（long scoreboard stalls）各能再带来约 20%。他的解读：</p>
+        <ul>
+            <li>尾部效应和占用率常由补齐这类事控制，你能控制。</li>
+            <li>长记分板停顿要靠合并读写、使用共享内存解决，而在 Triton 内核里这是 Triton 控制的。</li>
+        </ul>
+        <p>所以写一个 Triton 内核、拿到这样的剖析结果后：补齐能拿到 70% 的提速，在你的控制范围内；如果你认为自己的共享内存管理和合并访存能做得比 Triton 好，可能再拿 20%。这给出了一个自然的决策点：什么时候从 torch 升级到 Triton，什么时候再升级到 CUDA，而不是一上来就写 CUDA、瞎折腾，最后写出比 Triton 自动调优器还慢的东西。</p>
+        <p>他还喜欢源码视图：能看到 Triton 内核每一行对应的指标，比如 <code>tl.load</code> 那一行有大量全局读；还能对照 PTX，类似前面 <code>%r8 * %r8</code> 得到 <code>%r15</code>，只是这里出于某种原因只用了 4 个寄存器。可以逐行改代码，看要改什么才能拿到更好的性能。</p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 小结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=2644s" target="_blank">0:44:04</a>–0:44:57 · Key takeaways and summary</em></p>
+        <ul>
+            <li>用 <code>load_inline</code> 把自定义 CUDA 内核接进 PyTorch 很容易；接 Triton 内核也很容易。</li>
+            <li>剖析工具按这个顺序用：autograd profiler，然后 PyTorch profiler，然后 <code>ncu</code>。</li>
+            <li>这些足以让你写出 GPT-fast、SAM-fast 这类东西，之后课程讲更高级的内容时会再回来。</li>
+        </ul>
+    </section>
+
+    <section id="t14">
+        <h2>14. 问答：torch.compile 怎么生成 Triton，能编译多复杂的代码</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=2697s" target="_blank">0:44:57</a>–0:56:13 · Under the hood of compilers / Live coding and fusions / Future topics and closing</em></p>
+        <h3>Triton 和 torch.compile 是什么关系</h3>
+        <p>Mark 说编译器其实挺“笨”的。比如 <code>torch.square</code>：<code>torch.compile</code> 遇到它，发现这不是最基本的操作，就把它变成 <code>torch.mul</code>；然后读这个 mul 操作，往磁盘上写一个字符串文件，内容基本就是等价的 Triton 代码，再运行这个文件。很多编译器都这样工作，按某些启发式往磁盘写字符串，再执行。这就是从 PyTorch 程序到 Triton 程序的高层过程。</p>
+        <h3>生成的 Triton 代码可读吗</h3>
+        <p>有人问把 compile 生成的代码当起点，多常能读懂。Mark 说几乎总能。编译器做不了太聪明的事，机器学习代码最主要的是把尽可能多的东西融进一个内核、内核越少越好，所以生成的 Triton 代码很好读，主要问题是变量名都叫 <code>tmp0</code>、<code>tmp1</code>。拿它当起点，自己加注释，是他现在写任何 Triton 内核时都用的技巧（他承认这次的平方内核忘了这么做）。</p>
+        <h3>现场演示</h3>
+        <p>有人觉得刚才那部分太快。他在自己的 Windows 机器上现场写了一个 <code>square_compile.py</code>：定义 <code>square(a)</code> 返回 <code>torch.square(a)</code>，<code>opt_square = torch.compile(square)</code>，因为是 JIT，要实际调用一次，然后用 <code>TORCH_LOGS=output_code python square_compile.py</code> 运行，就会把 Triton 内核打印到控制台。</p>
+        <pre><code># sketch based on the live demo
+import torch
+
+def square(a):
+    a = torch.square(a)
+    a = torch.square(a)   # two squares: eager runs two kernels
+    return a
+
+opt_square = torch.compile(square)
+opt_square(torch.randn(10000, 10000, device="cuda"))
+# run with: TORCH_LOGS="output_code" python square_compile.py</code></pre>
+        <p>如果做两次平方，eager 模式要读 a、写回，再读、再写回，每次启动一个内核；如果 <code>torch.compile</code> 工作正常，应该看到两次平方在同一个内核里，否则就是哪里出了问题。他说这是从 Python 入手学习的好工具。他也提到 Lightning AI 的 studio 很适合这种现场编程，但他连 <code>ncu</code> 时还有些问题。</p>
+        <p>另一个问题：Triton 和 CUDA 的平方内核比过性能吗？没有。CUDA 也生成 PTX 吗？是的，怎么看应该一搜就有。</p>
+        <h3>torch.compile 能处理多复杂的代码</h3>
+        <p>Andreas 说他在没考虑 <code>torch.compile</code> 的复杂项目上试过，有很多 if 语句，还有 FlashAttention，并不能直接工作，问是不是要提前为它写代码。Mark 说 <code>torch.compile</code> 的设计理念是完全不用改代码：你的代码也许不是最高效的，但加上它不应该让性能变差。如果写代码时考虑到它，他们有过用它在 SAM、Stable Diffusion、GPT 上拿到最先进性能的例子，所以是可能的。从一个你关心的模型走到很好的性能，可以单独讲一讲，涉及图断裂（graph break）、原地修改（in-place mutation）、CUDA Graphs 等概念。Andreas 说他自己也搞不太清 CUDA Graphs、<code>torch.compile</code> 这些选项的区别，以及什么时候该自己写内核、怎样最好地分配时间、东西什么时候不再是动态的。</p>
+        <p>Mark 有硬性结束时间，提前收尾。他们会公布第二讲的时间，欢迎在 Discord 提议题，也欢迎其他人来讲；Andreas 说下周他可能讲一次，之后 Thomas 等人也会讲。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“the main like maybe the most important thing you can ever know about CUDA is that CUDA is async”（关于 CUDA，你能知道的最重要的一件事，大概就是 CUDA 是异步的。）<a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=620s" target="_blank">0:10:20</a></li>
+            <li>“if you were to just use the Python time module you're just going to measure the overhead that it takes to launch a kernel and not how much time the kernel actually took.”（如果只用 Python 的 time 模块，你量到的只是启动内核的开销，不是内核实际花的时间。）<a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=620s" target="_blank">0:10:20</a></li>
+            <li>“a slow CUDA kernel is not useful.”（一个慢的 CUDA 内核没有用。）<a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=1630s" target="_blank">0:27:10</a></li>
+            <li>“the way you need to read this book is you need to read it and then you need to do all the exercises at the end of the chapter”（这本书的读法是：读完，然后做完章末所有习题。）<a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=431s" target="_blank">0:07:11</a></li>
+            <li>“it gives you like a very natural time to decide to upgrade from torch to Triton to CUDA”（它给了你一个很自然的时机，决定从 torch 升级到 Triton，再升级到 CUDA。）<a href="https://www.youtube.com/watch?v=LuhJEEJQgUM&t=2545s" target="_blank">0:42:25</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 1: How to profile CUDA kernels in PyTorch · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

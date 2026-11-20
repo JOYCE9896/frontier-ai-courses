@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CuTe 布局与张量 | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="15_在H100上超过cuBLAS.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 16</span>
+    <span><a href="17_GPU编程基础与ThunderKittens.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 57 · CuTe 布局与张量</h1>
+        <p class="subtitle">CuTe 的发明者从一个 for 循环讲起：布局是从坐标到索引的函数，层级形状让任何张量都能折成任何矩阵，组合（composition）加切片就是分区，再用同一套东西描述每一种 Tensor Core 指令</p>
+        <div class="author-meta">
+            主讲：Cris Cecka（NVIDIA Principal Research Scientist，CuTe 的最初发明者）· 发布日期：2025 年 5 月 17 日 · 时长：1 小时 24 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=vzUhbDO_0qk" target="_blank">讲座录像 Lecture 57: CuTe</a>（GPU MODE YouTube 频道公开）· 幻灯片：<a href="https://github.com/gpu-mode/lectures/tree/main/lecture_057" target="_blank">lecture_057（PDF 幻灯片，讲者分享的子集）</a>，<a href="https://drive.google.com/file/d/1HU9O-B9Ycm-wlHS6vKxKFO7lEIXXBjfQ/view?usp=sharing" target="_blank">Google Drive 原链接</a>（本文依据录像字幕和幻灯片整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>CuTe 是 CUDA Tensors 的缩写，是 CUTLASS 3 和 CUTLASS 4 底层的张量与布局库。主讲人 Cris Cecka 是 NVIDIA 的研究科学家，也是 CuTe 的最初作者。主持人是 Mark Saroufim，另一位主持人是 Mark 在 PyTorch 的同事，做 CuTe 和 attention 相关的工作，字幕里名字识别不清，下文称“另一位主持人”。Cris 开场就说他喜欢被提问，所以这一讲穿插了很多问答。</p>
+        <p>这一讲回答的问题是：GPU 内核里那些复杂的数据排布（行主序、列主序、交错、swizzle、Tensor Core 要求的线程到元素的映射），能不能用一种统一的表示写下来，并且能拿来做运算？他的答案是 CuTe 布局（Layout）：一对“形状 + 步长”，形状可以嵌套。前置知识只需要知道行主序和列主序、线程和 warp、共享内存和寄存器的区别；本站 CS149 和 CS2680 的笔记里讲过这些。后半段涉及 Tensor Core 和 TMA，第 10 篇（Lecture 23）、第 13 篇（Lecture 36）和第 15 篇（Lecture 45）讲得更细。本讲的 Python 版接口在第 19 篇（Lecture 86，CuTe DSL）。</p>
+        <ol>
+            <li><a href="#t01">CuTe 的来历</a> · <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">CUTLASS 的层次和 CUTLASS 4.0 的 Python 支持</a> · <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=264s" target="_blank">0:04:24</a></li>
+            <li><a href="#t03">从 for 循环到布局：坐标到索引的函数</a> · <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=575s" target="_blank">0:09:35</a></li>
+            <li><a href="#t04">Tensor 是视图，静态整数</a> · <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=1001s" target="_blank">0:16:41</a></li>
+            <li><a href="#t05">张量折叠的不对称和层级形状</a> · <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=1315s" target="_blank">0:21:55</a></li>
+            <li><a href="#t06">形式化：Shape、Stride、Layout、Tensor 和布局代数</a> · <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=1739s" target="_blank">0:28:59</a></li>
+            <li><a href="#t07">布局例子：迭代器对比布局，swizzle，Morton 码</a> · <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=2119s" target="_blank">0:35:19</a></li>
+            <li><a href="#t08">用 CuTe 写通用算法：copy 和 gemm</a> · <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=2597s" target="_blank">0:43:17</a></li>
+            <li><a href="#t09">组合（composition）与分区</a> · <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=3310s" target="_blank">0:55:10</a></li>
+            <li><a href="#t10">MMA atom 和 Tensor Core 编程</a> · <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=3878s" target="_blank">1:04:38</a></li>
+            <li><a href="#t11">向量化、TMA、copy atom 和问答</a> · <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=4435s" target="_blank">1:13:55</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. CuTe 的来历</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=0s" target="_blank">0:00:00</a>–0:04:24 · Introduction to cute / History of cute development</em></p>
+        <p>Mark 介绍说，Cris 之前在几期讲座里客串过，这次来讲 CuTe 和张量代数。Cris 自我介绍：他是 CuTe 的最初发明者，CuTe 是 CUDA Tensors 的意思。</p>
+        <h3>一直困扰他的问题：张量缩并为什么难</h3>
+        <p>他的背景是数值线性代数。做 FFT 研究时，他需要 BLAS 的扩展来做张量缩并（tensor contraction，把多个张量沿某些维度相乘求和，矩阵乘法是它最简单的情形）。后来做低秩机器学习研究，幻灯片上的例子是两个 CP 分解（canonical polyadic decomposition，他最喜欢的张量分解）的 Kronecker 积，又碰到同样的问题。他一直不理解：张量缩并就是 GEMM，为什么做起来这么难？</p>
+        <p>于是他开始在 NVIDIA 内部找答案。他和 Paul Springer 合作了很长时间，Paul 当时在做 cuTENSOR，吃了很多 CUTLASS 2 的苦头。Cris 理解这些痛点，但仍然觉得这件事应该简单，于是开始写 CuTe，先用在 Volta、Ampere、Hopper 上。</p>
+        <h3>几个节点</h3>
+        <ul>
+            <li>实习生 Muhammad Osama 来的第一周，就读懂了一个单文件的 CuTe 光速（speed of light）GEMM 例子，改了改，比 cuBLAS 快 25%。Cris 说这在当时闻所未闻，因为 NVIDIA 内部的 GEMM 基本是直接用汇编写的，一个能读能改的单文件 C++ GEMM 很少见。</li>
+            <li>之后实现了 Stream-K（一种把 K 维工作在 SM 之间均分的 GEMM 调度方法），发了论文；接着做 Tensor Core。</li>
+            <li>最后他把 CuTe 用回最初想做的张量缩并上（幻灯片写作 SoL GETT，GETT 指一般张量乘张量），达到了光速性能。</li>
+            <li>这引起了 CUTLASS 团队的注意。Vijay Thakkar（Cris 给他起外号“golden intern”）拿着这些想法跑得飞快，搭出了覆盖 Hopper、Blackwell 和 TMA 的 CUTLASS 3。</li>
+        </ul>
+    </section>
+
+    <section id="t02">
+        <h2>02. CUTLASS 的层次和 CUTLASS 4.0 的 Python 支持</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=264s" target="_blank">0:04:24</a>–0:09:35 · Overview of cutless / Cutless 4.0 and python support</em></p>
+        <h3>CUTLASS 是什么</h3>
+        <p>他的定义：CUTLASS 是一组抽象，为 GPU 上的稠密线性代数在各个范围和规模上兼顾生产力和性能。它分多层，可以从任何一层进入。</p>
+        <p>他先解释 NVIDIA 内部常说的 SOL：speed of light，光速，指某块芯片按架构算出来的理论最快速度。他说达到了就是做得好；差 1%，就去把那 1% 找回来。</p>
+        <p>幻灯片上的层次从上到下：Device 层（Gemm Universal、Conv 等，挑好配置直接用）、Kernel 层（如 SM90 GEMM TMA Warp Specialized Ping-pong / Cooperative，SM100 GEMM TMA Warp Specialized 等）、Collective 层（Collective MMA、Collective Epilogue TMA 等）、CuTe 层（Tiled Copy 和 Tiled MMA），最底下是 CuTe Atoms（TMA、TMEM load/store、MMA SM90、MMA SM100）。越往上预调好的配方越多，越往下控制越多。他说 CUTLASS 里所有东西都是用 CuTe 实现的。</p>
+        <ul>
+            <li>CuTe examples：不加包装的单文件 GEMM/GETT 内核，用到 MMA、TMA、TMEM，给 NVIDIA 内部工程师和外部用户看基本操作。</li>
+            <li>CUTLASS examples：他说已经超过 100 个，覆盖 GETT、卷积、FastAttention、FMHA、Grouped GEMM、FP4、Stream-K、epilogue、分布式 GEMM 和各种优化。</li>
+            <li>幻灯片上的数据：7500 个 GitHub star，180 位贡献者，每月 420 万次下载，NVIDIA 最受欢迎的开源项目。</li>
+        </ul>
+        <h3>C++ 的痛点和 CUTLASS 4.0</h3>
+        <p>他放了一张从 GTC 报告里拷来的幻灯片，列 C++ 模板的问题：模板不方便、写编译期逻辑心智负担大、报错信息“比小说还长”、编译慢、前端太泛化、妨碍快速迭代、无法大规模 JIT 和暴力自动调优、深度学习领域反正都在用 Python、大家都讨厌写绑定代码、依赖 nvcc、LLM 可能更擅长生成 Python。Cris 一条条开玩笑地反驳（“听起来像是技术问题”），然后承认：他是 C++ 粉丝，但 C++ 确实难、编译确实慢。</p>
+        <p>所以有了 CUTLASS 4.0，可以用 Python 写 Tensor Core 程序。第一版先放出 CuTe 这一层，幻灯片说它提供“成熟的底层张量编程模型，完全控制 Tensor Core”。他说这一讲的所有内容都已经移植到 Python；如果 Python 里有不一致，希望大家反馈。Python 版的好处：能和 PyTorch 及各种 ML 内核集成；编译时间快 100 倍以上（幻灯片上是 8k×8k×8k GEMM 的对比图，性能持平）；可以直接用原生 Python 写 CUDA 内核。</p>
+        <p>幻灯片上 Python 版用到的函数名（与 C++ 同名）：<code>make_shape(Int&lt;1&gt;{}, Int&lt;2&gt;{}, x) → (1,2,x)</code>、<code>make_layout</code>、<code>make_identity_tensor</code>、<code>zipped_divide</code>、<code>local_tile</code>、<code>tiled_mma.get_slice</code>、<code>thr_mma.partition_A</code>、<code>thr_copy.partition_S</code>。入门代码：</p>
+        <pre><code>pip install nvidia-cutlass-dsl
+
+import cutlass
+import cutlass.cute as cute
+
+@cute.kernel
+def kernel():
+    tidx, _, _ = cutlass.arch.thread_idx()
+    if tidx == 0:
+        cute.print_("Hello world")
+
+@cute.jit
+def host():
+    cutlass.cuda.initialize_cuda_context()
+    kernel().launch(
+        grid=(1,1,1),
+        block=(32,1,1))
+
+host()
+
+# python3 hello_world.py</code></pre>
+    </section>
+
+    <section id="t03">
+        <h2>03. 从 for 循环到布局：坐标到索引的函数</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=575s" target="_blank">0:09:35</a>–0:16:41 · Layouts as representations</em></p>
+        <h3>CuTe 一页纸</h3>
+        <p>他用一张幻灯片概括 CuTe 的两面：</p>
+        <ul>
+            <li>CuTe 布局是一种<strong>表示</strong>：能表达远超行主序、列主序的数据排布；能写出极其通用的算法（copy、gemm、reduce 只需写一次）；能封装元数据（后面讲）。</li>
+            <li>CuTe 布局也是一种代数：布局之间可以组合出新布局，由此实现他说在别的系统里没见过的通用分块（tiling）和分区（partitioning）。</li>
+        </ul>
+        <h3>循环的规范形式</h3>
+        <p>他从一个一维循环讲起：</p>
+        <pre><code>for (int i = 2; i &lt;= 50; i += 3) {
+  A[7*i + 5] = 0;
+}</code></pre>
+        <p>描述这个循环要记下：起点 2、终点 50（含）、步长 3、基指针 A、下标变换 7*i+5。把起点平移到 0、步长变成 1、常数偏移合进指针，就得到等价的写法：</p>
+        <pre><code>for (int i = 0; i &lt; 17; ++i) {
+  (A+14+5)[3*7*i] = 0;
+}</code></pre>
+        <p>现在只剩三个参数：基指针 A+19，大小 17，步长 21。他说这样一眼就能看出：这是内存里某处 17 个元素组成的向量，元素之间相隔 21。原来的写法要推一下才知道。</p>
+        <p>二维循环参数更多，但同样能化简：</p>
+        <pre><code>for (int j = 3; j &lt; 43; j += 2) {
+  for (int i = 4; i &lt;= 20; i += 5) {
+    A[10*i - j + 1] = 0;
+  }
+}
+// can be rewritten as
+for (int j = 0; j &lt; 20; ++j) {
+  for (int i = 0; i &lt; 4; ++i) {
+    (A+4*10-3+1)[5*10*i - 2*j] = 0;
+  }
+}</code></pre>
+        <p>化简后是基指针 A+38、形状 (4,20)、步长 (50,-2)。可以把它看成一个 4×20 的矩阵，步长告诉我们每个元素在哪。</p>
+        <h3>布局：从逻辑坐标到物理索引</h3>
+        <p>由此引出布局对象：一个数学函数，把矩阵的逻辑坐标映射到物理上的值索引。他说这本身不新。以 2×3 矩阵为例：</p>
+        <ul>
+            <li>列主序：Shape (2,3)，Stride (1,2)，idx = i*1 + j*2。沿第一个大小为 2 的模（mode，CuTe 对“维度”的叫法）步长为 1，所以 d 紧跟 a，e 紧跟 b。</li>
+            <li>行主序：Shape (2,3)，Stride (3,1)，步长 1 出现在另一个模上。</li>
+            <li>带填充的列主序：Shape (2,3)，Stride (1,4)。矩阵的值在这些位置，其余内存位置空着不用。</li>
+            <li>三阶张量：Shape (2,2,2)，Stride (4,1,2)，每个模有独立步长。</li>
+        </ul>
+        <p>一般规则：逻辑坐标和步长做内积，得到物理偏移。</p>
+        $$\text{idx} = \langle c, d\rangle = \sum_i c_i\, d_i$$
+        <p>其中 $c$ 是坐标，$d$ 是步长。</p>
+        <h3>问答：只有仿射映射有用吗</h3>
+        <p>Mark 问：这些从逻辑到物理的映射都是仿射函数，你是不是认为只有这一类有用？Cris 说他同意这些都是仿射变换，它们恰好最有用也最常见，但不是唯一能想到的。比如三角矩阵；也可以根本不用内存，值在运行时现算；布局还能做很多别的事。他常把 CuTe 张量和 C++ 的 <code>std::mdspan</code> 比较，并认为 CuTe 好用得多，至少在本讲涉及的常见应用（恰好都是仿射的）里如此。更花哨的用法有时间再提。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. Tensor 是视图，静态整数</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=1001s" target="_blank">0:16:41</a>–0:21:55 · Tensors as views</em></p>
+        <h3>最基本的用法</h3>
+        <p>他说不喜欢 <code>std::mdspan</code> 的接口和抽象。他希望的写法是：给行数、列数做一个布局；给一个迭代器指向底层数据；两者合成一个张量，就能双重循环按下标读写。</p>
+        <pre><code>int n_rows = 22;
+int n_cols = 19;
+thrust::host_vector&lt;float&gt; storage(n_rows * n_cols);
+Layout layout = make_layout(make_shape(n_rows, n_cols));
+Tensor matrix = make_tensor(storage.data(), layout);
+static_assert(rank(matrix) == 2);
+for (int i = 0; i &lt; size&lt;0&gt;(matrix); ++i) {
+ for (int j = 0; j &lt; size&lt;1&gt;(matrix); ++j) {
+  matrix(i,j) = i * stride&lt;0&gt;(matrix) + j * stride&lt;1&gt;(matrix);
+ }
+}
+print(matrix)
+// ptr[32b](0x559ecbf182b0) o (22,19):(_1,22)</code></pre>
+        <p>几个术语：</p>
+        <ul>
+            <li>Tensor 是视图（view），不是容器，背后可以是任何迭代器。</li>
+            <li>rank：模的个数，常叫维数。矩阵 rank 为 2，向量为 1。</li>
+            <li>size：某个模的大小（extent）。</li>
+            <li>stride：沿某个模相邻两个元素之间隔多少个元素。</li>
+        </ul>
+        <p>打印结果里 <code>ptr[32b]</code> 表示 32 位元素（float）的指针，后面是地址，<code>(22,19):(_1,22)</code> 是“形状:步长”。没给步长时默认列主序。</p>
+        <h3>静态整数</h3>
+        <p>他说 CuTe 做的第一件事，是让编译期已知的形状和步长不占存储、不在运行时计算。把行数换成静态整数 <code>Int&lt;22&gt;{}</code>，其他代码都不用改：</p>
+        <pre><code>auto n_rows = Int&lt;22&gt;{};
+int  n_cols = 19;
+thrust::host_vector&lt;float&gt; storage(n_rows * n_cols);
+Layout layout = make_layout(make_shape(n_rows, n_cols));
+Tensor matrix = make_tensor(storage.data(), layout);
+static_assert(rank(matrix) == 2);
+static_assert(size&lt;0&gt;(matrix) == 22);
+// ... same loop ...
+print(matrix)
+// ptr[32b](0x559ecbf182b0) o (_22,19):(_1,_22)</code></pre>
+        <p>打印里的下划线表示这个值是静态已知的：第一个模大小静态为 22，第二个模动态为 19。他指出一个细节：他没有写步长，但默认列主序推出的两个步长 1 和 22 现在都是静态的。这样下标内积能把这些常数直接编进去，编译器处理它们比处理动态整数快得多。他说这实际上是一种优化。</p>
+        <p>静态整数有三种写法：<code>cute::Int&lt;N&gt;{}</code>、<code>cute::C&lt;N&gt;{}</code>、<code>N_c</code>。步长也可以自己给，静态动态任意混合，比如形状 <code>(_22,19)</code>、步长 <code>(47,_2)</code>；还有 <code>LayoutLeft</code>（默认的“列”主序，从左往右读）和 <code>LayoutRight</code>（“行”主序，从右往左读）。他说到这里为止，这些都能在 <code>std::mdspan</code> 或其他张量库里找到对应，只有静态整数这一点他觉得很酷，而且写法简洁。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 张量折叠的不对称和层级形状</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=1315s" target="_blank">0:21:55</a>–0:28:59 · Tensor folding and symmetry</em></p>
+        <h3>2×2×2 张量折成 2×4 矩阵</h3>
+        <p>考虑一个 2×2×2 张量，布局 (2,2,2):(4,1,2)。沿行方向步长是 1，所以 a、b 相邻，c、d 相邻。把它折成 2×4 矩阵很常见，也很容易：同一个指针，把三阶布局换成二阶布局 (2,4):(4,1) 就行，沿行是 a b e f，在物理内存里也确实是 a b e f。</p>
+        <p>他说自己靠这一点发过论文：任何张量缩并都能映射成批量 GEMM（batched GEMM）。做法是把模分组：只出现在 C 和 A 里的是行模（m-modes），只出现在 C 和 B 里的是列模（n-modes），出现在 A、B 但不在 C 里的是归约模（k-modes），三个都有的是批模（p-modes）。这样把张量缩并规范化成批量 GEMM，等价于把张量折成矩阵，交给 cuBLAS 或别的 BLAS 库。幻灯片引用了两篇论文：Shi、Niranjan、Anandkumar、Cecka 2016 年的 <em>Tensor Contractions with Extended BLAS Kernels on CPU and GPU</em>，以及 Cecka 2017 年的 <em>Low communication FMM-accelerated FFT on GPUs</em>。</p>
+        <h3>折成 4×2 就不行了</h3>
+        <p>困扰他的问题：同一个张量能折成 2×4，却折不成 4×2。沿新的行方向元素是 a c e g：a 到 c 步长 4，a 到 e 步长 2，从 c 到 e 还是往回走的，再一路到 g。没有任何一个整数步长能描述这一列。这种不对称让他很久都不舒服，也让他没法直接把现成的 GEMM/BLAS 库用在任意张量缩并上。</p>
+        <h3>在模里面再嵌套模</h3>
+        <p>他的办法：既然折叠就是把几个模合在一起当成一个模，那就在一个模里嵌一组模，并记住“这个模里面是一个矩阵”。4×2 的视图写成</p>
+        $$\text{Shape}: ((2,2),2) \qquad \text{Stride}: ((4,2),1)$$
+        <p>按内积规则照样成立，只是行坐标变成了二维的，比如 (0,0)、(1,0)、(0,1)、(1,1)。用二维坐标当行下标就不像矩阵了。但可以在内部把整数行下标映射成行坐标：0→(0,0)，1→(1,0)，2→(0,1)，3→(1,1)，再做内积。眯着眼不看这个层级形状，只用整数下标，它在代码里就和一个 4×2 矩阵完全一样。</p>
+        <h3>对称性回来了</h3>
+        <p>他还是觉得不对称：2×4 视图很简单，4×2 视图却需要层级形状和行下标变换。后来他退一步看，发现 2×4 视图里那个大小为 4 的模本身也是另外两个模折出来的。(2,(2,2)):(4,(1,2)) 和 (2,4):(4,1) 完全等价：从下标到坐标的变换，再和这个列主序步长做内积，结果一样。所以两种视图都可以用原始整数下标访问，上面那个还可以用层级坐标访问。</p>
+        <p>结论：任何张量都能折成任何矩阵，方法是把模放在一起组合，不需要把它们合并（他们叫 coalescing，合并成一个扁平的模）。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 形式化：Shape、Stride、Layout、Tensor 和布局代数</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=1739s" target="_blank">0:28:59</a>–0:35:19 · Formalizing shapes and layouts / Algebra of layouts</em></p>
+        <h3>四个概念</h3>
+        <ul>
+            <li><strong>Shape</strong>：层级元组（HTuple）概念，元素是整数。递归定义：Shape 是一个整数，或者是若干 Shape 组成的元组。例子：<code>N</code>、<code>(N,M)</code>、<code>(N,M,P)</code>、<code>((N0,N1),M)</code>、<code>((N0,N1),(M0,(M10,M11,M12)))</code>。他说“找不到更好的词，这是个很 cute 的定义”。</li>
+            <li><strong>Stride</strong>：同样是层级元组，元素 D 可以是任何能和整数做内积的东西，数学上叫整数模（integer module）。暂时把它当整数就行，但在步长对象上可以玩出很聪明的东西。它要和 Shape 同构（congruent），即层级结构一样。</li>
+            <li><strong>Layout&lt;Shape,Stride&gt;</strong>：形状和步长组成的一对，把形状内的逻辑坐标映射到 D。</li>
+            <li><strong>Tensor&lt;Ptr,Layout&gt;</strong>：指针（或访问器）加上布局函数。可以是数组 <code>T[]</code>、<code>T*</code>、带标签的指针 <code>smem_ptr&lt;T&gt;</code> / <code>gmem_ptr&lt;T&gt;</code>，也可以是隐式迭代器，比如 Thrust 里的 counting_iterator、transform_iterator。</li>
+        </ul>
+        <h3>问答：迭代器和步长是什么关系</h3>
+        <p>另一位主持人问：迭代器不就是一种步长吗？counting iterator 和 transform iterator 又是什么？Cris 讲了 CUTLASS 2.x 的故事：那时一切都用迭代器实现，而迭代器对多维线性代数是糟糕的抽象，因为它在内存点之间任意跳。CUTLASS 2.x 里每个迭代器都是定制实现的，各种复杂布局和模式各自独立表示。CuTe 的变革是把这些迭代器全部换成 CuTe 布局。在这个视角下迭代器只是一个数组、一份数据，能随机访问：“第 5 个位置上是什么？”他说迭代器应该是“笨”的，可以变聪明，但别太聪明。对方追问两个仿射迭代器复合是否还是迭代器、是否不允许来回乱跳，他说其实允许，但这次不讲。只要查找结果一致就行。</p>
+        <h3>布局代数</h3>
+        <p>因为布局是仿射的，可以组合。幻灯片列出的运算：</p>
+        <pre><code>concatenation(Layouts...)           -&gt; Layout
+composition(LayoutA, LayoutB)       -&gt; Layout
+right_inverse(Layout)               -&gt; Layout
+left_inverse(Layout)                -&gt; Layout
+complement(Layout, Shape)           -&gt; Layout
+logical_product(LayoutA, LayoutB)   -&gt; Layout
+logical_divide (LayoutA, LayoutB)   -&gt; Layout</code></pre>
+        <p>他的说明：两个布局的函数复合几乎总是另一个布局；右逆、左逆也是布局；补（complement）定义有点怪；积（product）可以理解为把一个布局的每个元素替换成另一个完整的布局，即“布局的布局”；除（divide）是按另一个布局包含的元素把一个布局拆成两部分。他说这些很快就变得很强大。</p>
+        <h3>坐标映射和下标映射</h3>
+        <p>他把映射过程分成两步。形状定义坐标映射：一维逻辑坐标 <code>A(I)</code> → n 维逻辑坐标 <code>A(i,j)</code> → 层级逻辑坐标 <code>A(i,(j0,j1))</code>。步长定义下标映射：层级坐标和步长做内积，得到物理存储下标 <code>A[k]</code>，再拿这个下标去问指针“你那里有什么”。幻灯片的例子是 Shape (4,(2,2))、Stride (2,(1,8)) 的 4×4 布局。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 布局例子：迭代器对比布局，swizzle，Morton 码</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=2119s" target="_blank">0:35:19</a>–0:43:17 · Iterators and complex layouts</em></p>
+        <h3>几个 4×8 布局</h3>
+        <p>列主序、行主序、带填充的列主序只是步长不同。CUTLASS 2 有 ColumnMajorInterleaved 迭代器，它想表达的其实是一个“走一半、退回来、再从顶上开始”的两块布局。还有一个连名字都没有的布局。他问：为什么要给每种布局起名字？告诉我布局本身就行。这些布局都能当成 4×8 矩阵来用，按 4×8 矩阵的下标访问，不必关心数据实际在哪。</p>
+        <p>幻灯片列了 CUTLASS 2.x 里的一长串命名布局类型：RowMajor、ColMajor、RowMajorInterleaved、ColumnMajorInterleaved、PitchLinear、TensorNCHW、VoltaTensorOpMultiplicandCongruous、ColumnMajorVoltaTensorOpMultiplicandCongruous、VoltaTensorOpMultiplicandCrosswise……在 CuTe 和 CUTLASS 3.x 里它们都变成一个 <code>Layout&lt;Shape,Stride&gt;</code>。</p>
+        <p>问答：另一位主持人问，能不能随手在张量上乱画一条路径，就得到任意布局？Cris 说可以表达很疯狂的布局，他有很多例子，swizzle 布局更疯狂。</p>
+        <h3>迭代器对比布局</h3>
+        <p>CUTLASS 2 里这类循环都靠迭代器实现，从一个块走到下一个块，代码很难写也很难维护。他统计过：大约 200 到 300 个迭代器实现，分布在 80 个文件里，三四万行代码（他说忘了把准确数字放进幻灯片）。这些迭代器彼此不兼容：某个迭代器只能配某种计算，从 grid 级分区到线程级时又只能用特定的迭代器。他说那是一场灾难。</p>
+        <p>幻灯片总结 CUTLASS 2.x 的问题：自定义的布局函子做逻辑坐标到下标的映射；线程和数据布局固定且隐含在实现里；下标难实现、无法维护；布局难以组合；每种布局一个命名类型；接口僵硬、目标单一。CuTe 的替代写法：</p>
+        <pre><code>auto swizzle_atom   = composition(
+       Swizzle&lt;3,3,3&gt;{},
+   Layout&lt;Shape &lt;Shape &lt;_2, _4, _2&gt;,Shape &lt;_8, _2&gt;&gt;,
+          Stride&lt;Stride&lt;_8,_64,_32&gt;,Stride&lt;_1,_16&gt;&gt;&gt;{});
+auto swizzle_layout = tile_to_shape(swizzle_atom, Shape&lt;_128,_64&gt;{});
+print_latex(swizzle_atom);</code></pre>
+        <p>这里的 Swizzle 函数做了一些“奇怪的事”，在硬件上很有用（swizzle 是对地址的若干位做异或重排，常用来避免共享内存的 bank 冲突，bank 冲突指同一 warp 的多个线程同时访问同一个 bank 的不同地址而被串行化）。这个 atom 的两个模大小之积都是 16，所以是 16×16 的布局；他想要 128×64，就用 <code>tile_to_shape</code> 把 16×16 铺满 128×64。<code>print_latex</code> 能把布局画出来，他说自己尽量配了颜色，但看起来还是不太好读。重点是写一次就可以忘掉它。</p>
+        <h3>问答：布局的遍历顺序</h3>
+        <p>另一位主持人问：布局是否总有一个从 0 到 size 的自然编号？是不是总是先沿一个模从左到右走完再进到下一个模？Cris 说循环想怎么写都行。实际应用里通常是两个 for 循环，一个遍历行一个遍历列，访问 (i,j) 时去看对应的偏移，仅此而已。</p>
+        <h3>层级布局例子</h3>
+        <p>第一个例子：Shape (8,(2,2))、Stride (2,(1,16))，背后用 counting_iterator，所以张量里的值就是物理下标。</p>
+        <pre><code>Layout layout = make_layout(make_shape (8,make_shape (2, 2)),
+                            make_stride(2,make_stride(1,16)));
+Tensor A = make_tensor(counting_iterator{}, layout);
+// Logical coordinates are 1D, 2D, hD
+A(17)      = 18
+A(1,2)     = 18
+A(1,(0,1)) = 18
+// Slice along logical sub-boundaries
+A(3,_) = [6,7,22,23]
+A(5,(_,1)) = [26,27]</code></pre>
+        <p>第二个例子是三层 Morton 编码（Morton code，一种按 Z 字形递归排布二维数据的方式），表示成 8×8 的 CuTe 布局。先做一个 2×2 的小布局，和自己做积，再做一次积：</p>
+        <pre><code>Layout morton1 = make_layout(Shape&lt;_2,_2&gt;{}, Stride&lt;_1,_2&gt;{})
+Layout morton2 = blocked_product(morton1, morton1);
+Layout morton3 = blocked_product(morton1, morton2);
+Tensor A = make_tensor(counting_iterator{}, morton3);
+// Shape:  ((2,(2, 2)),(2,(2, 2)))
+// Stride: ((1,(4,16)),(2,(8,32)))
+A(37)                  = 49
+A(5,4)                 = 49
+A((1,2),(0,2))         = 49
+A((1,(0,1)),(0,(0,1))) = 49
+A(_,2) = [8;9;12;13;24;25;28;29]
+A((_,1),(_,2)) = [36,38;
+                  37,39]</code></pre>
+        <p>他说怎么构造出来的不重要，也可以手写。可以当 8×8 矩阵用行列下标访问，也可以用一个整数坐标，还可以用任何一级的层级坐标，它们都映射到同一个位置，上面这几种写法都是在要位置 49。还可以沿逻辑子边界切片，比如取第二列，得到的不只是一个向量，而是另一个张量，有自己的布局（指针偏移和新布局都能算出来）。</p>
+        <h3>形状构成偏序集</h3>
+        <p>形状之间有兼容关系，构成偏序集（poset）。幻灯片以 36 个元素为例：36、(1,36)、(2,18)、(3,12)、(4,9)、(6,6)、(3,4,3)……以及 ((2,3),6)、(6,(2,3))、((2,3),(2,3))、((2,(3,1,1)),(2,3)) 等。如果某个算法要求传入 6×6 矩阵，那么原则上这里的任何一个都能传进去，因为都能按 6×6 的方式对称地访问。他说这让很多巧妙的做法成为可能，CuTe 布局成功表示了 CUDA 想表示的一切。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 用 CuTe 写通用算法：copy 和 gemm</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=2597s" target="_blank">0:43:17</a>–0:55:10 · Implementing algorithms with cute</em></p>
+        <h3>copy 的实现</h3>
+        <p>他先留了一大块空白，问 copy 怎么写：要考虑 rank 吗？二维要两个循环，三维更麻烦。但所有 CuTe 张量都接受整数坐标，所以 copy 就是：</p>
+        <pre><code>template &lt;class SrcEngine, class SrcLayout,
+          class DstEngine, class DstLayout&gt;
+CUTE_HOST_DEVICE void
+copy(Tensor&lt;SrcEngine,SrcLayout&gt; const&amp; src,
+     Tensor&lt;DstEngine,DstLayout&gt;      &amp; dst)
+{
+  for (int i = 0; i &lt; size(dst); ++i) {
+    dst(i) = src(i);
+  }
+}</code></pre>
+        <p>他说这是通用的，能用于 CUDA 里任何张量。</p>
+        <p>问答：有人问这是不是布局的“自然顺序”，前面幻灯片上那条线是不是表示遍历顺序。Cris 说那条线只是为了展示，表示存储里的物理顺序，和遍历顺序没有必然关系。</p>
+        <h3>为什么静态形状下它是最优的</h3>
+        <ul>
+            <li>他说 copy 从根本上是 rank-1 算法，不管参数张量是几阶。</li>
+            <li>两个张量形状都是静态时，这个循环能完全展开；坐标变换能完全静态计算；求物理偏移的内积也常常能静态算出，步长静态时就完全静态。</li>
+            <li>动态时仍然是最优的，因为参与内积的层级坐标是静态已知的。</li>
+        </ul>
+        <p>他强调静态形状在 CUDA 里极其常见：寄存器本身就是静态的；共享内存的布局几乎总是已知的；Blackwell 的张量内存（tensor memory，TMEM，Blackwell 上专给 Tensor Core 累加器用的片上存储）总是静态的；全局内存可能是动态形状，但写内核时第一件事就是分块，块内处理的子块几乎总是静态大小。</p>
+        <h3>同一个 copy 能做的事</h3>
+        <p>幻灯片上的源/目标布局（写法是“形状:步长”）：</p>
+        <table>
+            <tr><th>用途</th><th>Source</th><th>Destination</th></tr>
+            <tr><td>1D 数组</td><td><code>8:1</code></td><td><code>8:1</code></td></tr>
+            <tr><td>ND 数组</td><td><code>(8,2,3):(1,8,16)</code></td><td><code>(8,2,3):(1,8,16)</code></td></tr>
+            <tr><td>Gather</td><td><code>(2,2,2):(42,1,128)</code></td><td><code>8:1</code></td></tr>
+            <tr><td>Scatter</td><td><code>8:1</code></td><td><code>(2,2,2):(42,1,128)</code></td></tr>
+            <tr><td>Broadcast</td><td><code>8:0</code></td><td><code>8:1</code></td></tr>
+            <tr><td>Constant</td><td><code>8:0</code></td><td><code>8:0</code></td></tr>
+            <tr><td>Transpose</td><td><code>(8,3):(1,8)</code></td><td><code>(8,3):(3,1)</code></td></tr>
+        </table>
+        <p>步长 0 是合法的，用来做广播：逻辑上 8 个元素，在内存里都是同一个值。把 8×3 列主序张量拷到 8×3 行主序张量，就是转置。</p>
+        <h3>问答：“最优”指什么，编译慢从哪来</h3>
+        <p>聊天区有人问这里的“最优”指什么。他说指运行时零开销：前面那些行下标计算和内积，只要形状静态，几乎一定不花运行时间。</p>
+        <p>Mark 问这是不是 C++ 编译慢的根源。Cris 说当然是：它把所有静态信息一路传下去，他确保永远不丢任何静态信息，因为那是运行时性能的死穴。有人（字幕作 Amaz）问为什么用模板而不是 <code>constexpr</code>，他说编译器很不擅长传播 <code>constexpr</code>，很容易丢掉，代码里突然就多了一个动态值。</p>
+        <h3>问答：gather/scatter 怎么落到真实的指令上</h3>
+        <p>Mark 问：copy 和转置可以靠算法上的聪明，但 gather、scatter 这些要和硬件打交道，表达能力和实际要调用的底层 API 之间怎么对应？Cris 用一个例子回答，同时说优化细节先不展开。全局内存张量第一步是分块，幻灯片画了四种把 M×N 张量分成 4×8 子张量的方式，比如 <code>&lt;4:1,8:1&gt;</code>、<code>&lt;(2,2):(1,4),8:1&gt;</code>、<code>&lt;(2,2):(1,4),8:2&gt;</code>、<code>&lt;4:2,8:2&gt;</code>，每一种都是 4×8 子张量，只是步长不同。共享内存也画了四种排法，可以按访存模式或向量化需求来选。拷贝只有一种写法：</p>
+        <pre><code>cute::copy(src_4x8_tensor, dst_4x8_tensor);</code></pre>
+        <p>不管分块方式和共享内存布局是哪种组合，都是这一行。copy 内部当然可以做优化，而且能做得很好，因为可以检查布局：步长 1 在哪，该按哪个方向遍历，能不能自动向量化，能不能证明没有竞争条件，能不能消除冗余指令，能不能用更复杂的指令完成等价的拷贝。</p>
+        <h3>gemm 的实现</h3>
+        <p>GEMM 从根本上是 rank-3 算法：</p>
+        <pre><code>template &lt;class AEngine, class ALayout,
+          class BEngine, class BLayout,
+          class CEngine, class CLayout&gt;
+CUTE_HOST_DEVICE constexpr void
+gemm(Tensor&lt;AEngine,ALayout&gt; const&amp; A, // (M,K)
+     Tensor&lt;BEngine,BLayout&gt; const&amp; B, // (N,K)
+     Tensor&lt;CEngine,CLayout&gt;      &amp; C) // (M,N)
+{
+  for (int k = 0; k &lt; size&lt;1&gt;(A); ++k) {
+    for (int m = 0; m &lt; size&lt;0&gt;(A); ++m) {
+      for (int n = 0; n &lt; size&lt;0&gt;(B); ++n) {
+        C(m,n) += A(m,k) * B(n,k);
+      }
+    }
+  }
+}</code></pre>
+        <table>
+            <tr><th>应用</th><th>A Layout</th><th>B Layout</th><th>C Layout</th></tr>
+            <tr><td>NT, TN, NN, TT GEMM</td><td><code>(M,K):(1,lda)</code></td><td><code>(N,K):(1,ldb)</code></td><td><code>(M,N):(1,ldc)</code></td></tr>
+            <tr><td>NTT GEMM</td><td><code>(M,K):(1,lda)</code></td><td><code>(N,K):(1,ldb)</code></td><td><code>(M,N):(ldc,1)</code></td></tr>
+            <tr><td>BLIS GEMM</td><td><code>(M,K):(dma,dka)</code></td><td><code>(N,K):(dnb,dkb)</code></td><td><code>(M,N):(dmc,dnc)</code></td></tr>
+            <tr><td>GETT</td><td><code>((M1,M2),K)</code></td><td><code>(N,K)</code></td><td><code>((M1,M2),N)</code></td></tr>
+            <tr><td>GETT</td><td><code>(M,(K1,K2))</code></td><td><code>(N,(K1,K2))</code></td><td><code>(M,N)</code></td></tr>
+            <tr><td>CONV</td><td><code>(K,(C,T,R,S))</code></td><td><code>((N,Z,P,Q),(C,T,R,S))</code></td><td><code>(K,(N,Z,P,Q))</code></td></tr>
+        </table>
+        <p>他的解说：四种 BLAS 转置组合只是在布局里交换 lda 和 1。NTT GEMM 转置的是 C，BLAS 里也能做，但要用转置技巧，他说一半的人可能不知道他在说什么，而这个问题在他们的 Slack 里每个月至少出现几次。BLIS（另一个 BLAS 库）允许两个模都有任意步长，CuTe 白送。多个 M 模、多个 K 模的张量缩并也一样。卷积稍微疯狂一点：im2col 把卷积变成矩阵乘法，而 im2col 变换本身能用 CuTe 布局表示，然后调用 gemm 就完成了。当然还要做相应的优化，但卷积能和 GEMM 用完全相同的方式分块，原则上不用写很多额外代码，能复用为矩阵乘法写的优化和内核。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 组合（composition）与分区</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=3310s" target="_blank">0:55:10</a>–1:04:38 · TMA load and composition / Partitioning and thread management</em></p>
+        <p>Cris 问还剩多少时间，Mark 说想讲多久都行，三四个小时也可以。Cris 决定讲完这一节再商量。聊天区有人问：TMA 加载不是比通用 copy 更有用吗？他半开玩笑地说“要是能用 CuTe 构造 TMA 拷贝就好了”，然后说 CuTe 有很多 TMA 例子（TMA 是 Hopper 起的张量内存加速器，一条指令搬一整块多维数据，后面再提）。</p>
+        <h3>组合的定义</h3>
+        <p>他说组合是 CuTe 代数的主力，所有积、除、分块都是用组合实现的。回到布局映射：坐标先变换，再和步长做内积，得到物理下标。如果“眯着眼或者喝醉了”忽略中间过程，布局就是一个从整数到整数的函数。对这种函数，最先想到的运算就是函数复合，而两个布局的复合几乎总能得到另一个布局 R。</p>
+        <p>定义：布局 A 和 B 的组合是布局 R，满足 R 与 B 形状兼容（B 的所有坐标都能当 R 的坐标用），并且对 B 的每个坐标 $c$：</p>
+        $$R = A \circ B, \qquad R(c) = A\big(B(c)\big)$$
+        <p>它有左、右单位元，满足结合律；在 B 满射时满足左分配律。</p>
+        <h3>例子：给线程分元素</h3>
+        <p>假设输入是一个向量，不告诉你它的布局，也不告诉你数据在哪。程序里要给它分区：线程 0 负责 6 个元素，它们的坐标（是坐标，不是地址）是 0、1、4、5、8、9。把这串坐标写成布局，是 (2,3):(1,4)，即两个相邻元素、再按步长 4 重复三次。</p>
+        <p>下一个线程拿 2、3、6、7、10、11，再两个线程拿 12–23 里对应的位置。横着看，每个线程拿到的值的坐标构成一个布局；竖着看，每个线程的起点也构成一个布局，(2,2):(2,12)，先步长 2，再步长 12。两者拼成一个二维布局：</p>
+        $$\text{TV}: \big((2,2),(2,3)\big) : \big((2,12),(1,4)\big)$$
+        <p>这是一个从（线程编号，值编号）到数组一维坐标的函数。比如线程 2 的第 4 个值（值编号 3）对应坐标 17：线程 2 的起点是 12，值编号 3 对应偏移 5。</p>
+        <h3>分区 = 组合 + 切片</h3>
+        <p>有了组合，就把向量和这个 TV 布局组合，得到另一个布局。因为结果与 TV 布局形状兼容，它仍是 4×6。要分区，只需切片：线程 1 那一行就是它拥有的 6 个元素，也就是它在原向量里的子张量。代码就是这样：</p>
+        <pre><code>Tensor input     = make_tensor(. . .);
+Tensor tv_input  = composition(input, thr_val);
+Tensor thr_input = tv_input(tid, _);</code></pre>
+        <p>幻灯片上的结论：给定一个布局，分区就是函数组合后再切片（Given a layout, partitioning is functional composition followed by slicing）。他说只要定义合适的线程-值布局，就能按任意方式分区。</p>
+        <h3>问答：不对齐时怎么办（predication）</h3>
+        <p>另一位主持人问：要分区的东西不能整除怎么办，谓词（predication，用一个布尔掩码决定哪些元素可以访问）的一般策略是什么？Cris 说那能单独讲一整场。他们有一套形式化的、很强的谓词方法。块不能整除矩阵完全没问题，都用组合实现，组合会照预期向上取整；然后需要一个谓词张量告诉你哪些值能合法访问。他说构造这个谓词张量也有同样数学化的方法。</p>
+        <h3>点睛之处</h3>
+        <p>他说刚才是对一个向量做的分区，但每个张量也是一个向量：任何张量都能用整数坐标访问。所以这等于得到了一种对任意阶、任意布局的张量做任意分区的方法。他说这一点力量极大，因为能立刻用到 MMA，也就是 CUDA 里的 Tensor Core。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. MMA atom 和 Tensor Core 编程</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=3878s" target="_blank">1:04:38</a>–1:13:55 · MMA atoms and tensor cores / Programming tensor cores</em></p>
+        <h3>指令自带的分区模式</h3>
+        <p>Tensor Core 是 GPU 上专做小矩阵乘加（MMA）的硬件单元，一条指令由一组线程合作完成，每个线程在寄存器里持有输入输出的特定元素。他最喜欢的是 Volta 的 8×8×4 Tensor Core，这也是启发 CuTe 的那个：他第一次用 LaTeX 打印出它的分区模式时觉得“太酷了”。PTX 文档规定了这条指令要求的分区：线程 0 拿这些值，线程 1、2、3 各拿往下的 4 个，有的甚至不连续。这些就是上一节练习里的线程-值布局。他说这是这条指令唯一能理解的东西，所以它要成为指令的元数据。宇宙里每一个 Tensor Core 都能这样描述。</p>
+        <p>幻灯片注明：这些布局把线程/值编号（定义域）映射到 MNK 逻辑坐标，通常我们想的是它的逆，MNK 到（线程，值）。</p>
+        <p>他依次展示：通用 SIMT 乘加 <code>UniversalFMA&lt;double&gt;</code>；DP4A（Tensor Core 的前身，SM61 上的打包 int8 点积）；Volta 第一代 Tensor Core；Ampere 双精度 8×8×4，看起来相似但 A、B、C 的分区不同；Ampere 半精度 16×8×8。他说都只是把 PTX 文档里的分区模式记录成线程-值布局。DP4A 的定义：</p>
+        <pre><code>template &lt;&gt;
+struct MMA_Traits&lt;SM61_DP4A&gt;
+{
+  using ElementDVal = int32_t;
+  using ElementAVal = int8_t;
+  using ElementBVal = int8_t;
+  using ElementCVal = int32_t;
+  using ThrID   = Layout&lt;Shape&lt;_1&gt;&gt;;
+  using ALayout = Layout&lt;Shape&lt;_1,_4&gt;&gt;;
+  using BLayout = Layout&lt;Shape&lt;_1,_4&gt;&gt;;
+  using CLayout = Layout&lt;Shape&lt;_1,_1&gt;&gt;;
+};
+
+struct SM61_DP4A
+{
+  using DRegisters = int32_t[1];
+  using ARegisters = uint32_t[1];
+  using BRegisters = uint32_t[1];
+  using CRegisters = int32_t[1];
+
+  // Arch register view
+  CUTE_HOST_DEVICE static void
+  fma(int32_t       &amp; d,
+      uint32_t const&amp; a,
+      uint32_t const&amp; b,
+      int32_t const&amp; c) {
+    asm volatile("dp4a.s32.s32 %0, %1, %2, %3;"
+      : "=r"(d)
+      : "r"(a), "r"(b), "r"(c));
+  }
+};</code></pre>
+        <p>幻灯片提醒注意架构接口和逻辑元素类型的区别：寄存器是 <code>uint32_t</code>，逻辑元素是 4 个 <code>int8_t</code>。Volta 8×8×4 的定义：</p>
+        <pre><code>template &lt;&gt;
+struct MMA_Traits&lt;SM70_8x8x4_F32F16F16F32_NT&gt;
+{
+  using ElementDVal = float;
+  using ElementAVal = half_t;
+  using ElementBVal = half_t;
+  using ElementCVal = float;
+  using Shape_MNK = Shape&lt;_8,_8,_4&gt;;
+  using ThrID = Layout&lt;Shape &lt;_4, _2&gt;,
+                       Stride&lt;_1,_16&gt;&gt;;
+  // (T8,V4) -&gt; (M8,K4)
+  using ALayout = Layout&lt;Shape &lt;Shape &lt;_4,_2&gt;,_4&gt;,
+                         Stride&lt;Stride&lt;_8,_4&gt;,_1&gt;&gt;;
+  // (T8,V4) -&gt; (N8,K4)   (this is the B layout; the slide repeats the name ALayout)
+  using ALayout = Layout&lt;Shape &lt;Shape &lt;_4,_2&gt;,_4&gt;,
+                         Stride&lt;Stride&lt;_8,_4&gt;,_1&gt;&gt;;
+  // (T8,V8) -&gt; (M8,N8)
+  using CLayout = Layout&lt;Shape &lt;Shape &lt;_2, _2,_2&gt;,Shape &lt;_2,_2, _2&gt;&gt;,
+                         Stride&lt;Stride&lt;_1,_16,_4&gt;,Stride&lt;_8,_2,_32&gt;&gt;&gt;;
+};</code></pre>
+        <h3>Hopper：共享内存描述符</h3>
+        <p>到 Hopper 情况变了：WGMMA（Hopper 上由 4 个 warp 组成的 warpgroup 共同发射的异步矩阵乘指令）的 A、B 操作数直接从共享内存读，需要构造共享内存描述符（shared memory descriptor），A、B 不再按线程分区，只有 C 分区。他说正因为能检查输入矩阵的布局，CuTe 才能验证布局是否合法并替你构造描述符，这些对用户完全透明。幻灯片上的例子是 <code>SM90_64x16x16_F32F16F16_SS</code>，<code>ThrID = Layout&lt;_128&gt;</code>（128 个线程），A、B 的“片段”类型是 <code>GMMA::smem_desc</code>，并注明实际不会用这么小的 N，理想情况是选和块形状匹配的 N，比如 128。</p>
+        <h3>MMA_Atom、TiledMMA、ThrMMA</h3>
+        <ul>
+            <li><strong>MMA_Atom</strong>：MMA_Op（原始 PTX）加 MMA_Traits（PTX 元信息）。它能检查调用接口的布局、生成片段（fragment，即寄存器张量），还能打印出分区模式。</li>
+            <li><strong>TiledMMA</strong>：MMA atom 的布局。一条指令是一个 warp 的量，他想要 4 个 warp 排成 2×2，就把 atom 和一个 2×2 列主序布局做积（也可以是行主序或 4×1）。还可以对 M、N、K 模做置换，仍然是合法的计算策略。置换 M 的效果是把各线程的值挪到相邻位置，更容易为这条 MMA 指令设计访存模式好的共享内存布局；实际上是在交错多个 Tensor Core 指令。</li>
+            <li><strong>ThrMMA</strong>：把 TiledMMA 按线程号切片，得到这个线程在 A、B、C 里负责的分区。他高亮了线程 24，说从 GEMM 遍历行列的角度看完全说不通，它怎么跑到那么远的地方去了，这种东西他可不想手工记。</li>
+        </ul>
+        <pre><code>MMA_Atom mma = MMA_Atom&lt;SM90_16x8x4_F64F64F64F64_TN&gt;{};
+print_latex(mma);
+
+Tiled_MMA mma = make_tiled_mma(SM90_16x8x4_F64F64F64F64_TN{},
+                               Layout&lt;Shape&lt;_2,_2&gt;&gt;{},   // 2x2 warps
+                               Tile&lt;Layout&lt;_8,_2&gt;&gt;{});   // Permute M
+print_latex(mma);
+
+ThrMMA thr_mma = tiled_mma.get_slice(threadIdx.x);</code></pre>
+        <h3>用 MMA 写一个完整的小 GEMM</h3>
+        <p>构造共享内存张量（布局任意），构造 MMA 并取本线程的切片，用它分区共享内存，得到本线程负责的子张量；再做寄存器片段，形状和共享内存分区相同，所以可以直接 copy。拷到寄存器，清零累加器，写三重循环调用复杂的指令，最后把寄存器拷回内存。幻灯片代码（原样照抄，几处变量名有笔误，见注释）：</p>
+        <pre><code>Tensor sA = make_tensor(ptrA, Shape&lt;_64,_16&gt;{})); // (64,16)
+Tensor sB = make_tensor(ptrB, Shape&lt;_32,_16&gt;{})); // (32,16)
+Tensor gC = make_tensor(ptrC, Shape&lt;_64,_32&gt;{})); // (64,32)
+
+ThrMMA thr_mma = mma.get_slice(threadIdx.x);
+Tensor tCsA = thr_mma.partition_A(sA);        // (2,M',K')
+Tensor tCsB = thr_mma.partition_B(sB);        // (1,N',K')
+Tensor tCgC = thr_mma.partition_C(gC);        // (4,M',N')
+
+Tensor tCrA = thr_mma.make_fragment_A(tCsA);  // (2,M',K')
+Tensor tCrB = thr_mma.make_fragment_B(tCsB);  // (1,N',K')
+Tensor tCrC = thr_mma.make_fragment_C(tCgC);  // (4,M',N')
+
+copy(tCsA, tCrA);
+copy(tCsB, rCrB);   // rCrB on the slide means tCrB
+clear(tCrC);
+// rC / rA on the slide mean tCrC / tCrA
+for (int m = 0; m &lt; size&lt;1&gt;(rC); ++m) {
+ for (int n = 0; n &lt; size&lt;2&gt;(rC); ++n) {
+  for (int k = 0; k &lt; size&lt;2&gt;(rA); ++k) {
+   mma.call(tCrA(_,m,k), tCrB(_,n,k), tCrC(_,m,n));
+} } }
+copy(tCrC, tCgC);</code></pre>
+        <p>他特别指出 gC 是全局内存，连共享内存都不是，sB 才是共享内存。全局内存也按指令期望的方式分区，所以指令不关心数据在共享内存还是全局内存，形状都对。</p>
+        <p>他说这是 CUTLASS 的基础，也是让 CUTLASS 编程容易得多的原因：对 Tensor Core 有了极其稳健、通用的表示；所有子张量都能访问；有 bug 就打印张量或 MMA 看看。优化往往就变成找合适的共享内存布局，让 copy 快、能在内部向量化；MMA 本身总是对的。这时他说只超时了 15 分钟，还挺满意。另一位主持人说他的幻灯片才讲了三分之一左右，问后面还想讲什么。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 向量化、TMA、copy atom 和问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=4435s" target="_blank">1:13:55</a>–1:24:32 · Vectorization and conclusion</em></p>
+        <h3>公共子布局和自动向量化</h3>
+        <p>回到 copy 的各种输入。从一个布局拷到另一个布局时，如果源里两个值在物理内存中相邻，目标里对应的两个值也相邻，就能用一条双倍宽度的指令代替两条，这就是向量化。他的例子里，24、25 能放进 18、19 的位置，因为两边物理上都相邻。他强调物理相邻和逻辑相邻没有关系。另一个例子里 0 1 2 3 对 0 1 2 3，可以做 4 路向量化。原因是两边有一个公共子布局（common sublayout），前一个例子公共部分是 2 个元素，后一个是 4 个。</p>
+        <p>这个公共子布局能算出来。把“公共布局”写成数学式，取逆，变成一个布局的逆和另一个布局的组合，结果就给出两个张量的重叠部分和安全的向量化宽度：</p>
+        $$B^{-1} \circ A$$
+        <p>问答：另一位主持人问，这是不是你工作的一贯主题，在编译期先从数学上证明哪些优化是安全的？他答是。又有人问公共子布局能不能理解成最小的连续切片。他说最简单的表述是：A 和 B 有一组公共坐标，映射到连续的偏移。一定存在这样一组坐标让两边产生同样的连续偏移；表达方式有很多种，推导下去会得到很简单的 B 的逆和 A 的组合。</p>
+        <h3>问答：写别的内核也用 CUTLASS 吗？TMA 的例子</h3>
+        <p>有人问：如果 NVIDIA 有人请你写某个内核 X（他说每周都有人来找他），你会用 CUTLASS 表达数据到线程和值的分区吗？他说会，每次都用。例如想清楚怎么编程 TMA 的时候。TMA 是 Hopper 和 Blackwell 上极其复杂的拷贝指令，对程序员要求极高。它有一个 TMA 描述符，描述整个问题；然后要在问题空间里生成坐标，TMA 拿着坐标和描述符搬数据，并替你处理所有谓词。描述符很大，写起来很痛苦，容易搞错，也常常没优化好。用 CuTe 可以检查全局内存布局和共享内存布局，生成 TMA 描述符和正确的坐标，算出搬多少字节等等，一切都替你做好，安全，也相对好写。</p>
+        <h3>copy atom</h3>
+        <p>他说这套模型已经超出 GEMM，用在他们的每一个拷贝和计算操作上。拷贝操作越来越复杂：都是集体操作，用多个线程、多个 warp，源的分区模式和目标的分区模式不一样。他展示了 LDSM（从共享内存加载到寄存器的指令，字幕作 LDSN）的 copy atom：源是共享内存的分区模式，目标是寄存器的分区模式，两者不同。他说这让人头晕，人类做不到；以前他们用一张又一张 Excel 表格追踪共享内存布局、每个寄存器代表什么、数据在哪、epilogue 怎么写回全局内存。而最终想写的代码只是：有一个 tiled copy，把它的分区模式分别用到源和目标上，然后对这些张量的整数坐标写简单的 for 循环调用 copy。</p>
+        <h3>问答：和 PyTorch 里的 reshape</h3>
+        <p>Mark 先问能否分享幻灯片，Cris 说可以，但只放一部分。Mark 又说：PyTorch 新手最容易卡住的是 reshape、切片、flatten，这些形状操作很难在脑子里对应起来；CUTLASS 前期成本高，但最后给了一套代数，能不管布局、不管设备数量地推理拷贝和 reshape？Cris 说是，但要小心：逻辑 reshape 和物理 reshape 不同，你是否在乎数据实际在哪，有时在乎有时不在乎。不过单是能更稳健地把张量折成矩阵这一点，对把这些东西做起来就很有帮助。</p>
+        <h3>问答：入门资料</h3>
+        <p>Mark 问幻灯片底部那两篇论文还适合入门吗。Cris 说完全不适合，那是张量缩并应用的学术论文。入门和深入请去 NVIDIA CUTLASS 仓库，那里有大量文档，他自己有一个文档目录，大部分是他写的；新的 Python DSL 有快速入门，hello world 也会过一遍 CuTe 的各种操作，包括积、除、分块和谓词；文档里还链接了很多代码示例。他推荐用这些去改内核，做“你以前一直做不到的那件怪事”。</p>
+        <p>Mark 收尾说这是他最喜欢的讲座之一，下周的讲座是 Junda Chen 讲解耦（disaggregated）LLM 推理。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“If you hit that speed good job. If you don't hit that speed where if you're 1% off, let's go find that 1%.”（达到了那个速度，干得好。没达到，哪怕差 1%，就去把那 1% 找回来。）<a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=264s" target="_blank">0:04:24</a></li>
+            <li>“tensor is a view, not a container”（张量是视图，不是容器。）<a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=1057s" target="_blank">0:17:37</a></li>
+            <li>“why are we trying to name all of these things? Just tell me the just tell me the layout and we'll go from there.”（我们为什么要给所有这些东西起名字？直接告诉我布局，我们从那里开始。）<a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=2167s" target="_blank">0:36:07</a></li>
+            <li>“It's propagating all the static information around and I make absolutely sure that I never lose track of any static information ever.”（它把所有静态信息一路传下去，我绝对确保永远不丢任何静态信息。）<a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=2976s" target="_blank">0:49:36</a></li>
+            <li>“the term partitioning is functional composition followed by slicing.”（分区这个词，就是函数组合后再切片。）<a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=3821s" target="_blank">1:03:41</a></li>
+            <li>“Next to each other in physical memory has nothing to do with next to each other in logical memory.”（物理内存里相邻，和逻辑上相邻没有关系。）<a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=4489s" target="_blank">1:14:49</a></li>
+            <li>“That's mind-bending and it's impossible for humans.”（这让人头晕，人类做不到。）<a href="https://www.youtube.com/watch?v=vzUhbDO_0qk&t=4771s" target="_blank">1:19:31</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 57: CuTe · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

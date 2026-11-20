@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CUTLASS 与 FlashAttention-3 | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="12_低比特Triton内核.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 13</span>
+    <span><a href="14_FlashInfer.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 36 · CUTLASS 与 FlashAttention-3</h1>
+        <p class="subtitle">FlashAttention-3 作者之一讲它在 H100 上的三个想法：用 WGMMA 和 TMA、用 warp 专用化和乒乓调度把 GEMM 与 softmax 重叠、为 FP8 解决布局一致性问题；再讲持久化内核、解码时的 GQA packing，最后打开代码逐行读消费者 warpgroup 的 MMA 方法</p>
+        <div class="author-meta">
+            主讲：Jay Shah（Colfax Research，FlashAttention-3 论文的共同第一作者）· 发布日期：2024 年 11 月 17 日 · 时长：1 小时 49 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=JwUcZwPOCpA" target="_blank">讲座录像 Lecture 36: CUTLASS and Flash Attention 3</a>（GPU MODE YouTube 频道公开）· 幻灯片：<a href="https://github.com/gpu-mode/lectures/tree/main/lecture_036" target="_blank">lecture_036（flash_attn_3_gpu_mode_talk.pdf）</a> · 代码：<a href="https://github.com/Dao-AILab/flash-attention" target="_blank">Dao-AILab/flash-attention</a>（本文依据录像字幕和幻灯片整理，屏幕上的代码按讲者口述转写；是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>Jay Shah 来自 Colfax Research，主持人介绍说这是一家做数学和性能编程的家族公司，它的博客文章质量很高，GPU MODE 里在重写 PMPP 教材的成员也读过、并打算把其中很多内容放进新版。Jay 是 FlashAttention-3（FA3）论文的作者之一，合作者有 Ganesh Bikshandi、Ying Zhang、Vijay Thakkar、Pradeep Ramani 和 Tri Dao（Vijay 和 Pradeep 就是本合集第 10 篇的两位讲者）。</p>
+        <p>这一讲分三部分：先回顾注意力和 FlashAttention 的核心想法；再讲 FA3 算法在 H100 上做了哪些改动；最后，也是他认为最有价值的部分，切到编辑器里讲怎样把算法写成基于 CUTLASS 的代码，重点是消费者 warpgroup 的 MMA 方法。前置知识：本合集第 05 篇的分块和在线 softmax，第 10 篇讲的 Hopper 特性（TMA、WGMMA、事务屏障、warpgroup）和 CUTLASS 的 collective / tile scheduler 结构。CS2680 笔记里讲过注意力、KV cache 和 GQA。</p>
+        <p>录像说明里有 Jay 的一条更正：讲 warpgroup 内重叠的那张图放错了，是他们现在已经不用的一个旧重叠方案，算法本身是对的；GitHub 上的幻灯片已经换成正确的图。</p>
+        <ol>
+            <li><a href="#t01">开场，注意力回顾，FlashAttention 的想法</a> · <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">FlashAttention-2 算法，它在 H100 上的不足，FA3 的三个想法</a> · <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=446s" target="_blank">0:07:26</a></li>
+            <li><a href="#t03">WGMMA、TMA 和 warp 专用化</a> · <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=764s" target="_blank">0:12:44</a></li>
+            <li><a href="#t04">GEMM 和 softmax 的重叠：乒乓调度和 warpgroup 内流水线</a> · <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=1469s" target="_blank">0:24:29</a></li>
+            <li><a href="#t05">FP8 的布局一致性问题</a> · <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=1921s" target="_blank">0:32:01</a></li>
+            <li><a href="#t06">持久化内核和训练场景的测速</a> · <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=2175s" target="_blank">0:36:15</a></li>
+            <li><a href="#t07">解码优化：split-KV 和 GQA packing，小结</a> · <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=2431s" target="_blank">0:40:31</a></li>
+            <li><a href="#t08">用 CUTLASS 搭 FA3：三个类和 CTA 级骨架</a> · <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=2623s" target="_blank">0:43:43</a></li>
+            <li><a href="#t09">MMA 方法一：共享内存视图、tiled MMA 和描述符</a> · <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=3334s" target="_blank">0:55:34</a></li>
+            <li><a href="#t10">MMA 方法二：第一个 GEMM、在线 softmax 和主循环的重叠</a> · <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=3974s" target="_blank">1:06:14</a></li>
+            <li><a href="#t11">累加器重排、flash_gemm 封装和乒乓屏障</a> · <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=4997s" target="_blank">1:23:17</a></li>
+            <li><a href="#t12">问答：方法从哪来、FP4、编译器、自动化</a> · <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=5578s" target="_blank">1:32:58</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场，注意力回顾，FlashAttention 的想法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=0s" target="_blank">0:00:00</a>–0:07:26 · Introduction / Flash attention overview</em></p>
+        <h3>开场</h3>
+        <p>主持人说，他问别人该请谁来讲一次关于 CUTLASS 的有意思的讲座，第一个被提到的名字就是 Jay；之后他读了很多 Colfax Research 的博客，觉得在内容质量上可以和最好的那批技术文章相比，直观、优雅。Jay 在会前提到 Colfax Research 其实是家族企业，主要做数学和性能编程。另一位主持补充说，他们在重写 PMPP 教材时读过 Jay 的大部分博客，会把其中很多内容放进去。</p>
+        <h3>注意力</h3>
+        <p>注意力是 Transformer 的核心组件，公式是</p>
+        <p>$$O = \mathrm{softmax}(QK^\top)\,V$$</p>
+        <p>查询矩阵 $Q$ 是 $M \times d$，键矩阵 $K$ 是 $N \times d$。幻灯片上它们画成扁长的矩形，因为头维度 $d$ 通常比序列长度短得多。先算 $S = QK^\top$，记录查询和键的相似度，是一个 $M \times N$ 的矩阵，比 $Q$、$K$ 大得多；再对 $S$ 逐行做 softmax，得到注意力概率 $A$（逐行归一化的相似度分数）：</p>
+        <p>$$\mathrm{softmax}(s_1,\dots,s_N) = \left(\frac{e^{s_1}}{\sum_i e^{s_i}},\ \dots,\ \frac{e^{s_N}}{\sum_i e^{s_i}}\right)$$</p>
+        <p>最后乘以值矩阵 $V$（$N \times d$），得到输出 $O$（$M \times d$）。幻灯片上的典型取值：假设预训练时 $M = N$，序列长度 $N$ 在 1K 到 16K，头维度 $d$ 在 64 到 256。注意力随序列长度二次增长，所以是长上下文应用的主要瓶颈。</p>
+        <h3>朴素算法卡在访存上</h3>
+        <p>朴素地在 GPU 上实现：从 HBM（高带宽内存，也就是全局内存）按块读入 $Q$ 和 $K$，算出 $S$，然后必须把 $S$ 写回 HBM 才能做 softmax，因为 softmax 事先需要整行的全局信息。这一次中间矩阵的写和读，让朴素注意力受限于访存：一是因为分数矩阵很大，二是因为读写 HBM 比在片上计算慢得多。幻灯片上的话是：最大的开销在搬运比特。</p>
+        <h3>内存层次</h3>
+        <p>他说听众多半熟悉 GPU 的内存层次，但在这些想法刚被提出时，至少在机器学习圈子里这还不是常识。要点是存储容量和速度（带宽）成反比：金字塔底部是 HBM，即全局内存；往上是共享内存，再到片上寄存器，容量小得多，带宽高得多。幻灯片引用的是 Horace He 的博客 <em>Making Deep Learning Go Brrrr From First Principles</em>，问题是：能不能利用这种存储不对称来提速，也就是做到 IO 感知（IO-awareness，把对各级存储的读写都算进成本）。</p>
+        <h3>分块和重计算</h3>
+        <p>FlashAttention 的想法是用分块（tiling）和重计算（recomputation）加速注意力，并且不把中间的分数矩阵写到 HBM。由此带来两个挑战：</p>
+        <ol>
+            <li>拿不到完整的输入（分数矩阵的整行），也要算出 softmax 的归一化；</li>
+            <li>反向传播时没有前向算出的那个大注意力矩阵，也要能算。</li>
+        </ol>
+        <p>解决办法是经典的内核融合：把注意力的全部计算融合成一次内核启动，用分块和在线 softmax（online softmax）绕开整行归一化的问题。对给定的一块 $Q$，一块一块地读入 $K$、$V$，用在线 softmax 算出中间的 $S$ 和 $P$，边读边对 $O$ 做重缩放并累加到对应的 $O$ 分块里。反向传播时用重计算，不存注意力矩阵。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. FlashAttention-2 算法，它在 H100 上的不足，FA3 的三个想法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=446s" target="_blank">0:07:26</a>–0:12:44 · Flash attention overview / Hopper architecture optimization</em></p>
+        <h3>FlashAttention-2 的循环</h3>
+        <p>他展示 FA2 算法：</p>
+        <ul>
+            <li>把整个 $Q$ 按行分块，块大小叫 BM，把一块 $Q_i$ 读进共享内存；</li>
+            <li>遍历 $K$、$V$ 的分块，块大小叫 BN，也读进共享内存；</li>
+            <li>第一个 GEMM 算 $S = Q_i K_j^\top$，按头维度缩放；</li>
+            <li>跟踪一些统计量：行最大值（因为有指数，要它来安全地算 softmax）和行和（最后归一化用）；</li>
+            <li>对中间矩阵取指数，读入对应的 $V$ 做第二个乘法，并在循环中更新累加器。</li>
+        </ul>
+        <p>这样 FA2 对给定的查询分块 $Q_i$ 算出对应的输出分块 $O_i$，写回 HBM。外层循环靠启动多个线程块来并行，内层循环是每个线程块（CTA）的“注意力主循环”（attention main loop）。</p>
+        <p>下面是这一类在线 softmax 的标准写法（FA 论文里的形式，这里作背景补充，记号按本页）：处理第 $j$ 块时，对每一行</p>
+        <p>$$m^{(j)} = \max\big(m^{(j-1)},\ \mathrm{rowmax}(S^{(j)})\big),\qquad P^{(j)} = e^{S^{(j)} - m^{(j)}}$$</p>
+        <p>$$\ell^{(j)} = e^{m^{(j-1)} - m^{(j)}}\,\ell^{(j-1)} + \mathrm{rowsum}(P^{(j)}),\qquad O^{(j)} = e^{m^{(j-1)} - m^{(j)}}\,O^{(j-1)} + P^{(j)} V_j$$</p>
+        <p>最后 $O = O^{(\text{last})} / \ell^{(\text{last})}$。后文代码里的 “rescale O” 和 “finalize” 就对应这里的重缩放和最后的除法。</p>
+        <h3>在 H100 上远不够</h3>
+        <p>他说讲硬件感知的算法，总要看它跑在什么硬件上。在 A100 上 FA2 基本是最优的，利用率约 80%。在 H100 上它离最优很远：测出的数字在 300 多 TFLOPS，而 H100 SXM5 的理论峰值约 1000 TFLOPS。原因是 FA2 没用 Hopper 的新指令（做矩阵乘的 WGMMA、从全局内存读数的 TMA），也没用 Hopper 上拿到好性能所需的一些异步方面的高级做法，所以利用率最多到 40% 左右（幻灯片写的是 35–40%）。</p>
+        <h3>FA3 的三个核心想法</h3>
+        <ol>
+            <li><strong>用 H100 的新指令。</strong>WGMMA 是吞吐更高的 MMA 原语，完全异步，由一个 warpgroup（4 个连续的 warp）合作执行；TMA 是 Hopper 新加的、由单个线程发出的异步读取，加速把分块搬进共享内存，并且省寄存器。</li>
+            <li>复杂地利用异步。一是 warpgroup 之间的重叠：用 warp 专用化把 warp 分成生产者和消费者，加上乒乓调度（ping-pong scheduling）；二是 warpgroup 内部的重叠：在每个消费者 warpgroup 内，让 softmax（主要是指数运算）和异步的矩阵乘重叠。这些都建立在异步 WGMMA、TMA 和事务屏障之上。</li>
+            <li>低精度。除了改进 BF16 内核，还把 FP8 用进注意力的矩阵乘。这带来布局一致性（layout conformance）的问题：为了能调用 FP8 的 WGMMA，要在 $V$ 被读进共享内存后，由生产者 warpgroup 把它转置，他们叫它内核内转置（in-kernel transpose）。这次不讨论 FP8 注意力的精度问题，也就是怎样减轻低精度带来的精度损失。</li>
+        </ol>
+        <p>结果：BF16 下比 FA2 快最多 3 倍（幻灯片写 1.6–3 倍），实现基本最优，利用率最高约 85%，和最好的 GEMM 内核相当。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. WGMMA、TMA 和 warp 专用化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=764s" target="_blank">0:12:44</a>–0:24:29 · Flash attention-3 algorithm</em></p>
+        <h3>新指令</h3>
+        <p>Hopper 上要拿到峰值吞吐必须用 WGMMA。Ampere 的指令 <code>mma.sync</code> 在 H100 上只能达到理论峰值的约三分之二。</p>
+        <p>TMA 是从全局内存读数的新模型。Ampere（SM80）上已经有异步读取 <code>cp.async</code>；TMA 的改进是减少了做地址计算所用的寄存器，地址计算交给一个专门的硬件单元，省下寄存器。TMA 有读也有异步写，指令由单个线程发出，在异步代理（async proxy）里异步执行。</p>
+        <p>WGMMA 管计算，TMA 管读取，二者自然地嵌进一个生产者/消费者、warp 专用化的流水线设计里。Hopper 还有 warpgroup 级的寄存器重新分配指令（register reallocation），可以把线程块里更大份额的寄存器分给消费者。他说对注意力内核这是必需的，否则会发生寄存器溢出（register spilling，寄存器不够时变量被挪到慢得多的本地内存）。</p>
+        <h3>CTA 视角的算法</h3>
+        <p>幻灯片上是 FA3 论文里的 Algorithm 1，还没加入消费者一侧那些更高级的异步想法，相当于 FA2 加上 warp 专用化。他要大家看第 2 行和第 11 行的生产者/消费者分离：</p>
+        <ul>
+            <li>初始化一个 pipeline 对象，它管理生产者和消费者之间的屏障同步，背后是一个 s 级的环形共享内存缓冲区；</li>
+            <li>生产者 warpgroup 负责从全局内存往共享内存读数据：在进入注意力主循环之前的序言（prologue）里读 $Q_i$，然后读算 $O_i$ 所需的全部 $K$、$V$；</li>
+            <li>消费者一侧在各处等生产者的读取完成，然后就是 FA2 的算法。</li>
+        </ul>
+        <p>FA2 在 SM80 上的实现并不是这样：FA2 代码里没有把生产者和消费者分开的 warp 专用化，虽然它已经用 <code>cp.async</code> 异步读分块。他说对 FA2 这样的 Ampere 风格内核和 GEMM 内核，通常更优的是多级（multi-stage）设计，让同一批 warp 交替做生产和消费；到了 Hopper，FA3 改用 warp 专用化。</p>
+        <h3>问答：为什么做 warp 专用化；为什么分两种角色不分三种</h3>
+        <p>有人问两个问题：为什么走 warp 专用化这条路；为什么只分两种角色，不把读、算、写分成三种。</p>
+        <p>Jay 说，他们在 Hopper 上的第一版实现其实是多级设计，生产者和消费者在同一批 warp 里交替做读取和 MMA：拿 FA2，把 <code>cp.async</code> 换成 TMA，把 MMA 换成 WGMMA，这已经带来很大提升。然后他们受最快的 Hopper GEMM 内核都用 warp 专用化的启发，同时做了多级版和 warp 专用化版，比较之下专用化版本能多挤出一些性能，于是在 Hopper 上所有最快的注意力内核都采用了 warp 专用化设计。</p>
+        <p>为什么不单独用一个 warpgroup 来写结果：写出应该由消费者 warpgroup 来做，因为结果累加在消费者的寄存器里。先写进共享内存、再让另一个 warp 发 TMA 写，没有意义，不如直接在消费者 warp 里发。warp 专用化的好处是让编译器更好地优化、在主循环里交错读取和计算；写只在最后发一次，交给生产者做没有好处。提问者补充说，写对你来说不阻塞，Jay 同意。</p>
+        <h3>问答：warp 专用化是不是一种便于推理的工具</h3>
+        <p>另一位问：他有时把 warp 专用化看作一种工具，方便推理任何时刻有多少线程在做非读取的工作。如果只分一个 warp 去发读取指令，就知道其余 N−32 个线程都在算；如果是协作式的写法，某一刻可能三个 warp 在发读取，另一刻又不一样。Jay 说从可读性和写代码的角度，warp 专用化的代码确实好读得多、好推理得多。</p>
+        <p>提问者又说，因为实际干活的是 TMA 单元，那个读取 warp 只是发指令然后就没事了。Jay 说基本如此，但有个例外：生产者 warpgroup 里另外三个 warp 可以用来做预处理，比如前面说的内核内转置，这在 FP8 内核里很重要。之所以要一个完整的生产者 warpgroup，即使只用一个生产者 warp，是因为寄存器重新分配只能以 warpgroup 为单位操作。所以 BF16 内核里，生产者 warpgroup 中后三个 warp 做完寄存器重新分配就直接返回。提问者确认：重新分配就是说“这些寄存器我不需要，给别人用”。Jay 说对，释放掉再分给消费者，否则寄存器会被平分。</p>
+        <h3>问答：warp 专用化是否把指令调度交给 warp 调度器</h3>
+        <p>聊天里有人问：warp 专用化是不是把指令调度从编译器交给了 warp 调度器，免得编译器去交错生产者和消费者的操作？Jay 说每个周期执行哪条指令仍然由 warp 调度器决定。warp 专用化做的是让编译器（或者说 warp 调度器）的工作更容易：被标为生产者的 warp 唯一的工作就是发 TMA。他坦言对编译器没有深入了解，它是个黑盒，但如果相信关于编译器工作方式的说法，那么写成 warp 专用化的代码，编译器能更好地交错读取和计算指令。另一位与会者补充，专用化后访存模式也会改善。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. GEMM 和 softmax 的重叠：乒乓调度和 warpgroup 内流水线</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=1469s" target="_blank">0:24:29</a>–0:32:01 · WGMMA and softmax optimization / Ping-pong scheduling</em></p>
+        <h3>softmax 的指数运算出乎意料地占时间</h3>
+        <p>FA2 加 warp 专用化、TMA 和 WGMMA 已经能走很远，但还能改进。问题在于 softmax 用的特殊函数（指数）吞吐很低。幻灯片上的例子：头维度 128，块大小 128×192。</p>
+        <p>两个 GEMM（$QK^\top$ 和 $PV$）的 FP16 WGMMA 运算量：</p>
+        <p>$$2 \times 2 \times 128 \times 192 \times 128 \approx 12.6\ \text{MFLOPs},\qquad \frac{12.6\text{M}}{4096\ \text{FLOPs/cycle}} = 3072\ \text{cycles}$$</p>
+        <p>指数运算（MUFU.EX2，SM 上做特殊函数的单元）：</p>
+        <p>$$128 \times 192 \approx 24.6\text{k ops},\qquad \frac{24.6\text{k}}{16\ \text{ops/cycle}} = 1536\ \text{cycles}$$</p>
+        <p>也就是说指数运算花的周期是 WGMMA 的 50%，比通常想象的大得多。FP8 更糟：WGMMA 吞吐翻倍，两者都是 1536 个周期。要提速，就要利用它们用的是不同的硬件单元（Tensor Core 和做指数的 SIMT 单元），并且 Tensor Core 是异步执行的：在 Tensor Core 忙着做 WGMMA 时去做指数运算。</p>
+        <h3>warpgroup 之间的重叠：乒乓调度</h3>
+        <p>一个 warpgroup 合作执行一条 WGMMA，所以先考虑不同 warpgroup 之间。最简单的办法是交给 warp 调度器去选执行哪些指令，幻灯片说这效果还行，但可以做得更好：用屏障显式地组织执行流程。比如有两个消费者 warpgroup，可以把 warpgroup 2 的 WGMMA 排在 warpgroup 1 做 softmax 的时候，反过来也一样。这是一张理想化的图，但用屏障可以在一定程度上逼近这个调度，他们叫它乒乓调度，和 GEMM 内核里的乒乓调度很像（第 10 篇最后提到过 GEMM 的 ping-pong 调度）。</p>
+        <p>幻灯片上的数字：用同步屏障（<code>bar.sync</code>）做乒乓调度，580 TFLOPS → 640 TFLOPS。他说这些数字是在某个配置下观察到的，不要太当真；他们打算在代码里加一条路径，方便关掉乒乓调度做消融实验。实践中在某些配置下确实能看到提速。他说这个实现起来相当简单。</p>
+        <h3>warpgroup 内部的重叠：两级流水</h3>
+        <p>在一个 warpgroup 内部也可以重叠 softmax 和 WGMMA。注意力计算里有隐含的依赖：先做第一个 GEMM 得到分数分块，对它做 softmax，结果喂给第二个 GEMM。要打破这种依赖，可以多维护一个寄存器缓冲区：在做下一轮主循环的第一个 GEMM 的同时，让 softmax 处理上一轮存下来的分数。图上按迭代编号，WGMMA 0 和上一个分数分块的 softmax 重叠。</p>
+        <p>多维护一个寄存器缓冲区来存上一轮的分数，会增加寄存器压力，所以不一定总值得做；但实践中用这类方案确实观察到 TFLOPS 提高。幻灯片上的数字：两级流水，640 TFLOPS → 670 TFLOPS（寄存器压力更高）。如上所述，讲座时这一页放的是旧方案的图，GitHub 上的幻灯片已更正。</p>
+        <h3>消费者视角的完整算法</h3>
+        <p>他展示 FA3 论文里 BF16/FP16 的完整算法（消费者视角），想强调的是：算法里明确区分了什么时候发出一条 WGMMA，什么时候等它完成。异步矩阵乘发出去之后继续往下算，到某个点再等它完成。比如主循环里先发 $S_{\text{next}} = QK^\top$，再发第二个 GEMM，然后等第一个 GEMM 完成，于是第二个 GEMM 和 softmax 重叠。他承认幻灯片上把算 softmax 的那一行藏掉了，说法有点含糊，之前那张示意图更清楚，看代码时会讲明白。要点是：可以把矩阵乘的完成和它的发出解耦；只要小心管理 softmax 和矩阵乘之间的依赖，就能实现这个算法，而不触发编译器在依赖没处理好时给出的串行化警告（serialization warning）。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. FP8 的布局一致性问题</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=1921s" target="_blank">0:32:01</a>–0:36:15 · FP8 layout challenges</em></p>
+        <p>FP8 让 WGMMA 吞吐翻倍，代价是精度。他说 FP8 有一些布局一致性的挑战，从某种意义上说这是整个算法最有意思的部分。</p>
+        <h3>V 要转置</h3>
+        <p>FP8 的 WGMMA 要求共享内存里的操作数张量在内维（被缩并的那一维）上内存连续，即 K-major。而 $Q$、$K$、$V$ 在全局内存里通常按头维度连续，也就是 BSHD 格式最后那个 D：B 是 batch，S 是序列长度，H 是头数，D 是头维度。用 TMA 从全局内存读到共享内存时，改变不了哪一维连续，这是 TMA 的一个限制。</p>
+        <ul>
+            <li>GEMM 0（$QK^\top$）没问题：内维就是头维度，正好是要缩并的那一维。</li>
+            <li>GEMM 1（$PV$）不行：对 $V$ 来说头维度不是内维，必须在内存里把 $V$ 转置，才能用 FP8 WGMMA。</li>
+        </ul>
+        <p>解决办法是在生产者 warpgroup 里做内核内转置。技术上用 LDSM / STSM 指令（在共享内存和寄存器之间成块读写的指令），只用很少的寄存器；这些拷贝指令要配自定义的布局，中间还要用字节置换（byte permute）在寄存器里挪数据。他说这相当复杂，代码里选的布局是专门为这个问题量身定做的。</p>
+        <h3>累加器布局要重排</h3>
+        <p>消费者这边，还要把第一个 GEMM 累加器的布局重排成第二个 GEMM 的操作数 A 布局。$QK^\top$ 的结果存在寄存器里，在原地做指数，得到喂给第二个 GEMM 的 $P$ 分块，也在寄存器里；WGMMA 的第一个操作数可以来自寄存器，但对它的布局有要求。要实现这个算法，就得知道 WGMMA 对分块里每个值归哪个线程所有的假设；从 FP32 累加器转成 FP8 时这个假设被打破，必须做一些寄存器移动来满足它。</p>
+        <p>一个有意思的技术细节：FP8 算法里 $V$ 的内核内转置，实际写出的是 $V$ 的一个行置换，这样就能省掉 $P$ 矩阵上的某些 shuffle 指令（但字节置换省不掉）。也就是说，把 $P \times V$ 换成 $P$ 的一个列置换乘以 $V$ 的对应行置换，结果不变：</p>
+        <p>$$P\,V = (P\,\Pi)(\Pi^\top V)$$</p>
+        <p>其中 $\Pi$ 是置换矩阵。他说搭 FP8 注意力的计算需要一些这样的巧思。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 持久化内核和训练场景的测速</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=2175s" target="_blank">0:36:15</a>–0:40:31 · Persistent kernels / Performance benchmarks</em></p>
+        <h3>持久化内核</h3>
+        <p>和 GEMM 内核一样，可以把实际启动的物理 CTA 和逻辑上的工作分块（work tile）解耦。持久化内核启动固定数量的 CTA 占满整个 GPU，比如等于 SM 数，每个持久 CTA 分到若干个工作分块。好处是可以让当前分块的 epilogue 和下一个分块的 prologue 重叠：具体是写出注意力输出的 TMA store，和为下一个分块的第一个 WGMMA 读入 $Q$、$K$ 的读取重叠。</p>
+        <p>幻灯片上的例子：序列长度 4096，8 个头，batch 4。因为 WGMMA 的工作方式，BlockM 定为 128，所以有 32 个 M 块。总共</p>
+        <p>$$32 \times 8 \times 4 = 1024$$</p>
+        <p>个工作分块。不用持久化内核时，CUDA 网格是 (32, 8, 4)，启动 1024 个 CTA，CTA 和工作分块一一对应。用持久化内核时，在 H100 SXM5 上启动 132 个 CTA，等于 SM 数，每个 CTA 处理 1024 个分块中的一部分，并做上面的 prologue/epilogue 重叠。他说注意力计算很重，处理一个工作分块就要用掉一个 SM 的全部资源，这一点和 Hopper GEMM 内核一样。</p>
+        <p>还可以动态地把工作分块分给下一个空闲的 CTA，解决不是所有分块处理速度都一样的负载均衡问题，比如因果掩码（causal masking，每个查询只看它之前的键，所以不同分块的工作量不同）。他说实践中用持久化内核相当重要。</p>
+        <h3>问答：持久化内核和 stream-K 有什么区别</h3>
+        <p>有人问，持久化内核和 stream-K 框架有什么区别，看起来很像。Jay 说 stream-K 需要持久化内核，但它是一种特定的调度工作分块的方法，也就是一个调度算法。用持久化内核以后，选用哪种调度算法就更简单。提问者确认：这就是代码里 tile scheduler 那个模板参数，可以放 stream-K 进去。Jay 说对。</p>
+        <h3>训练场景的速度</h3>
+        <p>最重要的头维度 128 下：不带因果掩码最高约 750 TFLOPS，带因果掩码约 700 TFLOPS。头维度 256 时最高约 85% 利用率，他说更大的头维度更容易把 GPU 用满。FP8 最高 1.3 PFLOPS。幻灯片的标题分别是：BF16 比 FA2 快 1.6–2.0 倍；BF16 最高 850 TFLOPS；FP8 最高 1.3 PFLOPS。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 解码优化：split-KV 和 GQA packing，小结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=2431s" target="_blank">0:40:31</a>–0:43:43 · Decoding optimization / Summary</em></p>
+        <h3>解码场景快 6 到 7 倍</h3>
+        <p>他想宣传一个在推理上发现的改进。图表是 BF16、多查询注意力（MQA，所有查询头共用一组 K/V）的设置：16 个查询头、1 个 KV 头。这是访存受限的场景：解码时查询序列长度比上下文长度短得多。横轴是上下文长度和 batch 大小，越低越好。FA3 当前的做法比 FA2 快约 6 到 7 倍，并且耗时基本随上下文长度与 batch 大小之积保持不变，上下文变长时带宽没有下降。</p>
+        <p>他说在访存受限的场景比 FA2 快这么多有点出人意料，因为这时已经和 WGMMA 没太大关系。解码时查询只有几个 token，上下文很长（比如 128k），做了两项优化：</p>
+        <ol>
+            <li>沿 KV 序列长度切分（split-KV），给 GPU 足够多的工作。FA2 里已经有，叫 Flash-Decoding，用的是同一个算法。这一项让耗时和上下文长度解耦，只看字节数。</li>
+            <li>GQA packing：在 GQA（分组查询注意力，几个查询头共用一组 K/V）或 MQA 设置里，把多个查询头打包进同一个查询分块。FA2 里还没有这一项。WGMMA 的第一个操作数固定是 64 的倍数；如果不打包，就会启动更多工作分块（逻辑线程块），每个块的查询分块大部分是空的。batch 大的时候，相当于多启动了 N 倍的波次（wave），N 是 GQA 比例。</li>
+        </ol>
+        <p>他说图表里的数字是精心挑过的：MQA 比例 16，查询序列长度 4，乘积 64，正好填满一个 WGMMA 分块，所以在解码场景拿到 6 到 7 倍的提速。</p>
+        <h3>小结</h3>
+        <p>FA3 怎样在 Hopper 上优化：在每一层都用异步，加上 FP8 低精度；推理还有两个额外技巧，split-KV（和 FA2 一样，他没讲细节，可以搜 Flash-Decoding）和 GQA packing，后者和 WGMMA 特有的宽度 64 绑在一起。结果是训练更快、推理更快，能用更长的序列训练更好的模型。代码在 GitHub 的 Dao-AILab/flash-attention 仓库。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 用 CUTLASS 搭 FA3：三个类和 CTA 级骨架</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=2623s" target="_blank">0:43:43</a>–0:55:34 · Cutlass implementation / Code deep dive</em></p>
+        <h3>三个类</h3>
+        <p>他说 FA3 构建在 CUTLASS 之上，在某种意义上离不开 CUTLASS：如果没有一个至少和 CUTLASS 一样强大的库，几乎没法把这个想法写出来。一个 CUTLASS 内核（GEMM 内核是这样，他们的注意力内核也用同样的结构）有三个类：</p>
+        <ol>
+            <li><code>CollectiveMainloop</code>：负责读取和 MMA（在注意力里是读取和计算）；</li>
+            <li><code>CollectiveEpilogue</code>：负责写出；</li>
+            <li><code>TileScheduler</code>：管理工作循环，用持久化内核时把工作分块分给 CTA，这一点很重要。</li>
+        </ol>
+        <p>每个类有自己的一组内核参数，在主机端通过 <code>to_underlying_arguments</code> 函数传进去。他不讲这部分机制，只说需要有一种干净的方式把所有参数从主机传到设备。</p>
+        <h3>问答：CUTLASS 是不是一种新的编程范式</h3>
+        <p>有人说，随着 FlashAttention 一版版演进，FA3 仓库就像一个迷你版 CUTLASS，有很多相同的积木；CUTLASS 几乎像是一种新的 CUDA C++ 编程范式。Jay 说 CUTLASS 里内建了一些想法，硬要说的话可以叫它 DSL，但他个人不这么看：CUTLASS 让你智能地管理线程到数据的映射，有处理这件事的抽象，这也许是见仁见智。另一位与会者补充，CUTLASS 3 重写时特意让它更符合 CUDA C++ 的模型，CUDA C++、CUTLASS、CuTe 都是现代 C++ GPU 编程方法，各自为一组特定任务设计，合在一起是一整套，模板特化是他们榨取性能的方式。Jay 说它确实是一个深度模板化的库。</p>
+        <h3>CTA 级骨架</h3>
+        <p>在生产者/消费者 warp 专用化设计里：生产者让 collective mainloop 做读取；消费者让 collective mainloop 做 MMA（更广义地说是计算），再做写出；tile scheduler 管工作分块。生产者和消费者各有一个“工作循环”（work loop），分别处理读取，以及计算加写出。</p>
+        <p>他切到代码，先指了一下 CTA 视角的内核：</p>
+        <ul>
+            <li>开头设置和流水线有关的东西，初始化 pipeline 对象、collective mainloop 和 collective epilogue，同步线程，然后分成生产者和消费者。</li>
+            <li>生产者 warpgroup：调用相应的 CUTLASS 方法释放寄存器（deallocation）；设置更多 pipeline 辅助对象（他没时间讲）；初始化调度器；进入工作循环：调度器用 get initial work 返回一个 work tile info 对象，for 循环一直跑到它不再有效，每轮取下一个工作分块；从工作分块里取逻辑线程块坐标；有一些提前退出的逻辑；主要的是 load 方法，即 collective mainloop 的 load，负责发 TMA 读取。</li>
+            <li>消费者：按 MMA 的寄存器需求做寄存器分配（allocation），初始化调度器和一些东西，然后是同样结构的工作循环。这里有累加器 <code>tOrO</code>，还有负责 softmax 的 softmax 结构体；取块坐标；用 collective mainloop 的 MMA 方法做计算，之后 <code>tOrO</code> 里就是要写出的值；然后调 store 方法。</li>
+        </ul>
+        <pre><code>// sketch based on the talk: CTA-level skeleton of the FA3 kernel
+// producer warpgroup
+//   deallocate registers (warpgroup-wide)
+//   for (work_tile_info = scheduler.get_initial_work(); work_tile_info.is_valid(); ...next work...)
+//       block_coord = work_tile_info.get_block_coord(...)
+//       collective_mainloop.load(...)          // issue TMA loads of Q, K, V
+// consumer warpgroups
+//   allocate registers (warpgroup-wide, the consumers' larger share)
+//   for (each work tile from the scheduler)
+//       Tensor tOrO = partition_fragment_C(tiled_mma1, ...)   // O accumulator in registers
+//       collective_mainloop.mma(..., tOrO, softmax, ...)
+//       collective_epilogue.store(..., tOrO, ...)</code></pre>
+        <h3>问答：tOrO 是什么</h3>
+        <p>有人问 <code>tOrO</code> 是什么。Jay 说这是 CUTLASS 的命名习惯，简单说就是注意力输出的线程级累加器：大写 O 表示它是 $O$ 矩阵，r 表示存在寄存器里，t 表示是线程级视图。它是一个寄存器张量，用一个知道 WGMMA 布局的方法创建，用来装注意力计算的结果，也就是累加器。</p>
+        <p>另一位追问这种命名：像 <code>tOrO</code>，他有时把前一半看作“任务”，后一半 <code>rO</code> 看作这个任务需要的寄存器视图。Jay 说他把前缀理解为这是数据的线程级视图，t 表示线程。那如果写成 tC 会不一样吗？Jay 说他对命名没那么严格。这里重复写 O 是因为它和 MMA 有关，也可以写 C，表示 MMA 里泛指的累加器 C，但对他来说写 O 更清楚。</p>
+        <p>他说 pipeline 类是另一个话题，不打算多讲。他想通过 MMA 方法讲的，是怎样把算法，尤其是 warpgroup 内 GEMM 与 softmax 的重叠，在 CUTLASS 里实现出来。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. MMA 方法一：共享内存视图、tiled MMA 和描述符</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=3334s" target="_blank">0:55:34</a>–1:06:14 · Code deep dive</em></p>
+        <p>他说这个 MMA 方法已经简化过一点，但没简化多少。下面按顺序讲要懂哪些 CUTLASS 知识和哪些算法知识。</p>
+        <h3>第一步：建共享内存视图</h3>
+        <p>WGMMA 从共享内存取操作数，第一个操作数也可以来自寄存器。注意力里有两个 GEMM：$QK^\top$ 和 $PV$。$Q$、$K$ 被读进共享内存；$P$ 是第一个 GEMM 的累加器，在原地修改；$V$ 也读进共享内存。这次不讲 TMA 部分，只讲 MMA 部分，所以 MMA 方法里只需要构造 GEMM 要用的共享内存视图。</p>
+        <p>做法：有一个共享存储结构体（shared storage struct），里面放着共享内存里所有数据的位置；用 <code>make_smem_ptr</code> 把里面对应 $Q$、$K$、$V$ 的三个成员做成指针，再配一个布局，用 <code>make_tensor</code> 构造成 CUTLASS 张量。这些共享内存布局用 CUTLASS 的辅助函数构造，因为调用 WGMMA 时它们必须符合特定规格，除了形状以外几乎没有选择余地。形状是 kBlockM × kHeadSize（$Q$），$K$、$V$ 类似，后两者还多一个模式，即流水线的级数。</p>
+        <p>布局交给 CUTLASS 的 <code>ss_smem_selector</code> 来生成。他跳到定义处：先用一个辅助函数构造 atom，也就是传给 WGMMA 所需的最小不可分部分，然后把这个 atom 复制到目标形状上。形状从 tile shape MNK 里取，即 kBlockM × kBlockN × kBlockK（头维度）。</p>
+        <p>这一步你唯一要决定的是 kBlockM 和 kBlockN 的值。kBlockM 基本固定，是 WGMMA 第一个操作数不可分大小 64 的倍数；kBlockN 的选择空间大，要根据头维度、性能和内核的寄存器用量来调。他说 CUTLASS 的 GEMM 内核里也能看到同样的共享内存张量准备。</p>
+        <h3>第二步：建 tiled MMA</h3>
+        <p>CUTLASS 里的 tiled MMA 是一个分区器，负责准备传给 gemm 调用的张量对象。这里建的是调用 WGMMA 的 tiled MMA：把 CuTe 的 <code>GMMA::ss_op_selector</code> 传给 <code>make_tiled_mma</code>。它需要知道操作数和累加器的元素类型（比如 bfloat16 和 float32）、分块形状，以及 atom 布局 MNK。atom 布局和消费者 warpgroup 的数量有关：如果 kBlockM 是 128，它就是 (2,1,1)，意思是第一个 warpgroup 覆盖 64 行，第二个覆盖另外 64 行。</p>
+        <p><code>tiled_mma0</code> 负责 GEMM 0，<code>tiled_mma1</code> 负责 GEMM 1。实际代码里这些类型定义在方法外面，他为了清楚在这里复制了一份。</p>
+        <p>用它们对共享内存张量分区时，要的是线程级的切片（slice）。在 WGMMA 的情况下，分区器只依赖当前是哪个 warpgroup，所以用一个 warpgroup 线程布局取出对应的切片，这个切片在 warpgroup 内是一致的，得到 <code>wg_mma0</code>、<code>wg_mma1</code> 这样的对象。CUTLASS 的 GEMM 内核里通常看到的是 <code>thr_mma</code>，也就是 tiled MMA 的线程级切片。这是 CUTLASS 的范式：tiled MMA 类型在编译期定义，然后传入和内核相关的信息（线程下标，这里是 warpgroup 下标）去取 MMA 操作的切片。</p>
+        <h3>第三步：做描述符</h3>
+        <p>用 <code>partition_fragment_A</code> / <code>partition_fragment_B</code> 在共享内存张量上构造描述符（descriptor），传给 gemm 调用。描述符是 WGMMA 特有的；其他 MMA 操作这里得到的是 fragment，即共享内存的某种线程级视图。WGMMA 的模型和大多数 MMA 不同，但在 CUTLASS 里通过方法重载被统一对待。</p>
+        <h3>问答：每个线程都持有不同的描述符吗</h3>
+        <p>有人问每个线程是否持有一个描述符。Jay 说是，每个线程持有一个描述符，所以名字前面有 t；只是分区器只依赖 warpgroup。这段代码每一行都是在线程的上下文里执行的。</p>
+        <h3>坐标和 Q 的等待</h3>
+        <p>接着设置一个和流水线有关的 consumer wait lambda。然后取坐标数据：从传入方法的块坐标参数（一个四个整数的 tuple）里取出 M 块、batch、split 下标（如果切分了内核）。用 batch 取出 $Q$ 和 $K$ 的序列长度（不同 batch 可以不同），算出读 $K$、$V$ 时从哪开始到哪结束，即 <code>n_block_min</code> 和 <code>n_block_max</code>。这里没有单独的掩码工具。</p>
+        <p>之后取出等待 $Q$ 读取完成的事务屏障。代码也支持在消费者里读 $Q$：做 GQA packing 时要用 <code>cp.async</code> 而不是 TMA 读 $Q$，他没细讲。等 $Q$ 完成用的是屏障上的 try wait 方法。他说这体现了 CUTLASS 对管理同步的强力支持；想把同步写对，就要很熟悉 CUTLASS 屏障对象上 try wait 这样的操作。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. MMA 方法二：第一个 GEMM、在线 softmax 和主循环的重叠</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=3974s" target="_blank">1:06:14</a>–1:23:17 · Code deep dive</em></p>
+        <h3>序言 GEMM</h3>
+        <ol>
+            <li>用 <code>partition_fragment_C</code> 建分数累加器 <code>tSrS</code>，存第一个 GEMM 的结果。它借助 tiled MMA 知道要在什么布局上分区，按 WGMMA 对输出分块的规定持有若干值，大小是 kBlockM × kBlockN（从形状对象里选出）。</li>
+            <li>等 $Q$ 完成（上一节的代码），再用 CUTLASS pipeline 的 consumer wait 等 $K$ 完成。</li>
+            <li>第一个 GEMM：<code>flash::gemm</code> 是对 CUTLASS gemm 的封装，传入 tiled MMA、$Q$ 的描述符、$K$ 的描述符（取对应的流水线级，因为 $K$ 最后一个模式是级数），累加到 <code>tSrS</code>。可以把它看作序言 GEMM。</li>
+            <li>它外面包着乒乓调度的逻辑，最后再讲；这部分实现 warpgroup 之间 MMA 和 softmax 的错开。</li>
+        </ol>
+        <h3>wg_wait = −1 是什么意思</h3>
+        <p>给 <code>flash::gemm</code> 传 −1，表示只发出 WGMMA、不等它完成，之后要显式地用 warpgroup wait 方法等，这一步在 warpgroup 范围同步。有人问 −1 的语义。Jay 说这是他们自己的 <code>flash::gemm</code> 特有的约定：−1 表示不等；传 n 表示等到只剩最近的 n 个 commit group（提交组）还没完成；0 表示没有尾随的 commit group 在等。提问者复述：传 3 就是“除了最后 3 个，其余都要做完”，Jay 说对。</p>
+        <h3>在线 softmax 和 P 的准备</h3>
+        <p>之后如果需要就做掩码，再建一个辅助张量，存放给 $O$ 做重缩放用的值，这和 softmax 结构体有关。<code>online_softmax</code> 方法在 <code>tSrS</code> 上原地做在线 softmax。他不讲细节，说那是专门为 softmax 写的定制代码，和 CUTLASS 没有本质关系。</p>
+        <p>然后把已经变成 $P$ 的 $S$ 准备好给 GEMM 1 用：</p>
+        <ul>
+            <li>如果是 FP8，要做寄存器移动，由两个方法处理；用哪个取决于 $V$ 是在内核内转置的，还是作为预处理离线转置的（代码支持两种）。</li>
+            <li>FP8 以外：建 <code>tOrP</code>，第二个 GEMM 的操作数 A。它是一个寄存器张量，转换后指向 <code>tSrS</code> 的数据，但布局不同。融合两个 GEMM、把第一个的输出喂给第二个时，通常都要做这种重排，因为 WGMMA 这类 MMA 原语对布局有假设：哪个线程拥有哪些值，分区器怎样呈现线程级张量。所以一般要写一个定制方法，用 CuTe 和 CUTLASS 写起来不难。把累加器 S 的布局传进去，转成适合 GEMM 1 的布局。</li>
+        </ul>
+        <h3>主循环</h3>
+        <p>然后准备一个大 lambda，做注意力主循环里的一步计算，叫 forward step。之后是因果掩码相关的处理：先做几步带掩码的迭代，后面就可以不用掩码、可以展开。然后是真正的注意力主循环。所有逻辑都被放进了 forward step lambda，主循环只需要知道当前的 n 块；其余参数是以对象形式传入、类型可读的东西，能转成 constexpr 布尔值，用来处理特殊的迭代，而在不展开的主循环里这些特殊情况都设成平凡的。他说这是算法的核心。</p>
+        <p>他按顺序讲 forward step 里做的事（假设不是第一轮，也不做掩码）：</p>
+        <ol>
+            <li>要错开两个 GEMM。pipeline state 是一个线程级对象，知道当前在流水线的哪一级、哪个相位。用当前的 <code>smem_pipe_read</code> 下标建一个 <code>smem_pipe_read_v</code>，给 $PV$ 这个 GEMM 用；然后让 <code>smem_pipe_read</code> 前进一步，这样 GEMM 0 就比 GEMM 1 领先一步。</li>
+            <li>用 <code>partition_fragment_C</code> 再建一个分数累加器。</li>
+            <li>用 pipeline K 的 consumer wait 等 TMA 把 $K$ 读完。</li>
+            <li>乒乓同步，然后为第 n_block − 1 块做 GEMM 0。他说主循环是从右往左读的：因为有因果掩码时希望从对角线开始，所以总是从右往左。GEMM 0 用 $QK$ 的 tiled MMA，结果放进新的 <code>tSrS</code>。</li>
+            <li>因为在线 softmax 要对 $O$ 重缩放（rescale O），等 $V$ 完成，然后发 GEMM 1。这两个 MMA 都是异步执行的，因为传了 wg_wait = −1，到这里还没等任何一个完成。</li>
+            <li><code>warpgroup_wait&lt;1&gt;()</code>：等 GEMM 0 完成。此时下一轮的 $QK^\top$ 已经完成，$PV$ 不一定完成，可能还在跑。</li>
+            <li>释放 $K$，因为已经用完。需要的话做掩码（这里传的是不做掩码的函数）。把重缩放数据拷到 score scale，做在线 softmax。这次在线 softmax 作用在刚完成的 GEMM 0 的输出 <code>tSrS</code> 上，与此同时 GEMM 1 可能还在执行；他说实际看 SASS 代码，它们确实是交错的。</li>
+            <li>确保 $PV$ 完成，然后释放 $V$。再做一次上面的转换，拷到 <code>tOrP</code> 里供下一轮的 GEMM 用。<code>tOrP</code> 就是那块被反复使用的寄存器缓冲区。</li>
+        </ol>
+        <p>所以每一步是：GEMM 0，GEMM 1，softmax 和 GEMM 1 重叠，也就是幻灯片上画的那张图。</p>
+        <pre><code>// sketch based on the talk: one forward step of the consumer main loop
+// (order of operations as narrated; not the exact FA3 source)
+smem_pipe_read_v = smem_pipe_read;   // V stage used by P*V
+++smem_pipe_read;                    // stagger: gemm0 runs one block ahead of gemm1
+Tensor tSrS = partition_fragment_C(tiled_mma0, select&lt;0, 1&gt;(TileShape_MNK{}));
+pipeline_k.consumer_wait(smem_pipe_read);
+warp_scheduler_barrier_sync();       // ping-pong between consumer warpgroups
+flash::gemm&lt;-1&gt;(tiled_mma0, tSrQ, tSrK(_, _, _, smem_pipe_read.index()), tSrS);  // S = Q K^T, async
+softmax.rescale_o(tOrO, scores_scale);
+pipeline_v.consumer_wait(smem_pipe_read_v);
+flash::gemm&lt;-1&gt;(tiled_mma1, tOrP, tOrV(_, _, _, smem_pipe_read_v.index()), tOrO); // O += P V, async
+warp_scheduler_barrier_arrive();
+warpgroup_wait&lt;1&gt;();                 // S is done, P*V may still be running
+pipeline_k.consumer_release(smem_pipe_read);
+// mask if needed, then online softmax on tSrS overlaps with the P*V WGMMA
+scores_scale = softmax.online_softmax(tSrS);
+warpgroup_wait&lt;0&gt;();                 // P*V is done
+pipeline_v.consumer_release(smem_pipe_read_v);
+// convert tSrS (fp32 accumulator) into tOrP (operand A of the next P*V)</code></pre>
+        <h3>问答：这段代码在哪个分支；有什么调试异步错误的工具</h3>
+        <p>有人问这是主仓库的代码还是他自己的 fork。Jay 说在一个单独的分支里，打算很快合并；这个分支主要给解码加了一些改进（他不打算讲），也是一次让代码更干净的整体重构，对基础内核没有太大影响。</p>
+        <p>主持人说，即使这么一个函数也很复杂，有一千行，有很多 wait 和异步调用，问他在 NVIDIA 生态里有没有找到好用的工具来调试异步错误或内存错误。Jay 说很遗憾没有。compute sanitizer 能用，但他觉得不太有用；只能仔细地想清楚，他们有一套 pytest 测试来检查竞态条件之类的问题。主持人确认：这更像是先把算法仔细写下来再写代码，而不是靠迭代去找怎样让代码更快。另一位与会者说，在 profiler 出现之前写 CUDA 的老一辈就是这么写的，他用得最少的就是 compute sanitizer；Jay 说他们确实花了很多时间调试。有人插话说 printf 是史上最好的调试工具。</p>
+        <p>那位与会者还说，这个分支里的注释比原仓库多得多，原仓库读起来很难。Jay 补充：读这些代码时，常能看到一些被注释掉的 print 语句，取消注释就能看到作者（CUTLASS 的或 FlashAttention 的）认为你可能想知道的东西。</p>
+        <h3>收尾逻辑</h3>
+        <p>方法最后：因为两个 GEMM 是错开的，要做最后一次重缩放和最后一个 GEMM；然后调 finalize 方法，它做最后的归一化，即除以行和：把归一化系数拷到 score scale，再用它重缩放。之后 <code>tOrO</code> 不需要再算什么，就可以写出，由 collective epilogue 存到全局内存。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 累加器重排、flash_gemm 封装和乒乓屏障</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=4997s" target="_blank">1:23:17</a>–1:32:58 · Code deep dive</em></p>
+        <p>最后还剩三件事：乒乓调度、<code>flash::gemm</code> 封装了什么、重排操作。他倒着讲。</p>
+        <h3>convert_layout_acc_Aregs：唯一要认真想布局的地方</h3>
+        <p>他说先看这个，因为它说明了实践中关于布局到底要懂多少。大家常说 CUTLASS 全是布局和张量，但很大程度上可以把布局当黑盒，只考虑形状，因为步长由前面那些辅助函数决定，共享内存布局也是用标准的 CUTLASS 方法准备、保证和 WGMMA 兼容的。真正要想布局的，就是这一处重排。</p>
+        <p>他指着一行：累加器 <code>tSrS</code> 的布局看起来有点怪，形状是 ((2, 2, N/8), MMA_M, MMA_N)。可以把 (2, 2, N/8) 看作 MMA_V，即在 WGMMA atom 下累加器持有的值；这里 atom 很大，所以 MMA_M、MMA_N 预期是 1。CUTLASS 里说第一个是值模式（value mode），后面是分块模式（tiling modes）。用分区器去分区一个共享内存张量或输出分块，总会得到这种形状：值模式加上额外的分块模式，再喂给 CuTe 的 gemm 调用。</p>
+        <p>问题是这里是融合 GEMM。<code>partition_fragment_C</code> 是把张量当作累加器来分区的，现在要把它当作操作数，而且要直接做，不经过 CUTLASS 的分区器。所以要自己写这个重排工具：作为 GEMM 1 的操作数 A，<code>tSrS</code> 的值模式应该是 (2, 2, 2)，因为这里考虑的维度从 M 和 N 变成了 M 和泛指的内维 K；后面的模式也要算出来，得到这个形状。</p>
+        <p>他强调这是最严格意义上的重排：不涉及任何寄存器移动，只是换一个视图。每个线程内部的值顺序不变，线程之间也不用交换数据。对比 FP8：为了满足布局一致性，要改变线程拥有哪些寄存器，可能要在线程间 shuffle，而且无论如何都要在每个线程内部重排寄存器顺序。</p>
+        <p>怎样从 A 变成 B：用 CuTe 的 <code>size</code>、<code>logical_divide</code>、<code>make_layout</code> 等方法，凭着对具体布局的细致了解拼出要返回的布局。他说这是最底层的 CUTLASS 代码，拆开看很简单但很底层；如果要在 CUTLASS 里解决融合 GEMM 中出现的布局重排问题，建议看这个方法。这是 Tri Dao 写的，FA2 在 SM80 上也用它做同样的重排。</p>
+        <h3>flash::gemm 比 cute::gemm 多了什么</h3>
+        <p><code>cute::gemm</code> 接收 A、B、C 操作数和 tiled MMA，通过模板特化和重载分派到正确的 MMA 方法（这里是 WGMMA 指令），但它不含 WGMMA 需要的任何同步，这些在方法外处理。<code>flash::gemm</code> 把它包起来，加上 WGMMA 特有的几样东西：<code>warpgroup_fence_operand</code>、<code>warpgroup_arrive</code>，以及 <code>warpgroup_commit_batch</code>，把之前的一组 WGMMA 操作提交成一个 commit group，供 warpgroup wait 使用。如果传入合法的整数，就在这里发 <code>warpgroup_wait</code>；传 −1 就不等。</p>
+        <pre><code>// sketch based on the talk: what flash::gemm adds around cute::gemm
+template &lt;int wg_wait = 0, typename TiledMma, typename TensorA, typename TensorB, typename TensorC&gt;
+__forceinline__ __device__ void gemm(TiledMma&amp; tiled_mma, TensorA const&amp; tCrA,
+                                     TensorB const&amp; tCrB, TensorC&amp; tCrC) {
+    warpgroup_fence_operand(tCrC);
+    warpgroup_arrive();
+    cute::gemm(tiled_mma, tCrA, tCrB, tCrC);   // dispatches to WGMMA
+    warpgroup_commit_batch();                  // close a commit group
+    if constexpr (wg_wait &gt;= 0) { warpgroup_wait&lt;wg_wait&gt;(); }  // -1: do not wait
+    warpgroup_fence_operand(tCrC);
+}</code></pre>
+        <h3>乒乓调度：用命名屏障把 GEMM 括起来</h3>
+        <p>乒乓调度交给两个方法处理。它们用 CUTLASS arch 里的命名屏障（named barrier）sync，调用 <code>bar.sync</code>，可以指定参与同步的线程数和屏障 ID。barrier arrive 放在 barrier sync 之后：sync 会挡住一个 warpgroup，让另一个通过；通过的那个 warpgroup 执行 arrive 后，被挡住的那个才能继续。两个 warpgroup 用的命名屏障 ID 相互错开，这个方案才能成立，这就是代码里那几对屏障的意义。所以乒乓调度只需要用这两个方法把 <code>flash::gemm</code> 括起来。他说这比 warpgroup 内的重叠简单得多，只是在正确的位置放命名屏障。</p>
+        <p>他说他讲的这个 MMA 方法，虽然可以说是最重要的方法，但从代码行数看只是 FlashAttention 内核这头“巨兽”的一小部分。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 问答：方法从哪来、FP4、编译器、自动化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=5578s" target="_blank">1:32:58</a>–1:49:15 · Q&amp;A</em></p>
+        <h3>你的优势从哪里来</h3>
+        <p>主持人说他是所有嘉宾里讲代码讲得最深的一位；Jay 的很多工作是在和复杂度搏斗，用的是很新、文档不全、难调试的特性，问他的优势从哪来。Jay 说没有 CUTLASS 几乎不可能写出来，它承担了大量重活。另一方面是把算法想得很仔细。他举 GQA packing：把多个查询头放进一个查询分块，想法很简单，但它是算法里硬件感知的部分，和特定的形状绑定（WGMMA 的 64），这个简单想法在解码上带来约 6 倍提速。有了 CUTLASS 这样稳健的库，可以快速试想法；这些想法原则上不用 CUTLASS 也能实现，只是不现实。他觉得两者分不开，互相补充。另一位与会者说，他认为 CUTLASS 更像一种 DSL，可以更花哨地给 GPU 编排 TMA 和 GEMM 操作。</p>
+        <h3>FP4、MX4、MX6 怎么办</h3>
+        <p>那位与会者说 FP8 要做对简直是噩梦，问对 FP4、MX4、MX6 这些更低精度有什么想法或计划。Jay 说：</p>
+        <ul>
+            <li>从算法上看，FP8 最难的是内核内转置，这和 FP8 的布局密切相关。其余代码里的布局问题，除了上面那处重排，基本不用想，只要想形状，分区器替你干活。FP8 不是这样，要仔细想清楚具体布局，写那些从共享内存拷到寄存器的 tiled copy，还可以利用算法技巧，比如知道矩阵乘积在匹配的行列置换下不变。</li>
+            <li>FP4 他得仔细看硬件、看调用硬件加速 MMA 指令的细节，可能和 FP8 完全不同，也可能很像，没看之前说不准。</li>
+            <li>他认为通用的模式大概还适用：全局内存里数据怎样排布是外部强加的，比如要支持某个 API，别人就按某种格式给你数据，改不了；那就在生产者 warpgroup 里读进来，在那里做这种变换（这里是内核内转置）。他特别强调他们学到的一课：也可以在消费者里做转置，但会差得多，这是从 cuDNN 那里学到的，要放在生产者里做。这一课大概会照样适用于 FP4，但具体的布局变换怎样满足 FP4 的布局一致性要求，多半是 FP4 特有的。</li>
+        </ul>
+        <p>那位与会者补充：FP4 下指数等非 GEMM 部分会更突出，FP8 时已经大约一半一半，FP4 吞吐再翻倍，非 GEMM 部分会占主导，调度要重新平衡，复杂度更高。Jay 说这个评论很好：他们最后其实对 FP8 和 BF16 用的是基本相同的调度（主仓库里不同，重构后的代码里基本一样），所以如果为 FP8 写一条很不一样的代码路径，也许能超过他说的 1.3 PFLOPS；但维护多套方法会大大增加代码复杂度，这也是重构后把所有东西统一到一个方法里的原因之一。他说 FP4 很可能需要不同的调度思路。</p>
+        <h3>怎样让编译器生成你想要的代码</h3>
+        <p>聊天里有人说 FA3 的代码似乎把 nvcc 逼到了极限，比 GEMM 主循环复杂得多；他自己在改主循环和流水线实现一个注意力变体，很难得到好的 PTX，问怎样让编译器听话。Jay 说这对他们也是大问题。FA3 针对某个 CUDA 版本调得很细：针对的是 12.3，在 12.6 上性能差很多，回退严重，他们在和 NVIDIA 一起解决，NVIDIA 会为他们准备专门的二进制。</p>
+        <p>他说这完全是大量试错的结果：纸面上合理的东西，并不显然能按预期跑出来。他的方法很朴素：当然用 profiler，看主要卡在哪，然后试一小串可能的重叠方案。有几条基本原则可以缩小要评估的空间：比如注意力主循环里不要用很多级，用两级就够，分数缓冲区和额外的寄存器缓冲区都用两级，这样可能性就不多了。他提到之前讲幻灯片时说错的那个旧重叠方案，他们还试过三级流水。他的建议是：根据基本原则列一小串候选，全部评估一遍；他也说这也许只对注意力管用。</p>
+        <p>主持人追问“针对 CUDA 12.3 调优”具体指什么，是不是依赖了某些调度启发式。Jay 说最直接的意思就是在 12.6 上性能不好；他对编译器没有细致的了解，只能观察到现象。调优过程相当费力，如果还依赖这类因素，也谈不上很有原则。</p>
+        <h3>怎样联系他</h3>
+        <p>主持人说 Jay 在社交媒体上很难找到，问怎样联系。Jay 说最好是发邮件，他把邮箱贴在聊天里。</p>
+        <h3>torch.compile 或 LLM 能做出这种东西吗</h3>
+        <p>另一位与会者问主持人：要怎样才能让 torch.compile 或别的机制做出 Jay 这样的东西，五六年后 LLM 能做到吗？主持人给了个“暴论”：他看不到 Jay 的工作被 LLM 取代。Jay 说也许有些部分能自动化，但有些数学技巧，比如意识到不必算 $P \times V$，可以算 $P$ 的列置换乘以 $V$ 的行置换，于是内核内转置其实不是转置，从而省掉所有 shuffle，他很怀疑 LLM 或某种代码生成能找到；BF16 那版也许还有可能，FP8 那版他看不出来。那位与会者说，他甚至怀疑 Triton 能不能做到，因为这需要大量定制和类似 DSL 的能力，算法和底层硬件优化结合得很紧，相当于软硬件协同设计。Jay 说确实有一些自动做内核融合的工具，能生成点什么，多半没这么快，但他也不能排除。</p>
+        <p>有人在聊天里问能不能用类似 AlphaChip 的方案做这类性能优化。Jay 说不知道 AlphaChip 是什么，主持人也不知道；主持人说很多这类工作是先描述硬件规格再生成最好的内核，他觉得那是更难、更遥远的问题。幻灯片会在一两天内和录像一起放出。下周的讲者是 llm.c 的核心开发者之一，讲 PTX 和 SASS 层面的优化。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“warp specialization is way easier to read and to reason about”（warp 专用化的代码好读得多，也好推理得多。）<a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=1213s" target="_blank">0:20:13</a></li>
+            <li>“to a large extent you can blackbox the layouts you can just think about the shapes because the strides are going to be determined”（很大程度上可以把布局当黑盒，只考虑形状，因为步长会被决定好。）<a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=5062s" target="_blank">1:24:22</a></li>
+            <li>“that simple idea leads to like a 6X speed up in decoding”（这个简单的想法在解码上带来大约 6 倍的提速。）<a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=5640s" target="_blank">1:34:00</a></li>
+            <li>“this is something we learned from cudnn that uh you want to do it in the producer to do this this transpose”（这是我们从 cuDNN 学到的：这种转置要放在生产者里做。）<a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=5900s" target="_blank">1:38:20</a></li>
+            <li>“it was really a huge amount of trial and error”（这真的是大量试错的结果。）<a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=6091s" target="_blank">1:41:31</a></li>
+            <li>“you don't want to use many stages you want to use like two in this attention main Loop that reduces the amount of things you have to think about”（不要用很多级，在注意力主循环里用两级左右，这样要考虑的东西就少了。）<a href="https://www.youtube.com/watch?v=JwUcZwPOCpA&t=6155s" target="_blank">1:42:35</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 36: CUTLASS and Flash Attention 3 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

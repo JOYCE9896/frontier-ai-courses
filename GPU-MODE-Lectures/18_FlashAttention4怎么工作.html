@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FlashAttention 4 怎么工作 | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="17_GPU编程基础与ThunderKittens.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 18</span>
+    <span><a href="19_CuTe_DSL入门.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 80 · FlashAttention 4 怎么工作</h1>
+        <p class="subtitle">Modal 团队读 FA4 源码后的讲解：FA1 到 FA3 各自解决了什么，FA4 在 Blackwell 上用五种 warp 角色的异步流水线、tensor memory、软件模拟指数和按阈值重缩放做到 PFLOP 级，以及这对内核编程模型意味着什么</p>
+        <div class="author-meta">
+            主讲：Charles Frye（Modal）· 主持：Alex、Mark Saroufim · 发布日期：2025 年 10 月 1 日 · 时长：1 小时 15 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=VPslgC9piIw" target="_blank">讲座录像 Lecture 80: How FlashAttention 4 Works</a>（GPU MODE YouTube 频道公开）· 配套文章：<a href="https://modal.com/blog/reverse-engineer-flash-attention-4" target="_blank">Modal 博客上的 FA4 源码解读</a>（本文依据录像字幕整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>Charles Frye 在 Modal（一家卖 GPU 算力的基础设施公司）工作。他说客户付一美元，希望干两美元的活，FlashAttention 这类内核就是做到这一点的手段。FlashAttention 4（FA4）发布时只有源码、没有论文，他和同事 Nathan Wang、Timmy Fang 读完源码发现没人写过解读，就写了一篇博客，这一讲是博客的口头版。他提醒：FA4 还在开发中，讲的内容只对应 2025 年 10 月初某个 git 版本的代码。</p>
+        <p>前置知识：注意力的计算、分块矩阵乘法、softmax；最好看过本合集第 05 篇（FA1 的手写实现）和第 13 篇（FA3 作者讲 Hopper 上的 FA3）。本篇里的 TMA、warp 专用化、tensor memory 等概念第 10、15 篇也讲过。</p>
+        <ol>
+            <li><a href="#t01">FA4 是什么</a> · <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=2s" target="_blank">0:00:02</a></li>
+            <li><a href="#t02">性能</a> · <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=258s" target="_blank">0:04:18</a></li>
+            <li><a href="#t03">内部改动概览，用了和没用的 Blackwell 特性</a> · <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=318s" target="_blank">0:05:18</a></li>
+            <li><a href="#t04">开场问答：和 ThunderKittens 比、编译器能不能做、SM120</a> · <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=559s" target="_blank">0:09:19</a></li>
+            <li><a href="#t05">FA1：分块和在线 softmax</a> · <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=850s" target="_blank">0:14:10</a></li>
+            <li><a href="#t06">FA2：换一种循环顺序</a> · <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=1296s" target="_blank">0:21:36</a></li>
+            <li><a href="#t07">FA3：异步和 warp 专用化</a> · <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=1484s" target="_blank">0:24:44</a></li>
+            <li><a href="#t08">FA4 的三处变化</a> · <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=1969s" target="_blank">0:32:49</a></li>
+            <li><a href="#t09">五种 warp 角色和 tensor memory</a> · <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=2215s" target="_blank">0:36:55</a></li>
+            <li><a href="#t10">问答：异步流水线会不会交给编译器</a> · <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=2409s" target="_blank">0:40:09</a></li>
+            <li><a href="#t11">软件模拟指数</a> · <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=2702s" target="_blank">0:45:02</a></li>
+            <li><a href="#t12">更聪明的 softmax 重缩放</a> · <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=3102s" target="_blank">0:51:42</a></li>
+            <li><a href="#t13">其他 Blackwell 内核</a> · <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=3346s" target="_blank">0:55:46</a></li>
+            <li><a href="#t14">内核编程的未来：tile 编程、cuTile、Gluon</a> · <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=3409s" target="_blank">0:56:49</a></li>
+            <li><a href="#t15">问答</a> · <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=3772s" target="_blank">1:02:52</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. FA4 是什么</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=2s" target="_blank">0:00:02</a>–0:04:18 · Introduction / Flash Attention 4 overview</em></p>
+        <ul>
+            <li>面向 B200，也就是 SM 10.0 的 GPU（Blackwell 数据中心卡）的注意力内核：一个做融合多头注意力（fused multi-head attention）的 CUDA 内核。注意力是 Transformer 里两个最重要的操作之一，另一个是矩阵乘法。</li>
+            <li>用 CuTe DSL / CUTLASS Python 写的，这是两门很新的写内核的 DSL，代码并不以 C++ 的形式写成。</li>
+            <li>目前只有前向。反向据说很快会有；代码里已经有一些为反向准备的功能，比如可以选择把一些中间结果存到全局内存，供梯度反向使用。</li>
+            <li>目前输入输出都是 BF16（16 位 brain float）。大约一个月前作者之一 Tri Dao 说，再过一个月左右会有更低精度的版本。</li>
+            <li>支持分页的键值张量（paged KV，即 KV cache），支持 attention sink（GPT-OSS 推广的一种做法，用来处理超出给定内存所能处理的更长上下文）。</li>
+        </ul>
+        <p>他的总体判断：现在它更像一个 prefill 内核，不太像 decode 内核；因为是 BF16，可能更适合训练（大多数人推理用更低精度），但反向还没出。所以还很早期，但已经能看懂几项关键的算法技巧。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 性能</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=258s" target="_blank">0:04:18</a>–0:05:18 · Performance benchmarks</em></p>
+        <ul>
+            <li>FlashAttention 系列里第一个 PFLOP 级的内核，即每秒一千 TFLOP，每秒 $10^{15}$ 次浮点运算。</li>
+            <li>B200 上的 FA4 大约是 H100 上 FA3 的 2 倍，是 A100 上原版 FlashAttention 的 15 倍。</li>
+            <li>他估计 MFU（模型浮点利用率，实际吞吐占峰值的比例）约 30%。他说 FlashAttention 和其他最先进内核常落在 30% 到 50% 区间，30% 很体面。</li>
+            <li>比 NVIDIA cuDNN 库里的注意力快一点。cuDNN 的 Blackwell 注意力也到了 PFLOP 级，大约慢 5% 到 10%。</li>
+        </ul>
+    </section>
+
+    <section id="t03">
+        <h2>03. 内部改动概览，用了和没用的 Blackwell 特性</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=318s" target="_blank">0:05:18</a>–0:09:19 · Key architectural changes / Blackwell hardware features</em></p>
+        <h3>在 FA3 基础上加了什么</h3>
+        <ul>
+            <li>更多的 warp 专用化（warp specialization，同一个线程块里不同 warp 做不同的工作）：内核里写着“如果我的线程索引落在某个范围，也就是我是某个 32 线程的 warp，我就做这件事，否则做另一件”。FA4 有大约五种角色，FA3 只有两种。</li>
+            <li>在线 softmax 的数值稳定性有了新的处理方式，更高效。在线 softmax 是所有 FlashAttention 版本的核心。</li>
+            <li>他认为“至少对我这种书呆子”最酷的一项：一种新的软件模拟指数运算，在某些迭代上触发，把计算从多功能单元（也叫特殊函数单元 SFU）挪到 CUDA core 上，看起来是为了缓解 SFU 上的瓶颈。</li>
+        </ul>
+        <h3>Blackwell 特性</h3>
+        <p>FA4 用了 Blackwell 的新特性 tensor memory，但没用两个最出名的 Blackwell 特性：</p>
+        <ul>
+            <li>没有 FP4，也不清楚会不会有 FP4 版本。</li>
+            <li>没用可以拆到两个协作线程阵列（CTA，即线程块）上的新矩阵乘法。平常一次只编程网格里的一个元素，Blackwell 允许两个 CTA 一起做一次矩阵乘法、共享数据。FA4 没用，ThunderKittens 的 Blackwell 注意力内核用了。不用 2-CTA 矩阵乘法主要影响内存带宽，会稍有损失，但如果是计算受限，也许无所谓。</li>
+        </ul>
+    </section>
+
+    <section id="t04">
+        <h2>04. 开场问答：和 ThunderKittens 比、编译器能不能做、SM120</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=559s" target="_blank">0:09:19</a>–0:14:10 · Q&amp;A session</em></p>
+        <h3>ThunderKittens 的注意力内核和 FA4 比怎样</h3>
+        <p>他说即使记得数字，也担心不是同等条件的比较：cuDNN、FA4、ThunderKittens 之间的差距预计在几个百分点，这时要担心很多干扰变量，比如某人的 GPU 放在一个比较热的房间里。他不知道有公开的比较数字。</p>
+        <h3>FA4 的优化能不能做成编译器优化，哪种 DSL 最合适</h3>
+        <p>他先给了初步看法（结尾再回到这个问题）：编译器自己决定做一条五级流水线有点疯狂，工作量很大；也许可以写几个核心模式，让几个编译器 pass 分别找出来再组合。FA3 的生产者/消费者 warp 感觉更容易编译器化；FA4 的做法要对算法、对程序员的意图了解得多得多。软件模拟 softmax 指数感觉对编译器友好，可以准备几种实现，靠启发式或基准测试挑选。更聪明的 softmax 重缩放更像一个技巧，证明它不影响数值不是编译器能从一小组基本概念推出来的，更像是作为一个合法变换写进编译器。</p>
+        <h3>这些在 SM120（消费级 5090 一类）上能用吗</h3>
+        <p>Modal 没有 SM120 的卡，他没玩过，不熟悉它们的特性。FA4 用的 tcgen05 指令他认为从 SM100 到 SM120 是可移植的。2-CTA 那个可能只在 SM100 上有，但 FA4 没用。软件指数：他认为 SM120 的 GPU 有更多 SFU 带宽，可能根本不需要这个技巧，vLLM 的 Simon 发过推文讲过这一点，主要针对 RTX 6000（他记得是 SM120，和 5090 一样）。更聪明的 softmax 重缩放可以移植到任何注意力，他说这是那种事后看很显然的东西，几乎可以加到任何流式注意力内核里。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. FA1：分块和在线 softmax</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=850s" target="_blank">0:14:10</a>–0:21:36 · History of Flash Attention</em></p>
+        <p>他先道歉说部分数学幻灯片是一两天赶出来的，因为想尽快讲。</p>
+        <h3>为什么要分块</h3>
+        <p>FA1 的关键贡献是把分块（tiling）这个通用思想很好地用到注意力计算上。注意力要拿查询（query）和键（key）做一个大的外积得到相似度矩阵，再把每一行缩放到 0 到 1 之间、和为 1，也就是 softmax，他称之为 argmax 的“软化”版本；然后用这个矩阵对值（value）张量做加权。</p>
+        <p>对硬件不敏感的写法是直接把数学翻成程序：实际造出一个序列长度 × 序列长度的大矩阵，对每行做 softmax，再做矩阵乘法。以前在 PyTorch 里照着写，默认就是这样，性能不好。要性能好，就要拆成对一块块内存的操作：每次取查询、键、值矩阵的一块，算完这一块再写输出。原因是 SM 上的高速 RAM 远少于 GPU 上较慢的显存。他说每个快的 GPU 矩阵乘法都用某种分块，Tensor Core 的操作方式往里看也是分块。FA1 的具体分块方式和后面版本不同，他不细讲。</p>
+        <h3>难点在 softmax 的数值稳定性</h3>
+        <p>softmax 看上去很好并行：对每个元素做指数（逐元素非线性），再除以所有指数的和（一次求和归约）。归约 PMPP 里有专门一章，而且有现成的库。难点在于数值不稳定：输入里有大的值，指数后会溢出。常见的安全 softmax 先找出每行最大值，从每个数里减去它：</p>
+        $$\mathrm{softmax}(z)_i = \frac{e^{z_i - m}}{\sum_j e^{z_j - m}},\qquad m = \max_j z_j$$
+        <p>对一个很负的数取指数，结果很接近 0，而浮点数在 0 附近分布最密，精度更好。问题是求最大值又多了一次归约，而分块的初衷就是张量太大、片上存不下、内存带宽宝贵，多一次归约不划算。</p>
+        <h3>在线 softmax</h3>
+        <p>FA1 的技巧是在线地应用这个稳定因子：减去到目前为止见到的最大值。这样不会有很大的数被取指数，也就不用担心数值稳定性。但每块被减去的值不同，结果和原式不再相同，所以要回头把过去的输出重新缩放，乘以旧最大值和新最大值之比对应的因子：</p>
+        $$m_{\text{new}} = \max(m_{\text{old}}, \max_j z_j),\qquad O \leftarrow O \cdot e^{m_{\text{old}} - m_{\text{new}}} + \sum_j e^{z_j - m_{\text{new}}} v_j$$
+        <p>（分母 $\ell$ 也按同样的因子更新。）这个修正很便宜：要缩放的输出只有一块，而每个 CTA 要处理很多块，所以在内存带宽和计算上都便宜。他特别讲这个稳定因子，是因为 FA4 最大的变化之一就是更聪明地处理它。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. FA2：换一种循环顺序</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=1296s" target="_blank">0:21:36</a>–0:24:44 · Flash Attention 2 innovations</em></p>
+        <p>FA1 面向 Ampere GPU；同一代硬件上出了更快的 FA2。关键区别是内层矩阵乘法“转置”了：FA2 及以后的版本都是先加载一个查询块，扫过所有的键算查询-键乘积，再扫过所有的值算输出。图上 warp 1 到 4 切分了查询张量，但都要访问全部的键和值。</p>
+        <p>结构上的好处：查询块 1 的输出只依赖查询块 1 和全部键、值，所以输入输出到 warp 和 CTA 的映射更干净。他记得 FA2 论文把这个想法归功于 Triton 的作者。FA2 到 FA4 都按这种方式工作：加载一个查询块，处理所有键、所有值，产出一个输出块。FA2 在 Ampere 上达到了高得多的 MFU。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. FA3：异步和 warp 专用化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=1484s" target="_blank">0:24:44</a>–0:32:49 · Flash Attention 3 advancements</em></p>
+        <p>FA3 随 Hopper（主要是 H100）出现，加了两样东西，FA4 把这两样“开到最大”：</p>
+        <h3>异步</h3>
+        <p>CPU 编程里异步很常见，比如让操作系统内核去发网络数据，回复到了再通知你，Python、Node.js、Rust 的 async/await 就是这种。但在 GPU 上，由程序员管理的这种异步很新。FA3 里有两种：</p>
+        <ul>
+            <li>用 TMA（Tensor Memory Accelerator，专门加载张量即多维数组的硬件）做异步内存加载，开销更小；</li>
+            <li>异步矩阵乘法：在 H100 上，用一条指令启动矩阵乘法，之后再回来说“现在我要这条指令的结果，下一步要用”，这要在代码里显式写出来。这样 Tensor Core 在算时可以做别的事。</li>
+        </ul>
+        <h3>warp 专用化</h3>
+        <p>在一个 CTA（一个正在运行的内核程序实例）里，一部分 warp 做一组操作，另一部分 warp 做完全不同的操作。这个想法不新，他记得 2012 年左右一篇模拟化学燃烧反应的论文就提出了。但 Hopper 加了动态寄存器分配后好用得多：给生产者少分寄存器，给消费者多分。生产者是只从显存加载查询、键、值块放进共享内存的 warp，它们基本只是告诉 TMA 把数据写进共享内存，不需要多少寄存器；消费者做其他所有事，矩阵乘加（MMA）和 softmax，需要寄存器来计算。这是一条很简单的流水线：一方只管内存，另一方只管计算。</p>
+        <p>他解释了 warp group：4 个连续的 warp，线程索引按 128 对齐，调度在一起。Hopper 上最快的矩阵乘法要用一整个 warp group。FA4 里基本不用了，所以不展开，“听到 warp group 就当作 warp”。</p>
+        <h3>CUDA 编程模型和 warp 专用化</h3>
+        <p>你写的程序（复制一个查询块，复制所有键和值块到 SRAM，计算，得到输出）是给一个线程块（也叫 CTA）写的，运行时保证同一个 CTA 的线程落在同一个 SM 上；要得到全部输出，要并发地跑很多份，铺满所有 SM，这是整个网格。CUDA C++ 暴露的就是这个层次，能这样写是最顺的路。warp 专用化的技巧是：32 个线程组成的 warp 才是真正一起执行的单位，几乎所有指令上它们做同一件事，而且哪些线程同属一个 warp 从线程索引就能提前知道。所以把线程按 warp 切块，规定这几块只做拷贝，那几块只做计算。他提到 DeepSeek 的人用 warp 专用化处理跨 GPU 通信的不同部分，warp 专用化可以玩得很疯。</p>
+        <p>FA3 还有 warp group 内部的异步，他说对 FA3 很重要，但对 FA4 没那么重要，而且 FA3 论文讲得很清楚，所以跳过。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. FA4 的三处变化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=1969s" target="_blank">0:32:49</a>–0:36:55 · FA4 performance analysis / FA4 implementation details</em></p>
+        <p>他展示了 Tri Dao 大约六周前在 Hot Chips 会议上的幻灯片：在各种序列长度下，FA4 比 cuDNN 的 B200 注意力快大约 10%，最大规模时也许快 20%。他说新架构出来时，所有内核都还算快，但不再是“光速”，利用率下降了。</p>
+        <p>FA4 做了什么：</p>
+        <ol>
+            <li>把生产者/消费者流水线的异步程度大幅提高：流水线级数更多，代价是协调更复杂，内核更难写。他强调，这种程序员管理的异步 100% 由程序员负责。它更像自己写一个事件循环，而不是依赖语言的 async/await，更像是在写 async/await 所依赖的那一层。编译器帮不了你确认正确性，要特别小心死锁和非法程序：几个流水线阶段访问同一块内存时，要确保在写入之前不去读、在读完之前不去写。这些都用 CUDA 层面的 barrier 实现。</li>
+            <li>不再用 warp group，Blackwell 上快的矩阵乘法不需要它。</li>
+            <li>更高效的 softmax，两处变化：只在最大值变化大到影响数值正确性时才重缩放，不是每次见到新最大值都缩放；把指数运算从 SFU 挪到 CUDA core 上，只在某些时候这样做，从代码推断，是在 SFU 可能成为瓶颈时。</li>
+        </ol>
+    </section>
+
+    <section id="t09">
+        <h2>09. 五种 warp 角色和 tensor memory</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=2215s" target="_blank">0:36:55</a>–0:40:09 · FA4 Q&amp;A and analysis</em></p>
+        <p>流水线复杂到值得画出来。有五种专用的 warp，有人叫 warp role。图是单个块的视角：</p>
+        <ul>
+            <li>load warp：和 FA3 的生产者很像，把块加载到共享内存。</li>
+            <li>store warp（epilogue）：load 的反面，把产出的输出块写回全局内存。</li>
+            <li>MMA warp：每个块一个，既做查询和键的矩阵乘法，也做注意力概率和值的矩阵乘法产出输出。</li>
+            <li>softmax warp：每个块 4 个，对原始注意力分数做 softmax，并在需要重缩放时通知 correction warp。</li>
+            <li>correction warp：每个块 4 个（他说要看代码确认数字），做重缩放。</li>
+        </ul>
+        <h3>Tensor memory</h3>
+        <p>Blackwell 的另一项新东西是 tensor memory（TMEM），他说很遗憾它和 Tensor Memory Accelerator（TMA）毫无关系。TMEM 基本上是 Tensor Core 的输出存储：Tensor Core 运算产出的张量存在 TMEM 里。这是存放累加值的理想位置，注意力分数就是累加出来的，查询要和过去所有的键相乘。它在很多方面像共享内存，大小也一样，但粗略地说只有 Tensor Core 能访问。MMA warp 产出它，softmax warp 处理它。它像是在共享内存之上多了一层内存层级；数据一般先加载到共享内存，再经寄存器从共享内存搬到 TMEM，或者由 Tensor Core 运算直接产出到 TMEM。</p>
+        <h3>实际上一个 CTA 同时处理两个块</h3>
+        <p>为了让图好懂，图上只画了单个输入输出块。实际上任何时刻一个 CTA 都在处理两个输入块、产出两个输出块：两个查询块、两个输出块，中间的大部分东西都是双份的。键和值不需要双份缓冲，因为两个块基本共享它们。管理这对缓冲是很多额外复杂度的来源，但对暴露足够的并行度、隐藏长延迟的读取和长延迟指令很重要。博客里有讲。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 问答：异步流水线会不会交给编译器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=2409s" target="_blank">0:40:09</a>–0:45:02</em></p>
+        <p>聊天区问：把一切做成异步、用内存 barrier、做花哨的多级流水线，是不是以后 GPU 内核开发者都得这么写？还是因为这是 Blackwell 上的早期算法，以后会由编译器解决？</p>
+        <p>Charles 说这是个价值十亿美元的问题。现在出现很多 tile 级编程 DSL，原因之一就是想让程序员用一种编译器能推理这些事的方式写，或者让编译器能把一些策略套进去。如果在线程层面写，编译器没法推理块，块只存在于程序员脑子里。他也指出，需要这么多异步，主要是因为要把 Tensor Core 推到最大吞吐。很多内核不需要：非线性、归一化，任何核心不是矩阵乘法的东西，本来也拿不到那么多 FLOPs，99% 的 FLOPs 在 Tensor Core 里，而 Tensor Core 只做矩阵乘法。所以矩阵乘法的编程正在变成一种和 CUDA 其余部分很不一样的东西，比 Ampere 时差别更大。</p>
+        <p>Mark 插话“为人类辩护一下”：这种专用化代码实际上就是按 warp ID 分支，这个 warp 做消费者，那个 warp 做生产者，看起来像是把编程模型直接交给了用户。也许最终会交给编译器，但目前把调度决策交给内核作者带来了很多收益，于是有了 megakernel、有了更专用的内核。他说短期内他更押这个方向，编译器也许一年后。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 软件模拟指数</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=2702s" target="_blank">0:45:02</a>–0:51:42 · Software exponentiation</em></p>
+        <h3>为什么要绕开 SFU</h3>
+        <p>softmax 里有指数，这是超越函数，肯定不是矩阵乘法，不能用 Tensor Core。默认做法是用 PTX 的 <code>ex2</code> 内建函数算 2 的幂，再乘以 $\log_2 e$ 换成以 $e$ 为底：$e^x = 2^{x \log_2 e}$。它在特殊函数单元（SFU）上以硬件执行。问题是 SFU 不多（NVIDIA 没公开 B200 的平面图，他没法给出数字），很容易卡在 SFU 上。</p>
+        <p>而 SFU 本来也不是真的“算出”指数：浮点数下，算的是最接近真实指数值的浮点近似，SFU 本身就在做多项式近似。多项式近似就是乘和加，CUDA core 擅长的就是这个。CUDA core 有很多好用的特性，比如打包（packed）指令，他认为 SFU 上对这类向量指令的支持少得多，也许没有（“别引用我”）。CUDA core 总带宽大得多、数量更多，调度也容易一些。</p>
+        <h3>代码</h3>
+        <p>他在 softmax 代码里找到这段：如果没开这个新技巧，就直接调 exp；如果编译时打开了这个技巧（字幕里听起来是一个和 end-to-end assembly 有关的开关），就检查几个条件：一个频率，以及一个上限，总共只做一定数量。很多时候仍用内建函数，否则转到一段内联 PTX。关键部分是：把几个 32 位浮点常数放进一个 64 位寄存器，也就是一个 64 位向量通道里放两个 32 位值，然后对成对的输入值执行指令，一次算两个指数，用三次融合乘加（FMA）。</p>
+        <p>把这些常数和 $2^x$ 比较，会发现这是在 $[0,1)$ 区间上很好的三次多项式近似。指数分成两部分：</p>
+        $$2^x = 2^{\lfloor x \rfloor} \cdot 2^{x - \lfloor x \rfloor},\qquad 2^{f} \approx c_0 + c_1 f + c_2 f^2 + c_3 f^3,\ f \in [0,1)$$
+        <p>整数部分 $2^{\lfloor x \rfloor}$ 很容易，基本上是一个移位（浮点数里不完全是字面意义的移位，是直接设置指数位），负责大部分量级；小数部分用三次多项式近似（按 Horner 形式正好三次 FMA）。他和 FA3 作者之一 Jay Shah 聊过，Jay 说在 16 位精度的值上，这个软件模拟和硬件 <code>ex2</code> 给出逐位相同的结果：两者都是对真实数学的近似，在 BF16 上结果一样。</p>
+        <h3>只在部分迭代上用</h3>
+        <p>代码里有 <code>frag_count &lt; frag_limit</code> 这样的条件：这个技巧只用到一定数量的块就停。他的解读是：内核快结束时剩下的活少了，这是一种 wave 量化效应（他推荐了 Colfax 讲 wave 量化的博客），那时不太可能卡在 SFU 上，就不必用这个额外技巧。他说等 Tri Dao 等人写出论文会知道更多，这是他自己的解读。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 更聪明的 softmax 重缩放</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=3102s" target="_blank">0:51:42</a>–0:55:46 · Smart softmax scaling</em></p>
+        <p>回想为什么要在线减去最大值：不是为了得到正确的运算，而是为了数值正确。但数值正确并不要求总是减去最大的那个值，只要保证取指数后的数不太大。FA4 的技巧是推迟这次减法，直到最大值不只是涨了一点、而是涨到真正影响结果的程度。</p>
+        <p>直觉：开头查询过去的键时，可能看到一堆很小的值，最大值几乎每次或隔一次就变一下，但它们都很小；最终会看到一个很大的值，因为注意力机制想关注某一个或某几个键，它确定了最大值，那就是最后一次需要修正，也许只需修正这一次。修正需要协调：要重缩放之前的输出值，它不算贵，但协调总是有代价。</p>
+        <h3>代码</h3>
+        <p>在同一个 <code>SoftmaxSm100</code> 类里：根据旧的行最大值和新算出的行最大值之差算一个缩放量，和 <code>rescale_threshold</code> 比较，如果变化够大，才更新缩放。在 <code>flash_fwd_sm100</code> 里能看到用法：如果值变了，缩放因子会表现为小于 1 的值；当前运行的线程里可能只有一个看到了新值，所以要做 warp 范围的检查，用 ballot 产生一个位掩码，标出 warp 里哪些线程观察到缩放变化，只要有一个变了，就要做重缩放。</p>
+        <p>阈值取多少要看什么在数值上是安全的，他没在任何地方看到这个数应该设成多少，也许漏看了；他认为在开源代码里默认是关闭的。计算依据是 BF16 的数值正确性。按 Hot Chips 演讲的说法，合理设置这个参数能把需要重缩放的次数减少最多 10 倍。</p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 其他 Blackwell 内核</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=3346s" target="_blank">0:55:46</a>–0:56:49 · Other Blackwell kernels</em></p>
+        <p>cuDNN 的后端内核是闭源的，但 NVIDIA CUTLASS 仓库里的 fused multi-head attention 示例有同样的 warp 流水线，名字一模一样，warp 索引的分配也一样，是很相似的异步流水线。FlashAttention 因为多次成为最快的内核而备受关注，但要找写 Blackwell 快速内核的技巧和方法，还有别的地方可看。他说“巨人也站在巨人的肩膀上”。</p>
+    </section>
+
+    <section id="t14">
+        <h2>14. 内核编程的未来：tile 编程、cuTile、Gluon</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=3409s" target="_blank">0:56:49</a>–1:02:52 · Future of kernel programming</em></p>
+        <h3>GPU 异步和 CPU 异步不一样</h3>
+        <p>CPU 异步是单个线程在多个请求之间跳来跳去：给这个请求加个头，给那个去掉一个头，读内存，放到网卡上。Rust 的异步实现成状态机，每个 await 点是一个状态，每次 poll 时在状态之间移动。GPU 这里也有状态序列，但写 warp 时，正如 Mark 说的，是“如果 warp 索引是这个就跑这一步，是那个就跑那一步”。程序停在原地，每个程序实现一个状态转移，数据在程序实例之间移动。他觉得这对计算机科学的人来说很不一样、很有意思，意味着在 GPU 上可能要用和 CPU 很不同的方式思考异步。</p>
+        <h3>需要新的编程模型</h3>
+        <p>一大收获是：这些都要自己管，没有 async/await 那样好用的接口。所以 NVIDIA GPU 上做矩阵乘法的编程需要一次大更新。很多人看到了以块为中心（tile-centric）的方向：不在块内元素之间、也不在块之间做琐碎操作，而是把程序巧妙地切成块；在小块上讲得通的东西，再大规模地易并行运行，或者作为跨块的大 scan 运行。这样才能真正用上硬件提供的内存容量、内存带宽和算力。</p>
+        <ul>
+            <li>NVIDIA：Stephen Jones、Bryce Adelstein Lelbach 有讲 cuTile 的演讲，cuTile 是 NVIDIA 即将推出的（他认为还在早期 alpha）基于 tile 的编程 DSL。他认为 NVIDIA 是认真的，信号是它不经过 PTX，而是用一种新的 IR，叫 Tile IR，直接编译到 SASS。据他所知这在 CUDA 历史上没有过，是一次很大的押注。</li>
+            <li>Triton：OpenAI 的类似方案，基于 LLVM IR 逐步下降（lowering）。他说看起来 Triton 团队已经放弃在 Triton 里达到 FA4 的速度，转而推出一个新的后端 Gluon，可以处理 warp 专用化、分区、调度、同步技巧，比如循环缓冲区（circular buffer），这些他们发现在 Triton 里太难表达。他们报告的 16 位内核早期数字，FP16 下大约达到 cuDNN 的性能（GPU MODE 的 Lecture 104 专门讲 Gluon，本合集没有收）。</li>
+        </ul>
+        <p>他说这说明要设计出合适的编程模型，让程序员写出能编译到这种速度的程序，有多难；对高性能计算和让它变得易用的编译器、编程语言工作来说，是很激动人心的时候。他最后提到 Modal 在从容器层往上重写整个栈，帮 Suno、Lovable 等大规模服务模型，在招人。</p>
+    </section>
+
+    <section id="t15">
+        <h2>15. 问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=3772s" target="_blank">1:02:52</a>–1:15:09</em></p>
+        <h3>各部分各花多少时间</h3>
+        <p>Alex 问有没有测过 FA4 内核各部分的耗时，因为看起来很多 warp 在做 softmax 相关的事。Charles 说这是和 Hopper 内核的重要区别：FA3 里矩阵乘法很难，要做 warp group MMA；这里 warp 分配不同。FA4 和 CUTLASS 示例完全一样：每个循环缓冲区条目一个 softmax warp group（共两个条目），前四个 warp 给一个块做 softmax，后四个给下一个块；correction 也占一整个 warp group；MMA 只有一个 warp。好消息是现在用一个 warp 就能把 Tensor Core 驱动到可观的性能。他们没做消融或精确计时，只是跑过。直觉上，看 trace、看所有 warp 处于什么阶段，会发现很大一部分墙钟时间花在 softmax 上，但这是直觉。</p>
+        <h3>判断要不要重缩放，为什么比直接重缩放便宜</h3>
+        <p>因为判断发生在 softmax warp 里，执行重缩放在 correction warp 里。要先判断需要重缩放，再通知 correction warp 去做；softmax warp 也许还能继续更新一点，但某个时候必须等修正完成才能继续。所以重缩放会带来协调开销和一个同步点，省掉它就省掉了这些。</p>
+        <h3>编译器还差在哪</h3>
+        <p>他说自己不是 DSL 专家，事情变得太快，不想多说。他最近在看 GCC 怎么编译 C 程序，人们最终琢磨出了很疯狂的东西，所以他对一个下定决心的编译器工程师能做到什么评价很高。但那是因为 x86 被 Intel 定死、很久没变，Intel 在硬件里做了很多加速，C 语言也很长时间没变。现在完全不是这样：编译器工程师要很努力才能搞定某个编程模型或硬件模型，下一代一变，谁知道 Rubin 会带来什么。从 Hopper 到 Blackwell，warp group 就基本不重要了，这是很大的变化。Mark 说一年也许够解决一些问题，但一年后又会冒出什么新问题？</p>
+        <p>Mark 补充：现阶段，在今天的硬件环境里，定制内核 DSL 似乎占优，很大程度取决于你愿意花多少工夫。只有几分钟或一天，什么都比不过编译器；有几天到几周，可以试试；有几周到几个月，DSL 就重要了。像 FlashAttention 这种问题，花几个月完全可以接受。他个人更多押在定制内核 DSL 上，因为它让“什么被融合进了什么”更可预测：你不用问自己某个优化有没有做，你调用了 intrinsic 或自己融合了代码，当然做了；用编译器就得猜，做 Blackwell 的工作时这种体验不理想。</p>
+        <h3>Hopper 和 Blackwell 上的算法主要差在哪</h3>
+        <p>最重要的一点：有矩阵乘法，有其他一切。Tensor Core 只做矩阵乘法，多年来占用了大量芯片面积，在它擅长的那类操作上，吞吐能达到其他部件的 100 倍。所以某种程度上只有矩阵乘法在变，给矩阵乘法加载数据的方式也随 tensor memory 等而变。Blackwell 简单得多：理解 Hopper 内核里矩阵乘法怎么工作比理解 Blackwell 的难。Blackwell 上就是找到 <code>tcgen05.mma</code> 调用，有一个 leader 线程发起，有点烦，除此之外和其他代码差不多；Hopper 要设置 warp group，甚至多个 warp group 协作做一个矩阵乘法。他说在一个开发速度和性能需求让很多东西变得更乱的时代，看到这种简化很好。</p>
+        <p>CUDA core 还是 CUDA core，能跑差不多的程序。但这个部件（Tensor Core）快了这么多，就必须重新设计算法去适配它。人们在调整 Transformer 架构，比如多头潜在注意力（MLA）、多 token 预测、推测解码，都是想在尽可能多的地方用上对 Tensor Core 友好的操作。长期的走向是把 GPU 拉向真正的矩阵乘法机器，而不那么像一个通用并行处理器。</p>
+        <p>结尾他感谢主持人 Alex 和 Mark，称 Mark 是 GPU MODE 的创始人之一。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“it's the first pedaflop scale kernel in the flash attention series.”（它是 FlashAttention 系列里第一个 PFLOP 级的内核。）<a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=258s" target="_blank">0:04:18</a></li>
+            <li>“this like programmer managed asynchrony is 100% on you as the programmer.”（这种由程序员管理的异步，百分之百由你这个程序员负责。）<a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=2096s" target="_blank">0:34:56</a></li>
+            <li>“the tensor memory um which has nothing to do with the tensor memory accelerator unfortunately.”（tensor memory，很遗憾，它和 Tensor Memory Accelerator 毫无关系。）<a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=2282s" target="_blank">0:38:02</a></li>
+            <li>“we don't need to always subtract off the largest value to be numerically correct. We just have to make sure that the numbers don't get too big when they're exponentiated.”（要数值正确，并不需要总是减去最大值，只要保证取指数后的数不会太大。）<a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=3102s" target="_blank">0:51:42</a></li>
+            <li>“the long-term arc is like pulling GPUs over to being truly like just a matte machine”（长期的走向是把 GPU 拉向一台真正只做矩阵乘法的机器。）<a href="https://www.youtube.com/watch?v=VPslgC9piIw&t=4457s" target="_blank">1:14:17</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 80: How FlashAttention 4 Works · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

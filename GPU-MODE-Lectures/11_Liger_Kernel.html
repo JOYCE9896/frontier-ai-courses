@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Liger Kernel：LLM 训练用的 Triton 内核 | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="10_Tensor_Core与CUTLASS3.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 11</span>
+    <span><a href="12_低比特Triton内核.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 28 · Liger Kernel：LLM 训练用的 Triton 内核</h1>
+        <p class="subtitle">LinkedIn 开源的 Triton 内核库怎么做到能上生产：用 profiler 找瓶颈，手推 RMSNorm 反向，把线性层和交叉熵融合并分块省显存，再用收敛测试、连续性检查和 int32 溢出测试兜底</p>
+        <div class="author-meta">
+            主讲：Byron Hsu（LinkedIn 高级软件工程师，AI 基础设施团队成员）· 发布日期：2024 年 9 月 1 日 · 时长：1 小时 11 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=gWble4FreV4" target="_blank">讲座录像 Lecture 28: Liger Kernel - Efficient Triton Kernels for LLM Training</a>（GPU MODE YouTube 频道公开）· 幻灯片/代码：<a href="https://github.com/gpu-mode/lectures#lecture-28-liger-kernel" target="_blank">讲座仓库 README 里的幻灯片和 5 个 Colab notebook 链接</a>（本文依据录像字幕整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>Byron Hsu 是 LinkedIn AI 基础设施团队的工程师，Liger Kernel 是他们开源的一组 Triton 内核，专门给 LLM 训练用，覆盖 RMSNorm、RoPE、交叉熵、线性层加交叉熵融合等算子。他开场就说明这一讲的重点：网上已经有很多实验性的 Triton 内核（来自研究项目、xformers 等），但大多不完整，有的不支持 BF16，有的有精度问题。他要讲的是怎样把一个内核做到“生产级”：怎么测正确性和性能，怎么确认训练收敛和原模型完全一致，以及他们踩过的两个坑（张量不连续、int32 地址溢出）。</p>
+        <p>前置知识：PyTorch 训练流程（前向、反向、优化器状态）、矩阵乘法求导、Triton 的基本写法（program id、<code>tl.load</code>/<code>tl.store</code>，本站 GPU MODE 第 06 篇讲过）。本站 CS2680 笔记里讲过的 FSDP、激活重计算（gradient checkpointing）在这里会直接用到。这一讲没有仓库代码文件，配套材料是 5 个 Colab notebook，他边讲边在屏幕上过代码，下面按他说的内容用文字记录。</p>
+        <ol>
+            <li><a href="#t01">开场和大纲</a> · <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">LLM 训练的瓶颈：显存、利用率和 profiler 演示</a> · <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=183s" target="_blank">0:03:03</a></li>
+            <li><a href="#t03">为什么选 Triton</a> · <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=641s" target="_blank">0:10:41</a></li>
+            <li><a href="#t04">例一：RMSNorm 的反向传播推导</a> · <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=829s" target="_blank">0:13:49</a></li>
+            <li><a href="#t05">RMSNorm 的两个技巧，正确性测试和性能测试</a> · <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=1203s" target="_blank">0:20:03</a></li>
+            <li><a href="#t06">例二：FusedLinearCrossEntropy 的三层优化</a> · <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=1694s" target="_blank">0:28:14</a></li>
+            <li><a href="#t07">FusedLinearCrossEntropy 的实测：显存和速度</a> · <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=2276s" target="_blank">0:37:56</a></li>
+            <li><a href="#t08">收敛测试</a> · <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=2475s" target="_blank">0:41:15</a></li>
+            <li><a href="#t09">连续性（contiguity）：RoPE 内核的坑</a> · <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=2652s" target="_blank">0:44:12</a></li>
+            <li><a href="#t10">int32 地址溢出：交叉熵内核的坑</a> · <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=2985s" target="_blank">0:49:45</a></li>
+            <li><a href="#t11">问答：FP32 logits、批大小和选择性重计算</a> · <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=3276s" target="_blank">0:54:36</a></li>
+            <li><a href="#t12">问答：生产使用、多卡、路线图和 torch.compile</a> · <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=3628s" target="_blank">1:00:28</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场和大纲</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=0s" target="_blank">0:00:00</a>–0:03:03 · Host Opening / Main Focus / Outline</em></p>
+        <p>主持人介绍 Byron Hsu：LinkedIn 高级软件工程师，AI 基础设施团队成员。Byron 说问题留到最后，因为内容多。大纲按顺序是：</p>
+        <ol>
+            <li>LLM 训练的瓶颈，以及为什么用 Triton。</li>
+            <li>第一个例子 RMSNorm：怎么测性能、怎么测正确性。</li>
+            <li>第二个例子 FusedLinearCrossEntropy：把线性层和交叉熵融合，大幅降低显存，以及怎么验证显存确实降了。</li>
+            <li>收敛测试。他说这是代码库里最关键的部分，因为它验证端到端的正确性和收敛。大家对自定义内核总有顾虑，怕有精度问题或者结果不精确，所以他们写了大量收敛测试，让使用者有信心部署到生产。</li>
+            <li>连续性（contiguity）。处理错了会花大量时间找问题。</li>
+            <li>开发交叉熵内核时遇到的一个有意思的 bug。</li>
+            <li>简短介绍 Liger Kernel 项目和致谢。</li>
+        </ol>
+    </section>
+
+    <section id="t02">
+        <h2>02. LLM 训练的瓶颈：显存、利用率和 profiler 演示</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=183s" target="_blank">0:03:03</a>–0:10:41 · LLM Training Bottleneck / Live Demo - PyTorch Profiler</em></p>
+        <h3>瓶颈一：动不动就 OOM</h3>
+        <p>OOM（out of memory）就是显存不够，程序直接报错。他算了一笔账，以 8B 模型为例：</p>
+        <ul>
+            <li>权重 8B 个参数，BF16 每个 2 字节，就是 16 GB。</li>
+            <li>梯度和权重一样大，再加 16 GB，到 32 GB。</li>
+            <li>优化器状态：不用混合精度、全按 BF16 算的话，优化器状态（Adam 的一阶、二阶矩）是权重的两倍，即 32 GB。合计 64 GB。</li>
+            <li>服务器级 GPU 通常 80 GB，只剩 16 GB 放激活值和其他东西。A6000 之类的卡显存更少。</li>
+        </ul>
+        <p>ZeRO 或 FSDP 这类算法会把权重、梯度、优化器状态分散到多块 GPU 上，但不切分激活值，所以用户还是经常 OOM。</p>
+        <h3>瓶颈二：“利用率 100% 为什么还慢”</h3>
+        <p>很多人抱怨 GPU 利用率一直是 100% 却还是很慢。他说这是对利用率的常见误解：利用率只表示 GPU 有多大比例的时间在干活，不管干了多少活、跑出多少 TFLOPS。他在幻灯片上推荐了一篇相关文章（字幕没有说出标题）。</p>
+        <h3>瓶颈三：没有 profiler 一切都是黑箱</h3>
+        <p>他说做任何性能工作，profiler 都是理解一切的钥匙，并推荐了一个讲 torch profiler 和 TensorBoard 用法的演讲。</p>
+        <h3>演示：8 张 A100 上 FSDP 训练 Llama 8B 的 profile</h3>
+        <p>他在 8 张 A100 上用 FSDP 跑 Hugging Face 的 Llama 8B 模型，把时间和显存一起看。</p>
+        <p>概览页按颜色把操作分类，内核（kernel）占的时间最多。他提醒，占得多不代表做得高效，可以用内核融合（kernel fusion，把几个连续的小算子合成一个内核，中间结果不写回显存）把东西合在一起，还可以用分块（chunking）降显存。</p>
+        <p>显存曲线：图上有 allocated 和 reserved 两条。reserved 是 nvidia-smi 里显示的那个数，allocated 是实际在用的显存。先看 allocated：曲线先一级级上升，然后有一个尖峰，再一级级下降。上升段是前向传播。因为开了激活重计算（gradient checkpointing：前向时不保留每层的中间激活，反向时再算一遍），每个 Transformer block 算完激活就丢掉前一个 block 的激活，到反向再重算，所以不会一直累积。反向段同理。</p>
+        <p>那个尖峰出现在前向的最后，也就是交叉熵的位置。原因是新模型的词表很大：Llama 3 的词表是 128k，Llama 2 只有 32k。128k 词表要把全部 logits 物化出来，很容易就是 20 到 30 GB，这就是尖峰的来源。</p>
+        <p>trace 视图：分 CPU 流和 GPU 流，GPU 流跑在 CPU 流前面，最耗时的是 GPU 部分，所以主要看 GPU 流。放大后，名字带 ampere 前缀的是矩阵乘法，不带前缀的通常是逐元素（element-wise）操作。GPU 上有两条流，第一条是计算，第二条是通信，来自 FSDP：FSDP 要做 all-gather 和 reduce-scatter，图上能看到通信和计算重叠得很好。</p>
+        <p>他指出 trace 里有大量逐元素操作，带来两个问题：一是可以用内核融合来提速；二是不融合的话会产生很多中间激活要存，浪费显存。</p>
+        <h3>小结</h3>
+        <ul>
+            <li>时间角度：很多慢的逐元素算子，以及大量 CUDA 启动开销（launch overhead，每次启动一个内核 CPU 端要付出的固定时间），用内核融合解决。</li>
+            <li>显存角度：交叉熵带来的显存尖峰，用分块或重计算降低峰值。</li>
+        </ul>
+    </section>
+
+    <section id="t03">
+        <h2>03. 为什么选 Triton</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=641s" target="_blank">0:10:41</a>–0:13:49 · Why Triton / QA</em></p>
+        <p>发现问题后，他们找 GPU 内核编程的方案，最先想到的是 CUDA。那时他刚加入 CUDA MODE，觉得 Triton 很有意思，试了之后发现开发周期短很多，也更直观。他列的理由：</p>
+        <ol>
+            <li>编程更容易，写一个内核比 CUDA 快得多。但也没有 PyTorch 那么容易，仍然要花不少时间调试、理解内部机制。</li>
+            <li>可以用熟悉的方式思考：按张量、按向量去想，不用像 CUDA 那样按单个元素去想。</li>
+            <li>他觉得对自己最有用的一点：方便和 AI 研究员协作。研究员不一定完全懂 GPU 内部，但能很快看懂内核的思路，比如想加一个 bias 项，在 Triton 里比 CUDA 里容易，研究员自己也能帮忙改。</li>
+            <li>纯 Python。Liger 的仓库里没有任何 C 文件或头文件，全是 Python，不用为一个 CUDA 内核维护四种文件类型。</li>
+            <li>依赖干净：Triton 直接把 Python 代码转成 PTX（NVIDIA GPU 的中间汇编语言），不经过 CUDA 那一层。</li>
+        </ol>
+        <h3>问答：FSDP 用的是 NCCL 吗</h3>
+        <p>有人看了 profiler 里的通信流，问 FSDP 是不是用 NCCL。回答是：GPU 之间通信，NVIDIA 提供的库是 NCCL，PyTorch 在它上面包了一层；具体用哪个后端取决于设备，PyTorch 跑在 NVIDIA 卡上默认用 NCCL，其他硬件用别的。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 例一：RMSNorm 的反向传播推导</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=829s" target="_blank">0:13:49</a>–0:20:03 · Example - RMS Norm / QA</em></p>
+        <h3>写前向容易，写反向难</h3>
+        <p>他说刚开始写 Triton 时觉得前向太简单了，后来发现反向很痛苦，不知道怎么推。所以总结了几条推导反向的技巧：</p>
+        <ol>
+            <li>按元素想，不要按向量想。有些元素和别的元素地位不同（比如求和时自己那一项），分情况推更稳。就做本科学过的标量微积分。</li>
+            <li>复习一下微积分基础，乘法和除法的求导法则。</li>
+            <li>记住矩阵乘法的梯度公式，后面线性层加交叉熵会用到。</li>
+        </ol>
+        <p>第 3 条有人请他再讲一遍。对 $Y = XW$，</p>
+        $$\frac{\partial L}{\partial X} = \frac{\partial L}{\partial Y} W^{\top}, \qquad \frac{\partial L}{\partial W} = X^{\top} \frac{\partial L}{\partial Y}$$
+        <p>他的说法是：结果还是矩阵乘法，只是换了顺序、加了转置。证明可以上网查，记住结论就行。</p>
+        <h3>RMSNorm 的前向和反向</h3>
+        <p>RMSNorm 是 LayerNorm 的简化版，只除以均方根、不减均值，Llama 等模型都用它。他从论文里取前向公式：</p>
+        $$y_i = \frac{x_i}{\mathrm{rms}(x)}\, w_i, \qquad \mathrm{rms}(x) = \sqrt{\frac{1}{n}\sum_{k=1}^{n} x_k^2 + \epsilon}$$
+        <p>他强调：每个 $x_i$ 都参与了所有 $y_k$ 的计算（通过 rms），所以求 $\partial L/\partial x_i$ 时要把所有 $y_k$ 传回来的梯度加起来：</p>
+        $$\frac{\partial L}{\partial x_i} = \sum_{k} \frac{\partial L}{\partial y_k}\frac{\partial y_k}{\partial x_i}$$
+        <p>然后分 $k = i$ 和 $k \neq i$ 两种情况分别求导，各自化简，再合起来。他说最后能整理成一个很整齐的向量形式，只用逐元素乘法和点积。按上面的定义，记 $r = \mathrm{rms}(x)$、$g = \frac{\partial L}{\partial y} \odot w$，结果是（这是标准推导的结论，幻灯片上的写法字幕看不到）：</p>
+        $$\frac{\partial L}{\partial x} = \frac{1}{r}\left(g - \frac{g \cdot x}{n\, r^2}\, x\right), \qquad \frac{\partial L}{\partial w} = \frac{\partial L}{\partial y} \odot \frac{x}{r}$$
+        <p>批量输入时，$\partial L/\partial w$ 还要在所有行上求和。</p>
+        <h3>问答：为什么要手推反向，能不能用符号计算</h3>
+        <p>主持人确认：之所以要手推，是因为 Triton 里没有自动微分；PyTorch 有 autograd，torch.compile 也能处理。Byron 同意。</p>
+        <p>另一位主持人补充：可以用 torch.compile，但如果想省心，SymPy 推这类公式意外地好用，写出前向，让它给出反向的符号表达式。他说自己经历过手写梯度规则的年代，要注意的是，梯度写得有一点点错，模型照样可能收敛；自动微分或符号微分的好处就在这里，能帮你做合理性检查。</p>
+        <p>Byron 问 SymPy 能不能化简到最少的运算。回答：能化简，但不会帮你做融合；它给出的是数学表达式，在内核里怎么融合、怎么实现由你决定；有些算子重新排序能更高效，这些它也不会做。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. RMSNorm 的两个技巧，正确性测试和性能测试</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=1203s" target="_blank">0:20:03</a>–0:28:14 · RMS Norm Tricks / Live Code - RMS Norm / QA</em></p>
+        <h3>两个技巧</h3>
+        <ul>
+            <li>原地复用张量：用存放 $dy$ 的那块显存来存 $dx$，省显存。</li>
+            <li>缓存 rms：前向时把每行的 rms（他说的是 rstd 向量）存下来，反向直接用，省一次计算。</li>
+        </ul>
+        <p>这两个思路他说是参考 Unsloth 的内核。代码现在看起来越来越长，因为要处理各种类型转换的条件分支，反向传播真正的计算其实不长。他让大家自己去 Liger Kernel 仓库里读。</p>
+        <h3>写完内核怎么测</h3>
+        <p>他说通常做两类测试：</p>
+        <ol>
+            <li>正确性测试：内核必须精确，任何偏差都会被放大，最后变成 AI 研究员的头疼事。</li>
+            <li>性能测试：测时间和显存。没有收益，就没必要写自定义内核。</li>
+        </ol>
+        <h3>notebook 演示：正确性</h3>
+        <p>他准备了一个 Colab，没有现场运行（太花时间），讲了思路：</p>
+        <ul>
+            <li>参照实现直接从 Hugging Face 复制 RMSNorm 代码。</li>
+            <li>要测不同精度，FP32 和 BF16 都要测。</li>
+            <li>麻烦在容差（tolerance）怎么定。幻灯片上给了 FP32 和 BF16 各自的推荐容差（具体数值字幕里没念）。但这也不总是好用，比如数值的量级大小会影响合适的容差。所以后面还要做端到端的收敛测试，这里只管单算子的正确性。</li>
+            <li>要测多种 dtype，还要测一些奇怪的形状，因为内核里处理越界（out of bound）很重要，不测的话程序会在生产上直接崩。</li>
+            <li>测试本身就是做一次前向、一次反向，比较输出和梯度。这个例子里他们比推荐容差稍微放宽了一点。</li>
+        </ul>
+        <h3>notebook 演示：性能</h3>
+        <ul>
+            <li>速度用 Triton 自带的 benchmark 工具，它提供一个装饰器，测速很直观。因为把多个算子融合成了一个内核，Liger 的 RMSNorm 比 Hugging Face 快很多。他建议同时用 profiler 看一下，确认所有操作确实缩成了一个内核。</li>
+            <li>显存是他们自己写的工具，用 <code>torch.cuda</code> 的 API 测峰值显存：跑一次前向加反向，记录峰值。Liger 的峰值明显低于 Hugging Face。</li>
+        </ul>
+        <p>他说仓库的 test 目录里有很多测试，他们很重视测试。</p>
+        <h3>问答：要不要支持任意形状</h3>
+        <p>Eric 问：快的内核拒绝处理不好的形状，也许是好事？比如说不定能避免 GPT-2 那个 50257 词表的问题。Byron 回答：像 RMSNorm 这种，序列维度不可能固定，所以要测各种形状确保不崩；其他内核未必需要，他知道有些内核强制形状必须是 2 的幂。</p>
+        <p>另一位参与者说，50257 是实现层面的问题，矩阵乘法要在好的 2 的幂形状上才快；但从单元测试角度，输入可以是任何东西，黑盒测试本来就该先想所有错误组合，所以测试不应该只测好形状。</p>
+        <p>主持人（PyTorch 团队，从语境看是 Mark Saroufim）说了 torchao 的做法：至少在 FP8 里，他们用一个开关把内层维度做 padding，torch.compile 也经常对内层维度做 padding；序列长度这种你希望保持动态。这里就涉及设计哲学：PyTorch 不阻止用户“打自己的脚”，允许用户得到差的性能，但理想情况下要有合适的日志和文档告诉用户怎么避免。他觉得 Byron 做了类似的选择。</p>
+        <p>Byron 追问：torchao 是在高层张量上 padding 再送进内核吗？对方说只 pad 内层维度，否则就改变了程序语义：比如序列长度是 9，你偷偷变成 10，那就是另一个程序了；内层维度的话用户观察不到维度变化，所以没关系。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 例二：FusedLinearCrossEntropy 的三层优化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=1694s" target="_blank">0:28:14</a>–0:37:56 · Example - Fused Linear Cross Entropy / Gradient Checkpointing / Gradient-in-forward / QA / Chunking / QA</em></p>
+        <h3>问题在哪</h3>
+        <p>他说这可能是他们写过的最有意思的内核。想法来自 PyTorch 的一个 issue 讨论帖，里面有很多实现，但都不完美：有的有收敛问题，有的和 Hugging Face 不兼容。所以他们决定自己写一个生产级的。</p>
+        <p>LLM 的最后是语言模型头（LM head，一个把隐藏向量投影到词表大小的线性层）：输入隐藏状态，经过 LM head 得到 logits，再和标签（target）做交叉熵。反向时先算 logits 的梯度。因为词表很大，logits 通常有 20 到 30 GB，就是 profile 里看到的显存尖峰。</p>
+        <p>数学推导他说比 RMSNorm 简单，时间有限跳过了。作为背景（不是他现场讲的），交叉熵对 logits $z$ 的梯度是 $\mathrm{softmax}(z) - \mathrm{onehot}(y)$，再用上一节的矩阵乘法公式就能得到对隐藏状态和 LM head 权重的梯度。</p>
+        <p>他们做了三层优化。</p>
+        <h3>第一层：激活重计算</h3>
+        <p>反向时把 LM head 的前向再算一遍，前向结束后不用存激活。代价是多花时间重算，好处是省掉中间激活的显存。但这里仍然要物化完整的 logits，所以还不够。</p>
+        <h3>第二层：在前向里算梯度</h3>
+        <p>交叉熵是最后一层，损失是标量，它对自身的导数 $\partial L / \partial L$ 恒为 1。所以前向时算完激活，可以马上把梯度也算出来，然后结束前向。到反向时：如果传进来的上游梯度是 1，什么都不用做；如果是别的标量，就把预先算好的梯度乘上这个标量。这样省掉一次重计算，而 LM head 很大，这次重计算很重。</p>
+        <h3>问答：“在前向里算梯度”是什么意思</h3>
+        <p>有人没听懂。Byron 解释：正常流程是输入进 LM head 得到 logits，反向时用 logits 算梯度；但如果损失就是交叉熵，没有再乘别的标量，$dL$ 就是 1，前向时已经知道了，所以可以在前向直接用它算梯度，不必等到反向。有人说这可以推广到所有输出是标量的情况，Byron 同意。另一位参与者提到 PyTorch 的 CTC loss 也是这么做的。</p>
+        <h3>第三层：分块</h3>
+        <p>因为梯度可以在前向里算，就可以一块一块地做。他说这个思路和 Berkeley 那篇按块算注意力来降显存的论文相似。具体是：把输入沿 batch 和序列维度（BT）切块，逐块送进 LM head；每块算出 logits 和梯度，用完就丢，再算下一块。显存峰值从完整 logits 降到一块的大小。</p>
+        <p>块大小怎么定：输入的最后一维是隐藏维度（hidden size），输出的最后一维是词表大小（vocab size）。他们找一个比例，让一块 logits 的显存降到和隐藏状态差不多大，这样就不会让显存增加。他说这块很 tricky，建议读代码。</p>
+        <h3>问答：块大小是事先 profile 还是动态决定</h3>
+        <p>他说先假设一个比例，profile 后发现效果不错就用了，目前还不能配置，以后可能开放。</p>
+        <h3>问答：分块后分母怎么办</h3>
+        <p>一位参与者问：真正的问题是 LM head 这个大矩阵，最后的交叉熵标量本身不大，但 softmax 的分母要对所有项求和，分块之后怎么处理？Byron 说对，需要做缩放，因为逐块计算时每块的缩放系数不同。他们为此被困了很久，一直查为什么正确性不对，最后发现损失和梯度都要缩放。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. FusedLinearCrossEntropy 的实测：显存和速度</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=2276s" target="_blank">0:37:56</a>–0:41:15 · Live Code - Fused Linear Cross Entropy / QA</em></p>
+        <p>notebook 里先装 Liger Kernel，然后把 Hugging Face 的实现复制过来，再用 Liger 的内核写一个对照版本，测显存。词表大小用的是 Llama 3 的。他顺带提到 Qwen 2 的词表更大，他记得是 150k 左右，还有一个模型（字幕不清）大约 200k。</p>
+        <ul>
+            <li>显存：Hugging Face 版本随规模线性增长，Liger 版本斜率低得多，规模变大时消耗也低得多。好处是可以加大 batch，或者关掉激活重计算。他说对 8B 训练来说，不开激活重计算基本不可能，有了这个内核就有机会关掉。</li>
+            <li>速度：Liger 的内核比 Hugging Face 略慢，但可以忽略。交叉熵是最后一层，只执行一次，相比前面那么多 Transformer block 不算什么。所以开了这个内核不会拖慢训练，但显存会降很多。</li>
+        </ul>
+        <p>主持人补充：大家用激活重计算时本来就愿意牺牲一点速度换不 OOM，因为根本跑不起来就什么都没有。Byron 说内部有些场景已经关掉了激活重计算，效果不错。</p>
+        <h3>最要紧的一行：logits 要转成 FP32</h3>
+        <p>他打开仓库 ops 目录下的实现，指出最重要的一点：必须把 logits 转成 FP32，否则会有收敛问题。他说这就是大多数实现错的原因。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 收敛测试</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=2475s" target="_blank">0:41:15</a>–0:44:12 · Convergence Test / Live Code - Convergence Test</em></p>
+        <h3>思路</h3>
+        <p>有一个原始模型，一个打了 Liger 补丁的模型，要确认两者收敛完全一样、内核是精确的。这个方法受 llm.c 启发：写一个最小的 PyTorch 训练循环，用一个假的小数据集，把数据分别喂给原始模型和补丁模型，跑 10 次迭代，最后比较 logits、权重和损失，要求在一定容差内。</p>
+        <p>他说这帮他们抓到了很多问题：单元测试（正确性测试）都通过了，仍然可能藏着问题，比如连续性没处理好、某些张量形状会让内核崩、dtype 转换不对（就是上一节 logits 转 FP32 那种）。</p>
+        <h3>最小示例</h3>
+        <ul>
+            <li>不用加载预训练模型，从头训练。他用的是 Mistral：拿 Mistral 的 config 实例化一个模型。</li>
+            <li>数据集用的是 Karpathy 的 Shakespeare 数据。</li>
+            <li>先打补丁，建 DataLoader，建小模型，从头训练，最后把所有东西输出。先不用 Liger 跑一遍，再用 Liger 跑一遍，比较所有结果，确认通过。</li>
+        </ul>
+        <p>他说这种代码很简单，可以让 ChatGPT 帮你写。主持人插话说 Byron 之前告诉过他，有过所有单元测试都通过但出了问题的情况，Byron 说那就是下一个话题。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 连续性（contiguity）：RoPE 内核的坑</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=2652s" target="_blank">0:44:12</a>–0:49:45 · Contiguity / Live Code - Contiguity / QA</em></p>
+        <h3>逻辑视图和物理视图</h3>
+        <p>他引用 Edward（应是写过 PyTorch internals 文章的 Edward Yang）的图：张量有两种视图。逻辑视图是 <code>tensor.shape</code> 看到的形状；物理视图是 <code>tensor.stride()</code> 描述的、数据在内存里实际怎么存。张量“连续”（contiguous）指元素在内存里按行优先顺序紧挨着排，转置这类操作只改 stride、不搬数据，结果就不连续了。</p>
+        <p>他说 Triton 操作的是物理视图，所以要按物理视图去想。比如对张量做了转置，到 Triton 内核里面什么都没变，内存布局没变。</p>
+        <h3>RoPE 的事故</h3>
+        <p>他们写完 RoPE（旋转位置编码）内核部署到生产，很快发现损失出现很大偏离。起初以为实现错了，不停往正确性测试里加各种奇怪的形状、各种精度，全都通过。后来又发现一个怪现象：用 FlashAttention 时收敛正常，用 SDPA（PyTorch 的 <code>scaled_dot_product_attention</code>）时发散。最后查明是 SDPA 传回来的梯度不连续，而 FlashAttention 传回来的是连续的。为什么会这样，他说他们还不知道。</p>
+        <p>notebook 里：原始 RoPE 实现看起来很直接，做一次转置，取形状，把所有东西扔进内核。测试时用随机值初始化 Q 和 K，分别用 Hugging Face 实现和 Liger 实现做前向，结果失败。原因是送进内核前忘了强制 contiguous。没崩溃是运气：访问恰好还落在这个张量的内存块里，没越界，但读写的方式完全错了，结果就不对。加上之后再跑就通过了。这个 bug 是收敛测试抓到的。</p>
+        <p>他的建议：每个内核调用前都加上 contiguous 强制。</p>
+        <h3>问答：内核能处理 stride 就不用强制</h3>
+        <p>有人说这只在内核内部处理不好 stride 时才有必要，如果内核能处理非连续布局就不需要，但应该两种情况都测性能。Byron 说他们试过，影响不大，因为瓶颈在计算上。</p>
+        <p>另一位参与者说看复杂度：如果是 $O(n^3)$ 的运算，比如矩阵乘法或卷积，先强制 contiguous 往往是划算的。PyTorch 内部也一直这么做：很多 CUDA 内核要求输入连续，分发前会调用 contiguous。他解释原因：就像 Byron 在注意力上观察到的，PyTorch 里输出的 stride 是实现细节，同一个函数的不同实现可能不同；卷积也有返回不同 stride 输出的实现。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. int32 地址溢出：交叉熵内核的坑</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=2985s" target="_blank">0:49:45</a>–0:54:36 · Memory Address / Live Code - Memory Address / QA</em></p>
+        <h3>问题</h3>
+        <p>他说这是开发内核时最难缠的 bug。Triton 里的 program id 相当于 CUDA 里的 block id，它是 int32。计算地址时要做“基地址 + program id × stride”，如果 program id × stride 超过 int32 最大值（约 21.4 亿），就会溢出变成负数，触发非法内存访问（illegal memory access）。</p>
+        <p>他们在交叉熵内核里碰到的。logits 大小是 B × T × V（批大小 × 序列长度 × 词表大小），program id 乘以行 stride（也就是 V）就可能超过 int32 上限。他给大家看了交叉熵内核开头三行，运行测试会崩。有个怪现象：在他的 VM 上崩，在 Google Colab 上不崩，他不知道为什么。</p>
+        <p>修法是给 program id 加一个类型转换，转成 int64。他说 Triton 仓库里已经有一个长讨论帖，Triton 团队在想更好的办法，但还没有定论。</p>
+        <h3>问答：只在大张量时出现，64 位寻址更慢</h3>
+        <p>Byron 说只有张量很大时才会发生，其他内核不需要转换。Thomas Viehmann 说这才是最大的麻烦：开发和测试时可能不会用这么大的张量，以为一切正常，生产上一来就出事。另一个麻烦是 64 位寻址比 32 位慢很多，PyTorch 里一些高性能内核会根据大小准备两种实现，比如 batch norm。</p>
+        <p>Byron 问 Thomas 是两个实现还是内核里一个 if。Thomas 说是模板化的：同一份代码生成两个内核。他是从前把 batch norm 移植到别处时发现的，移植后突然慢了很多，就是因为没想着保持 32 位寻址。PyTorch 里用来索引张量的 tensor accessor 工具以前是按索引类型模板化的，现在拆成了两个独立的版本，因为这太容易写错，一写错就意外地拿到差性能。Byron 提到 FlashAttention 的 CUDA 内核似乎也按大小有不同参数，Thomas 说任何性能关键又要处理大张量的代码，大概都需要两种版本。</p>
+        <h3>为此加的测试</h3>
+        <p>所以他们加了一个用超大向量测试、确认不出异常的用例。有人发现这个测试被 skip 了，Byron 说只在显存小的 GPU 上 skip，他们内部 CI 跑在 80 GB 的 A100 上，会跑这个测试；开源的 CI 还在搭。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 问答：FP32 logits、批大小和选择性重计算</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=3276s" target="_blank">0:54:36</a>–1:00:28 · QA</em></p>
+        <h3>问答：为什么要把整个 logits 转 FP32，只用 FP32 累加不行吗</h3>
+        <p>Byron 说原因之一是 Hugging Face 的模型代码就这么做，为了对齐结果他们也得这么做；另外概率计算对精度很敏感，转成 FP32 精度更高。有人问是不是在取指数之前转，Byron 说是。再问当时具体是什么数值问题，是出了无穷大吗？Byron 说不会出 NaN 或无穷，但收敛会很差：一开始他们试过不加转换，收敛曲线波动很大。</p>
+        <h3>问答：内核稍慢但能开更大 batch，最终能更快吗</h3>
+        <p>Byron 说通常是这样。另一个方向是关掉激活重计算，能提速很多，他说大约 20% 左右。</p>
+        <h3>问答：选择性激活重计算</h3>
+        <p>有人提议选择性重计算：有的算子重计算，有的不。思路是计算量大的操作保存激活，免得重算；计算量小的不存激活，反向时重算。Byron 说他们也在研究，因为对整个 Transformer block 做重计算很浪费，但他还没看到 PyTorch 里好用的 API。有人提到 TorchTitan 仓库里可能有这类技巧。</p>
+        <p>有人问具体的启发式是不是“除了最后那个大线性投影，其他都重计算”，Byron 说大致是这个想法，不确定 NeMo 或 Megatron 怎么处理。Thomas 说他们在 Thunder 里正在实现激活重计算，控制粒度比较细。</p>
+        <h3>问答：重计算的程度能不能交给编译器决定</h3>
+        <p>有人问 Mark。Mark 说对自动调优型的编译器来说这很自然：测出每层花多少时间再做决定，这是相对比较，不是简单的大小启发式。Byron 说自动选择分布式策略、让 FLOPS 最大化也会很有用。Mark 同意但说那更难。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 问答：生产使用、多卡、路线图和 torch.compile</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gWble4FreV4&t=3628s" target="_blank">1:00:28</a>–1:11:26 · QA - Liger Kernel / Acknowledgement</em></p>
+        <h3>问答：LinkedIn 生产环境在用吗，和不用 Liger 的部分怎么一起维护</h3>
+        <p>Byron 说在用。API 很简单，完全兼容 Hugging Face，只要改一行。所以几乎没有维护成本：用户不喜欢或者遇到问题，直接关掉就行，但一般不会这样。</p>
+        <h3>问答：多卡、多机怎么办</h3>
+        <p>他说按他们的经验，加上 PyTorch 博客的说法，少于 1000 张 GPU 时 DeepSpeed 和 FSDP 扩展得很好。这两者都是数据并行，每块 GPU 执行的还是单卡内核，所以自定义内核直接插进去就能用，什么都不用改。即使是张量并行（tensor parallelism，把单层的矩阵切到多卡上），通常也作用在矩阵乘法上，而他们实现的多是逐元素算子或最后一层，所以也能直接用。仓库里有 FSDP 和 DeepSpeed 两个例子，之后还会移植到 Lightning AI 的 Lightning Studio，正在和 Thomas 合作。</p>
+        <p>一位参与者补充：RMSNorm、RoPE 这些在所有 rank 上都会执行，有张量并行也多半直接能用，因为切分主要在矩阵乘法上，注意力则按 head 切。Byron 说 Triton 在通信层之下，需要通信的话用 PyTorch 的集合通信自己实现，自定义内核本身不含通信。对方说到了序列并行或 ring attention 时情况会不同，Byron 说那时通信还是用 PyTorch，Triton 做不了通信。</p>
+        <h3>问答：未来计划</h3>
+        <p>有人说今天已经有 10 个左右的 PR 开着。Byron 说内部讨论不能全透露，高层方向是：支持更多模型；继续做“深”的内核，开箱即用、性能好、测试充分；支持更多硬件，在 AMD 和 NVIDIA 上都能直接跑，已经有 AMD 用户在用，效果不错，什么都不用改，这要归功于 Triton。会继续和 PyTorch、Lightning、Hugging Face、Axolotl 等社区合作，也在找企业合作，但会保持开放协作。</p>
+        <h3>问答：Liger 和 torch.compile 是什么关系</h3>
+        <p>Byron 说两者应该共存，谁也替代不了谁。他的一般建议是先用 torch.compile，它确实能生成很好的内核；如果有显存限制（比如只有 40 GB），可以用 Liger 的线性层交叉熵融合；如果想在 eager 模式下用自定义内核，也可以插 Liger 的内核。</p>
+        <p>Mark 说他的看法和 Byron 一致，取决于时间尺度：短期内需要性能就用自定义内核，它能带来提速和省显存，没有理由不用。但自定义内核的主要问题是让实验变难：模型一变，内核难写、难调试。长期来看编译器应该吸收这些好想法。但有些想法编译器吸收不了：编译器不擅长在保持数值的前提下对模型做算法层面的改动。torch.compile 是一个融合编译器，目前机器在做融合上比人强，但写更好的算法还不如人。</p>
+        <p>Thomas 从 Thunder 的角度说，他们允许用户提供复杂的规则；和融合类似，你得知道遇到某种算子可以怎么处理，torch.compile 有某些融合的模板，再把符合模板的算子收集起来，还没有完全自动化。有人说他乐观地认为 2030 年前，编译器之上会多一层，像现在的 agent 和 Cursor 这类工具那样，能决定一些普通编译器看不到的优化策略。Thomas 提到 TVM 已经有一些自动生成模板的做法，能生成编译器去搜索的空间，以后会有更多。</p>
+        <h3>项目介绍和致谢</h3>
+        <p>Byron 说欢迎贡献，目标是做最好的开源 Triton 训练内核库；从 LLM 训练开始，现在多模态、音频、视觉方向的需求也多了起来。他感谢了 logo 设计者，Unsloth、FlashAttention、efficient cross entropy 等实现给他们的启发，Karpathy 的 Shakespeare 数据集，CUDA MODE 让他开始学 Triton，以及团队成员。他说一周内团队之外又来了 10 多个新贡献者，大约 50 个 PR。</p>
+        <p>主持人祝贺 Byron，说接下来几周没有讲座，9 月 21 日在旧金山市中心有 CUDA MODE IRL 线下活动，已经发了第一批邀请，需要确认。Byron 说想找黑客松题目的话可以看 Liger 的 issue 列表。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“the key here is that on Triton it operates on the physical view. So you need to think everything in the physical view.”（要点是 Triton 操作的是物理视图，所以一切都要按物理视图去想。）<a href="https://www.youtube.com/watch?v=gWble4FreV4&t=2674s" target="_blank">0:44:34</a></li>
+            <li>“So the idea is compute the gradient in forward pass and backward pass you don't need to do anything that's a key idea”（思路就是在前向里把梯度算出来，反向什么都不用做，这是核心想法。）<a href="https://www.youtube.com/watch?v=gWble4FreV4&t=2025s" target="_blank">0:33:45</a></li>
+            <li>“even if you write it subtly incorrectly you can still end up with a model that converges.”（即使梯度写得有一点点错，最后模型照样可能收敛。）<a href="https://www.youtube.com/watch?v=gWble4FreV4&t=1141s" target="_blank">0:19:01</a></li>
+            <li>“we need to cast it to FP32 here a logits somewhere or here otherwise you will have convergence issue. This is very important and this is why most of the implementation is is wrong.”（这里要把 logits 转成 FP32，否则会有收敛问题。这很重要，这就是为什么大多数实现都是错的。）<a href="https://www.youtube.com/watch?v=gWble4FreV4&t=2446s" target="_blank">0:40:46</a></li>
+            <li>“Compile is essentially a fusion compiler.”（torch.compile 说到底是一个融合编译器。）<a href="https://www.youtube.com/watch?v=gWble4FreV4&t=3978s" target="_blank">1:06:18</a></li>
+            <li>“computers are better than humans at doing fusions but not better at writing better algorithms so far.”（到目前为止，机器做融合比人强，但写更好的算法还不如人。）<a href="https://www.youtube.com/watch?v=gWble4FreV4&t=3978s" target="_blank">1:06:18</a></li>
+            <li>“Currently a lot of the intelligence of the AI is still sitting in front of the machines.”（目前 AI 的很多智能还坐在机器前面。）<a href="https://www.youtube.com/watch?v=gWble4FreV4&t=4104s" target="_blank">1:08:24</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 28: Liger Kernel - Efficient Triton Kernels for LLM Training · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tensor Core 与 CUTLASS 3 | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="09_vLLM里的投机解码.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 10</span>
+    <span><a href="11_Liger_Kernel.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 23 · Tensor Core 与 CUTLASS 3</h1>
+        <p class="subtitle">NVIDIA CUTLASS 团队讲 Tensor Core 的五代演进，写 Tensor Core GEMM 难在哪，CUTLASS 3 和 CuTe 怎样把 GEMM 拆成层次化的组件；再讲 Hopper 的线程块簇、分布式共享内存、异步屏障、TMA 和 WGMMA，最后走读一个约 100 行的 Hopper GEMM 内核</p>
+        <div class="author-meta">
+            主讲：Vijay Thakkar（NVIDIA 架构师，CUTLASS 和 CuTe 的主要设计者）、Pradeep Ramani（NVIDIA 高级架构师，做 CUTLASS，有十年以上 GPU 计算经验）· 发布日期：2024 年 6 月 8 日 · 时长：1 小时 48 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=hQ9GPnV0-50" target="_blank">讲座录像 Lecture 23: Tensor Cores</a>（GPU MODE YouTube 频道公开）· 幻灯片：<a href="https://drive.google.com/file/d/18sthk6IUOKbdtFphpm_jZNXoJenbWR8m/view?usp=drive_link" target="_blank">Google Drive 上的 PDF</a>（本文依据录像字幕整理，幻灯片没有文字版可读，屏幕上的代码按讲者口述转写；是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>这是一次加长到近两个小时的特别讲座，由 Andreas Köpf 主持。前半段由 Vijay Thakkar 主讲，他是 NVIDIA 的架构师，CUTLASS 和 CuTe 项目的主要设计者，讲 Tensor Core 是什么、为什么针对它写程序很难，以及 CUTLASS 3 怎样用一套概念层次把 GEMM 内核拆成可以单独替换的部件。后半段由 Pradeep Ramani 主讲，讲 Hopper（H100）新加的硬件特性：线程块簇、分布式共享内存、带事务计数的异步屏障、TMA 和 warpgroup 级的 Tensor Core 指令，然后打开 CUTLASS 仓库里一个 Hopper WGMMA 示例，从主机端设置一路讲到设备端主循环。</p>
+        <p>前置知识：GEMM（通用矩阵乘）的分块写法、共享内存、warp、软件流水线。本站第 02 篇讲过 SM、warp 和共享内存分块矩阵乘法；CS149 和 CS2680 的笔记讲过 GPU 的层次化并行和访存墙。CuTe 的布局代数在本合集第 16 篇（Lecture 57，CuTe 发明者 Cris Cecka 主讲）里会细讲，这一讲只用到它的基本说法：布局 = 形状 + 步长。主持人在讲完后也说，这一讲的信息量对入门来说偏大，适合当作以后回头查的参考。</p>
+        <ol>
+            <li><a href="#t01">开场，Tensor Core 是什么和它的五代指令</a> · <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">为什么写 Tensor Core 程序难：分区问题和异步问题</a> · <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=288s" target="_blank">0:04:48</a></li>
+            <li><a href="#t03">CUTLASS 3 的设计目标和 CuTe</a> · <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=642s" target="_blank">0:10:42</a></li>
+            <li><a href="#t04">CUTLASS 3 的概念层次：atom、空间微内核、时间微内核、kernel</a> · <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=893s" target="_blank">0:14:53</a></li>
+            <li><a href="#t05">一个 CUTLASS 3 GEMM 长什么样：main loop、epilogue 和分派</a> · <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=1312s" target="_blank">0:21:52</a></li>
+            <li><a href="#t06">写自定义内核的规则：把改动限制在最小的那一层</a> · <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=1756s" target="_blank">0:29:16</a></li>
+            <li><a href="#t07">Epilogue visitor tree、Python 接口和 CUTLASS profiler</a> · <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=2079s" target="_blank">0:34:39</a></li>
+            <li><a href="#t08">Hopper 的线程层次：线程块簇和分布式共享内存</a> · <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=2375s" target="_blank">0:39:35</a></li>
+            <li><a href="#t09">异步屏障和 TMA</a> · <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=2697s" target="_blank">0:44:57</a></li>
+            <li><a href="#t10">Hopper 的 Tensor Core 和 warpgroup 指令</a> · <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=3050s" target="_blank">0:50:50</a></li>
+            <li><a href="#t11">高性能 Hopper GEMM 的构成：101 级优化和数据流</a> · <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=3499s" target="_blank">0:58:19</a></li>
+            <li><a href="#t12">代码走读一：主机端设置</a> · <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=4339s" target="_blank">1:12:19</a></li>
+            <li><a href="#t13">代码走读二：设备端内核</a> · <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=4855s" target="_blank">1:20:55</a></li>
+            <li><a href="#t14">进阶优化和问答</a> · <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=5807s" target="_blank">1:36:47</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场，Tensor Core 是什么和它的五代指令</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=0s" target="_blank">0:00:00</a>–0:04:48 · Introduction to CUDA mode / Tensor core fundamentals</em></p>
+        <h3>开场</h3>
+        <p>Andreas 介绍两位讲者：Vijay Thakkar 是 NVIDIA 的架构师，CUTLASS 和 CuTe 项目的主要设计者；Pradeep Ramani 是高级架构师，也在 CUTLASS 组，有十年以上 GPU 计算经验。CUTLASS 是 NVIDIA 开源的 CUDA C++ 模板库，用来写矩阵乘法这一类运算。平时讲座一小时，这次应要求延长到约两小时。Vijay 说他欢迎被打断提问，但他看不到聊天框，需要 Andreas 转述。</p>
+        <p>他列出这次的内容：CUTLASS 的动机，Tensor Core 是什么，怎样考虑针对 Tensor Core 写自定义内核，它的编程模型是什么，最后用 CUTLASS 和 CuTe 从零写一个 Hopper GEMM。</p>
+        <h3>Tensor Core 是什么</h3>
+        <p>Tensor Core 是 GPU 上专门做矩阵乘加的硬件单元。Vijay 说这不算对 Tensor Core 的深入讲解，只是帮大家建一个心智模型：它是一个硬件加速块，只做矩阵乘法。矩阵乘法有很好的算法性质，在硬件里做，可以从数据里榨出更多空间和时间上的复用，这样就能跨过“内存墙”（memory wall，计算速度远快于取数速度）。读进来的一份数据能用很多次，而搬运数据是最贵的操作之一。</p>
+        <h3>五代 MMA 指令</h3>
+        <p>幻灯片上画了五代用来实现矩阵乘法的指令：</p>
+        <ul>
+            <li>Tensor Core 出现之前：只有线程级的乘法（每个线程自己做乘加）。</li>
+            <li>Pascal：引入点积指令，每个线程一次做多于一个元素的低精度点积。</li>
+            <li>Volta：第一代 Tensor Core 指令，8 个线程合作算一个 8×8×4 的矩阵乘。</li>
+            <li>Ampere：变成 warp 级的 Tensor Core 指令（32 个线程一起）。</li>
+            <li>Hopper：warpgroup 级的 Tensor Core 指令，4 个 warp 合作，直接从共享内存读操作数，做一个大得多的矩阵乘。</li>
+        </ul>
+        <p>他说 Tensor Core 在各代架构之间变化很大，这本身就是针对 Tensor Core 写程序的一个根本难点。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 为什么写 Tensor Core 程序难：分区问题和异步问题</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=288s" target="_blank">0:04:48</a>–0:10:42 · Complexity of GEMM kernels / Tiling and partitioning / Asynchrony and synchronization</em></p>
+        <h3>概念上的矩阵乘很简单</h3>
+        <p>在 Python 里，或者从线性代数的角度看，矩阵乘法很简单：外积的累加，或者说内积的累加。沿着 K 方向遍历 A 和 B 的分块，算出输出矩阵 C 的一个完整分块。就是一个三重 for 循环，每次迭代算一个元素的部分积：</p>
+        <p>$$C_{mn} = \sum_{k} A_{mk} B_{kn}$$</p>
+        <h3>层次化并行带来的索引簿记</h3>
+        <p>难的地方来自 GPU 的层次化并行。GPU 是层次化的并行机器：线程有一层套一层的层次，数据所在的存储也有对应的层次。要利用越来越多的数据局部性和复用，问题就得按这些层次一层层分块：整个全局内存里的张量先分到线程块（thread block）级，再分到线程级。真正难的是记住所有的下标和数据位置，并且不让地址计算的开销吃掉矩阵乘法本身的时间。</p>
+        <p>Tensor Core 还要求输入操作数按它自己规定的线程布局摆放，否则结果就不对。这样一来，代码就离开了干净的三重循环，变成一大堆下标簿记。这是第一个问题：没有简单的办法写出 CPU 上那种 SIMD 风格的循环。</p>
+        <p>他拿 Volta 举例，说细节不用看懂，只是想说明它有多难在脑子里推演。一条 Volta 指令覆盖 8 个线程；高效的 Volta 内核先把这一条指令在整个 warp 上平铺成 4 条；这 4 份在 warp 内部按 quad pair 0、1、2、3 交错排列，既不是行主序也不是列主序；然后在这个 warp 的整个共享内存分块上做空间交错；再往上，一个 warp 的单元在整个 SM 上平铺，SM 有 4 个子分区，也就是 4 个 warp；为了从共享内存做向量化读取，还有更多的空间复用。这些很快就乱成一团。</p>
+        <p>他把这个叫作分区问题（partitioning problem）：先要搞清楚哪个线程拥有哪些数据元素，也就是把逻辑上的数据元素映射到它们实际所在的物理存储。CUTLASS 2 的时候，每种 Tensor Core 操作都有一个手写的布局函数：给一个输入坐标，算出这个元素存在哪个下标。这些手写的迭代器实现的是“分区之后的布局”（post-partition layout），它们默认你已经拿到了线程 ID，没有把线程布局和数据布局分开，所以写起来很难。</p>
+        <h3>第二个问题：异步和程序员管理的同步</h3>
+        <p>CPU 上的线性代数和 GPU 上的线性代数还有一个关键区别：GPU 没有推测执行、乱序执行的引擎来从代码里挖并行度、容忍全局内存延迟。所以程序员要用共享内存自己搭一条软件流水线（software pipeline），把数据源源不断地送进 Tensor Core，使访存延迟不拖慢计算。如果天真地直接用 Tensor Core 计算，从全局内存取数的延迟太长，性能永远上不去，阿姆达尔定律（Amdahl's law，没被加速的那部分决定了整体加速的上限）会把收益吃掉。</p>
+        <h3>问答：幻灯片上的 RM 是什么</h3>
+        <p>有人问幻灯片里的 R 指什么。Vijay 说记号是：SM 指共享内存（shared memory），RM 指寄存器（register memory），GM 指全局内存（global memory）。又有人问幻灯片会不会公开，他说之后会放一个整理过的版本。</p>
+        <h3>一个 Hopper 内核能复杂到什么程度</h3>
+        <p>他展示了一个为 Hopper 优化的内核的结构图，说明为了从 Tensor Core 拿到性能，事情能复杂到什么程度：</p>
+        <ul>
+            <li>有软件流水线；</li>
+            <li>是持久化算法（persistent kernel，启动固定数量的线程块，每个线程块循环处理多个输出分块），一个线程块计算多个输出分块；</li>
+            <li>有 warp 专用化（warp specialization，同一个线程块里不同的 warp 干不同的活）的流水线：一组线程一直在取数据，一组在做 Tensor Core 运算，还有一组做后处理，比如激活函数。</li>
+        </ul>
+        <p>这是第二个根本问题：程序员要在很深的异步流水线上自己管理异步，去容忍延迟，还要优化固定开销。他说如果不管程序的固定开销，阿姆达尔定律总会吃掉收益；Tensor Core 运算越来越快，代码里对延迟敏感的部分就越来越要紧。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. CUTLASS 3 的设计目标和 CuTe</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=642s" target="_blank">0:10:42</a>–0:14:53 · CUTLASS 3 and CUTE</em></p>
+        <h3>CUTLASS 是什么</h3>
+        <p>CUTLASS 给出一个编程模型，把 NVIDIA 架构上高性能矩阵乘法的结构拆成几个活动部件。它是一个 C++ 模板库，做高性能线性代数，同时支持 Tensor Core 和 CUDA Core，给 GPU 提供原生的分块（tile）编程模型。CUTLASS 1.0 在 2017 年发布，从那时起就有分块级的编程模型。它开源在 GitHub 上，另外还有一个 CUTLASS 的 Discord 频道，可以在那里交流，或者在 GitHub 上提 issue。</p>
+        <p>他的核心观点是：这些复杂度如果不拆成活动部件，很难推理；CUTLASS 做的就是这件事。把东西沿着一套概念层次拆开，就能把各个问题当成彼此正交的维度分别考虑。</p>
+        <h3>设计目标</h3>
+        <ul>
+            <li>做 NVIDIA GPU 公开的张量编程模型，同时作为生产级的示范。CUTLASS 被 300 多个项目采用；在 NVIDIA 内部，cuBLAS、cuDNN、TensorRT-LLM 等库也用它做后端。</li>
+            <li>开发者效率。他说现在大家想写自定义内核，光有现成的 GEMM 和卷积不够，他们要的是组成这些内核的积木。所以 CUTLASS 层次中的每一层都尽量可组合，用户可以写自己的变体换进去。</li>
+            <li>构造即正确（correctness by construction）。可组合性有陷阱：不是每种组合都合法。遇到不合法的组合，CUTLASS 在编译期用 static assert 直接让它编译不过，并给出有用的报错信息。</li>
+            <li>单一而清晰的定制点。CUTLASS 3 相比 CUTLASS 2 花了很大力气缩小 API 面，让用户只从少数几个入口进入。</li>
+        </ul>
+        <h3>CUTLASS 现在支持什么</h3>
+        <p>矩阵乘法一开始就有；CUTLASS 3.5 加了卷积和张量缩并（tensor contraction）；有面向 LLM 的优化，比如混合输入 GEMM（A 和 B 用不同的数据类型），他说后面会讲它其实只是在 CUTLASS 上做的一个融合；有 epilogue visitor tree，让人写自定义的融合 GEMM 而不用关心 Tensor Core 怎么工作；支持 FP8 数据类型；有一个方便的 pip wheel。</p>
+        <h3>CuTe 和 CUTLASS 3 的关系</h3>
+        <p>他说在 Discord 上看到很多人搞不清 CUTLASS 3 和 CuTe 是什么关系。CuTe 是 CUTLASS 3 的核心组成部分，CUTLASS 3 是 CuTe 的超集。CuTe 提供两样根本的东西：</p>
+        <ul>
+            <li>统一的布局表示：每个布局（layout）都是一个形状（shape）和一个步长（stride）的组合。布局本身是层次化、多模（multimodal）的，始终保持坐标的逻辑一致性。有了它，就再也不用自己操心坐标到下标的映射。布局还能和 swizzle 函子（functor）组合，写 swizzle 函数变得很容易。</li>
+            <li>形式化的布局代数：可以把多个布局组合起来，结果还是一个布局。他说这是 CuTe 最酷的特性。</li>
+        </ul>
+        <h3>问答：多模是什么意思；CuTe 受函数式编程启发吗</h3>
+        <p>有人问 multimodal 指什么。他说比如一个形状是二维的，但它的第二维本身又是一个二维形状，这就叫多模（multi-mode）。</p>
+        <p>又有人问 CuTe 是不是受函数式编程启发。他说它的灵感来自张量缩并里出现的一些用例。它确实用了函数式编程，因为模板元编程按定义就是函数式的：函数返回的是类型。但它本身不是受函数式编程启发做出来的。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. CUTLASS 3 的概念层次：atom、空间微内核、时间微内核、kernel</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=893s" target="_blank">0:14:53</a>–0:21:52 · CUTLASS conceptual hierarchy</em></p>
+        <h3>为什么要 CuTe</h3>
+        <p>CUTLASS 2 里那些手写的布局函数，全部换成了一个统一的布局概念。而且布局也用来表示线程布局：CUTLASS 2 里没有“线程布局”这回事，只有分区之后的数据布局；现在线程布局和数据布局分开定义，分区变成一个代数运算。</p>
+        <p>他引用了自己用了很久的一句话（说这是在他知道 FlashAttention-2 之前就开始用的）：CUTLASS 3 发布后，Tri Dao 在前三个月内就在它上面实现了 FlashAttention-2。他说更容易处理布局让很多很酷的研究成为可能。</p>
+        <h3>从下往上的五层</h3>
+        <p>CUTLASS 3 用 CuTe 形式化了一套线性代数组件的概念层次，把活动部件拆到正交的轴上。从最底层往上：</p>
+        <ol>
+            <li><strong>Atom 层</strong>：对应硬件原生支持的架构指令，加上用 CuTe 布局记下来的元信息。它是合法执行一条架构操作（数学运算、拷贝等）所需的最小线程集合和数据集合。</li>
+            <li><strong>Tiled MMA / Tiled Copy 层</strong>，他们叫它“空间微内核”（spatial micro-kernel）。“微内核”这个说法借自 CPU 上的 BLIS 库。它负责把数学和拷贝操作在空间上完整地平铺并抽象起来，空间指线程和数据，以及我们想表达的任何排列。有了这一层，不管指令布局多复杂，都能写出规范的循环：拷贝是一个 for 循环，GEMM 是三重 for 循环。这一层解决的是上一节第一个问题，即指令交错、布局校验和下标簿记。</li>
+            <li><strong>Collective 层</strong>，“时间微内核”（temporal micro-kernel）。它描述多个空间微内核怎样在时间上平铺，合起来算出一个输出分块。可以看成多个 tiled MMA 和 copy 的编排，用上架构相关的同步、warp 专用化、软件流水线，安排出隐藏全局内存延迟所需的指令交错。这一层处理的是异步和共享内存管理。</li>
+            <li><strong>Kernel 层</strong>：外层循环，调用 collective，做各个输出分块之间的负载均衡、把线程分派到各自专用的代码区域、网格规划（启动多少个线程块、怎么设簇），以及在主机端构造参数、在内核真正启动时映射到 ABI 上。</li>
+            <li><strong>Device 层</strong>：只是一层薄封装，一个内核句柄，相当于 cuBLAS 的 handle，他不细讲。</li>
+        </ol>
+        <h3>问答：微内核是什么意思</h3>
+        <p>Andreas 请他解释“微内核”。Vijay 说，这里的微内核是一个子部件，把线性代数里某个根本性的难点拆到一个正交的轴上。真正要关心的只有两层：空间微内核描述单个分块上所有拷贝指令和数学指令怎样交错；时间微内核描述这些分块之间怎样互动、怎样互相同步。叫“微内核”是因为它们算的不是整个 GEMM 或整个卷积，只是其中的子部件。拆开的好处是实现上大大简化：可以固定一个、改另一个，反过来也行。</p>
+        <h3>每层的入口</h3>
+        <p>为了降低学习曲线，每一层只有很少的 C++ 类型和 API 入口：</p>
+        <ul>
+            <li>空间微内核：CuTe 的 tiled copy 和 tiled MMA；</li>
+            <li>时间微内核：collective MMA 或 collective 卷积；</li>
+            <li>kernel 层：GEMM universal 和卷积 universal 两个 kernel；</li>
+            <li>device 层：对应的 device 适配器。</li>
+        </ul>
+        <p>他强调 kernel 层是三样东西的组合：一个 main loop collective、一个 epilogue collective，以及一个 tile scheduler（分块调度器）。调度器决定整个全局内存上的问题怎样分解到这些 collective 上。所以层次化的并行，映射到了一套对应的层次化模板上。</p>
+        <p>CUTLASS 的 pipeline 抽象贯穿整个层次，用来抽象层与层之间、层内部的同步。它帮你管理共享内存里的缓冲区，避免竞态，对外是一个生产者/消费者（producer-consumer）接口，用过任务并行编程模型的人会觉得眼熟。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 一个 CUTLASS 3 GEMM 长什么样：main loop、epilogue 和分派</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=1312s" target="_blank">0:21:52</a>–0:29:16 · Main loop and epilogue / Kernel fusion and dispatch</em></p>
+        <h3>用 collective builder 组装一个 GEMM</h3>
+        <p>他的例子是一个张量缩并（GETT，generalized tensor times tensor，广义的张量乘张量），说可以把它当成矩阵乘看。写法分三步：</p>
+        <ol>
+            <li>先建 collective main loop，也就是真正执行乘法的时间微内核。乍一看吓人，但里面没有什么 GPU 架构相关的复杂东西：告诉它 A、B 的元素类型，A、B 的步长（基本就是行主序还是列主序），输入的对齐，累加器用什么类型，分块形状和簇形状，其余全写 Auto。只要指定了要编译到哪个架构，CUTLASS 就自动生成内核。</li>
+            <li>epilogue 同理：告诉它 C、D 张量的元素类型、计算用的元素类型，其余写 Auto，得到 collective epilogue。</li>
+            <li>kernel 层把 main loop 和 epilogue 组合起来。幻灯片上没写 tile scheduler，因为它有默认值；epilogue 后面还有第三个模板参数，可以用来换掉调度器。</li>
+        </ol>
+        <p>他说这就是 CUTLASS 3 里一个现成 GEMM 的全部写法，并且不只适用于 Hopper：把 SM 架构换成任何支持的架构都行。CUTLASS 3 目前支持 Hopper 及更新的架构，但设计上没有什么根本原因不能支持更早或更新的架构，CUTLASS 3 就是他们在 Hopper 及以后架构上的编程模型。</p>
+        <p>下面是按他口述的参数顺序写的草图，类型名取自 CUTLASS 3 公开的 CollectiveBuilder 接口：</p>
+        <pre><code>// sketch based on the talk: element types, strides/layouts, alignments,
+// accumulator type, tile shape, cluster shape; everything else left to Auto
+using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder&lt;
+    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
+    ElementA, LayoutA, AlignmentA,
+    ElementB, LayoutB, AlignmentB,
+    ElementAccumulator,
+    TileShape, ClusterShape,
+    cutlass::gemm::collective::StageCountAuto,
+    cutlass::gemm::collective::KernelScheduleAuto
+  &gt;::CollectiveOp;
+
+// the kernel layer composes mainloop + epilogue (+ an optional tile scheduler)
+using GemmKernel = cutlass::gemm::kernel::GemmUniversal&lt;
+    ProblemShape, CollectiveMainloop, CollectiveEpilogue&gt;;</code></pre>
+        <h3>问答：有没有分派机制；main loop 和 epilogue 有什么区别</h3>
+        <p>Andreas 问，要支持多种配置时有没有分派（dispatch）机制，还是留给用户。Vijay 说幻灯片上那几个调度策略参数就是分派的入口：写 Auto 时 CUTLASS 挑它认为最好的；也可以逐步手动接管。架构也一样，所有参数都是可以自由改的正交维度。编译不过时会告诉你原因，有些配置确实不兼容，比如某个元素类型在某个架构上不支持，这时会告诉你没有合法的内核。</p>
+        <p>有人问 main loop 和 epilogue 的区别。他说 main loop 做 MMA；epilogue 是 A×B 做完之后的后处理。典型的 BLAS3 GEMM 算的是</p>
+        <p>$$D = \alpha \cdot (A \times B) + \beta \cdot C$$</p>
+        <p>C 和 A×B 形状相同，结果存进 D。epilogue 做的就是矩阵乘法最后的这些逐点运算。</p>
+        <h3>collective 是可复用的单分块 GEMM</h3>
+        <p>他再强调一次：collective 是时间微内核，计算一个输出分块。为某个架构把它调到高性能很难，所以 NVIDIA 把调好的 collective 现成提供出来，大家写自定义内核时可以直接复用。</p>
+        <p>kernel API 则更像一种建议。融合的能力在这里体现：同一套 collective 可以和很多不同的 kernel 调度自由组合，名字就叫可组合性。kernel 层实现的是网格规划、全局的内核入口，以及和分块调度有关的事情：为了 L2 局部性做的线程块级和簇级 swizzle，用 split-K 或 stream-K 做负载均衡。split-K 指沿 K 维把一个输出分块的计算拆给多个线程块再归约；stream-K 是另一种把 K 方向的工作更均匀地分给各个 SM 的调度方式。他说，要实现 stream-K，只需拿以前写过的任何 collective，和实现了 stream-K 的 kernel 层组合。</p>
+        <h3>逐步接管：collective builder 替你做了什么</h3>
+        <p>collective builder 是一个方便接口，并且允许逐步接管。比如想要一个 Hopper 内核，但指定持久化调度、共享内存里用 5 级流水，就把对应的 Auto 换成具体选项。</p>
+        <p>他展示 builder 背后做了什么：它拿到这些和 Tensor Core 无关的、与架构无关的问题描述，自己做大量启发式分析，决定共享内存里的级数、Hopper 上具体用哪条指令、共享内存的确切布局（包括带 swizzle 的组合布局）、用什么拷贝指令、和哪个调度组合等。幻灯片上用绿色标出了 builder 根据描述做出的决定。他说让 Tensor Core 跑起来相当复杂，需要很多架构知识；collective 和 builder 让你不用操心这些，专心写真正想要的融合或内核。</p>
+        <h3>卷积的接口几乎一样</h3>
+        <p>卷积的 API 基本相同。区别是不给行/列主序的步长，改为给卷积操作类型（前向 fprop、对输入求梯度 dgrad、对权重求梯度 wgrad）和空间维数（1D、2D、3D），其余不变。builder 同样把卷积问题描述映射到各种复杂的实现策略上。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 写自定义内核的规则：把改动限制在最小的那一层</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=1756s" target="_blank">0:29:16</a>–0:34:39 · Customizing CUTLASS kernels</em></p>
+        <h3>只换需要换的部件</h3>
+        <p>CUTLASS 的意图是让人写自定义内核时尽量复用已有的部分，只定制需要改的那一块。最基本的例子：写一个自定义 main loop（时间微内核），通过 dispatch policy 换掉调度，和任何现有的 kernel 调度组合，这样不用重写整个内核，改动只在一个文件里。反过来，想试 stream-K 之类的外层循环负载均衡策略，就复用现有的 main loop，配上自己写的外层循环调度。他说这样组合起来，其他文件一个都不用改，改动落在它所属的那层抽象上。</p>
+        <h3>参数也是层次化的</h3>
+        <p>启动内核要为所有张量和所有配置提供参数。因为内核是层次化组合的，如果换掉 epilogue，需要改的参数只在被改的那棵子树里。可以对传给内核的参数做一次前序遍历，替换子图时只改相应的叶子，这和模板的层次一一对应。</p>
+        <h3>同步也是层次化的</h3>
+        <p>他说，比起把布局写对，GPU 编程越来越要靠把并发和同步写对。要写一个跑到峰值的 Hopper 内核，代码里等于要写一张同步图，像幻灯片左边那张。用 CUTLASS 的 pipeline 来实现时，线程的调度和同步也被层次化地拆开：某个同步节点可以写成一张子图。这让调试同步容易很多，常常第一次就写对，因为分成两个单元推理比当成一个整体推理简单。就像数据局部性和布局可以层次化地拆，同步也可以。</p>
+        <h3>经验法则：改什么就写哪一层</h3>
+        <ul>
+            <li>做 kernel 融合：写一个自定义 kernel 调度，和现有的 collective、tile scheduler 组合，很多优化白拿。把 Tensor Core GEMM 调到峰值吞吐很难，而外层循环调度要好调得多。</li>
+            <li>做 main loop 融合：kernel 调度不变，扩展或定制一个现有的 collective MMA，定义一个新的 dispatch policy，和现有的 kernel 层组合。这样 kernel 层已有的优化（stream-K、为 L2 局部性做的分块 swizzle 等）全都白拿。</li>
+            <li>Hopper 上的混合输入 GEMM 就是这么做的：复用普通的稠密 GEMM kernel，只定制一个新的 collective，这个 collective 唯一多做的事是把其中一个输入上转换（upcast）到更高的精度。他说这就是分解层次带来的“力量倍增”效果。</li>
+            <li>epilogue 融合：这里更省事，完全不用改代码，下一节讲。</li>
+            <li>自定义负载均衡或 L2 局部性优化：只写一个新的 tile scheduler，main loop、epilogue、collective 都不变。CUTLASS 3 里的 stream-K 就是这样实现的：没有写新的 kernel 层，用普通 kernel 层配一个单独的调度器。</li>
+        </ul>
+        <h3>混合输入 GEMM</h3>
+        <p>他把混合输入 GEMM 作为一个功能亮点：Hopper 上可以做 A 和 B 元素类型不同的矩阵乘，内核自己做反量化。做权重量化时，激活保持较高精度，权重量化到较低精度，这类内核把反量化步骤融合进内核里。在 CUTLASS 里，这不需要写一个全新的内核，只写一个做上转换的新 main loop，其余照旧。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. Epilogue visitor tree、Python 接口和 CUTLASS profiler</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=2079s" target="_blank">0:34:39</a>–0:39:35 · Epilogue fusion visitor / Python interface and profiling</em></p>
+        <h3>用 C++ 类型拼出 epilogue 的 DAG</h3>
+        <p>epilogue visitor tree（EVT）让人把融合运算写成一张有向无环图（DAG），作用在 main loop 的结果，也就是累加器上。他的例子是：</p>
+        <p>$$D = \mathrm{ReLU}\big(\alpha \cdot \mathrm{acc} + \mathrm{bias} + \beta \cdot C\big)$$</p>
+        <p>其中 acc 是 A×B 的累加结果。这张 DAG 用组合起来的 C++ 类型来写：alpha 是某个元素的标量广播（scalar broadcast）；然后取累加器；bias 是一个按列的广播；再用一个三元计算节点，以这三个为操作数做乘加，得到“计算节点 0”。这个节点又可以当作结果节点，往后继续组合；结构本身是层次化的，可以按这个方式拼出任意的树。最后 ReLU 是对这个节点结果的再一次组合。任意的 epilogue visitor 都可以这么写。</p>
+        <h3>用 Python 函数定义 epilogue</h3>
+        <p>更省事的是通过 CUTLASS 的 Python 接口：把 epilogue 融合写成一个普通 Python 函数（例子和上面是同一个融合）。把输入张量的维度用空的 torch 张量给出，绑定到函数里用到的变量名上，调用 epilogue 的 trace，就会生成对应的 C++ EVT 代码。如果连 EVT 都不想写、嫌模板层次太繁琐，Python 接口会替你把 C++ 代码吐出来；它还能用 CUTLASS Python 接口生成一个 PyTorch 的 CUDA 扩展，把任意 epilogue 融合直接接进 PyTorch 模型。</p>
+        <p>幕后：CUTLASS 利用自己对“怎样让 epilogue 跑得快”的领域知识，把你的 visitor 里的回调有策略地插入 epilogue 的操作序列中，让它们交错执行。他说细节不必看，代码都是开源的。</p>
+        <h3>问答：Python 和 C++ 怎样交互，什么时候编译</h3>
+        <p>Andreas 问 Python 库和 C++ 库怎么配合：什么时候编译，怎么把内核加载进 PyTorch。Vijay 说 epilogue 的 trace 负责生成 C++ 代码，<code>plan.run</code> 负责编译内核并运行。它有缓存，同一个内核再跑一次不会重新编译，会维护一份目前遇到过的所有内核的缓存。</p>
+        <h3>CUTLASS profiler：他们推荐的自动调优方法</h3>
+        <p>CUTLASS 是只有头文件的模板库，可以在所有架构上生成成千上万（他说甚至几十万）个内核。挑最好的一个的办法：用基于 Python 的 emitter 框架或 PyTorch 接口，把关心的所有内核都生成出来，指定关心的分块形状和融合，在关心的所有问题形状上跑一遍，挑最好的。需要的话还可以用一些编译选项把 PTX 导出来。</p>
+        <p>CUTLASS profiler 还做了很多别的事：替你校验内核结果；如果知道输入的精度，可以设置输入的有效位数；它会确保输入输出不会一直驻留在 L2 里，免得性能数字被人为抬高。他的结论是：针对某个架构和某个形状，用 CUTLASS profiler 找出最好的内核。</p>
+        <p>这里 Vijay 的部分结束，交给 Pradeep 讲 Hopper 相关的部分和演示。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. Hopper 的线程层次：线程块簇和分布式共享内存</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=2375s" target="_blank">0:39:35</a>–0:44:57 · Hopper architecture overview / Distributed shared memory</em></p>
+        <p>Pradeep 说这部分主要讲 Hopper，也会提到 Ampere 等之前的架构。这套幻灯片要感谢 Stephen Jones，他常在 GTC 上讲各代架构的编程模型，演讲都可以在网上免费看，Pradeep 推荐大家去看。</p>
+        <h3>传统的线程层次</h3>
+        <p>GPU 编程模型大家都熟，他还是快速过一遍：把计算拆成一个网格（grid）。例子是处理一张花的图片，做提高对比度或用滤波器卷积之类的图像处理。网格被分成大小相同的线程块（block），这些块可以被调度到 GPU 上。每个块像一个独立的程序那样运行；块内由很多线程处理，线程可以一起同步，可以通过共享内存共享数据。在 Hopper 之前大家用的就是这套层次。在 GPU 这样的大规模并行机器上，这些线程块可以独立地跑在不同的 SM 上，资源不冲突时也可以跑在同一个 SM 上。</p>
+        <h3>新的一层：线程块簇</h3>
+        <p>Hopper 在网格和线程块之间加了一层：线程块簇（thread block cluster）。从花的图片就能看出，相邻的块之间有很多数据可以共享或复用，如果它们被同时调度，或者能利用某种局部性，就有好处。</p>
+        <p>这层局部性怎样体现在硬件上：一个线程块簇映射到硬件上的一个物理实体，叫 GPC（GPU processing cluster，GPU 处理簇）。他给了个尺度感：一个 GPC 大约相当于一整块 Kepler 级别的 GPU。线程块簇的好处是簇里的块被一起调度（co-scheduled）到同一个 GPC 上，这就带来了更快的同步、数据复用和数据共享的可能。</p>
+        <h3>分布式共享内存</h3>
+        <p>共享内存原本属于单个 SM。有了簇这一层、簇里的块被一起调度，Hopper 又加了一个特性：一个 SM 的共享内存可以被同一个簇里的任何 SM 访问。这叫分布式共享内存（distributed shared memory，DSMEM）。之所以能做到，是因为它们位于同一个 GPC 里。他说这打开了很多门：更好的带宽、更多复用、更快的同步。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 异步屏障和 TMA</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=2697s" target="_blank">0:44:57</a>–0:50:50 · Asynchronous barriers and TMA</em></p>
+        <h3>从 Volta 的独立线程调度说起</h3>
+        <p>Hopper 继续沿用 Volta 引入的概念。Volta 之前线程基本按 warp 调度，再加一些同步保证它们按 warp 行事；从 Volta 开始有了独立线程调度（independent thread scheduling），每个线程有自己的程序计数器。有了它，就可以有异步处理的生产者/消费者数据流，线程之间用屏障（barrier）同步。</p>
+        <h3>拆成 arrive 和 wait 的屏障</h3>
+        <p>Ampere 之前大家只用 <code>__syncthreads()</code>。它的问题是同步期间没法隐藏任何延迟敏感的工作：比如有些生产者很快就把数据产出来了，但它们本可以做的独立工作没法拿来填这段等待。从 Ampere 开始，可以把屏障拆成“到达”（arrive）和“等待”（wait）两步：生产者 arrive 之后可以继续干自己的独立工作，只在真正需要消费所有生产者产出的数据时才 wait。这叫 split arrive-wait 屏障，在 Ampere 引入，Hopper 全面采用：后面会看到，Hopper 上大多数概念都从同步方式转向了跑在生产者和消费者两边的异步代理（asynchronous agents）。NVIDIA 的协作组（cooperative groups）那一套库里的 <code>cuda::barrier</code> 也支持这个概念：arrive 之后是非阻塞的，可以继续做独立工作以减少暴露的延迟，只在需要时 wait。</p>
+        <p>从 Hopper 开始，arrive-wait 机制有硬件支持和硬件加速。这让用户可以快速同步，不用自己写复杂的信号量，也不用被迫用 <code>__syncthreads()</code>，后者会让线程块里所有线程停下来。</p>
+        <h3>带事务计数的屏障</h3>
+        <p>Hopper 更进一步：屏障除了到达计数（arrival count），还有事务计数（transaction count）。加事务计数是为了跟踪内存操作，因为内存操作现在也是异步的。硬件上的增强让指令可以直接用自己完成的事务量（比如从全局内存搬到共享内存的字节数）去更新屏障。生产者和消费者分别跟踪到达计数和事务计数，判断自己要等多久才能使用结果。（这种放在共享内存里的屏障常被叫作 mbarrier。）</p>
+        <h3>TMA：张量内存加速器</h3>
+        <p>Hopper 的另一个大改动是 TMA（Tensor Memory Accelerator，张量内存加速器），一个专门在全局内存和共享内存之间搬张量块的硬件单元。</p>
+        <ul>
+            <li>在它之前（Ampere）有 memcpy async，用的是一条叫 LDGSTS 的指令：把数据从全局内存直接读进共享内存，不经过寄存器。再之前，要用程序员管理的共享内存，就得先把数据读进寄存器，再存进共享内存。</li>
+            <li>Hopper 上 TMA 更进一步：它双向拷贝，全局到共享、共享到全局都行，也能在分布式共享内存之间拷贝；拷贝的同时异步更新屏障；还替你做地址计算。</li>
+            <li>Hopper 之前，每个线程都要在 LDGSTS 指令里手动给出自己要读的地址。用 TMA 时，一个线程发一条指令，就能异步地读一整块数据。TMA 可以事先编程，让它知道这个张量的边界、步长、数据类型等。</li>
+        </ul>
+        <p>这让 CUDA 内核里的 ALU 逻辑大幅减少，性能更好，也更好写。因为它是异步指令，需要有办法跟踪它什么时候完成，这就是上面的事务屏障。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. Hopper 的 Tensor Core 和 warpgroup 指令</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=3050s" target="_blank">0:50:50</a>–0:58:19 · Hopper tensor cores / Warp group instructions</em></p>
+        <h3>和 FP32 CUDA Core 比有多快</h3>
+        <ul>
+            <li>16 位浮点 Tensor Core 比普通 FP32 CUDA Core 快 16 倍，用稀疏（sparsity）时快 32 倍。</li>
+            <li>Hopper 新加了 FP8 Tensor Core，有两种格式，比普通 FP32 核快 32 倍，能效和性能都更好。他说社区外的研究已经表明 FP8 在训练和推理上都可行。</li>
+            <li>继续支持整数精度和 TF32 格式；双精度 Tensor Core 也改进了，比普通双精度 CUDA Core 快 2 倍。</li>
+        </ul>
+        <p>更多细节在 Hopper 架构白皮书里。他说这张表的意思是：Tensor Core 已经比 CUDA Core 快了这么多，想用满 GPU 就得针对 Tensor Core 写程序。</p>
+        <h3>各代 MMA 形状</h3>
+        <p>他列了一张各代 GPU 的 MMA 指令形状参考表。Hopper 级别的 GPU 上 FP16 性能高达约 1 PFLOPS，大约是 Ampere 的 3 倍，可以画出一条代际增长的趋势线。另一个要点是 MMA 的形状本身在变大：从 Volta 到 Ampere 再到 Hopper。Tensor Core 做的运算是矩阵乘加，单比特数据则做 XOR 加 popcount。</p>
+        <h3>Hopper 的 Tensor Core 指令是 warpgroup 级的</h3>
+        <p>warpgroup 就是 4 个 warp，即 128 个线程。这 128 个线程合起来持有累加器（C 或 D 操作数）。操作数 A 和 B 的来源也变了：Hopper 的 Tensor Core 可以通过可编程的描述符（descriptor）直接从共享内存读 A 和 B，A 也可以选择从寄存器读。对比 Ampere：Tensor Core 由单个 warp 编程，A 和 B 都来自寄存器。这类 Hopper 指令就是 WGMMA（warpgroup MMA）。</p>
+        <h3>Ampere 的一条 MMA 指令</h3>
+        <p>他展示 CuTe 里一条 Ampere MMA 指令的 MMA traits，形状 16×8×8：A 是 16×8，B 是 8×8，产出 16×8 的结果。图上标的是线程-值所有权（thread-value ownership）：这是 warp 级指令，由 32 个线程持有，A 的 16×8 由每个线程 4 个值覆盖，B 也类似。CuTe 用通用的布局（形状 + 步长）表示 A、B、C 三个张量的线程-值映射，由此知道数据归谁、怎样从共享内存读写。</p>
+        <h3>Hopper 的一条 WGMMA</h3>
+        <p>Hopper 的 MMA 形状大得多。他举的例子（Hopper 有很多种 MMA 指令，这只是其中一种）：M 是 64，A 是 64×16，B 是 16×16，由 128 个线程合持。名字里的 SS 表示两个操作数都来自共享内存；如果一个操作数来自寄存器，就是 RS 的 MMA atom。</p>
+        <p>直接写内联 PTX 去调 Hopper Tensor Core 很复杂，他把 PTX 留在幻灯片上供参考。结论是：可以用 CuTe 的 atom 达到同样的效果。</p>
+        <h3>问答：这些细节平时需要直接打交道吗</h3>
+        <p>Andreas 问：PTX 和前面那些布局图，在 CUTLASS 里通常都藏在抽象后面，开发者一般不需要碰，只在特殊情况下才需要？Pradeep 说对，builder 会替你搞定：给定分块形状和想要的内核类型，builder 有足够的信息挑出需要的 atom、用什么 traits、怎样在共享内存上平铺。但如果要写自定义内核，这些信息就变得要紧了。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 高性能 Hopper GEMM 的构成：101 级优化和数据流</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=3499s" target="_blank">0:58:19</a>–1:12:19 · Anatomy of high performance / Hopper kernel walkthrough</em></p>
+        <h3>GPU 性能编程关心的事</h3>
+        <p>最重要的是怎么处理内存：不被内存带宽卡住，管理好内存延迟，让数据在共享内存、寄存器（有时甚至是全局内存）里以正确的格式存放。其他要点：把 GPU 填满；保证有足够多的请求在途，让 warp 调度器能持续喂饱 Tensor Core；从 Hopper 开始，还要管理好异步。异步处理不好会导致系统长时间停顿：生产者没产出足够的数据，消费者在等。</p>
+        <h3>三个等级的优化</h3>
+        <p>他们尽量回忆、列出了一张优化清单，分成 101、201、501 三级（像课程编号，从入门到高阶）。101 级是在 Hopper 上拿到好性能必须有的，他说这几条不按重要性排序：</p>
+        <ol>
+            <li><strong>用 TMA。</strong>TMA 把所有谓词（predicate）计算都拿掉了。谓词计算要用谓词寄存器，这是一种稀缺的特殊硬件资源，不想大量使用；拿掉它们大大减轻谓词寄存器的压力，也减少了地址计算所需的 ALU 运算。</li>
+            <li>用线程块簇。它和 TMA 配合，可以做程序化多播（programmatic multicast）：你为自己读一份要存进共享内存的数据，因为有分布式共享内存，簇里的块又在同一个 GPC 里，可以把从 L2 读来的这份数据同时多播到其他 SM 上。这相当于放大了 L2 带宽，避免被内存卡住，也利用了数据的空间和时间局部性，还省电：能少读一次内存，就是最省电的做法。</li>
+            <li>隐藏全局内存延迟。在 Ampere 及更早的架构上也是靠软件流水线；Hopper 的区别是需要更深的流水线，原因有两个：MMA 快了很多，很容易追上从全局内存取数的速度；缓存等也都变大了。所以需要更深的软件流水线让 MMA 一直有活干。</li>
+            <li>用 Hopper 专属的 MMA 指令，即 warpgroup MMA：更大、更快，前面的吞吐表已经显示了。</li>
+            <li>TMA 和 MMA 都是异步的，所以异步的生产者和消费者之间要用 mbarrier（基于屏障的同步机制）。这样它们能独立运行，并且等待时以“光速”等待。他解释“光速”（speed of light）指尽可能快。</li>
+            <li>让数据以正确的格式待在共享内存里，办法是在共享内存里做 swizzle（按一定规则打乱地址，使一个 warp 的访问分散到不同的 bank）。这看似又多了一层复杂度，但 Hopper 的好处是硬件替你做：可以告诉 TMA 按某种 swizzle 格式写，MMA 也认识 swizzle，会按这种格式高效地读，避开共享内存的 bank 冲突。这是 TMA 和 MMA 一起配合完成的机制。</li>
+        </ol>
+        <h3>问答：好的流水线和坏的流水线</h3>
+        <p>有人请他举个好软件流水线和坏软件流水线的例子。Pradeep 说要保证流水线够深。如果你知道你的调度方式和算法 L2 命中不多，就需要更深的流水线来覆盖更大的延迟；如果你知道数据会驻留在 L2 里（比如上一个内核保证了数据放得进 L2），共享内存里的流水线可以短一些，两级就够。所以怎样做流水线取决于具体负载，没法给出通用的好坏标准，原则是要有足够的延迟覆盖，不被内存卡住。</p>
+        <h3>数据流：Ampere 和 Hopper 的区别</h3>
+        <p>典型的数据流：全局内存 → 共享内存 →（可选）寄存器文件 → Tensor Core；MMA 算完之后是 epilogue，也就是 MMA 之后的任何后处理，包括自定义函数或 epilogue visitor tree；所有修改做完，写回全局内存。Hopper 去掉了从共享内存读进寄存器这一步，数据可以从全局内存到共享内存，直接进 Tensor Core，再写回内存。</p>
+        <h3>一个 SM 里的异步配合</h3>
+        <p>他画了一张逻辑图来说明这些东西怎样编排。一个 SM 里有一些专门做 MMA 的 warp，有一些做 DMA（从全局内存取数）的 warp，有 Tensor Core、共享内存（里面分配了一些屏障）和寄存器。步骤是：</p>
+        <ol>
+            <li>生产者（DMA warp）要往共享内存里填数据，先获取（acquire）屏障，确认这块缓冲区是空的。一开始获取一定成功；进入稳态后，这一步是为了保证不会在数据被消费之前覆盖它。</li>
+            <li>获取成功后，这些 warp 发出所需数量的 TMA 指令，把数据从全局内存读进共享内存。TMA 指令只需要一个线程发，图上画多个 warp 是说多个 warp 可以各选一个线程，分别为不同的数据源发指令。</li>
+            <li>指令异步发出后，数据被写进共享内存，TMA 用事务计数更新异步屏障。TMA 还可以把这份数据多播给同一个簇里的另一个线程块：你只为自己读，但可以多播给同样需要这份数据的块，后面会看到确实需要。</li>
+            <li>另一边，MMA warp 等着数据来喂 Tensor Core。TMA 填好数据、用事务字节数更新屏障之后，MMA warp 发出 WGMMA async 指令，异步地直接从共享内存读数据做矩阵乘。</li>
+            <li>MMA 指令完成后，结果写回寄存器，即 C 张量。写回寄存器意味着这一级共享内存里需要的数据都读完了，于是 MMA warp 释放（release）这个异步屏障，DMA warp 就可以重新获取它，填下一级。</li>
+            <li>之所以要异步、要拆开，是为了让 DMA warp 能跑在前面，尽可能多地取数据，一收到释放信号就开始异步填共享内存。</li>
+            <li>最后写出：MMA warp 把寄存器里的数据拷到共享内存，再用 TMA 存到全局内存（TMA 双向都能拷）。</li>
+        </ol>
+        <p>CUTLASS 的 pipeline 把这套复杂的配合简化成几个可管理的接口：producer acquire、commit，consumer wait、release。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 代码走读一：主机端设置</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=4339s" target="_blank">1:12:19</a>–1:20:55 · Hopper kernel walkthrough</em></p>
+        <p>Pradeep 打开的是一个 Hopper SM90 WGMMA 示例，当时是 CUTLASS 仓库里的一个 pull request，他说很快会合并。这个示例的目的是把前面一个小时讲的所有概念放进一个精简的内核里。为了简单，先从主机端代码讲起。</p>
+        <h3>问题定义：GEMM TN</h3>
+        <p>例子是 GEMM TN。TN 指转置/不转置，他先说 A 是列主序，随即更正：A 操作数是 T（行主序），B 操作数是 N（列主序）。GEMM 问题由 M、N、K 三个数定义：A 是 M×K，B 是 N×K，结果是 M×N。</p>
+        <p>他说这里没有 builder 可用，所以有些选择会显得随意，builder 本来会帮你确保选择合法，但他还是会讲一些。</p>
+        <ol>
+            <li>用 thrust 库简化内存分配，分配 A、B、C 三个张量，大小分别是 M×K、N×K、M×N。</li>
+            <li>用 CuTe 定义输入的形状和步长。步长来自张量的内存分配：形状是 2D，连续那一维的宽度就是 leading dimension。</li>
+            <li>定义分块形状：一个线程块要计算的大小，用 block M、block N、block K 表示。他说单个线程块的问题是没用上线程块簇，后面也许会讲怎么扩展。取什么值，他建议参考 CUTLASS profiler 或 CUTLASS 的单元测试，那里有合理的值；给 builder 写 Auto 的话它也会挑一个合法的。</li>
+            <li>定义一个流水线参数，表示软件流水线有多深。</li>
+        </ol>
+        <h3>共享内存布局：用一个 atom 平铺</h3>
+        <p>要读入 A 和 B 的分块，所以要构造两个共享内存布局。它们靠把一个 atom 平铺到目标形状上得到。这里的 atom 就是前面说的 swizzle：swizzle 涉及复杂的 XOR 逻辑，CuTe 把它大大简化了，给出一个由形状和步长组成的基本单元；这个 atom 是一个 swizzle 和一个小的基本布局的组合布局（composed layout）。把它平铺到 M×K（A 的分块）乘以 P 级流水的形状上，一行代码就构造出了共享内存布局。他说这个例子里地址计算代码一行都没有，全靠 CuTe；要学的是 <code>tile_to_shape</code> 这类惯用法。</p>
+        <h3>Tiled MMA</h3>
+        <p>数据布局平铺好了，MMA 也要平铺。先选 MMA 指令：一个 MMA atom 定义最小的计算单元，直接映射到前面看到的那条 PTX 指令。它还带有 A、B 主模式（major mode）的属性：这里 A、B 都是 K-major，所以指令名里的 GMMA 标着 K major。</p>
+        <h3>张量和 TMA atom</h3>
+        <p>然后用 <code>make_tensor</code> 构造 A、B 张量：传入指针、形状和 leading dimension（用来构造步长）。最后一步是决定怎么拷贝。GPU 支持多种拷贝指令，Hopper 上要用 TMA，所以用 TMA copy atom：传入全局内存张量、共享内存张量的布局、分块的形状，最后一个参数和簇有关，这里先跳过。这相当于写一份“怎样从源拷到目的地”的处方。TMA 需要这些信息才能高效拷贝；CuTe 还要据此算出读一个分块要发多少条 TMA 指令，这些都在 CuTe 内部完成。</p>
+        <p>下面这段草图按他讲的顺序写，函数名取自 CUTLASS 的 CuTe Hopper 教程（具体数值是示意，不是他屏幕上的原数）：</p>
+        <pre><code>// sketch based on the talk (names follow CUTLASS's CuTe sm90 tutorial)
+auto bM = Int&lt;128&gt;{};
+auto bN = Int&lt;128&gt;{};
+auto bK = Int&lt; 64&gt;{};
+auto cta_tiler = make_shape(bM, bN, bK);   // CTA tile shape
+auto bP = Int&lt;3&gt;{};                        // pipeline depth
+
+// smem layouts: tile a swizzled K-major atom over (bM, bK, bP)
+auto sA = tile_to_shape(GMMA::Layout_K_SW128_Atom&lt;TA&gt;{}, make_shape(bM, bK, bP));
+auto sB = tile_to_shape(GMMA::Layout_K_SW128_Atom&lt;TB&gt;{}, make_shape(bN, bK, bP));
+
+// one WGMMA atom, both operands from shared memory (SS), K-major
+TiledMMA tiled_mma = make_tiled_mma(
+    SM90_64x64x16_F16F16F16_SS&lt;GMMA::Major::K, GMMA::Major::K&gt;{});
+
+// global tensors and TMA atoms
+Tensor mA = make_tensor(A, make_shape(M, K), dA);
+Tensor mB = make_tensor(B, make_shape(N, K), dB);
+Copy_Atom tmaA = make_tma_atom(SM90_TMA_LOAD{}, mA, sA(_,_,0), make_shape(bM, bK));
+Copy_Atom tmaB = make_tma_atom(SM90_TMA_LOAD{}, mB, sB(_,_,0), make_shape(bN, bK));</code></pre>
+        <p>他说这对开发者效率很好：建一个 MMA atom、一个 TMA atom、建好张量，就可以启动内核了，设置上不再需要别的。启动要用 Hopper 新加的启动机制（支持线程块簇的内核要这么启动），CUTLASS 对它有封装，所以也很简单。</p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 代码走读二：设备端内核</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=4855s" target="_blank">1:20:55</a>–1:36:47 · Device code and final orchestration</em></p>
+        <h3>内核参数</h3>
+        <p>设备端内核接收 A、B、C 的指针；还接收几个 grid constant（来自常量内存、整个内核范围内不变的常量）：刚建好的 TMA copy atom 和 tiled MMA；alpha、beta 在 epilogue 里给输出做缩放。参数很简单。开头是一串 static assert，确认一切符合预期；他说后面就不会再有 static assert 了，但如果哪里不对，CuTe 通常会在某次使用时抛出 static assert。</p>
+        <h3>先分块，再分区</h3>
+        <p>GPU 按线程块（簇）来处理一块数据，所以先要分块（tile），再分区（partition）：</p>
+        <ul>
+            <li>取 TMA tensor。Ampere 及更早的架构没有 TMA，直接切张量就能分区；Hopper 上要拿到所谓的 TMA tensor，这样分区和切片之后的信息能以 TMA 期望的形式传下去，供 TMA 拷贝使用。之前 make TMA atom 的 API 已经把 TMA 设置好了，它知道张量的全部信息，能做越界计算、算指针。</li>
+            <li>用 CTA 的分块形状对全局内存张量分块，但只取自己负责的那一块，由 <code>blockIdx</code> 坐标决定（CUDA 的线程层次给每个块一个 ID）。得到的是 local tile，即本块要处理的数据。</li>
+            <li>从动态分配的共享内存里取指针，把共享内存也做成张量。</li>
+            <li>TMA 提供分区 API <code>tma_partition</code>，传入 TMA atom，再加几个和多播、CTA ID 有关的数，这里写死成 1 和 0，因为簇大小就是 1。它把共享内存张量和全局内存张量分区，以便把全局内存的各个分区高效地拷进共享内存；分组模式（group modes）是为了让 TMA 只处理单条指令关心的那些维度。</li>
+        </ul>
+        <p>他提到 Hopper 之前的写法不同，CUTLASS 仓库里有其他例子：同样是给源和目的地分区，得到分区后的源张量和目的张量再拷贝。B 张量做同样的事。</p>
+        <h3>算事务字节数</h3>
+        <p>屏障需要知道每一级要等多少字节。分区信息里包含所有级，只要取第一级的大小就是每一级的字节数。到这里，张量已经分块、分区，分区还按要发的 TMA 指令数做了分配：如果一个分块需要 4 条 TMA 指令，分区器知道怎样分成 4 条、每条的偏移是多少。</p>
+        <h3>初始化屏障</h3>
+        <p>剩下的是屏障。Hopper 上屏障放在共享内存里（Ampere 风格的 CUDA barrier 也是基于共享内存的），需要用一些 API 初始化。CUTLASS 把这些封装成一个 pipeline 类，一行 pipeline init 就行；这个例子的目的是尽量剥掉抽象、展示发生了什么，所以把细节都写了出来。</p>
+        <ul>
+            <li>事务屏障：同时计事务数和到达数（到达数就是有多少线程到了）。</li>
+            <li>簇屏障：只计到达数。CUTLASS 把两种分开，是为了防止误用屏障。</li>
+        </ul>
+        <p>流水线有几级，就初始化几个屏障，每一级单独跟踪什么时候产出、什么时候消费。因为这块共享内存在整个簇范围内可见，初始化后要做一次簇范围的同步，确保簇里所有线程块都准备好了：如果数据要从一个共享内存多播到另一个，对方的屏障必须已经初始化。</p>
+        <h3>拷贝</h3>
+        <p>终于开始拷贝。他说这里没有任何地址计算，没有手动的线程-数据分区，没有手动的布局操作，前面已经分块、分区、初始化好屏障，拷贝只是用这些信息。copy 知道自己用的是 TMA，所以要传入 TMA 屏障让它更新；源是分区后的数据，把全局内存里的某个分块读进共享内存的某一级。为了跟踪屏障，还要建一个 pipeline state：屏障构成环形缓冲区，pipeline state 负责操作它们，防止缓冲区溢出或下标非法。</p>
+        <h3>MMA 一侧的分区</h3>
+        <p>要消费数据，还要从 MMA 的角度给 A、B 分区。Ampere 上数据进共享内存后要读进寄存器；Hopper 可以直接从共享内存读，需要另外编排。这里用的是从 tiled MMA 出发的通用 API，对 Ampere 之前的架构也适用；Hopper 上很多步骤其实不需要，但他说这是惯用的、正确的写法：</p>
+        <ul>
+            <li>从 tiled MMA 取出本线程要处理的那一片（slice），据此对 A、B 的共享内存和 Tensor Core 的输出 C 分区。</li>
+            <li>分区后可以在寄存器等处为它们分配存储（fragment）。Hopper 上其实不需要分配内存、也不需要建这些 fragment；这些 API 在 Hopper 上生成的是描述符（descriptor），告诉 MMA 怎样从共享内存读数据。名字虽叫 fragment，实际是告诉 MMA 数据在共享内存里怎么分区、怎么高效读取。</li>
+            <li>参照 C 张量对 A、B 分区，得到 tCsA、tCsB 这样的张量，目标是生成 MMA 指令要用的共享内存描述符。</li>
+        </ul>
+        <p>这时 Andreas 请他讲得高层一点，因为时间快不够了。</p>
+        <h3>主循环：三行调 Tensor Core</h3>
+        <p>剩下的就是 MMA。消费数据前先等屏障，然后三行代码驱动全部 Tensor Core 指令：一个 warpgroup fence（封装为 warpgroup arrive）；调 gemm，传入 tiled MMA、某一级的分区张量，以及要写入并持续累加的结果张量；因为 MMA 是异步的，要用 warpgroup wait 显式等它们完成，之后才能释放屏障，释放之后生产者才能再产出数据。最后是 epilogue，把数据写出。</p>
+        <pre><code>// sketch based on the talk: consumer side of one k-tile
+pipeline.consumer_wait(read_state);                 // wait for TMA to fill this stage
+warpgroup_arrive();                                 // warpgroup fence before WGMMA
+gemm(tiled_mma, tCrA(_,_,_,read_state.index()),
+                tCrB(_,_,_,read_state.index()), tCrC);  // async WGMMA from smem
+warpgroup_commit_batch();
+warpgroup_wait&lt;0&gt;();                                // MMAs are async: wait explicitly
+pipeline.consumer_release(read_state);              // producer may refill this stage
+++read_state;</code></pre>
+        <p>（上面的 pipeline 调用用的是 CUTLASS pipeline 类的说法；他走读的例子里屏障是手写初始化的，名字可能不同。）</p>
+        <p>他说整个设备端代码不到 100 行，如果把这个内核调得足够好，大概能拿到 cuBLAS 性能的 70% 到 80%。用大约 100 行代码写出一个高性能 GEMM，这就是把前面的东西串起来的结果。</p>
+        <p>Andreas 表示感谢，说对他来说信息有点过载，很高兴录了像；他觉得以后也许可以安排一些中级的讲座，介于之前那次很入门的 CUTLASS 介绍和这一次之间。</p>
+    </section>
+
+    <section id="t14">
+        <h2>14. 进阶优化和问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=5807s" target="_blank">1:36:47</a>–1:47:49 · Advanced optimizations and Q&amp;A</em></p>
+        <h3>201 和 501 级优化（只在幻灯片上）</h3>
+        <p>Pradeep 说上手需要很多时间，希望这次讲座能作为大家以后回头查的地方。刚才走读的代码只实现了 101 级的优化，更高级的都没实现，他把它们放在幻灯片上供以后看：</p>
+        <ul>
+            <li>把 warp 专用化为 DMA warp 和 MMA warp，让它们完全异步地运行；</li>
+            <li>持久化调度：一个线程块处理多个分块，把固定开销摊薄；</li>
+            <li>Vijay 讲过的其他调度：让 main loop 和 epilogue 重叠，使 Tensor Core 流水线一直忙；</li>
+            <li>更高效地使用同步原语：提前等屏障，连等屏障本身的延迟也藏起来。</li>
+        </ul>
+        <p>幻灯片上还解释了一个 GEMM 的生命周期，怎样分成三段，以及用不同调度在 GPU 上怎样排。高层的看法是：一种叫 ping-pong 调度，Tensor Core 运算和 epilogue 重叠；另一种调度里两者不重叠。各有好处：不重叠的 MMA 利用率更高；重叠的寄存器压力更大，等等。再往上是 501 级优化，榨出硬件的最后一点性能。CUTLASS 用了 101、201、501 级优化，还有很多他放不进幻灯片的东西。幻灯片上还有一份什么时候用什么的通用配方，以及经验法则：看 profiler 时不知道挑哪个内核，它告诉你每种形状在什么时候合适。</p>
+        <h3>问答：CUTLASS 总是比手写快吗</h3>
+        <p>Andreas 问：CUTLASS 是不是至少和手写一样快？他说听完觉得 CUTLASS 能控制的旋钮已经太多，很怀疑自己用 PTX 手写还能多挤出多少。Vijay 说，对 GEMM 这类基础运算，手写 PTX 级自定义内核的空间很小，可能几乎为零，因为这些内核本来就是为了在 GPU 上最优地调度、跑到峰值。但 FlashAttention 这类相当定制的内核，可能会有好处。</p>
+        <h3>问答：开发者有哪些接口能用 Tensor Core</h3>
+        <p>Pradeep 说：Triton 是一种流行的方式，它直接提供 Python 式、类似 NumPy 的编程风格；CUTLASS 走得深得多，控制更多，性能也因此更好，可以做设计空间探索；此外 NVIDIA 还提供 cuDNN 的一个基于图的 API，也能构造针对 Tensor Core 的自定义内核。他说这是他知道的三种常见方式。</p>
+        <h3>问答：亚字节数据类型、MX 格式</h3>
+        <p>有人问量化相关的亚字节（sub-byte）类型。Vijay 说他已经在文字频道里回答了：讲过的所有张量都支持亚字节类型；但提问者问的其实是 MX 数据类型（带共享指数的格式），这次不讲。Andreas 补充说，那是关于 MX4 和共享指数的问题，这次不在范围内，当时也不在 CUTLASS 里。</p>
+        <h3>社区拿不到 Hopper</h3>
+        <p>Andreas 说他从社区很多人那里听到同一个问题：拿不到 Hopper GPU。他建议 NVIDIA 以后也许可以给消费者出个精简版，让这些技术能在开源社区里跑起来。Vijay 说内部很多人听到了这个反馈，有一批人在做些什么，但他们不做产品决策。</p>
+        <h3>问答：有家公司说 CUTLASS 很好，但用不上，主要用 Triton</h3>
+        <p>Vijay 说他们以前也听过。常见原因：</p>
+        <ul>
+            <li>C++ 工具链，或者编译时间是关键问题。比如做推理、想用 JIT 编译，C++ 的编译时间太长，没法用在 JIT 场景里。</li>
+            <li>团队里没有会写 CUTLASS 的人。Triton 的入门门槛比 CUTLASS 低得多，这里有复杂度和性能之间的根本权衡。</li>
+        </ul>
+        <p>他说过去几年看到越来越多人从 Triton 转向写 CUTLASS：想要速度（开发速度）时先用 Triton，规模上去以后很快发现性能成了瓶颈，而在他看来 Triton 在 Hopper 上给不出好的性能，于是转向 CUTLASS。他说从 Triton 开始是合理的，它也有 CUTLASS 没有的优点。Andreas 补了一句，CUTLASS 的 Python 接口也值得以后深入看看。</p>
+        <p>最后 Andreas 预告第二天的讲座：scan at the speed of light。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“moving data is one of the most expensive things you can do”（搬运数据是你能做的最贵的事情之一。）<a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=187s" target="_blank">0:03:07</a></li>
+            <li>“programming gpus is less about getting the layouts right and more about getting concurrency and synchronization right”（比起把布局写对，GPU 编程越来越要靠把并发和同步写对。）<a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=1830s" target="_blank">0:30:30</a></li>
+            <li>“the name of the game is localize your changes to the smallest subset that is affected by it”（要领是把改动限制在受它影响的最小那一部分里。）<a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=1893s" target="_blank">0:31:33</a></li>
+            <li>“the entire device code is under 100 lines”（整个设备端代码不到 100 行。）<a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=5744s" target="_blank">1:35:44</a></li>
+            <li>“there's very minimal upside or probably little to zero upside because these are already meant to optimally schedule things on the GPU”（好处很小，可能几乎为零，因为这些内核本来就是为了在 GPU 上最优地调度。）<a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=6064s" target="_blank">1:41:04</a></li>
+            <li>“people will start with Triton when they want velocity and um very quickly when they start scaling they'll realize that performance is a bottleneck for them”（想要开发速度时大家从 Triton 开始，规模一上去，很快就会发现性能成了瓶颈。）<a href="https://www.youtube.com/watch?v=hQ9GPnV0-50&t=6382s" target="_blank">1:46:22</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 23: Tensor Cores · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

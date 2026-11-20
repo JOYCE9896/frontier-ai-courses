@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>归约 | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="03_CUDA性能检查清单.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 04</span>
+    <span><a href="05_FlashAttention入门实现.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 9 · 归约</h1>
+        <p class="subtitle">PMPP 第 10 章：sum、max、softmax 分母背后的归约怎么在 GPU 上并行；从朴素的归约树内核出发，依次减少分支发散、改用共享内存、分段多块、线程粗化，并看 PyTorch 和 torch.compile 怎么生成归约内核</p>
+        <div class="author-meta">
+            主讲：Mark Saroufim（PyTorch 团队，GPU MODE 组织者）· 发布日期：2024 年 3 月 10 日 · 时长：47 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=09wntC6BT5o" target="_blank">讲座录像 Lecture 9 Reductions</a>（GPU MODE YouTube 频道公开）· 幻灯片/代码：<a href="https://docs.google.com/presentation/d/1s8lRU8xuDn-R05p1aSP6P7T5kk9VYnDOCyN5bWKeg3U/edit" target="_blank">幻灯片</a>、<a href="https://github.com/gpu-mode/lectures/tree/main/lecture_009" target="_blank">lecture_009 代码</a>（本文依据录像字幕和代码整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>这是 Mark Saroufim 重新录制的归约（reduction）一讲。他说，认真学完第 1 到第 8 讲，就已经能写 CUDA 或 Triton 内核、接进 PyTorch、做性能分析并交付给别人用了。PMPP 书第 6 章以后基本都是案例：一个经典算法，先给朴素实现，再一步步改快。第 10 章讲归约，用到的技巧和第 8 讲的性能检查清单（本合集第 03 篇）一一对应：控制发散、访存发散、减少全局内存访问、线程粗化。</p>
+        <p>代码都在仓库的 lecture_009 目录，可以 clone 下来用 <code>nvcc</code> 编译，再用 Nsight Compute（<code>ncu</code>）分析。他提醒大多数云厂商上 <code>ncu</code> 不太好用，可以在自己的 GPU 上跑，他自己用的是 Lightning AI。</p>
+        <ol>
+            <li><a href="#t01">什么是归约，机器学习里哪里有归约</a> · <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">串行归约和并行归约树</a> · <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=316s" target="_blank">0:05:16</a></li>
+            <li><a href="#t03">非确定性和累加精度</a> · <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=571s" target="_blank">0:09:31</a></li>
+            <li><a href="#t04">第一版内核：朴素归约树</a> · <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=827s" target="_blank">0:13:47</a></li>
+            <li><a href="#t05">第二版：减少控制发散</a> · <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=1207s" target="_blank">0:20:07</a></li>
+            <li><a href="#t06">第三版：在共享内存里归约</a> · <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=1463s" target="_blank">0:24:23</a></li>
+            <li><a href="#t07">第四版：分段多块归约</a> · <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=1653s" target="_blank">0:27:33</a></li>
+            <li><a href="#t08">第五版：线程粗化</a> · <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=1843s" target="_blank">0:30:43</a></li>
+            <li><a href="#t09">PyTorch 怎么实现归约</a> · <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=2032s" target="_blank">0:33:52</a></li>
+            <li><a href="#t10">torch.compile 和 Triton 生成的归约</a> · <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=2415s" target="_blank">0:40:15</a></li>
+            <li><a href="#t11">小结</a> · <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=2735s" target="_blank">0:45:35</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 什么是归约，机器学习里哪里有归约</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=0s" target="_blank">0:00:00</a>–0:05:16 · Introduction / Reductions / Reductions in ML</em></p>
+        <h3>定义</h3>
+        <p>归约是把输入变小的数学运算。在机器学习代码里，通常就是输入一个向量、输出一个标量：min、max、argmax、argmin、norm、sum、product、mean、不同元素个数等等，PyTorch 里到处都是。</p>
+        <p>以求和为例：每一步应用的函数是 $a+b$，还有一个累加器初值，也就是列表为空时的结果，求和是 0。从 0 开始，每看到一个元素就加上去。乘积一样，初值是 1，每个元素乘上去。max、min 也是同样结构。所以归约可以抽象成：一个函数、一个单位元（identity，可以是 0、1、浮点的 $-\infty$ 等），遍历数据，每一步用运算 op 把上一步的结果和新元素合成新结果。</p>
+        <pre><code>def reduce(data, identity, op):
+    result = identity
+    for element in data:
+        result = op(result, element)
+    return result
+
+# Example usage:
+
+# Summation
+data = [1, 2, 3, 4, 5]
+print(reduce(data, 0, lambda a, b: a + b))  # Output: 15
+
+# Product
+print(reduce(data, 1, lambda a, b: a * b))  # Output: 120
+
+# Maximum
+print(reduce(data, float('-inf'), max))  # Output: 5
+
+# Minimum
+print(reduce(data, float('inf'), min))  # Output: 1</code></pre>
+        <p>他强调这种抽象，是因为 PyTorch 里没有单独的 min 内核或 max 内核，只有一个通用的归约内核，讲座最后会看它怎么工作。</p>
+        <h3>归约在机器学习里的位置</h3>
+        <ul>
+            <li>卷积网络的平均池化和最大池化：在一个块（tile）上做 mean 或 max。</li>
+            <li>分类：对一组概率取 argmax。</li>
+            <li>损失计算：损失是由目标和预测算出的一个标量。</li>
+            <li>softmax：softmax 本身输入向量输出向量，不算归约，但它的归一化项是归约，要把所有元素的 $e^{x_i}$ 加起来再去除。</li>
+        </ul>
+        <p>因为它无处不在，弄清什么让它慢、什么算法让它快就很重要。实际使用时直接调 PyTorch 的函数即可，张量在 CUDA 设备上时，PyTorch 会调用（或生成）对应的 CUDA 内核。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 串行归约和并行归约树</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=316s" target="_blank">0:05:16</a>–0:09:31 · Serial Reduction / Reduction Strategy / Parallel Reduction</em></p>
+        <h3>串行归约</h3>
+        <p>例子是求向量 [5, 2, 8, 1] 的最大值：for 循环遍历，max 初值 $-\infty$，每看到一个元素和当前 max 比较。第一步 max 是 5，看到 2 还是 5，看到 8 变成 8，看到 1 仍是 8，输出最后的值。这对 CUDA 程序没意思，因为完全没有并行。</p>
+        <h3>线程分配策略</h3>
+        <p>之前他展示的玩具内核大多是变换类内核（transformation kernel），比如把输入数组复制到输出数组 $C_i = A_i$，策略很直接：每个输出点一个线程。归约只有一个输出元素，怎么分配线程就微妙了。让一个线程做完整个归约，得不到任何并行。</p>
+        <h3>并行归约</h3>
+        <p>这页幻灯片他说是整讲的基础。对每一对元素分配一个独立线程，线程比较两个元素，把大的写到另一个数组里：5 和 2 由一个线程处理，写入 5；8 和 1 由另一个线程处理，写入 8。每一步输入长度减半，$\log n$ 步后得到最终结果。</p>
+        <p>书里把它画成“并行求和归约树”（parallel sum reduction tree）：把 max 换成加法，两两相加，一直加到整个数组的和。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 非确定性和累加精度</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=571s" target="_blank">0:09:31</a>–0:13:47 · Parallel Sum Reduction / Nondeterminism</em></p>
+        <h3>为什么 GPU 上的结果不确定</h3>
+        <p>他提醒，浮点数的加法和数学上的加法不同，加的顺序会改变结果（他用的词是“不满足交换律”；更准确的说法是浮点加法不满足结合律，第 02 篇 Thomas Viehmann 讲过这一点）。用 PyTorch 之类框架的人常常期待结果是确定的，但 GPU 上结果不确定有两个原因：不同线程在不同时间执行这些步骤，无法控制哪个线程先做；一个线程累加元素的顺序也不总在掌控之中。</p>
+        <p>想要确定性，PyTorch 里设 <code>torch.use_deterministic_algorithms(True)</code>。但这不是免费的：要确定性就要强制某种线程同步（比如线程必须从左到右依次来），会变慢。对有些应用，完全确定比速度更重要，那就可以接受。</p>
+        <h3>nondeterminism.py</h3>
+        <p>数组里有 10 个 $10^{-20}$，然后是 $10^{20}$ 和 $-10^{20}$。从左往右加得到 0；从右往左加得到约 $10^{-19}$。原因是把很小的数加到很大的数上会丢精度。这个例子里，从右往左的结果反而是更正确的那个。</p>
+        <pre><code># We'll use several small numbers that, when added together first, could show a difference
+numbers = [1e-20] * 10 + [1e20, -1e20]  # 10 small numbers followed by a large positive and negative number
+
+# Sum the list from left to right
+sum_left_to_right_adjusted = sum(numbers)
+
+# Sum the list from right to left
+sum_right_to_left_adjusted = sum(reversed(numbers))
+
+# 0.0 9.999999999999997e-20
+print(sum_left_to_right_adjusted, sum_right_to_left_adjusted)</code></pre>
+        <h3>累加精度</h3>
+        <p>他提到 Charles Hernandez 讲量化的那一讲（Lecture 7）：即使用 int4 或 int8 做量化，累加通常也在更高精度里做。因为在 float16 里累加很多小值，小值对结果根本没有影响。两个办法：用动态范围更大的 bfloat16，或者把累加器升到 float32。accuracy.py 演示了这一点：1000 加 0.001，FP32 得到 1000.0009765625，FP16 得到 1000.0。</p>
+        <pre><code>import torch
+large_value = torch.tensor([1000.0], dtype=torch.float32)  # Using float32 for initial value
+
+# Define a smaller value that is significant for float32 but not for float16
+small_value = torch.tensor([1e-3], dtype=torch.float32)  # Small value in float32
+
+# Add small value to large value in float32
+result_float32 = large_value + small_value
+
+# Convert large value to float16 and add the small value (also converted to float16)
+result_float16 = large_value.to(torch.float16) + small_value.to(torch.float16)
+
+# Convert results back to float32 for accurate comparison
+result_float32 = result_float32.item()
+result_float16_converted = result_float16.to(torch.float32).item()
+
+# Print results
+# 1000.0009765625 1000.0
+print(result_float32, result_float16_converted)</code></pre>
+        <p>Triton 的矩阵乘法教程里也是这样：做分块矩阵乘法时累加器是 <code>tl.float32</code>，算完再转回 float16，这样往累加器上加小值时不会丢掉。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 第一版内核：朴素归约树</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=827s" target="_blank">0:13:47</a>–0:20:07 · Reduction Tree</em></p>
+        <h3>思路</h3>
+        <p>按书里的图：线程 0 负责位置 0 和 1，相加后写回位置 0；线程 1 负责位置 2 和 3，写回位置 2；依此类推。下一步需要的线程减半，线程 0 还是写位置 0，但这次加的是位置 2；步长（stride）每轮翻倍。每个线程都是“把我当前位置的值，加上后面隔 stride 的那个值”。</p>
+        <p>问题很明显：分支发散严重，大多数线程什么也不做。如果启动了 7 个线程，最后一步只有 1 个在干活。输入很大时，会有整个 warp（32 个线程）闲着。</p>
+        <h3>simple_reduce.cu</h3>
+        <p>驱动代码（他说是 ChatGPT 帮他写的）造一个 2048 个 1 的输入，和应该是 2048，便于验证。启动的线程数是输入的一半，因为每个线程处理两个元素。索引用 <code>2 * threadIdx.x</code>，这样只有偶数位置是活跃的；stride 从 1 开始，每轮乘 2（1、2、4、8……）。</p>
+        <pre><code>__global__ void SimpleSumReductionKernel(float* input, float* output) {
+    unsigned int i = 2 * threadIdx.x;
+    for (unsigned int stride = 1; stride &lt;= blockDim.x; stride *= 2) {
+        if (threadIdx.x % stride == 0) {
+            input[i] += input[i + stride];
+        }
+        __syncthreads();
+
+    }
+    if (threadIdx.x == 0) {
+    *output = input[0];
+    }
+}
+
+// launch: one block, half as many threads as elements
+SimpleSumReductionKernel&lt;&lt;&lt;1, size / 2&gt;&gt;&gt;(d_input, d_output);</code></pre>
+        <p>用 <code>nvcc -o sum simple_reduce.cu</code> 编译，先确认结果正确。直接 <code>ncu sum</code> 只给出网格大小之类的信息，这不是要看的；要用 <code>ncu --set full</code>，才有分支发散相关的指标。结果：分支效率（branch efficiency）约 74%，平均发散分支数约 1.19。他说这很差，下一版要改善。</p>
+        <p>这里的“线程策略”指的是：在每个时刻，哪些线程处理哪些元素。需要一个更好的线程策略。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 第二版：减少控制发散</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=1207s" target="_blank">0:20:07</a>–0:24:23 · General Strategy</em></p>
+        <p>接下来的几个技巧都来自上一讲的性能检查清单：控制发散、访存发散、减少全局内存访问、线程粗化。</p>
+        <p>先解决控制发散（control divergence，同一 warp 的线程走了不同的分支）。改法是让所有活跃线程挨在一起：线程 0 加的是相隔 <code>blockDim</code> 的那个元素，线程 1 同理。前两步活跃线程数和以前一样，但之后活跃的是线程 0、1、2、3 这样连续的一组，它们访问的是连续的内存，缓存局部性更好。控制发散和访存发散同时减少了。</p>
+        <p>代码上，索引不再乘 2，直接用 <code>threadIdx.x</code>；仍然启动输入一半数量的线程。stride 从 <code>blockDim.x</code> 开始，每轮除以 2，随着时间推移越来越小，线程在内存里更可能挨在一起。每轮之后同步所有线程，直到只剩一个线程，结果在 <code>input[0]</code>。</p>
+        <pre><code>__global__ void FixDivergenceKernel(float* input, float* output) {
+    unsigned int i = threadIdx.x; //threads start next to each other
+    for (unsigned int stride = blockDim.x; stride &gt;= 1; stride /= 2) { // furthest element is blockDim away
+        if (threadIdx.x &lt; stride) { //
+            input[i] += input[i + stride]; // each thread adds a distant element to its assigned position
+        }
+        __syncthreads();
+
+    }
+    if (threadIdx.x == 0) {
+    *output = input[0];
+    }
+}</code></pre>
+        <p>编译、确认正确、再跑 <code>ncu --set full</code>：分支效率从 74% 升到 99%，这就是要解决的问题。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 第三版：在共享内存里归约</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=1463s" target="_blank">0:24:23</a>–0:27:33 · Shared Reduce</em></p>
+        <p>前两版的归约都在全局内存里做。新的想法：第一次归约时从全局内存读，结果放进共享内存，之后的读写都在共享内存里进行。</p>
+        <p>声明大小为 <code>BLOCK_DIM</code>（1024 个元素）的共享数组 <code>input_s</code>。<code>input[t] + input[t + BLOCK_DIM]</code> 这一步是整个内核唯一一次访问全局内存；之后 stride 从 <code>blockDim.x / 2</code> 开始减半，归约在共享内存里进行，写法和上一版一样。</p>
+        <pre><code>#define BLOCK_DIM 1024
+
+// This is the code from the book but I couldn't get this to run faster even with occupancy calculator
+// L1 throughput is dramatically increased though
+__global__ void SharedMemoryReduction(float* input, float* output) {
+    __shared__ float input_s[BLOCK_DIM];
+    unsigned int t = threadIdx.x;
+    input_s[t] = input[t] + input[t  + BLOCK_DIM];
+    for (unsigned int stride = blockDim.x/2; stride &gt;= 1; stride /=2) {
+        __syncthreads();
+        if (threadIdx.x &lt; stride) {
+            input_s[t] += input_s[t + stride];
+        }
+    }
+
+    if (threadIdx.x == 0) {
+        *output = input_s[0];
+    }
+}</code></pre>
+        <p>上一版（不用共享内存）的 L1 命中率是 66%，他预期这一版会大幅提高。跑完他说 L1 指标“大幅改善”（字幕里的具体数字不清）。但两个版本的耗时都在 8 微秒左右，没有变快。代码注释也写着：这是书里的代码，用占用率计算器调过也没能更快，但 L1 吞吐大幅提高了。原因是输入太小，看不出加速。</p>
+        <p>他把输入改成 10,000 再跑，结果输出的和是 0，内核出错了。原因是这个内核假设整个输入能放进一个块的共享内存，而这在实际中通常不成立。而且输入只有一千个元素时，用 CPU 的向量指令也能很快算完，根本犯不着花钱用 GPU。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 第四版：分段多块归约</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=1653s" target="_blank">0:27:33</a>–0:30:43 · Segmented Multiblock Reduction</em></p>
+        <p>分段多块归约（segmented multiblock reduction）的思路：之前都只启动一个块，现在启动多个块。只要每个块装得下 1024 个元素，就可以在各块里分别归约，最后再把所有块的结果合起来。归约分了层。</p>
+        <p>代码里有两个索引：全局索引 <code>idx</code>，不关心数据怎么分块；块内索引 <code>t</code>，表示在一个块里我是哪个线程。第一步按块把输入复制到共享内存（越界的位置填 0）；第二步像以前一样在共享内存里归约，stride 每步变小；所有块完成后，在全局内存里做最后一层跨块归约。</p>
+        <pre><code>#define BLOCK_DIM 1024
+
+__global__ void SharedMemoryReduction(float* input, float* output, int n) {
+    __shared__ float input_s[BLOCK_DIM];
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x; // global index
+    unsigned int t = threadIdx.x; // index within a block
+
+    // Load elements into shared memory
+    if (idx &lt; n) {
+        input_s[t] = input[idx];
+    } else {
+        input_s[t] = 0.0f;
+    }
+    __syncthreads();
+
+    // Reduction in shared memory
+    for (unsigned int stride = blockDim.x / 2; stride &gt; 0; stride &gt;&gt;= 1) {
+        if (t &lt; stride &amp;&amp; idx + stride &lt; n) {
+            input_s[t] += input_s[t + stride];
+        }
+        __syncthreads();
+    }
+
+    // Reduction across blocks in global memory
+    // needs to be atomic to avoid contention
+    if (t == 0) {
+        atomicAdd(output, input_s[0]);
+    }
+}
+
+// launch: one block per BLOCK_DIM elements
+int numBlocks = (size + BLOCK_DIM - 1) / BLOCK_DIM;
+SharedMemoryReduction&lt;&lt;&lt;numBlocks, BLOCK_DIM&gt;&gt;&gt;(d_input, d_output, size);</code></pre>
+        <p>最后一步必须用原子加（<code>atomicAdd</code>）：多个块争同一个内存位置时，普通加法会产生悄无声息的正确性错误。原子操作保证每个块完成时锁住这个位置、加上自己的结果，然后其他块再来。他说这里性能不重要，要紧的是内核正确：输入 10,000 时结果正确（仓库里的驱动用的是 100,000）。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 第五版：线程粗化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=1843s" target="_blank">0:30:43</a>–0:33:52 · Reduced Coring（即 thread coarsening）</em></p>
+        <p>线程粗化（thread coarsening，让每个线程处理更多数据、用更少的线程）在上一讲有点争议：当时测出它让某个内核快了 35 倍，实际更可能是 2 倍左右，35 倍是因为测进了内核启动开销。他的教训是别用自己写的计时器，看 <code>ncu</code> 或 Nsight 里的耗时。</p>
+        <p>到目前为止每个线程只加两个元素。如果一个线程加 4 个、8 个呢？<code>reduce_coarsening.cu</code> 和分段归约很像，区别是多了一层：</p>
+        <ul>
+            <li>线程内归约：每个线程先把自己负责的 <code>COARSE_FACTOR</code> 个元素加到一个寄存器变量里，这是新增的部分；</li>
+            <li>块内归约：和上一版一样，在共享内存里做；</li>
+            <li>跨块归约：<code>atomicAdd</code>。</li>
+        </ul>
+        <pre><code>#define BLOCK_DIM 1024
+#define COARSE_FACTOR 2
+
+__global__ void CoarsenedReduction(float* input, float* output, int size) {
+    __shared__ float input_s[BLOCK_DIM];
+
+    unsigned int i = blockIdx.x * blockDim.x * COARSE_FACTOR + threadIdx.x;
+    unsigned int t = threadIdx.x;
+    float sum = 0.0f;
+
+    // Reduce within a thread
+    for (unsigned int tile = 0; tile &lt; COARSE_FACTOR; ++tile) {
+        unsigned int index = i + tile * blockDim.x;
+        if (index &lt; size) {
+            sum += input[index];
+        }
+    }
+
+    input_s[t] = sum;
+    __syncthreads();
+
+    //Reduce within a block
+    for (unsigned int stride = blockDim.x / 2; stride &gt; 0; stride &gt;&gt;= 1) {
+        if (t &lt; stride) {
+            input_s[t] += input_s[t + stride];
+        }
+        __syncthreads();
+    }
+
+    //Reduce over blocks
+    if (t == 0) {
+        atomicAdd(output, input_s[0]);
+    }
+}
+
+// launch
+int numBlocks = (size + BLOCK_DIM * COARSE_FACTOR - 1) / (BLOCK_DIM * COARSE_FACTOR);
+CoarsenedReduction&lt;&lt;&lt;numBlocks, BLOCK_DIM&gt;&gt;&gt;(d_input, d_output, size);</code></pre>
+        <p>他喜欢这个算法的地方在于，线程策略在不同层次上不一样：线程这一层可以做粗化，块这一层用共享内存，多块这一层让算法能处理更大的输入。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. PyTorch 怎么实现归约</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=2032s" target="_blank">0:33:52</a>–0:40:15 · Bonus slides</em></p>
+        <h3>插话：开始做自己的项目</h3>
+        <p>他说第 1 讲和第 8 讲已经给了写内核、分析、交付所需的一切，现在是挑一个项目的好时机。不知道做什么，可以联系管理员或在 general 频道发帖，有合作者更容易坚持。下一讲是第一位来自社区的志愿者 Oscar，讲交付生产级 CUDA 库的经验。他们还在找志愿讲者，希望讲 Triton 内核、前缀和（prefix sum）、NCCL，以及还没讲过的分布式。</p>
+        <h3>一个内核要应付很多情况</h3>
+        <p>用户看到的是 <code>torch.max</code>、<code>torch.min</code>、<code>torch.mean</code>，它们怎么变成 CUDA 内核？刚才的推演已经暴露出几个问题：输入很大时用分段归约，输入很小时这些都不划算，直接用普通归约更好；归约要作用在多维数组上怎么办；输入输出的 dtype 变了，累加器要不要用相同的 dtype？</p>
+        <p>如果每种情况写一个专门的内核，每种组合都要往代码库里塞一个，二进制会很大，也很难面向未来。用代码生成加启发式规则挑内核，框架才能一直是一个让人做实验的框架。他说这是 PyTorch 成功的重要原因：框架不去宣布哪个算法会赢，它提供工具，让人自己找到合适的算法。</p>
+        <h3>Reduce.cuh</h3>
+        <p>所以 PyTorch 没有 <code>max.cu</code>、<code>mean.cu</code>，只有一个通用的 <code>Reduce.cuh</code>：既然所有归约结构相同，就给它一个单位元（或累加器）和一个运算，生成性能合适的内核。他带大家看了几处：</p>
+        <ul>
+            <li><code>ReduceConfig</code> 里设置块宽、块高、每个线程最少/最多处理多少值等启发式参数，根据 dtype 等条件生成合适的内核。</li>
+            <li>启动时用到了 CUDA stream（流，可以让拷贝和计算交错进行），这是之前的玩具内核没用过的参数；还能看到它怎么选最大线程数、块大小、网格大小这些启动超参数。</li>
+            <li>文件用的是 CUDA C++ 模板。模板的好处是同一个内核可以同时支持 float16 和 bf16 输入，而累加器设成 float32，不用到处写一大堆内核。有一段检查就是在说：不要在 bfloat16、half 这类类型里累加。</li>
+        </ul>
+        <p>他说读这个文件学到了很多，推荐大家研究。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. torch.compile 和 Triton 生成的归约</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=2415s" target="_blank">0:40:15</a>–0:45:35 · Triton Kernels / Triton Reductions</em></p>
+        <p>Eager 模式下主要是手写 CUDA 内核；<code>torch.compile</code> 则生成 Triton 内核，读起来容易一些。例子是对一个向量求和（他说的是求均值，均值也是归约）：</p>
+        <pre><code># TORCH_LOGS="output_code" python reduce_compile.py
+import torch
+
+@torch.compile
+def f(a):
+    c = torch.sum(a)
+    return c
+
+f(torch.randn(10).cuda())</code></pre>
+        <p>用 <code>TORCH_LOGS="output_code"</code> 打印生成的代码，可以看到：一个临时变量是求和；有一些样板代码和启发式，比如块大小取 16、元素个数是 10；还有 Inductor（torch.compile 的后端）给 Triton 的提示，标明这是一个归约、在最内维上做（也就是对所有元素做）。</p>
+        <p>这些启发式在 Inductor 的 <code>triton_heuristics.py</code> 里：是不是归约就设什么标志，关掉逐元素自动调优时用哪些合理的尺寸提示。写自己的内核时，常常不知道 <code>RBLOCK</code>、<code>XBLOCK</code>、块大小怎么设，这里可以参考。他给的两条直觉：</p>
+        <ul>
+            <li>启发式随输入大小变化，很小的输入和很大的输入应该分发不同的内核；</li>
+            <li>随 dtype 变化，即使内核是 bf16，归约的累加也应在 float32 里做；不是归约、没有累加的操作就不必升精度。</li>
+        </ul>
+        <h3>Triton 自己的归约实现</h3>
+        <p>他又打开 Triton 编译器里实现归约的函数，里面的层次和前面讲的一样：先在一个线程内归约；再在 warp（32 个线程）内归约；然后在 warp 之间归约，把每个 warp 的结果存到共享内存，累加部分结果再读回来。也就是线程内、warp 内、块内、块间，和讲座里讲的层次结构一致。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 小结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=2735s" target="_blank">0:45:35</a>–0:46:42</em></p>
+        <p>归约用并行求和归约树实现，难点在于怎么把线程分配到数据的不同部分。这一讲一步步改进：先两两相加；再改 stride 的算法让活跃线程挨在一起；然后用共享内存，并发现它在大向量上出错；改成多块分段归约；最后做线程粗化。他鼓励大家开始写自己的内核，说那才是真正开始学习的时候。CUDA MODE 讲座每周六中午（太平洋时间）进行。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“in pytor there isn't Like A Min kernel or a Max kernel there's like a general reduction kernel”（PyTorch 里没有 min 内核或 max 内核，只有一个通用的归约内核。）<a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=191s" target="_blank">0:03:11</a></li>
+            <li>“this is not a Freel lunch flag because if you make things deterministic that means you're effectively forcing a certain kind of thread synchronization”（这个标志不是免费的午餐，要让结果确定，就等于强制某种线程同步。）<a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=635s" target="_blank">0:10:35</a></li>
+            <li>“don't use your own timers just you know you can rely on the duration calculations in ncu or Nvidia insight”（别用自己的计时器，看 ncu 或 Nvidia Nsight 算出来的耗时。）<a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=1905s" target="_blank">0:31:45</a></li>
+            <li>“we're not sort of saying this is going to be the winning algorithm it's more like you provide tools for people to come up with the right algorithms”（我们不宣布哪个算法会赢，我们提供工具，让人们自己找到合适的算法。）<a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=2222s" target="_blank">0:37:02</a></li>
+            <li>“even if you're like doing a kernel in like let's say bf16 you still want your accumulations to happen in float 32”（即使内核是 bf16 的，累加还是要在 float32 里做。）<a href="https://www.youtube.com/watch?v=09wntC6BT5o&t=2606s" target="_blank">0:43:26</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 9: Reductions · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

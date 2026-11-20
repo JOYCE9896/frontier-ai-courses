@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>生产环境的 Megakernel | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="19_CuTe_DSL入门.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 20</span>
+    <span><a href="index.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 112 · 生产环境的 Megakernel</h1>
+        <p class="subtitle">把整个模型的前向传播编进一个持久化内核：为什么传统内核有启动开销、wave 量化和跨内核流水线断档，Luminal 编译器怎样用设备端解释器、全局指令队列、细粒度 barrier 和符号化指令队列把 megakernel 用到生产推理里，以及什么时候它不划算</p>
+        <div class="author-meta">
+            主讲：Joe Fioti（Luminal，做推理编译器）· 发布日期：2026 年 8 月 19 日 · 时长：58 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU" target="_blank">讲座录像 Lecture 112: Production Megakernels for Real-World Inference</a>（GPU MODE YouTube 频道公开，没有公开的幻灯片）（本文依据录像字幕整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>Megakernel（巨内核）指把一个模型一次前向传播里的所有算子放进同一个常驻 GPU 的内核里执行，中间不再回到 CPU 启动新内核。Joe Fioti 的公司 Luminal 做的是推理编译器：把模型编译成优化过的计算图，接进 vLLM、SGLang 或他们自己的推理服务器，直接服务生产流量，或者授权给提供生产服务的公司（录像从这段自我介绍的末尾开始）。这一讲讲他们怎样把 megakernel 和传统的内核图放在一起用，由编译器的搜索决定哪部分做成 megakernel。</p>
+        <p>前置知识：线程块、SM、持久化内核（本合集第 15 篇在 H100 上写 GEMM 时用过）、CUDA Graphs、矩阵乘法分块。讲座中途主持人 Mark Saroufim 的麦克风一度没声音，Joe 改为读聊天区的问题回答，后半段 Mark 恢复后又问了一轮。Hazy Research（ThunderKittens 团队，见第 17 篇）和 Mirage 是这个方向上被反复提到的另外两个项目。</p>
+        <ol>
+            <li><a href="#t01">传统的 GPU 内核编程模型</a> · <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">内核边界的代价和持久化内核</a> · <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=180s" target="_blank">0:03:00</a></li>
+            <li><a href="#t03">启动开销：主机启动和 CUDA Graphs</a> · <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=371s" target="_blank">0:06:11</a></li>
+            <li><a href="#t04">wave 量化</a> · <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=478s" target="_blank">0:07:58</a></li>
+            <li><a href="#t05">跨内核的访存流水线和 PDL</a> · <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=541s" target="_blank">0:09:01</a></li>
+            <li><a href="#t06">解释器：单线程和多线程</a> · <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=776s" target="_blank">0:12:56</a></li>
+            <li><a href="#t07">把 GPU 当成多核 CPU：粗粒度指令和全局队列</a> · <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=955s" target="_blank">0:15:55</a></li>
+            <li><a href="#t08">问答：分支预测、推测执行、指令融合</a> · <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=1276s" target="_blank">0:21:16</a></li>
+            <li><a href="#t09">依赖追踪：把全局 barrier 拆细</a> · <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=1525s" target="_blank">0:25:25</a></li>
+            <li><a href="#t10">动态形状和符号化指令队列</a> · <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=1769s" target="_blank">0:29:29</a></li>
+            <li><a href="#t11">Megakernel profiler 和实测结果</a> · <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=2375s" target="_blank">0:39:35</a></li>
+            <li><a href="#t12">Megakernel 不总是对的：和内核图混用</a> · <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=2633s" target="_blank">0:43:53</a></li>
+            <li><a href="#t13">问答</a> · <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=2811s" target="_blank">0:46:51</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 传统的 GPU 内核编程模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=0s" target="_blank">0:00:00</a>–0:03:00 · Traditional GPU programming</em></p>
+        <p>大家熟悉的 GPU 编程方式，是写很小的、自成一体的程序，叫内核（kernel），在几万个线程上并行运行。这些小程序的视角很局部：从单个线程的角度写代码，再去找这个线程要处理的那部分数据，然后整个程序在 GPU 上并行启动。</p>
+        <p>启动方式有点不透明（他说最近的 CUDA 版本暴露得多一些）。一般是按网格（grid）一次在所有核上运行，网格是三维结构，比如要在 25 个核上跑 25 个实例，可以用 5×5×1 的网格。同一个内核的不同实例一般不互相通信，能通信的途径只有全局内存（核与核之间）和共享内存（同一个核内的线程之间）。</p>
+        <p>一个容易混淆的地方：你写的是单个线程，但常常想编程的是更粗的单位，比如整个核或整个 warp，于是要站在 warp 或核的角度去写一个线程的程序。</p>
+        <p>时间线上看，就是一个接一个的内核启动，每次启动一个大小不同的网格。虽然有办法同时启动多个内核，但通常是启动一个，等网格完成，再启动下一个。NVIDIA 提供了把这件事做得很高效的工具。而 Luminal 想要更低一层的控制：想在需要的时候把工作直接调度到每一个核上，不再区分一个个内核程序。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 内核边界的代价和持久化内核</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=180s" target="_blank">0:03:00</a>–0:06:11 · Limitations of kernels</em></p>
+        <h3>传统内核的问题</h3>
+        <ul>
+            <li>网格之间需要全局同步：内核 2 依赖内核 1 产出的数据时，内核 1 完成前不能启动内核 2。</li>
+            <li>SRAM 状态不能保留：内核之间，片上 SRAM（共享内存）一般要完全清空。</li>
+            <li>在不同核上同时跑不同内核比较别扭，同时启动多个内核还有额外开销。</li>
+        </ul>
+        <p>如果能做异构启动：内核 1 运行时空出一个核，就先启动内核 2 的部分实例；下一个时间步在继续内核 2 的同时开始内核 3，只要数据依赖允许。这样机器能喂得更饱。</p>
+        <h3>持久化内核</h3>
+        <p>传统模型里，每份工作启动一个内核实例。矩阵乘法是好例子：每个输出块（tile）启动一个实例（线程块），每个线程块产出输出矩阵的一块。</p>
+        <p>持久化内核（persistent kernel）把控制权拉进内核：每个 SM 只启动一个线程块，再把输出工作单元直接分配给这些线程块，每个线程块可能处理多块输出。他引用了一篇在 H100 上超过 cuBLAS 的 worklog 里的图（本合集第 15 篇讲的就是这个主题）：左边是输出网格，颜色和数字代表线程块，比如线程块 1 负责前三块输出。</p>
+        <p>这种手动控制让线程块在整个矩阵乘法过程中一直存活，可以把下一块输出所需输入的加载，和当前块的存储重叠起来。右边的时间线就是这样：加载一直在流水线里进行，做矩阵乘法，最后存储整块输出；存储的同时马上开始加载下一块的输入。这只有持久化内核才做得到。他说持久化内核已经不新鲜了，但它们代表一个方向：把更多控制拉回内核，远离 CUDA 驱动。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 启动开销：主机启动和 CUDA Graphs</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=371s" target="_blank">0:06:11</a>–0:07:58 · Launch overhead</em></p>
+        <p>最传统的方式是纯主机启动：CPU 启动一个内核，内核跑完回到 CPU，CPU 再启动下一个。这很贵，开销可能在几百微秒甚至毫秒量级，现在基本没人这样做了。</p>
+        <p>现在大家都用 CUDA Graphs：把一批内核放进一个有向无环图，指定内核之间的依赖，一次性启动到设备上。它消除了大部分启动开销，但不是全部，仍然有几微秒的开销。</p>
+        <p>Mark 追问：说的是启动整个 CUDA Graph 的开销，还是图内部的？Joe 说是图内部：DAG 里每个节点都有一点启动开销，很小，但一次前向要启动几千个内核时，加起来就很可观。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. wave 量化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=478s" target="_blank">0:07:58</a>–0:09:01 · Wave quantization issues</em></p>
+        <p>wave 量化（wave quantization）指工作量不能被核数整除，最后一“波”只有部分核在干活。他喜欢的一张图（他说大概来自 Colfax）：9 个工作单元、4 个核，最后三分之一的时间里有两个核闲着。</p>
+        <p>单个算子有办法应对，比如矩阵乘法有 Stream-K，但很多时候工作没法完美均分。工作单元越粗，越容易让所有核都有活干，划分也越均匀。megakernel 的想法就是：如果工作单元是整个前向传播呢？那样通常就能分得很好。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 跨内核的访存流水线和 PDL</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=541s" target="_blank">0:09:01</a>–0:12:56 · Memory pipelining limits / Introduction to megakernels</em></p>
+        <p>持久化内核让访存流水线化，megakernel 把这个概念继续推下去。内核之间有边界时，SRAM 状态保不住，也没法跨边界做流水线。时间线上，加载流水线和存储流水线在内核末尾都得停下，不能开始加载下一个内核的输入，CUDA 在这里强制断开，于是出现气泡（bubble，硬件空闲的时间段）。</p>
+        <p>有 PDL（programmatic dependent launch，程序化依赖启动）这样的机制。Joe 的解释是：PDL 是 CUDA 驱动或 CUDA Graph 层面的概念，可以指定一些始终就绪的静态输入，比如权重，在前一个内核完全结束前就开始加载它们，因为权重不依赖前一个内核，用不着细粒度依赖追踪。但 CUDA 不知道激活值什么时候就绪，所以权重可以提前加载，激活不行，仍有内存气泡。做大的 prefill 时，激活也可能很大。</p>
+        <p>所以他们考虑把整个前向放进一个内核。三种方式对比：CPU 主机启动、整个 CUDA Graph、全部融成一个。最后一种只在开头启动一次内核，一直运行到前向结束，自然没有启动开销。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 解释器：单线程和多线程</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=776s" target="_blank">0:12:56</a>–0:15:55 · Interpreters for GPUs</em></p>
+        <p>他们的做法是在设备上跑一个解释器（interpreter）。解释器说到底就是一个 for 循环里面套一个 switch：程序是一串指令，CPU 依次遍历每条指令，按指令类型执行不同行为。这是最简单的计算形式之一，Python 等解释型语言都用它。某种意义上大多数 CPU 本身也是解释器，解释的是 x86 代码，只是用了乱序执行等很多技巧。</p>
+        <p>上面说的是单线程解释器：一个 CPU 核处理一个指令流。多线程解释器复杂一些：多个 CPU 核，各有自己的指令流，并行运行，但它们之间有数据依赖。例子：CPU 1 把数据加载到 X 和 Y，相加，结果存到寄存器 Z，然后到达一个 barrier；CPU 2 在等这个 barrier，因为它要用 X 所在的存储空间，必须等 CPU 1 完成、X 被释放。用 barrier 同步来保证数据或空间就绪，避免数据竞争。megakernel 和这个场景高度相关：很多核同时运行，相互之间有大量数据依赖。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 把 GPU 当成多核 CPU：粗粒度指令和全局队列</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=955s" target="_blank">0:15:55</a>–0:21:16 · Megakernel architecture</em></p>
+        <h3>插问：CUDA agent</h3>
+        <p>有人问他是否了解字节跳动 Seed 和清华的 CUDA agent。他说不熟悉这一个，但他们也大量用 agent 迭代单个算子的实现，把 agent 生成的内核纳入编译器的搜索空间。编译器的角色更像编排者，在代码生成的算子、厂商生态里的算子和 agent 生成的内核之间做选择。</p>
+        <h3>粗粒度指令</h3>
+        <p>把 GPU 当成核数极多的 CPU。他说 NVIDIA 的人听到这个类比可能会尖叫，它不严格准确，GPU 有不少不同之处，但他喜欢这个类比。如果把指令编码在全局内存里，GPU 的核可以直接读指令，按指令走不同分支。如果指令粒度是单条 PTX 指令，效率会低得可笑，因为每条指令都要往返一次全局内存。但如果指令粒度很粗，比如“对某个块做矩阵乘法”“对某个块做 softmax”，每条指令做的工作多，取下一条指令的延迟就能藏住。</p>
+        <p>这样做的好处：调度可以很细，直接编程 GPU 的核，编程模型灵活得多；启动开销没有了；可以跨算子做访存流水线，比如执行当前指令时预取下一条指令，只要共享内存还有空间，就开始预取它的输入。指令作用在块上，他们常叫子张量（subtensor），因为可以是多维的，不限于二维。</p>
+        <h3>两种组织方式</h3>
+        <ul>
+            <li>静态：编译器为每个核排好一个指令队列，每个核读自己的队列。</li>
+            <li>全局：所有核从同一个队列取指令。</li>
+        </ul>
+        <p>他们倾向全局指令队列：跑得慢的核、或分到更多工作的核，别的核可以分担，不需要把工作切得恰好均匀，还能实现某种动态的工作窃取（work stealing）。必须用严格的 barrier 保证顺序，数据按正确顺序读写。有编译器提前组装这些指令很有帮助，也可以手写；Hazy Research 前一阵做出了第一批能把完整模型跑好的 megakernel，起初很多是手写的，他认为他们现在在自动化更多环节。</p>
+        <p>结构图：一组 GPU 核，全局内存里一个指令队列，只有一个。所有核原子地从队列弹出指令，当前指令快做完或有空闲时就弹出下一条开始做。全局内存里还有另一样东西做依赖追踪，就是一大堆 barrier。barrier 怎么做是很大的话题，很大程度上决定 megakernel 的性能。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 问答：分支预测、推测执行、指令融合</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=1276s" target="_blank">0:21:16</a>–0:25:25</em></p>
+        <h3>有没有分支预测器的对应物</h3>
+        <p>可以想多复杂就多复杂，因为上面能跑几乎任意的 C++。但他们控制流很少，没必要预测分支。神经网络分支不多，工作可以提前全部排好。CPU 世界的想法有些能迁移，有些不行，因为面对的不是 CPU，讽刺的是硬件比 CPU 笨得多，比如指令重排只能靠编译器做，别指望运行时做好。</p>
+        <p>他觉得很有意思的一点：如果复杂模型引入控制流，要不要做推测执行？今天模型还没那么复杂，没必要；但在混合专家（MoE）里就可以推测执行：先推测地把 token 送进某个专家计算，如果路由器说这些 token 没路由到这个专家，就丢掉；如果确实路由到了，就消除了一个可能的内存气泡。他认为这里有很大的创造空间，所以不论具体是不是这种方法，这种直接编程 GPU 核的低层方式会存在很长时间。</p>
+        <h3>指令怎么预编译</h3>
+        <p>他们会提前尽可能地融合指令，让指令尽量粗，消除 HBM 往返。这些都在编译器的搜索空间里：线程块级的优化和实现都提前搜索，搜索通常偏向粒度最粗的操作，尽量减少全局内存往返。</p>
+        <h3>在 SASS 里随机跳转？公平性？</h3>
+        <p>他们不在 SASS（GPU 机器码）层面操作，指令比 SASS 粗，不直接处理那种控制流。公平性问题在指令队列里处理得很好：依赖链很长时，只要有下一条指令的数据就绪，核就尽量去窃取工作，不必闲着。调度可以玩出很多花样，多 GPU 时有通信和计算，要尽量交错，Hazy Research 有公开的工作，他们也做了很多，但还不能公开讲，只说这是很大的性能来源：在数据依赖允许的范围内，交错计算密集和通信密集的操作。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 依赖追踪：把全局 barrier 拆细</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=1525s" target="_blank">0:25:25</a>–0:29:29 · Dependency tracking</em></p>
+        <p>依赖追踪对正确性至关重要，否则会有竞态，或读到旧数据。他的理解方式：传统内核之间的依赖，相当于只有一个 barrier，上一个内核的每个实例都是这个 barrier 的生产者，下一个内核的每个实例都要等它归零，也就是一个全局 barrier。megakernel 的细粒度和性能收益来自拆分这个 barrier：拆成两个，可能只需等一半张量完成。目标是在可控范围内让 barrier 尽量多，因为 barrier 越多，同步就越细。</p>
+        <h3>按依赖划分张量维度</h3>
+        <p>他们按依赖关系划分张量的维度。图示是矩阵乘法的输出矩阵：生产者各自产出单个块，但消费者要消费完整的第一行条带（stripe）。于是一个 barrier 从 5 开始，每个生产者完成就减一，所有消费者等它归零。还可以更精细，在全部完成前就启动消费者，因为消费者不会一次用完所有块；简化模型里就等归零。</p>
+        <h3>一条不变式</h3>
+        <p>barrier 多了很贵。他们坚持的一条不变式是：每条指令只向一个 barrier 生产、只从一个 barrier 消费（通常每个输入一个 barrier，矩阵乘法有两个输入就消费两个）。不想出现一个 worker 完成后要更新 15 个 barrier，或一个消费者要不停检查 15 个 barrier 的情况。barrier 都在全局内存里，检查它们的开销不小。保持这条不变式，并在其中尽量增加 barrier 数，开销就可以接受。</p>
+        <p>因为指令粒度粗，barrier 总数相对于权重或显存来说存储上无关紧要，最多也就 500 KB 左右，甚至 100 KB 或更少。</p>
+        <h3>不用主机重置 barrier</h3>
+        <p>目标是运行期间、两次运行之间，主机永远不需要改显存里的任何东西，所以也不想每次运行后把 barrier 重置回 5。他们的做法：barrier 总是从 0 开始；全局队列顺序很规整，生产者被启动时把 barrier 加一，完成时减一；消费者总是在生产者启动之后才运行，只需等 barrier 归零。一次运行结束时所有 barrier 都回到 0，下一次运行正好需要它们是 0，主机不用介入。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 动态形状和符号化指令队列</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=1769s" target="_blank">0:29:29</a>–0:39:35 · Symbolic shapes / Execution and results</em></p>
+        <h3>问题：形状一变，队列就要重建</h3>
+        <p>推导这些依赖很难，他们大量用表达式推理，因为张量形状是以表达式存储的。一个问题是形状在运行时会变，而队列长度直接依赖形状。形状变了，就要重建整个工作队列，可能有几百万条指令，主机又被卷进来，开销太大。可以把重建和上一次运行重叠，但只有存在上一次运行时才能藏住，第一次运行或 prefill 时没东西可藏。</p>
+        <h3>用表达式表示形状</h3>
+        <p>他们把形状表示成表达式，认为这是最灵活的方式，能做很复杂的形状追踪：维度不必非静态即动态，可以混合。比如 $p$ 是上下文长度、$s$ 是序列长度，两者拼接后的张量形状可以写成 $s+p$，第二维则是静态维度。PyTorch 用 SymPy 做类似的事，他们可以直接读入并使用类似的表达式。</p>
+        <h3>问答插入：融合多少算子，对 vLLM/SGLang 高并发有没有用</h3>
+        <p>融合多少算子进 megakernel，本身就是搜索的一部分：可以把算子放进或拿出 megakernel，也可以把 megakernel 嵌进更大的 CUDA Graph。他们不局限于只用 megakernel，普通内核和 megakernel 可以混用，由搜索按哪种让墙钟时间最短来决定 megakernel 化多少。</p>
+        <p>对 vLLM、SGLang 那种高并发场景有没有帮助？要看模型。算子相对于算子个数很大时帮助小，所以超大模型、超大批量下帮助小得多，搜索在这些情况下倾向传统内核图。但即使高批量，也会用推测解码之类的东西，仍可能启动很多小内核，仍有 megakernel 化的机会。最大的收益来自内核多、每个内核工作量都小的时候，内核之间断开的开销占比大。</p>
+        <h3>符号化的指令</h3>
+        <p>既然张量用表达式表示，能不能对整个工作队列也这样做？不为每个输出块放一条指令，而是放一条带“范围”（extent）的符号指令：比如要启动 $m \times n$ 条矩阵乘法指令，$m \times n$ 只在运行时才知道。这样不管 $m \times n$ 是多少，工作队列都不用改。只要能在运行时解析，这是一个很有力的想法，整个工作队列都能转成这种格式：</p>
+        <ul>
+            <li>extent：一条指令要启动多少个实例；</li>
+            <li>数据步长（data strides）：让每个实例访问正确的输入和输出；</li>
+            <li>barrier 步长：让每个实例引用正确的 barrier，向哪个生产、从哪个消费。</li>
+        </ul>
+        <p>这些都用表达式表示，就和具体的张量大小无关了。</p>
+        <h3>例子：一个矩阵乘法指令</h3>
+        <p>一个张量形状是 $(s+p) \times 1024$，另一个（权重）是 $1024 \times 4096$。每条指令处理 32×32 的输出块，所以要启动 $\frac{s+p}{32} \times \frac{4096}{32}$ 个实例。$s$、$p$ 事先未知，所以事先不知道会启动多少条矩阵乘法指令。extent 和步长都这样表示，barrier 也当作步长处理：他把 barrier 画成矩阵，但可以把它看作一个张量，指令按步长索引进这个 barrier 张量。他说这种做法比较非正统。</p>
+        <h3>在设备上求值表达式</h3>
+        <p>因为 $s$、$p$ 未知，这些表达式只能尽量化简（$4096/32$ 可以化简，$\frac{s+p}{32}$ 不行），必须在设备上运行时求值，而且要比较高效。这个问题困扰了他们一阵，最后的解法很简单，也有点丑：提前把所有要求值的表达式渲染成 C++ 代码，放进一个大 switch 语句；显存里的指令队列不放真正的表达式，只放一个索引，指向 switch 里对应的分支。设备知道 $s$、$p$ 的值，按普通 CUDA 代码求值即可。他说希望有更聪明的办法，但这样能用。</p>
+        <pre><code>// sketch based on the talk: expressions rendered ahead of time into a switch;
+// the instruction queue in DRAM stores only the expression index
+__device__ int eval_expr(int expr_id, int s, int p) {
+    switch (expr_id) {
+        case 0: return (s + p) / 32;   // extent along M
+        case 1: return 4096 / 32;      // extent along N (simplified at compile time)
+        // ... one case per expression used by the work queue
+    }
+    return 0;
+}</code></pre>
+        <p>最大的好处是热循环里完全不涉及主机：CPU 读取一次前向的结果，但下一次前向不必等 CPU 读完。同一个 megakernel 可以一次接一次很快地重复执行。他还设想，长远来看也许可以把整个推理服务器都放进 megakernel，不知道是否有益，权当一个思考方向。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. Megakernel profiler 和实测结果</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=2375s" target="_blank">0:39:35</a>–0:43:53 · Profiling and benchmarks</em></p>
+        <p>他们为 megakernel 写了一个小 profiler，能看到所有 SM 上分别在运行什么指令。截图里粉色的大概是 RoPE 操作，然后是一批注意力操作。可以看到序列后面的注意力比前面的慢得多，因为要看的 K 和 V 更多：SM0 跑完三个 GQA（分组查询注意力）的时间，SM1 只跑完一个。这就是全局指令队列的好处，活少的核可以分担活多的核。</p>
+        <p>还能看到，一些 GQA 一完成、所需信息就绪，就能启动下一个矩阵乘法块，而在普通内核图里，这两个操作之间可能有一次硬同步，所有 GQA 完成前不能开始任何矩阵乘法。</p>
+        <p>看 SM 是否被充分利用：profile 里开头那些 W 标出的段是等待块（wait block）。如果很多，就能准确知道哪些 SM 没被用满，并直接看它们在等什么，对调试很有用。能直接看到每个核在干什么，再直接编程它们，他觉得很好。</p>
+        <h3>抖动</h3>
+        <p>他们不太测这个，但全局队列对抖动（jitter）也有用：总有些 SM 天然比别的快，可能因为制造工艺，可能因为更热被降频（他说不确定 SM 会不会被单独降频），总之有一定抖动，全局队列能让快的核替慢的核分担。</p>
+        <h3>结果</h3>
+        <p>展示的是比较小的模型（也做更大的，那对多 GPU 有用），最显著的结果往往来自小模型。这两组结果都在 GH200 上，Blackwell 上结果类似；他们在 GH200 上做很多工作，因为部署量很大，H100 也是。相对于当前最先进的传统推理引擎，性能高出不少（字幕没有报出具体倍数）。这也适用于推测解码里的小模型，再把它应用到大模型上，所以他认为 megakernel 还有很大的发挥空间。</p>
+        <p>聊天区问的几件事：没在 RTX 6000 上试过 Gemma 4，但可以试，他们也在 RTX 6000 上跑；编译器的核心是开源的，有些后端闭源，他会把链接贴到聊天区。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. Megakernel 不总是对的：和内核图混用</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=2633s" target="_blank">0:43:53</a>–0:46:51 · Q&amp;A and conclusion</em></p>
+        <p>megakernel 不总是对的方法，他们也不执着于它。他们想做通用编译器，不只是 CUDA，还要覆盖各种 ASIC，所以必须判断什么时候用普通内核、什么时候不用，最好混合两者，不必二选一。他们能把 megakernel 嵌进更大的 CUDA Graph：图里传统内核算子和线程块级算子混在一起，线程块级算子又常由生成的 warp 级算子乃至线程级算子组成。主机不需要在两次运行之间重建指令队列，这一点在这里也很有价值。</p>
+        <p>什么时候有用：算术强度（每字节内存访问做多少运算）低的时候。算术强度高时是计算受限，比如很大的矩阵乘法，相对于计算量，内核之间的延迟或开销就不太重要，把所有东西融进一个内核的意义小得多。</p>
+        <p>常见例子：即使在小模型里，最大的矩阵乘法也是最后的 LM head。于是整个 Transformer 主体在一个 megakernel 里，LM head 单独作为一个 cuBLAS 算子之类。这是搜索自己能找到的模式：它发现把 LM head 也 megakernel 化，整体运行时间反而变长，因为 cuBLAS 的矩阵乘法性能比他们 megakernel 里的矩阵乘法指令好。</p>
+        <p>结尾他说 Luminal 在招人（luminal.com）。</p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=2811s" target="_blank">0:46:51</a>–0:58:04</em></p>
+        <h3>闭源厂商库没法内联</h3>
+        <p>Mark 说他觉得一个很烦的限制是闭源厂商库无法内联：megakernel 有“传染性”，要求一切都开放；而且基线必须很强，否则可能做出一个没有气泡、却比 CUDA Graph 基线还慢的东西。哪些闭源库最希望开放？Joe 说 TensorRT 里有很多有意思的内核以 cubin 形式发布，没法转成线程块级、放进 megakernel，能做就太好了。这也是他们用搜索、让搜索决定要不要 megakernel 化的根本原因：很多情况下，他们在 megakernel 里的算子实现就是比厂商内核慢，cuBLAS 是好例子。有一个很少人谈的 cuBLASDx，提供线程块级的 cuBLAS 操作，可以把一部分 cuBLAS 矩阵乘法放进 megakernel。但 megakernel 还有一个问题：线程块大小是固定的，对某种矩阵乘法可能不是最优，传统 cuBLAS 可能仍然更好。</p>
+        <h3>被初始启动参数锁死</h3>
+        <p>Mark 问：megakernel 一个公认的限制是被最初的启动超参数锁死，这是真问题吗？能绕过吗？希望 NVIDIA 做什么？Joe 说确实算是限制。以前的一个限制是 warp 寄存器分配固定：要提前定义，比如 4 个 warp 之间想不均匀分配寄存器，而不同内核需要的分配不同，整个前向传播里的所有算子不会共用一种策略。现在已经有 API 可以在 warp 之间动态重新分配寄存器，这个问题基本不存在了。他很希望 CUDA 能在运行中改变线程块的大小，不是线程块个数，而是一个线程块里有多少 warp，也许 Rubin 上会有，他不知道。</p>
+        <h3>和 Mirage、ThunderKittens 的区别</h3>
+        <p>ThunderKittens：因为能定义块级算子，他们有时直接拿 ThunderKittens 写的算子当线程块级算子用。他的理解是 ThunderKittens 主要让 megakernel 很容易写，可能也在自动化更多流程；它本身比 megakernel 更宽，是做这类基于块（tile）的操作很有用的 CUDA 工具库。</p>
+        <p>Mirage：他和团队聊过，做法类似。他知道的一个区别是 Luminal 追求构造即正确（correct by construction），搜索里从不包含错误的候选，搜索里的一切都提前保证数值输出正确，执行时只测性能；他认为 Mirage 用的是统计方法，实际测输出，在一定误差范围内、经过足够多次带噪输入的运行后，从统计上保证实现正确。他还说 Mirage 在做一些有意思的事，比如在同一个 megakernel 里同时跑多个模型，模型较小时可能有意思。</p>
+        <h3>多 GPU 会遇到什么挑战</h3>
+        <p>建模多 GPU 很复杂，方式很多。他们能做 MPMD（每个设备跑完全不同的程序），但通常没用：单节点内多卡时用 SPMD（同一个程序跑在每个设备上）更好，MPMD 会让搜索空间无谓地膨胀，对张量并行这种直接的情况，分开搜索各设备的程序没有好处。所以做张量并行时就是标准 SPMD。跨多节点时一般不做跨节点张量并行，多半用流水线并行；他们也支持，但通常交给用户把工作按流水线 rank 切开，分别编译。</p>
+        <h3>有没有被 HTTP 前端之类拖住的阿姆达尔效应</h3>
+        <p>一般没有，HTTP 前端相对于很快的解码模型也很快。而且他们能完全异步地从 GPU 内存读取 token，不拖住 GPU：流式解码时，GPU 不会因为把 token 推回给用户的速度而变慢，可以独立继续跑。有时真正的大瓶颈是回到 CPU 做采样，或者做 KV cache 驱逐和管理，这些可能很显著。要追求极快的解码，往往越多放在设备上做、这些东西做得越简单越好。大模型时这些主机端开销通常不显著。</p>
+        <h3>每条指令能用不同数量的 warp group 吗</h3>
+        <p>目前做不好，这是 CUDA 的根本限制。现在的做法是按所有指令里需要最多的 warp group 数启动，需要少的指令就让多余的 warp group 直接空转关掉。这不好，因为那些 warp group 仍然占寄存器，不是免费的。他很希望 CUDA 提供运行中动态改变每个线程块（CTA）warp 数或 warp group 数的能力。Mark 说传统内核模型里这不太成问题，可以补齐，megakernel 里不行；Joe 补充传统内核可以逐个内核改每个线程块的 warp group 数。</p>
+        <h3>为什么不让空闲的 warp group 去做别的工作</h3>
+        <p>目前指令调度是以核为粒度，依靠编译器生成足够粗的指令让一个核保持忙碌。将来计算单位可能不必是一个核，可以是一个 warp group。问题在于：指令要尽量粗，以限制发射和取指延迟；而且 warp group 常常紧密协作，有时又完全独立、处理不同的指令，这会很复杂。他认为这是一个有意思的研究方向。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“within the graph, every node in that DAG actually has some some some launch overhead. It's fairly small, but when you are launching, you know, thousands of kernels per forward pass, it tends to add up quite a bit.”（在图内部，DAG 里每个节点都有一些启动开销。它很小，但一次前向要启动几千个内核时，加起来就相当可观。）<a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=429s" target="_blank">0:07:09</a></li>
+            <li>“mega kernels essentially say okay well what if our what if our unit of work was the entire forward pass?”（megakernel 实际上是在问：如果我们的工作单元是整个前向传播会怎样？）<a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=478s" target="_blank">0:07:58</a></li>
+            <li>“fortunately [clears throat] neural networks aren't very branchy and we can kind of lay out all of our work ahead of time.”（幸运的是，神经网络分支不多，我们基本可以提前把所有工作排好。）<a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=1276s" target="_blank">0:21:16</a></li>
+            <li>“the name of the game is we want to maximize the number of barriers uh that that we're actually dealing with”（关键玩法是让我们实际处理的 barrier 数量尽量多。）<a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=1525s" target="_blank">0:25:25</a></li>
+            <li>“we are not married to mega kernels.”（我们并不执着于 megakernel。）<a href="https://www.youtube.com/watch?v=loZ4xQ5RZuU&t=2633s" target="_blank">0:43:53</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 112: Production Megakernels for Real-World Inference · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

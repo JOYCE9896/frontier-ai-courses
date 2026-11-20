@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>在 H100 上超过 cuBLAS | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="14_FlashInfer.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 15</span>
+    <span><a href="16_CuTe布局与张量.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 45 · 在 H100 上超过 cuBLAS</h1>
+        <p class="subtitle">从零写一个 Hopper 上的 BF16 矩阵乘法：WGMMA、TMA、生产者/消费者流水线、两个消费者、持久化调度、L2 友好的分块顺序、PTX barrier、TMA multicast、异步存储和 Hilbert 曲线，一步步从 cuBLAS 的 4% 做到 107% 左右</p>
+        <div class="author-meta">
+            主讲：pranjalssh（主持人称他 Pranjal；他在讲座里没有做正式的自我介绍，只说自己平时偏爱算法，这一讲讲的是他写的 H100 矩阵乘法博客）· 发布日期：2025 年 2 月 16 日 · 时长：1 小时 16 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=ErTmTCRP1_U" target="_blank">讲座录像 Lecture 45: Outperforming cuBLAS on H100</a>（GPU MODE YouTube 频道公开）· 幻灯片/代码：<a href="https://github.com/gpu-mode/lectures" target="_blank">gpu-mode/lectures 讲座资料库</a>（本讲在资料库里没有单独的代码文件夹，代码在主讲人自己的博客和仓库里；本文依据录像字幕整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>主持人（GPU MODE 的 Mark Saroufim）介绍说，这一讲来自一篇博客：作者在 H100 上从零写矩阵乘法内核，最后超过了 cuBLAS。这篇博客的写法学的是 GPU MODE 服务器里分享最多的链接之一，Simon Boehm 那篇在 A100 上一步步逼近 cuBLAS 的文章。主讲人用户名 pranjalssh，主持人叫他 Pranjal。他说自己平时更多做算法，ML 兴起以后自然去研究 GPU 怎么工作、怎么让东西越来越快。讲座里还有两位插话的人：写过 llm.c 大量高性能 CUDA 代码的 Arun，以及 CUTLASS 核心开发者 Chris Cecka（本系列第 16 篇的主讲人）。</p>
+        <p>整讲只做一件事：在 H100 SXM 上把两个较大的 BF16 矩阵相乘，每一步加一个 Hopper 特性，报一次 TFLOPs 和相对 cuBLAS 的百分比。前置知识：CUDA 线程块和共享内存、分块矩阵乘法（本系列第 2、3 篇），Tensor Core 和 CUTLASS 的基本概念（第 10、13 篇）。下面这张表是整讲的数字主线，后面各节逐条展开：</p>
+        <table>
+            <thead><tr><th>步骤</th><th>TFLOPs</th><th>相对 cuBLAS</th></tr></thead>
+            <tbody>
+                <tr><td>cuBLAS</td><td>716</td><td>100%</td></tr>
+                <tr><td>不用 Tensor Core 的经典分块内核</td><td>31.8</td><td>约 4%</td></tr>
+                <tr><td>WGMMA + TMA，小 tile</td><td>317</td><td>约 44%</td></tr>
+                <tr><td>调大 tile</td><td>423</td><td>59%</td></tr>
+                <tr><td>生产者/消费者异步流水线</td><td></td><td>70%</td></tr>
+                <tr><td>128×256 tile，两个消费者</td><td>631</td><td>88%</td></tr>
+                <tr><td>持久化内核，朴素调度</td><td>400</td><td>下降</td></tr>
+                <tr><td>持久化内核，L2 友好调度（128 个 SM）</td><td>660</td><td>92%</td></tr>
+                <tr><td>PTX 里的快速 barrier</td><td></td><td>98%</td></tr>
+                <tr><td>TMA multicast，簇大小 2</td><td></td><td>约 102%</td></tr>
+                <tr><td>省掉清零、写回跳过 L2 等微优化</td><td>747</td><td>约 104%</td></tr>
+                <tr><td>TMA 异步存储</td><td></td><td>约 106%</td></tr>
+                <tr><td>Hilbert 曲线调度</td><td></td><td>再多约 1%</td></tr>
+            </tbody>
+        </table>
+        <p>（空格表示讲座里只报了百分比。约 4% 和约 44% 是整理者按 716 算出的。）</p>
+        <ol>
+            <li><a href="#t01">开场：学习资源和为什么写 H100</a> · <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=7s" target="_blank">0:00:07</a></li>
+            <li><a href="#t02">H100 的结构和经典分块矩阵乘法</a> · <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=201s" target="_blank">0:03:21</a></li>
+            <li><a href="#t03">基准数字和 Tensor Core 指令；问答：为什么只能写 PTX</a> · <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=523s" target="_blank">0:08:43</a></li>
+            <li><a href="#t04">WGMMA 的寄存器账和共享内存布局</a> · <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=842s" target="_blank">0:14:02</a></li>
+            <li><a href="#t05">TMA 和第一个 Hopper 内核，调 tile 大小</a> · <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=1164s" target="_blank">0:19:24</a></li>
+            <li><a href="#t06">生产者/消费者异步流水线</a> · <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=1483s" target="_blank">0:24:43</a></li>
+            <li><a href="#t07">把 tile 推到上限：两个消费者</a> · <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=2056s" target="_blank">0:34:16</a></li>
+            <li><a href="#t08">持久化内核、自己调度和 L2 缓存</a> · <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=2252s" target="_blank">0:37:32</a></li>
+            <li><a href="#t09">更快的 barrier 和 TMA multicast；簇大小的讨论</a> · <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=2640s" target="_blank">0:44:00</a></li>
+            <li><a href="#t10">微优化和异步存储</a> · <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=3026s" target="_blank">0:50:26</a></li>
+            <li><a href="#t11">Hilbert 曲线调度和最终结果</a> · <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=3282s" target="_blank">0:54:42</a></li>
+            <li><a href="#t12">Arun 的补充：stmatrix、去掉 warpgroup 间同步、融合 epilogue 为什么难</a> · <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=3608s" target="_blank">1:00:08</a></li>
+            <li><a href="#t13">问答：功耗墙、L2 分区、新版 cuBLAS、FP8</a> · <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=3991s" target="_blank">1:06:31</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场：学习资源和为什么写 H100</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=7s" target="_blank">0:00:07</a>–0:03:21 · Introduction to h100 kernel / Gpu programming background</em></p>
+        <p>他先列了自己学 GPU 编程用过的资源：</p>
+        <ul>
+            <li><em>Programming Massively Parallel Processors</em>：经典教材，讲 GPU 的基础，他很推荐。</li>
+            <li>Simon（当时在 Anthropic）的博客：怎样用 CUDA 写矩阵乘法内核，达到接近 cuBLAS 的性能。</li>
+            <li>Andrej Karpathy 的 llm.c：里面有大量高性能 CUDA 代码，能看到生产代码长什么样，有很多微优化。</li>
+            <li>NVIDIA 的 CUDA C++ Programming Guide：他说对初学者一点都不友好，只是 NVIDIA 支持的所有东西的完整清单。</li>
+        </ul>
+        <p>他觉得这些都缺一样东西：如果真要做这方面的工作，就得尽快把最先进的东西实现出来，而当时最先进的硬件是 NVIDIA Hopper H100。网上讲 H100 具体怎么工作的内容很少，适合学习的内容更少。教材里实现的是通用 CUDA 代码，能跑得不错，但用不上最新芯片的全部特性，而训练大模型需要的就是这些。他主要靠 NVIDIA 的博客 “NVIDIA Hopper Architecture In-Depth” 学，那里的细节足够拼出写一个用满 Hopper 特性的矩阵乘法所需的全部信息。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. H100 的结构和经典分块矩阵乘法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=201s" target="_blank">0:03:21</a>–0:08:43 · Matrix multiplication overview / Initial performance benchmarks</em></p>
+        <h3>H100 的轮廓</h3>
+        <p>幻灯片上一个大矩形代表 H100：有高带宽显存（HBM），有 132 个处理器（SM，streaming multiprocessor，GPU 上独立执行计算的单元），所有 SM 共享一个 L2 缓存。每个 SM 里大约能跑上千个线程，有所有线程共用的共享内存，有寄存器。到这里和其他 NVIDIA GPU 差不多。特别的是 Tensor Core：它不是 Hopper 新加的，但网上很少有内容讲怎么用 Tensor Core 编程让 CUDA 内核变快。</p>
+        <h3>问题设定</h3>
+        <p>他用的是 H100 SXM。任务是把两个较大的矩阵 A、B 相乘。现在训练里大部分权重是 BF16（一种为机器学习优化的 16 位浮点格式），所以 A、B、C 都是 BF16。累加用 FP32：如果两个 16 位浮点数相乘后一直用 16 位累加，精度不够，所以用 32 位寄存器累加。</p>
+        <h3>没有 Tensor Core 时的分块矩阵乘法</h3>
+        <p>他快速复习普通 GPU 上的做法。把 C 切成很多 tile，每个 tile 交给一个线程块。对于一个 $B_M \times B_N$ 的 tile，需要 A 里对应的一整条行带和 B 里对应的一整条列带相乘。这两条带通常太大，放不进 SM 的共享内存，所以再引入一个小的 $B_K$：</p>
+        <ol>
+            <li>把 A 的 $B_M \times B_K$ 小块和 B 的 $B_N \times B_K$ 小块载入共享内存；</li>
+            <li>把这两个小块相乘，结果累加在寄存器里；</li>
+            <li>沿 K 方向把所有小块都做完，最后把整个 $B_M \times B_N$ 结果写回全局内存。</li>
+        </ol>
+        <p>他说 Simon 的博客主要在这一步之后做优化：一个 tile 上用多少线程。不必每个线程算一个元素，一个线程可以算多个；一组线程一起从 A、B 载入 tile，一起算这块矩阵乘，一起写回。整讲的算法流程都是这个样子，只是针对 H100 去优化每一步。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 基准数字和 Tensor Core 指令；问答：为什么只能写 PTX</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=523s" target="_blank">0:08:43</a>–0:14:02 · Introduction to tensor cores</em></p>
+        <h3>起点：31.8 对 716</h3>
+        <p>他在 H100 上跑 cuBLAS（NVIDIA 最先进的矩阵乘法库），得到 716 TFLOPs；上面那个经典分块算法只有 31.8 TFLOPs。差距说明，要追上甚至超过 cuBLAS，必须研究 Hopper 架构。</p>
+        <h3>Tensor Core 是什么</h3>
+        <p>Tensor Core 可以理解为一条硬件指令，用来乘比较大的矩阵（不算特别大）。比如共享内存里有 $M\times K$ 的 A 和 $K\times N$ 的 B，想把乘积存进寄存器，Tensor Core 就是专门做这件事的独立硬件单元。矩阵尺寸大约和 tile 大小相当。H100 上 BF16 输入支持的形状是：</p>
+        <ul>
+            <li>$M$ 必须是 64；</li>
+            <li>$K$ 必须是 16；</li>
+            <li>$N$ 可以从 8 到 256（按 8 递增）。</li>
+        </ul>
+        <p>Hopper 上这条指令叫 WGMMA（warpgroup matrix multiply-accumulate，由一个 warpgroup 也就是 4 个 warp、128 个线程共同发出的异步矩阵乘加指令）。在 CUDA C++ 里没法直接调用它，要下到 PTX 这一层。PTX 相当于 GPU 上的汇编，其实不算太复杂：只需要给它写一层包装，传入 A、B 的共享内存地址和一段寄存器，它自己完成计算。幻灯片上的指令格式看起来很吓人，他说其实就像一个函数，只是要按特定格式写。</p>
+        <h3>问答：为什么有些功能只在 PTX 里有</h3>
+        <p>主持人说自己有个粗浅的猜测：一是有些指令是“脚枪”（foot gun），多数人用了反而更慢，所以不暴露，只留内联汇编这条后门；二是 NVIDIA 想让 CUDA 编程模型保持简单；三是不确定这些指令下一代 GPU 是否保留。</p>
+        <p>Pranjal 说他认为 NVIDIA 的方向是：新 GPU 特性的抽象层是 CUTLASS，不是 CUDA。按他自己写 CUDA 的经验，nvcc 只对 CUTLASS 优化得好；自己写定制的 CUDA 内核，经常莫名其妙出问题，比如多加一个 <code>if</code>，内核突然多用很多寄存器，还很难调试。最后要么把部分代码换成 PTX，要么去看 CUTLASS 代码、用类似的写法，让 nvcc 照常优化。所以他认为 NVIDIA 不愿把这层抽象公开，是因为它还没被很好地优化。主持人把这种哄编译器做你想要的事的体验叫作“摇一摇再祈祷”（jiggle and pray）。</p>
+        <p>Arun 从硬件角度补充：这是 NVIDIA 第一次出 sm_90a 这样的架构版本，必须用这个特定的 ISA 版本才能用这些指令，以前从没这样做过，而且明确说不保证向前兼容。这条指令在 Blackwell 上就不支持了。CUDA 需要向前兼容，所以 NVIDIA 不想在 CUDA 里支持这种东西。主持人问 Blackwell 上换成了什么，他答：大约 100 页的新指令。Pranjal 补了一句：他还是觉得，就算整个内核要写 1 万行 C，全放在一个文件里能从头读到尾，也比多几层抽象好。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. WGMMA 的寄存器账和共享内存布局</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=842s" target="_blank">0:14:02</a>–0:19:24 · Tensor core programming in ptx</em></p>
+        <h3>算一下内存</h3>
+        <p>取 $N=16$，即 $M=64,\ N=16,\ K=16$。A 和 B 放在共享内存里，BF16 每个元素 2 字节：</p>
+        <p>$$(64\times16 + 16\times16)\times 2\ \text{B} = 2560\ \text{B} \approx 2.5\ \text{KB}$$</p>
+        <p>H100 每个 SM 大约有 256 KB 共享内存（这是他的说法），这点用量没问题。C 放在寄存器里，需要 $64\times16 = 1024$ 个 32 位寄存器（FP32 累加）。一个线程用 1024 个寄存器太多了。Hopper 的做法是把这次计算分摊给 128 个线程：一条 Tensor Core 指令由 128 个线程以分组的方式一起执行。他说这也说得通：如果一条硬件指令能让成千上万个线程各自乘一个这么大的矩阵，性能就会提高几千倍，那不现实。</p>
+        <p>分到 128 个线程后，每个线程只要 $1024/128 = 8$ 个寄存器，很小。$N$ 可以一直加到 256，那时每个线程的寄存器数会被推到很高的水平，后面就会这么做。</p>
+        <h3>A、B 在共享内存里必须用特定布局</h3>
+        <p>回到 A 的 $B_M\times B_K$ 小块和 B 的 $B_N\times B_K$ 小块。A、B 在全局内存里按行主序或列主序存，一个 tile 不是一段连续内存：一行里取一段，跳过一大段，下一行再取一段，全是跨步访问。而且 Tensor Core 只支持几种特定的 A、B 内存布局，不能随便拷进共享内存了事，得告诉 Tensor Core 数据怎么排的。</p>
+        <p>为了避免共享内存的 bank 冲突（bank conflict：共享内存分成 32 个 bank，同一 warp 的多个线程同时访问同一 bank 的不同地址时只能串行），NVIDIA 在文档里给了一张图，说明全局内存的哪些下标应该搬到共享内存的哪些下标。主持人请他解释这张图。他说这是全局内存 tile 到共享内存 tile 的一一映射，它并不按顺序连续地搬，元素会被打乱（swizzle）放置，以避免 bank 冲突。看左边矩阵的前两行：前 8 个元素（他说 0 到 7）连续放，接着放的是 64 到 71，而 8 到 15 去了共享内存的其他位置。</p>
+        <p>他说结果这张图是错的。做 ThunderKittens 的 Stanford 团队发过帖子，说他们花了好几天想复现这张图里的下标，最后发现图有误。所以手工搬这些数据很难做对，而且还要保证全局内存访问是合并的，又要性能最优，他认为不值得自己做。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. TMA 和第一个 Hopper 内核，调 tile 大小</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=1164s" target="_blank">0:19:24</a>–0:24:43 · Tensor memory accelerator / First kernel optimization / Hyperparameter tuning</em></p>
+        <h3>TMA</h3>
+        <p>H100 加了一个新硬件单元 TMA（Tensor Memory Accelerator），解决的就是上面的问题：全局内存里有一个矩形 tile，要按 Tensor Core 需要的方式载入共享内存的一段连续区域。它是独立的硬件单元，异步执行：告诉 TMA “把这个 tile 载到这个共享内存地址”，它会在某个时刻做完，然后通知你。</p>
+        <h3>第一个内核的流程</h3>
+        <p>他在幻灯片上放了一段高度简化的代码，只针对一个线程块，计算一个 $B_M\times B_N$ 的输出 tile。代码里 <code>WGMMA_M</code>、<code>WGMMA_N</code> 是 Tensor Core 指令的尺寸，先假设都是 64，和 tile 一样大。流程用下面的草图表示（TMA 载入的代码很冗长，幻灯片上也只写了注释）：</p>
+        <pre><code>// sketch based on the talk: one thread block computes one BM x BN tile of C
+// the accumulator d[] is spread across the 128 threads of a warpgroup
+float d[...];                      // registers
+memset(d, 0, sizeof(d));
+for (int block_k = 0; block_k &lt; K / BK; ++block_k) {
+    // TMA: load a BM x BK chunk of A into shared memory sA
+    // TMA: load a BN x BK chunk of B into shared memory sB
+    // wait until the loads are done
+    // tensor core (wgmma): d += sA * sB
+}
+// write d (registers) back to C in global memory</code></pre>
+        <p>寄存器写回全局内存的下标计算不像从全局内存载入共享内存那么麻烦，只是简单的算术。他特意请听众不懂就问，因为后面所有优化都是在逐行优化这个流程：一组寄存器存输出 tile；沿 K 方向循环，载入 A、载入 B、做矩阵乘；最后写回。</p>
+        <p>只用很简单的 tile 大小，这个内核就到了 317 TFLOPs，比 31.8 快了 10 倍。他说这说明方向对了，接下来就是用上越来越多的 H100 特性。</p>
+        <h3>调 tile 大小：423 TFLOPs，59%</h3>
+        <p>下一步只是调超参数：加大 tile。tile 比 Tensor Core 指令大时，就把矩阵再切分，用多条指令拼出整个 tile。他对比：普通 GPU 代码里最小的乘法单位相当于 1×1，要从它拼出大 tile；这里最小单位是一条 Tensor Core 指令，比 1×1 大一些，思路一样。调好后到 423 TFLOPs，约为 cuBLAS 的 59%。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 生产者/消费者异步流水线</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=1483s" target="_blank">0:24:43</a>–0:34:16 · Asynchronous pipeline implementation / Memory layout optimization</em></p>
+        <h3>把载入和计算分开</h3>
+        <p>回到算法结构：沿 K 循环，载入 A 的 tile、载入 B 的 tile、做 Tensor Core 计算，重复很多次。比如 K 是 4096、$B_K$ 是 64，就要循环几十到上百次（他说大约上百次），最后把寄存器写回全局内存。</p>
+        <p>他说自己从 CPU 世界过来，第一反应是：一部分在载入，一部分在计算，它们各有各的节奏。如果分开，一方只管载入，一方只管计算，彼此不直接通信，只通过一个共享队列交接：生产者载入后推进队列，按自己的节奏；消费者从队列里取，按自己的节奏计算。队列可以存多个元素：生产者太快就多存几项，消费者慢慢取。这是大型分布式系统处理“慢生产者、慢消费者”的常见办法，在 GPU 上也行得通。</p>
+        <p>具体做法：128 个线程只负责载入，128 个线程只负责矩阵乘。其实载入用不了 128 个线程，TMA 调用一个线程就能发出，但 NVIDIA 的编程指南建议按 128 线程的倍数划分角色，他就这么做了。这不算浪费：生产者那组线程基本闲着，只发载入；消费者那组做所有重活。这种按角色分 warp 的做法叫 warp 专用化（warp specialization）。</p>
+        <p>共享队列用 barrier 实现。他没细讲，只说 barrier 是一种同步原语，CPU 世界里也很常见。比如队列长度为 4，就给每一项配一个 barrier：生产者载完某一项，通过 barrier 告诉对方“这项好了，轮到你了”；消费者问“这项好了吗”，好了就拿去算。（Hopper 上这种 barrier 一般就是共享内存里的 mbarrier，TMA 载完会自动更新它；这是整理者补的背景。）</p>
+        <h3>插话：Chris Cecka 谈 PTX 文档里的布局</h3>
+        <p>这时主持人把 CUTLASS 的核心开发者 Chris Cecka 请上来。他说公开的 PTX 文档里的共享内存布局确实是错的，他们也一直在催文档团队改，很多公司都来反映过这个问题。CUTLASS 现在的解决办法是用 CuTe 的布局：所有正确的布局都在 CuTe 库里有单元测试和文档，CuTe 是 CUTLASS 的核心，CUTLASS 里所有下标计算、分区计算和布局计算都靠它。</p>
+        <h3>问答：为什么要分生产者和消费者</h3>
+        <p>聊天区有人问：为什么要有生产者和消费者的概念，是因为在做异步操作吗？主持人顺带问了 Discord 上的一个问题：为什么常见的是两个生产者一个消费者，不能更多。</p>
+        <p>Pranjal 先答第一个。每一次“载入、计算”其实都是独立操作，处理的是 A、B 的不同 tile，彼此没有依赖，本来可以并行，只是因为线程有限才一个个做。如果共享内存够，就不必等第一次 Tensor Core 计算完再开始下一次载入，可以一直往前载，直到共享内存用完。Tensor Core 那边当然要等对应的载入完成，但前面已经多载了几份，它就能一直算下去。分开以后就能加这样一个缓冲。</p>
+        <p>有人追问：既然数据彼此独立，瓶颈是不是带宽？他说带宽通常能打满，真正的限制是共享内存的容量。队列长度设到把共享内存用完，每个 SM 大约 256 KB（他的说法），他的代码里大约能存四五个 tile，再多就放不下了。还有人问这是不是一种“前端优化”，他说不太确定“前端”指什么，建议去搜分布式系统里的慢生产者/慢消费者问题，中间加队列，各自按节奏工作，道理一样。</p>
+        <p>关于第二个问题，他说通常反过来，是一个生产者、两个消费者，下一节会讲为什么多个消费者有帮助，以及为什么数量有限。</p>
+        <p>Arun 补充：以前 GPU 在寄存器层面会自动管理生产者/消费者。数据在寄存器里时，barrier 由编译器分配；有很多并行载入、寄存器压力大时，编译器会决定并行发多少个载入、在哪里插等待。从 Ampere 开始用共享内存、TMA 和异步载入后，这些都变成开发者自己管理，这既是好处也是难处，感觉不那么像 GPU，更像是完全手动管理的东西。</p>
+        <h3>结果</h3>
+        <p>这一步他叫异步载入，从 59% 提到 70%。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 把 tile 推到上限：两个消费者</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=2056s" target="_blank">0:34:16</a>–0:37:32 · Pushing tile limits</em></p>
+        <p>之前 N 方向的 tile 是 128，但 Tensor Core 指令的 N 可以到 256，最大的指令是 m64n256k16。他说指令能用多大就用多大总是有好处，因为硬件里优化过，在软件里拼只会更慢。</p>
+        <p>算一下 128×256 的输出 tile：</p>
+        <p>$$128\times256 = 32768\ \text{个寄存器},\qquad 32768 / 128\ \text{线程} = 256\ \text{个/线程}$$</p>
+        <p>而 H100 每个线程最多只能有 256 个寄存器。累加器不可能占满全部，因为还有循环变量和其他变量要放，所以 128 个线程放不下这么大的 tile。</p>
+        <p>解决办法：指令的 M 是 64，把 128×256 的 tile 沿 M 方向切成两个 64×256 的子 tile，每个正好用一条 m64n256k16 指令算完。整体 tile 仍是 128×256，从 A、B 载入的仍是大 tile，但计算分给两个消费者 warpgroup，各自用 N 很大的指令。两者算的是 C 的不相交部分，可以并行，各自写回寄存器。（整理者算一下：这样每个消费者线程的累加器是 $64\times256/128=128$ 个寄存器。）</p>
+        <p>他强调一点：以前没这么做时，一个 SM 上也可能同时有多个消费者，因为按占用率（occupancy，一个 SM 上同时驻留的 warp 数相对上限的比例）可能有多个线程块同时调度到同一个 SM，调度器能并行跑它们。所以也可以说存在一种调度方式让这些自动成立，但自己显式做效果好得多。用上更大的 Tensor Core 指令后，到了 cuBLAS 的 88%。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 持久化内核、自己调度和 L2 缓存</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=2252s" target="_blank">0:37:32</a>–0:44:00 · Scheduling and occupancy / L2 cache utilization</em></p>
+        <h3>把上一个 tile 的存储和下一个 tile 的载入重叠</h3>
+        <p>他把流程图分成上下两行：上面是载入，下面是 Tensor Core 计算，两者已经并行，最后有一次存储。现在跳出一个线程块，看整块 GPU：只有 132 个 SM，而线程块数远多于 132，所以一个 SM 会依次跑多个线程块。tile 已经很大，占用率基本只有 1，一个 SM 一次只跑一个线程块。</p>
+        <p>这样看就有新的优化：一个 SM 载入、计算、最后做一次大存储，然后处理下一个线程块，又是载入、计算、存储。上一个 tile 的存储和下一个 tile 的载入是独立的：存储是把寄存器写回全局内存，同时完全可以开始载下一个 tile。目标是让 Tensor Core 指令一直在跑，不等任何东西。</p>
+        <p>实现上改代码用 barrier 不难，但要自己定调度策略：不再让 NVIDIA 把线程块分到 SM 上，改为正好启动 132 个线程块，每个 SM 一个，所有事情自己安排，硬件不再做调度。这就是持久化内核（persistent kernel）。</p>
+        <h3>朴素调度反而变慢</h3>
+        <p>先试一个朴素调度：把 C 切成很多 tile，一个 tile 对应原来的一个线程块，把多个 tile 分给同一个 SM。幻灯片上 C 的格子编号到 132：蓝色区域给第 1 个 SM，绿色给第 14 个 SM，依此类推，每个 SM 分到一段连续的 tile。看起来合理，结果性能下降：之前 631 TFLOPs，现在只有 400。他说自己做调度并不简单，NVIDIA 自己就做得很好，要自己做就得深入细节。</p>
+        <h3>原因：同时在跑的 tile 太分散</h3>
+        <p>换个角度看同一个调度：这次把同一时刻在跑的块标成蓝色。第 1 个 SM 先跑它的第一个 tile，第 14 个 SM 跑它的第一个 tile……132 个 tile 同时在跑，但它们在 C 里很分散，各自要从 A、B 载入完全不同的部分，相当于每一轮都把整个 A、B 重新载一遍。所有 SM 做完一轮，再载另一批完全不同的数据。</p>
+        <p>改法是让同时在跑的 tile 聚在一起，多用 L2 缓存。右边的调度里，所有 SM 第一轮载入的 tile 构成 C 里一个连续的矩形。这里他只用了 128 个 SM，没用 132 个，因为 2 的幂好算；剩下 4 个 SM 干脆不用。这样各 SM 载入的 A、B 部分高度重叠，L2 被充分利用，性能升到 660 TFLOPs，cuBLAS 的 92%。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 更快的 barrier 和 TMA multicast；簇大小的讨论</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=2640s" target="_blank">0:44:00</a>–0:50:26 · Fast barrier implementation / Tma multicast / Cluster size and scalability</em></p>
+        <h3>PTX 里的 barrier：92% 到 98%</h3>
+        <p>这一步他没细讲，因为比较繁琐。barrier 有另一种版本，不在 CUDA 里，在 PTX 里，要写 PTX 才能用，但比 CUDA 的 barrier 快很多。NVIDIA 的 Hopper 架构文档提到有了更快的 barrier，需要自己对照文档把它们拼出来。性能从 92% 提到 98%。他建议直接看代码，不复杂，只是细节多、要会写对应的 PTX。</p>
+        <h3>TMA multicast 和线程块簇：约 102%</h3>
+        <p>下一步用 TMA multicast 和线程块簇（thread block cluster，Hopper 上可以把几个线程块编成一组，保证它们同时调度在相邻的 SM 上，彼此能访问对方的共享内存）。他用图说明：这张图和前面一个 tile 拆给两个消费者的图不同，画的是两个在不同 SM 上同时运行的 tile。两个紫色 tile 算 C 的不同部分，同时跑在不同 SM 上，它们载入 A 的不同部分，却载入 B 的同一部分。如果能共享 B 的这部分，载入就更快。</p>
+        <p>直接跨线程块读对方的共享内存可以做到，但效率不高。更快、更干净的办法是 TMA multicast：两个 SM 原本各发一次 TMA，现在只由其中一个发一次，告诉 TMA 硬件“旁边还有一个人要同样的数据，也给它一份”。背后 NVIDIA 把这些 SM 组织成线程块簇。他用簇大小 2：两个相邻的 SM 共享 B 的载入。硬件对此优化得很好，性能到了约 102%。他说到这里已经是从零实现、针对一个特定矩阵尺寸高度优化，达到并略微超过了 cuBLAS。</p>
+        <h3>簇再大为什么没用</h3>
+        <p>理论上 NVIDIA 支持最多 8 个 SM 一簇，A 和 B 的相同部分都能 multicast，设特定标志还能到 16。但他实验发现，到那时通信开销太大，超过 2 就看不到收益了。用 NVIDIA 的 profiler 看，通信开销和停顿（stall）变大很多。他说 Blackwell 似乎也只支持大小为 2 的簇，可以印证这一点；他的代码里实现了更大的簇。</p>
+        <p>Arun 纠正并补充：Blackwell 支持大于 2 的簇，只是对 2 做了特别快的专门模式。硬件里有 TPC，大约从 2010 年起每个 TPC 就是两个 SM，硬件按这个结构组织，Blackwell 针对这种情况做了优化。Hopper 上还有另一个问题（他说不一定是性能变差的原因，但是一部分）：簇大于 2 时，没法用上 GPU 上的所有 SM。一个 GPC 可能有 18 个 SM，不是 4 或 8 的倍数，而且哪些 SM 因良率被屏蔽也不一样，NVIDIA 按最坏情况算。他记得簇大小为 8 时只剩 120 个左右可用，而不是 132；用 128 个 SM 时簇大小 4 应该可以，8 就不行。所以要注意能并行放多少个 SM，避免同时放不下。他说最疯狂的做法是并行跑两个内核，一部分用大簇、一部分用小簇，但没人这么做，复杂度太高。</p>
+        <p>主持人问 NVIDIA 自己是不是用大小为 4 的簇。Arun 说有些 CUTLASS 内核曾经这样，但默认不是；Pranjal 说最新的内核都用大小为 2 的簇。结论是：通信开销加上没法用满所有 SM，而这一点 NVIDIA 没有清楚地写进文档。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 微优化和异步存储</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=3026s" target="_blank">0:50:26</a>–0:54:42 · Micro optimizations / Asynchronous stores</em></p>
+        <h3>省掉累加器清零</h3>
+        <p>他又贴出一个 tile 的计算代码，高亮 <code>memset(d, 0, ...)</code> 那一行：把寄存器清零。Tensor Core 指令做的是累加，循环里每次都是 $C \mathrel{+}= A\times B$；换到下一个 tile 时必须先清零。Tensor Core 指令有一个标志可以开关累加：关掉时做 $C = A\times B$。对每个 tile 的第一次乘法关掉累加，就不用清零了。（PTX 里 wgmma 有一个 scale-d 参数控制是否加上原来的 D；这是整理者补的背景。）提升很小，但聊胜于无。</p>
+        <h3>写回时跳过 L2</h3>
+        <p>另一个技巧他是从 Arun 在 llm.c 里的代码学来的：写回时跳过 L2。默认情况下，把寄存器写回全局内存时，数据也会写进 L2。但写出的 C 之后不会再读，L2 应该全部留给被反复载入的 A 和 B。所以给编译器一个提示：这次写不用存进 L2。做了这一批微优化后到 747 TFLOPs，约 104%。</p>
+        <h3>异步存储：约 106%</h3>
+        <p>前面已经把载入和 Tensor Core 并行，又把存储和下一个 tile 的载入重叠了。但写回全局内存仍然太慢，如果精确测量存储要多久、填满队列要多久，还能看到停顿。TMA 也能做异步存储：先把寄存器写到共享内存，再让 TMA 有空时把它异步存回去。循环里的阻塞时间短了很多，能并行的事更多。代码不复杂，他在代码里加了注释，没在幻灯片上讲。这一步到约 106%。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. Hilbert 曲线调度和最终结果</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=3282s" target="_blank">0:54:42</a>–1:00:08 · Hilbert curve scheduling / Final results and cuBLAS comparison</em></p>
+        <h3>从 2 跳到 3 时 L2 全部作废</h3>
+        <p>他说到这里已经没什么想法了，于是“拿出大炮”：Hilbert 曲线调度，有点杀鸡用牛刀，但能带来一点提升。看左图：第一轮所有 SM 处理蓝色 tile，然后是绿色，再是第 3 批、第 4 批。假设每个 SM 只跑 4 个 tile，编号 1 到 4。</p>
+        <ul>
+            <li>从 1 到 2：已经载入的 A 的部分都还在 L2 里可以复用，只需要载 B 的新部分。</li>
+            <li>从 2 到 3：是一次对角方向的跳跃，L2 里的东西全都用不上，A 和 B 都要换新的部分。</li>
+            <li>从 3 到 4：又能复用一部分。</li>
+        </ul>
+        <p>右图把 3 和 4 换了位置：1 到 2 复用 B，2 到 3 也复用 B 的部分，3 到 4 复用 A 的部分，每一步都能用上 L2 里的东西。</p>
+        <h3>Hilbert 曲线</h3>
+        <p>这种在矩阵里依次走过相邻格子的空间曲线叫 Hilbert 曲线：从矩阵的一端走到另一端，经过所有格子，每一步都走到空间上相邻的格子。2×2 的情况就是上面那样。更大的矩阵递归构造：比如 4×4，先走左下 2×2 的 0、1、2、3，然后对上面的 2×2 做同样的走法，只是稍微旋转一下，让它从上一段结束的地方开始，再对另外两个 2×2 依次旋转。最后得到一条每一步都去相邻格子的曲线，所以总能复用一部分 L2。结果是大约 1% 的提升。他说这有点过度，但填补了心里的一个空缺。主持人说这很有竞赛编程的味道。</p>
+        <h3>问答：怎么保证 CUDA 里定好的指令顺序不被 PTX 改掉</h3>
+        <p>聊天区有人问：这些优化依赖很具体的指令调度，有没有办法保证 CUDA 里写好的调度不会在 PTX（到 SASS）的编译中被改掉？Pranjal 说不太确定，转给 Arun。Arun 说对这类内核通常不是大问题：有很多特殊指令，比如 TMA 载入和 WGMMA，编译器某种程度上不能跨越它们重排。循环之类的东西编译器会展开，随它怎么做，那些无伤大雅，本来也希望它那样做。他相当肯定，对所有关键的东西，编译器都被 PTX 的写法约束住了，没法那样重排。Pranjal 说他也没考虑到指令调度这一层，到 PTX 层面他就满意了。</p>
+        <h3>最终结果</h3>
+        <p>小矩阵上，他实现时看到相对 cuBLAS 大约 7% 的提升；大矩阵上接近 1%。他就停在这里。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. Arun 的补充：stmatrix、去掉 warpgroup 间同步、融合 epilogue 为什么难</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=3608s" target="_blank">1:00:08</a>–1:06:31 · Q&amp;A and future work</em></p>
+        <h3>stmatrix 和 padding</h3>
+        <p>后来 Arun 看了他的代码，提了一个 PR，又多了约 1%。Pranjal 先概括：寄存器写共享内存（之后由 TMA 写回全局内存）那一步原来写得很朴素；PTX 里有一条 <code>stmatrix</code> 指令，能让一个 warp 把所有寄存器的值一起写进共享内存，快得多。</p>
+        <p>Arun 说实际要复杂一点，还得手工加 padding，就是常见的共享内存 bank 冲突问题。问题有两个：一是数据都是 FP16/BF16，按 16 位一次地存，只用到了 load/store 流水线一部分带宽；二是在这之上还有 bank 冲突。直接用 <code>stmatrix</code> 能大幅减少 SASS 指令数，因为不用每 16 位算一个地址，大约每 128 位算一个就行，但仍有 bank 冲突，所以还要加 padding。也许能用 TMA 的 swizzle 配合调整数据位置，但他不确定和 <code>stmatrix</code> 一起能不能行，那会更麻烦。做完这一步，load/store 已经很快了。</p>
+        <h3>去掉两个消费者之间唯一的同步</h3>
+        <p>代码里另一个让它稍微变好的地方和 barrier 有关。原来在“存到共享内存”和“TMA 存储”之间的 barrier 是按整个线程组（两个消费者 warpgroup 一起）做的，这是整个内核里两个消费者 warpgroup 唯一会互相同步的地方。把这个 barrier 去掉，让 TMA 存储按每个 warpgroup（每个消费者）各自做，两个 warpgroup 在整个内核里就可以完全不同步，除非延迟隐藏不够、没法覆盖外部内存延迟。好处是：一个消费者在做存储和 TMA 时，另一个消费者已经跑到前面，开始算下一个 tile 的矩阵乘。他说这是让 Tensor Core 在做这类“不寻常”工作时也保持一直运行，这在 Hopper 上一般是最难做的事之一。</p>
+        <h3>为什么融合 GELU 的 epilogue 会变慢</h3>
+        <p>Arun 说他们在 llm.c 早期发现：往矩阵乘内核里融合 GELU 后，慢了四五个百分点。他认为 NVIDIA 现在改进了很多，但这仍是瓶颈，对一件相对大矩阵乘很简单的事，损失比预期大。原因是很难把这部分工作重叠起来：寄存器全被矩阵乘的累加器占着，共享内存全用于输入数据，可能还有 TMA 存储，只能别扭地挪来挪去，或者减少延迟隐藏，才塞得下。所以有时一个高效的非融合 GELU 内核反而更快。他说 NVIDIA 已经优化了不少，现在可能只比融合版快一两个百分点。</p>
+        <h3>这个内核是真的快</h3>
+        <p>Arun 还说，这个内核对这些尺寸确实和 cuBLAS 一样快，有人可能怀疑，但据他所知是真的；换更大的矩阵，比如 32K，cuBLAS 会快一点，可能是它的分块顺序不同。它也比 Triton 快得多，某种程度上比 ThunderKittens 也快。他举 Triton 的问题：如果拿一个 GPT 模型做 <code>torch.compile</code>，再写一个自定义的逐元素内核，PyTorch 编译器很擅长融合，会把这个逐元素操作融进 Triton 的矩阵乘里。但 Triton 的矩阵乘至少比 cuBLAS 慢 5%，可能更多，所以融合了也不更快。这就是为什么有时 PyTorch 不融合：开启调优时，它会很聪明地选“cuBLAS 加非融合”。用 CUTLASS 或这种手写内核的好处是能做这类融合，但因为 Hopper 的工作方式，重叠很难做，这个例子说明 tile 末尾的处理，就算没有 GELU 这样的后处理，也可能是最难保持高效运行的部分。他说 Blackwell 会好一点，但肯定会有新问题。</p>
+        <p>Pranjal 说，NVIDIA 给新硬件的更好的抽象就是 CUTLASS，如果只想用、不想想太多，就用它，不用一直和 nvcc 较劲。Arun 补充：GELU 这类问题即使用 CUTLASS，寄存器和共享内存也还是不够；做得好损失会小，但按 Hopper 的工作方式，很难做到融合完全没有代价。</p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 问答：功耗墙、L2 分区、新版 cuBLAS、FP8</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=3991s" target="_blank">1:06:31</a>–1:16:00 · Q&amp;A and future work</em></p>
+        <h3>Hilbert 曲线和稀疏矩阵</h3>
+        <p>聊天区有人评论：Hilbert 曲线这类优化对稀疏矩阵很有效，有研究组做过定量研究，推荐了一篇论文和一篇博士论文，里面有几章讲这个技术。主持人请他把链接发到 Discord。</p>
+        <h3>问答：能不能靠省数据搬运的功耗换更高频率</h3>
+        <p>有人问：关于跳过 L2 写入，有没有研究过不同缓存层级的能耗？有没有一种优化方案，在一个层级降低带宽，代价放在另一个层级，从而降低数据搬运的功耗，也许还能跑更高的频率？</p>
+        <p>Pranjal 说这就涉及一个点：这些内核受硬件功耗限制。大家会说矩阵乘法是计算受限的，只要做完这些乘法就行，结果并非如此。他放了一张图，提到 PyTorch 的 Horace 写过一篇很好的博客，分析新一代硬件上的这个问题。nvidia-smi 截图里功耗已经顶在上限（字幕里的瓦数识别不清）。也就是说，到某个程度你没法同时用满芯片上所有 Tensor Core，功耗太大，GPU 会降频，不能同时跑那么多矩阵乘。要解决就得降低功耗，所以问题变成：能不能在内核软件上做改动来降低功耗，从而跑更多矩阵乘。</p>
+        <p>他试过调一些常数，没看到性能变化。他想到一点：硬件上 L2 缓存其实分成两个分区，这一点文档很少，他只找到一份很好的研究，来自 Citadel 在某届 GTC 上的报告。他们发现不同的内存部分会载入不同的 L2 分区，两个分区之间会有重复，不同 SM 只从离自己近的分区读。他的理论是：如果有一种巧妙的算法，让两个 L2 分区不重复存东西、少互相通信，默认只把数据载到正确的分区，功耗就会下降。但这很复杂，连地址到分区的映射都不简单，没有文档，他短时间内没能复现，也许有人可以试试。</p>
+        <p>Arun 补充：离理论峰值有多远这个问题很微妙，因为功耗和性能绑在一起。在很低的频率下跑，可能能到峰值的 98% 左右；但在实际比较的情况下是功耗受限的，所以离峰值远得多。他说大概跑在 1450 MHz 左右，而芯片能到约 2 GHz（字幕里机型听不清，像是 H200 或 GH200），所以因为功耗限制浪费了 20% 以上的性能，cuBLAS 也一样。Pranjal 说功耗是 Hopper 的大瓶颈，也许 Blackwell 不一样，因为它有自己的 Tensor Core 内存。几个人接着聊了一会：功耗限制是否来自温度，新芯片用液冷，H200、Blackwell 的新装机大多是液冷；Arun 认为最终是整个数据中心能供多少电、有没有供电线路、能不能把整个数据中心的热散出去，不只是单块 GPU 的问题。</p>
+        <h3>新版 cuBLAS</h3>
+        <p>Pranjal 说他写博客和内核期间，NVIDIA 发布了新的 CUDA 版本，小矩阵上已经和他的内核持平，这距离 H100 首次发布大约两年。新的内核做矩阵乘很快，他的代码在小矩阵上看不到优势了（Arun 的版本他没试）。在 $N=8192$ 时，他们的内核仍快约 1%。他说花了大约两年一切才凑齐，所以到处都有机会，愿意深入的人总能改进东西。</p>
+        <p>主持人说之后有问题可以去 Discord 找他，用户名 pranjalssh。</p>
+        <h3>问答：会不会扩展到 FP8、FP4、INT8</h3>
+        <p>有人问是否打算扩展到低比特类型。Pranjal 说现在没时间，Arun 试过。Arun 说不带缩放的 FP8 很容易跑起来，比给 <code>stmatrix</code> 做 swizzle 那些事容易得多，TMA 布局等也差别不大。但 FP8 等类型的问题是 Hopper 对转置的支持方式不一样，还有一堆不完全相同的地方。他说这份代码有些部分不是生产级的：比如输入、输出都不支持转置，不支持在 D 上累加等等；一加 FP8，这些未实现的东西在 Hopper 上都会冒出来。他说有意思的是 Blackwell 上 FP8 更正交了，但 FP4 没那么正交，问题只是被往后推了一个数据类型。</p>
+        <p>Pranjal 说这份代码不用于生产。cuBLAS 在某些情况下比它略慢，但 cuBLAS 真正的本事是所有情况都快：随便扔一个矩阵尺寸，它都能做得不错。那是和这里很不同的问题，这里只是在一个问题上玩，借此学习 H100 架构。主持人最后提到，另一位社区成员 Eric 也在做 H100 矩阵乘，特意没来听，怕被“剧透”，有兴趣的人可以去找 Arun、Eric 和 Pranjal。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“tensor core is ideally one Hardware instruction to multiply relatively large matrices”（Tensor Core 可以理解为一条用来乘比较大矩阵的硬件指令。）<a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=523s" target="_blank">0:08:43</a></li>
+            <li>“one tensor core instruction is actually run by 128 threads in a grouped way”（一条 Tensor Core 指令实际上由 128 个线程分组一起执行。）<a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=909s" target="_blank">0:15:09</a></li>
+            <li>“it turns out that this diagram is wrong”（结果这张图是错的。）<a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=1036s" target="_blank">0:17:16</a></li>
+            <li>“using the as large an instruction as you can possibly can is always helpful”（结果发现，指令能用多大就用多大，总是有好处的。）<a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=2056s" target="_blank">0:34:16</a></li>
+            <li>“we are usually limited by the amount of memory in shared”（我们通常受限于共享内存的容量。）<a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=1864s" target="_blank">0:31:04</a></li>
+            <li>“there's always opportunities everywhere people want to dive in and improve things”（只要有人愿意深入去改进，到处都有机会。）<a href="https://www.youtube.com/watch?v=ErTmTCRP1_U&t=4369s" target="_blank">1:12:49</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 45: Outperforming cuBLAS on H100 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

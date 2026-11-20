@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FlashAttention 入门实现 | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="04_归约.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 05</span>
+    <span><a href="06_Triton实践指南.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 12 · FlashAttention 入门实现</h1>
+        <p class="subtitle">把注意力看成模型内部的一次分类，从“算一个输出元素需要什么”推出 FlashAttention 的分块方式和在线 softmax；再按 FlashAttention 2 的伪代码依次写出 PyTorch、Numba、CUDA 三个版本，把累加器从共享内存挪进寄存器，用 cuda-python 编译，用 Lightning Thunder 替换模型里的注意力</p>
+        <div class="author-meta">
+            主讲：Thomas Viehmann（Lightning AI，做 Thunder 编译器）· 主持：Mark Saroufim · 发布日期：2024 年 3 月 31 日 · 时长：1 小时 12 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=zEuwuCTEf_0" target="_blank">讲座录像 Lecture 12: Flash Attention</a>（GPU MODE YouTube 频道公开）· 代码：<a href="https://github.com/gpu-mode/lectures/tree/main/lecture_012" target="_blank">lecture_012（notebook、flash_attention.cu 等）</a>（本文依据录像字幕和仓库代码整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>Thomas Viehmann 八周前讲过第 4 讲（本合集第 02 篇），结尾留了一个练习：从零实现 FlashAttention。这一讲是他自己的“进度报告”。他说本想现场写出最快的 FlashAttention 内核，但 GTC 和这一讲之间只隔一周，太乐观了；最后展示的是一个能正确运行、但比 PyTorch 内置注意力慢的教学内核，以及写的过程中学到的东西。</p>
+        <p>前置知识：第 02 篇的共享内存分块矩阵乘法；softmax 的定义。读完这一篇，再看第 13 篇（FA3）和第 18 篇（FA4）会顺很多。仓库里的 notebook 后来被整理成 FlashAttention 2 论文前向算法的 Torch、Numba、CUDA 三个版本（$d=128$），比讲座现场的版本更完整，下面的代码取自仓库。</p>
+        <ol>
+            <li><a href="#t01">为什么要分块和融合</a> · <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">把注意力看成分类</a> · <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=196s" target="_blank">0:03:16</a></li>
+            <li><a href="#t03">多头注意力的并行性：一个头一个线程块</a> · <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=458s" target="_blank">0:07:38</a></li>
+            <li><a href="#t04">分块策略：算一个输出元素需要什么</a> · <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=1046s" target="_blank">0:17:26</a></li>
+            <li><a href="#t05">稳定 softmax 和在线 softmax</a> · <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=1771s" target="_blank">0:29:31</a></li>
+            <li><a href="#t06">真正的 FlashAttention 还做了什么</a> · <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=2165s" target="_blank">0:36:05</a></li>
+            <li><a href="#t07">第一步：照着伪代码写 PyTorch 版本</a> · <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=2355s" target="_blank">0:39:15</a></li>
+            <li><a href="#t08">第二步：Numba 内核</a> · <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=2680s" target="_blank">0:44:40</a></li>
+            <li><a href="#t09">第三步：CUDA 版本，把输出放进寄存器</a> · <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=2941s" target="_blank">0:49:01</a></li>
+            <li><a href="#t10">用 cuda-python 和 NVRTC 编译</a> · <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=3076s" target="_blank">0:51:16</a></li>
+            <li><a href="#t11">用 Thunder 把内核接进模型</a> · <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=3397s" target="_blank">0:56:37</a></li>
+            <li><a href="#t12">问答</a> · <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=3649s" target="_blank">1:00:49</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 为什么要分块和融合</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=0s" target="_blank">0:00:00</a>–0:03:16 · Introduction to FlashAttention</em></p>
+        <p>他现在在 Lightning AI 做 Thunder。FlashAttention 拿注意力这个计算（两次矩阵乘法加一次 softmax），套用和矩阵乘法类似的基本分块方案，又经过大量优化，因为注意力是 Transformer 里最耗时间和显存的部分之一，而 Transformer 正在吃掉所有可用的算力。基本想法是避免把中间结果写到显存：一是不必分配内存并长时间占着，显存永远不够；二是共享内存（SRAM）通常快一个数量级左右，不过这类假设要不断更新。他举例说，七年前他刚开始用 PyTorch 时，一个接一个发内核就能把 GPU 喂饱，现在情况变了很多。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 把注意力看成分类</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=196s" target="_blank">0:03:16</a>–0:07:38 · Attention mechanism review</em></p>
+        <p>他喜欢把注意力看成模型内部的一个分类问题。经典的分类头：$d$ 维输入激活，乘以最后一层全连接矩阵（他特意叫它 $K$）得到 logits，再做 softmax 得到概率。ResNet 时代的人都熟悉这个结构。</p>
+        <p>他在自己的博客 Lernapparat 上有一篇《ResNet 是几个模型》，说可以重新理解这一步：把最后的线性层看成类别嵌入，矩阵每一行是一个目标类别的嵌入向量，输入和每个嵌入做点积得到 logits，再 softmax 得到类别概率。他在这里加了一个缩放项，注意力里也有，相当于一个温度；早年人们会设法找一种初始化来起到这个作用。</p>
+        <p>如果 $Q$ 和 $K$ 不是固定参数，而是来自线性变换，这就是注意力权重。注意力就是一个分类问题：该挑选值 $V$ 的哪些行。</p>
+        $$P = \mathrm{softmax}\left(\frac{QK^\top}{\sqrt{d}}\right),\qquad O = PV$$
+    </section>
+
+    <section id="t03">
+        <h2>03. 多头注意力的并行性：一个头一个线程块</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=458s" target="_blank">0:07:38</a>–0:17:26</em></p>
+        <p>多头注意力就是同时做多个这样的分类，每个头的 $d$ 更小。<em>Attention Is All You Need</em> 把它说成是为了表示能力：“multi-head attention allows the model to jointly attend to information from different representation subspaces at different positions”。Thomas 说它同时也是巨大的计算简化：各个头完全独立，像批维度上的不同样本一样，很容易并行。他说这像个“快乐的小意外”，除非你相信它也是为了省计算才发明的。每个头的大小会成为限制因素，头多了就容易并行。</p>
+        <p>所以在 GPU 上写注意力时，只要头数和批量够大，就能把这些“易并行”的部分分到所有 SM 上。FlashAttention 的做法通常是一个注意力头的计算放在一个线程块里，这样块内线程能共享内存。他还假设 $Q$、$K$、$V$ 形状相同，序列长度 $n$、头维度 $d$（实际中 $K$、$V$ 可以和 $Q$ 大小不同）。</p>
+        <p>他说中间矩阵 $P$ 可以不必实际造出来。他早年学数值线性代数时有句话：对大矩阵，在某些情况下如果你把中间矩阵物化了，说明你做错了，因为内存代价太高。这里情况类似。</p>
+        <h3>问答：“一个头一个块”是什么意思</h3>
+        <p>Mark 请他解释头和硬件的对应。Thomas 说启动 CUDA 内核时定义一个由块组成的网格，块是协作的线程，一个块总是由一个 SM 处理。GPU 有八十几个 SM，要有足够多的块才能占满。一个头在一个协作线程块里计算，因为要用共享内存，它只能跑在一个 SM 上；头多、批大，就有希望不只用到 GPU 的一部分，当然还有别的技巧能提高利用率。</p>
+        <p>Mark 问：这是不是 FlashAttention 的头维度又小又固定（128、256）的原因，否则一个头装不进一个块，算法就崩了？Thomas 说基本如此。他自己写了一个处理单个头的玩具内核，比简单的 FlashAttention 实现还慢得多。在他看来最大的约束是每个头的维度，它限制了寄存器和共享内存；共享内存紧张到要把一些东西从共享内存挪到寄存器里。</p>
+        <p>Mark 提到 PyTorch 核心开发者 Christian Puhrsch 的一个观察：多头注意力的公式是矩阵乘法、非线性、矩阵乘法，概念上和带非线性的两层神经网络几乎没区别，主要差别是头维度小。Thomas 说这和他的看法一致：它是一个小的两层网络，但因为有很多头，批量很大；用头换来了类似批量的东西，代价是内部隐藏维度小，而我们迫切需要这一点。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 分块策略：算一个输出元素需要什么</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=1046s" target="_blank">0:17:26</a>–0:29:31 · FlashAttention tiling strategy</em></p>
+        <p>他写 CUDA 内核时，第一件事是看算一个输出元素需要什么。理想情况是一个线程负责一个或多个输出：多个线程写同一个输出总有同步问题，要用原子加之类，量大了会有性能问题，还会带来非确定性，同一块 GPU 同一天跑两次，结果因为加法顺序不同而略有差别。</p>
+        <p>输出元素 $O_{t,d}$ 有序列维 $t$ 和头维 $d$（比如 Llama 2 7B 是 128）。要算它，需要：</p>
+        <ul>
+            <li>所有序列位置 $s$ 上的 $V_{s,d}$；</li>
+            <li>这一行 $t$、所有 $s$ 上的 softmax 概率 $P_{t,s}$；</li>
+            <li>要算 softmax，又需要输入 logits $L_{t,s} = \sum_d Q_{t,d} K_{s,d}$，收缩维度是头维 $d$。</li>
+        </ul>
+        $$O_{t,d} = \sum_s P_{t,s} V_{s,d},\qquad P_{t,s} = \frac{\exp(L_{t,s})}{\sum_{s'} \exp(L_{t,s'})}$$
+        <p>他说关键的“奇迹”是：softmax 归一化所沿的维度，恰好和 $P$ 与 $V$ 相乘时的收缩维度相同，都是 $s$。这让整件事成为可能。另外，喂进网络时，收缩维度天然是变化最快的维度，比通常的矩阵乘法更方便读连续的值。</p>
+        <h3>先忽略 softmax 的分块方案</h3>
+        <ol>
+            <li>沿 $t$ 方向（输出方向，容易分的方向）分块，加载对应的 $Q$ 块。这个块在收缩维度 $d$ 上覆盖整行，所以和第 02 篇的方形块不同，是很大的块。初始化输出。</li>
+            <li>对 $s$ 方向的块做循环。这是 $P V$ 那次矩阵乘法的收缩维度，就像矩阵乘法分块里内层循环是收缩维度。每次把一块 $K$ 和一块 $V$ 加载到共享内存。</li>
+            <li>算 $Q$ 块乘 $K$ 块的转置，得到 logits，再算出概率（这一步先略过）。</li>
+            <li>用这一块概率乘 $V$ 块，累加到输出上。</li>
+            <li>循环结束，写出输出块。</li>
+        </ol>
+        <p>他说这是一种进阶的分块，把两次矩阵乘法的分块想法混在一起。只要能解决从 $L$ 到 $P$ 的那一步，并且能处理 $d$ 维上的大块，就和矩阵乘法的分块在概念上很像。Mark 在聊天区贴了一张 Hugging Face 的图，对比标准实现和 Flash 实现，Thomas 说说到底就是融合：读进所有输入，再写出所有输出。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 稳定 softmax 和在线 softmax</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=1771s" target="_blank">0:29:31</a>–0:36:05 · Numerical stability in softmax</em></p>
+        <p>softmax 对每个分量取指数，再除以所有指数的和。实数的指数总是正的，所以结果在 0 和 1 之间，且和为 1。问题是分子和分母可能极大或极小：输入 100 或 1000，指数就已经是巨大的数，数值上不稳定。</p>
+        <p>稳定版 softmax 给分子分母同乘 $e^{-m}$，等价于把 $-m$ 加进指数里，结果不变。取 $m$ 为所有 logits 的最大值，分子里的每一项就落在 0 和 1 之间，最大的那项是 1（指数为 0）：</p>
+        $$P_{t,s} = \frac{\exp(L_{t,s} - m_t)}{\sum_{s'} \exp(L_{t,s'} - m_t)},\qquad m_t = \max_{s} L_{t,s}$$
+        <p>问题是要先求出最大值再用它。在线版本的观察是：想把已经用过的 $m$ 换成新的 $m_{\text{new}}$，只要调整已经累加的东西：</p>
+        $$\ell \leftarrow e^{m_{\text{old}} - m_{\text{new}}}\,\ell + \sum_s e^{L_{t,s} - m_{\text{new}}},\qquad O \leftarrow e^{m_{\text{old}} - m_{\text{new}}}\,O + \sum_s e^{L_{t,s} - m_{\text{new}}}\,V_s$$
+        <p>每出现新的最大值，就调整输出。FlashAttention 的伪代码按块做这件事。他常想按元素做是否概念上更简单，但那样计算量大，指数不是便宜的函数。</p>
+        <p>即使 FP32 也需要稳定化：在有 FP16 之前，FP32 就是那个“不太稳定”的类型，指数函数让参数涨得太快。他提到 PyTorch 开发者论坛上一周前的一篇帖子，标题大意是“FMA 和 max 加浮点数被认为有害”：融合乘加（FMA）和非融合乘加的舍入差异，大到足以在 FlashAttention 的 softmax 里造成问题。所以即使是 32 位浮点，这个计算也很敏感。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 真正的 FlashAttention 还做了什么</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=2165s" target="_blank">0:36:05</a>–0:39:15 · Implementation challenges</em></p>
+        <ul>
+            <li>有掩码时块布局不是矩形，要聪明地把块分给 worker。FlashAttention 2 论文讲了一些细节，前向和反向用了不同策略。</li>
+            <li>为了用上 Tensor Core，FlashAttention 用 CUTLASS（NVIDIA 实现各种 Tensor Core 矩阵乘法原语的库），后面会有讲座专门讲（本合集第 10、13 篇）。</li>
+            <li>这让 FlashAttention 2 成了一个巨大的 C++ 文件。他和 PyTorch 的 Alban 聊过（论坛上答题比他还多的两个人之一），Alban 说就是 FlashAttention 2 这个文件让他没法在笔记本上编译 PyTorch，编译它要用四十多 GB 内存。</li>
+            <li>论文里的分块大小是 64 或 128，已经很大，他自己还没达到；论文说有几种取法，可以自动调优，论文里是手工调的。</li>
+        </ul>
+        <p>他先尝试用 Numba 实现，但很快撞上共享内存的限制。他也提醒：只想改一点 FlashAttention 的人，可以直接看 Triton 的教程示例和模板；但那样就少了一半乐趣，所以他尽量从头写。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 第一步：照着伪代码写 PyTorch 版本</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=2355s" target="_blank">0:39:15</a>–0:44:40 · Triton and CUDA implementation（前半）</em></p>
+        <p>他在 Lightning Studio 里演示（顺带为新东家做了广告：可以直接把配好的环境给别人跑）。FlashAttention 前向伪代码的步骤：把块从 HBM 加载到片上共享内存；初始化输出和在线 softmax 的中间最大值；外层按 $Q$ 块循环，内层按 $K$、$V$ 块循环；算 logits（他叫 $L$，论文叫 $S$）；在线 softmax；因为输出和 softmax 在同一个收缩轴上，用同样的修正技巧更新中间输出；最后用 softmax 的分母归一化（之前一直只乘了分子），并把 softmax 统计量存下来给反向用。</p>
+        <p>他先用一些样例尺寸，用 PyTorch 原样实现这个算法，块的命名尽量和论文一致，和 PyTorch 的实现比较，结果在数值精度范围内相同（目前还只处理单个注意力头）。仓库里整理后的版本：</p>
+        <pre><code>def flash_attention_torch(Q, K, V, O, L, N_inp, N_out, d) -&gt; None:
+    B_c = 16
+    B_r = 16
+    T_c = (N_inp + B_c - 1) // B_c
+    T_r = (N_out + B_r - 1) // B_r
+
+    scaling = 1 / math.sqrt(d)
+
+    # Q and O L split into T_r; K, V in T_c blocks
+    for i in range(T_r):
+        Q_i = Q[i * B_r : (i + 1) * B_r]
+        O_i = torch.zeros(B_r, d)
+        L_i = torch.zeros(B_r, 1)
+        m_i = torch.full((B_r, 1), -math.inf)
+        last_m_i = m_i
+        for j in range(T_c):
+            K_j = K[j * B_c : (j + 1) * B_c]
+            V_j = V[j * B_c : (j + 1) * B_c]
+            S_i = scaling * (Q_i @ K_j.T)
+            m_i = torch.maximum(m_i, S_i.max(dim=-1, keepdim=True).values)
+            P_i = torch.exp(S_i - m_i)
+            L_i = torch.exp(last_m_i - m_i) * L_i + P_i.sum(dim=-1, keepdim=True)
+            O_i = torch.exp(last_m_i - m_i) * O_i + P_i @ V_j
+            last_m_i = m_i
+        O_i = (1.0 / L_i) * O_i
+        L_i = m_i + torch.log(L_i)
+        O[i * B_r : (i + 1) * B_r] = O_i
+        L[i * B_r : (i + 1) * B_r] = L_i</code></pre>
+        <h3>问答：torch.compile 能把它变成 FlashAttention 吗</h3>
+        <p>Mark 很好奇纯 PyTorch 写的这个版本经过 torch.compile 会生成什么样的 Triton 内核，请他把代码合进仓库。Thomas 说会合进去。他预期编译器的自动融合对内存受限的东西有帮助，对计算受限的帮助不大，这个太复杂，Dynamo 恢复不出 FlashAttention 内核。但它给了他一个参考实现，还能写出中间结果。他说作为数学家，做这种练习时希望尽早有能跑的 Python 代码。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 第二步：Numba 内核</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=2680s" target="_blank">0:44:40</a>–0:49:01 · Triton and CUDA implementation（后半）</em></p>
+        <p>下一步翻译成 Numba 内核。他说 CUDA MODE 里很少讲 Numba，但它很好：用 Python 风格的语言给你几乎全部的 CUDA 能力和 CUDA 语义，而且不经过 C++ 编译，周转很快。用 <code>@numba.cuda.jit</code> 装饰，就能像写 CUDA 一样取线程 ID、声明共享内存、对 range 循环。启动时指定块大小，他只用一个元素的网格（只算一个块），直接传 PyTorch 张量，这靠 PyTorch 和 Numba 都支持的 CUDA Array Interface，他说 2017 年还做不到，现在能互通让他很高兴。结果和参考实现有一点数值差异，小例子上一致。</p>
+        <p>他没能用上论文里的块大小：一是他用的是 FP32；二是伪代码说 $Q$、$K$、$V$ 加载到共享内存，但没说其他东西也放共享内存，而它们多半不在共享内存里。仓库 notebook 里先给了“全部放共享内存”的版本，再做优化。notebook 的估算：</p>
+        <ul>
+            <li>共享内存：$Q_i$、$K_j$、$V_j$、$S$ 共约 25 KB；累加器 $m_i$、$\ell_i$、$O_i$ 约 8 KB；合计约 33 KB，一个 SM 跑一个块没问题。</li>
+            <li>想把累加器挪成每个线程的局部变量放进寄存器，但如果每个线程都存完整的数组，需要约 4 MB，远超每个 SM 256 KB 的寄存器。</li>
+            <li>按 <code>tpb = (32, 16)</code> 分工后，每个线程只负责 $x$ 方向 $d/\text{blockDim.x} = 4$ 列、$y$ 方向 $B_r/\text{blockDim.y} = 1$ 行，局部数组只要 24 B，每块 12 KB，远小于 256 KB，避免寄存器压力和溢出。</li>
+        </ul>
+        <p>他在讲座里解释了规则：用动态下标访问的数组必须按数组布局放在内存里；但如果局部数组大小是常量，并且只用普通的循环下标访问，CUDA 会把它分配到寄存器。他说自己还不确定完全做对了。从他读到的 FlashAttention 代码看，这些东西应该在寄存器里。写的过程中一半时间在找循环变量用错、或条件和循环变量对不上的地方，这时内核要么非法内存访问，要么一直跑不完。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 第三步：CUDA 版本，把输出放进寄存器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=2941s" target="_blank">0:49:01</a>–0:51:16</em></p>
+        <p>他把 Numba 版本翻成 C++，也重新排了一下，方便把 $O$ 放进寄存器。他说这一点值得认真想：共享内存只有 48 KB，用满块大小的话会被 $Q$、$K$、$V$ 用完（他还把 $S$ 放在共享内存）；而 SM 上的寄存器文件不小，每个 SM 有 16K 个单精度寄存器（他的说法），每个线程能分到两百多个，所以把输出分配在寄存器里。仓库里的 <code>flash_attention.cu</code>（$d = 128$，每个块算外层循环的一次迭代，网格大小为 $T_r$）：</p>
+        <pre><code>constexpr int d = 128;
+constexpr int B_r = 8;
+constexpr int B_c = 32;
+constexpr int block_dim_x = 128;
+constexpr int block_dim_y = 8;
+constexpr int d_over_bdx = d / block_dim_x;
+constexpr int B_r_over_bdy = B_r / block_dim_y;
+
+
+extern "C" __global__ void flash_attention_k(
+    float *out,
+    float *out_l,
+    float *Q,
+    float *K,
+    float *V,
+    float scaling,
+    int n,
+    int T_r,
+    int T_c
+) {
+    // Thread indices
+    int tid_x = threadIdx.x;
+    int tid_y = threadIdx.y;
+    int bdy = blockDim.y;
+    int bdx = blockDim.x;
+    int bix = blockIdx.x;
+
+    // Shared memory buffers for Q, K, V blocks
+    __shared__ float Q_i[B_r][d];
+    __shared__ float K_j[B_c][d];
+    __shared__ float V_j[B_c][d];
+    __shared__ float S[B_r][B_c];
+
+    // Local accumulators per thread for output block
+    float l_i[B_r_over_bdy];
+    float m_i[B_r_over_bdy];
+    float O_i[B_r_over_bdy][d_over_bdx];
+
+    // Loop over only one tile block out of T_r blocks
+    for (int i = bix; i &lt; bix + 1; i++) {
+        // Load Q_i tile into shared mem
+        for (int ii = tid_y; ii &lt; B_r; ii += bdy) {
+            for (int dd = tid_x; dd &lt; d; dd += bdx) {
+                Q_i[ii][dd] = Q[(ii + i * B_r) * d + dd];
+            }
+        }
+        // Init O_i, l_i, m_i into registers
+        for (int ii = 0; ii &lt; B_r_over_bdy; ii ++) {
+            for (int dd = 0; dd &lt; d_over_bdx; dd ++) {
+                O_i[ii][dd] = 0.f;
+            }
+            l_i[ii] = 0.f;
+            m_i[ii] = 1e-30f;
+        }
+
+        for (int j = 0; j &lt; T_c; j++){
+            // Load K_j, V_j into shared memory
+            for (int jj = tid_y; jj &lt; B_c; jj += bdy) {
+                for (int dd = tid_x; dd &lt; d; dd += bdx) {
+                    K_j[jj][dd] = K[(jj + j * B_c) * d + dd];
+                    V_j[jj][dd] = V[(jj + j * B_c) * d + dd];
+                }
+            }
+            __syncthreads();
+            // S[ii][jj] = scaling * Q_i @ K_j.T
+            for (int ii = tid_x; ii &lt; B_r; ii += bdx) {
+                for (int jj = tid_y; jj &lt; B_c; jj += bdy) {
+                    float S_ij = 0.0f;
+                    for (int dd = 0; dd &lt; d; dd ++) {
+                        S_ij += Q_i[ii][dd] * K_j[jj][dd];
+                    }
+                    S_ij = scaling * S_ij;
+                    S[ii][jj] = S_ij;
+                }
+            }
+            __syncthreads();
+            for (int ii = 0; ii &lt; B_r_over_bdy; ii ++) {
+                // Get max m_i[ii]
+                float m = m_i[ii];
+                float last_m = m;
+                for (int jj = 0; jj &lt; B_c; jj++) {
+                    if (m &lt; S[ii * bdy + tid_y][jj]) {
+                        m = S[ii * bdy + tid_y][jj];
+                    }
+                }
+                m_i[ii] = m;
+                float l = expf(last_m - m) * l_i[ii];
+
+                // Scale O_i
+                for (int dd = 0; dd &lt; d_over_bdx; dd ++) {
+                    O_i[ii][dd] *= expf(last_m - m);
+                }
+                // Compute P_ij, add it to l and add P_ij*V_ij to O_i
+                for (int jj = 0; jj &lt; B_c; jj++) {
+                    float P_ij = expf(S[ii * bdy + tid_y][jj] - m);
+                    l += P_ij;
+                    for (int dd = 0; dd &lt; d_over_bdx; dd ++) {
+                        O_i[ii][dd] +=  P_ij * V_j[jj][dd * bdx + tid_x];
+                    }
+                }
+                l_i[ii] = l;
+            }
+        }
+
+        // Write outputs to HBM
+        for (int ii = 0; ii &lt; B_r_over_bdy; ii ++) {
+            for (int dd = 0; dd &lt; d_over_bdx; dd ++) {
+                out[(ii * bdy + tid_y + i * B_r) * d + dd * bdx + tid_x] = O_i[ii][dd] / l_i[ii];
+            }
+            out_l[ii * bdy + tid_y + i * B_r] = m_i[ii] + logf(l_i[ii]);
+        }
+        __syncthreads();
+    }
+}</code></pre>
+        <p>关键点：$Q_i$、$K_j$、$V_j$、$S$ 在共享内存；每个线程的 $\ell_i$、$m_i$、$O_i$ 是大小为编译期常量的局部数组，只用循环下标访问，所以进寄存器。内层先求这一块的行最大值 $m$，用 $e^{m_{\text{old}} - m}$ 缩放旧的 $\ell$ 和 $O_i$，再累加 $P_{ij}$ 和 $P_{ij} V_j$。最后输出 $O_i / \ell_i$，并写出 logsumexp $m_i + \log \ell_i$ 给反向用。</p>
+        <p>仓库还有一个 <code>flash_attention_spilling_from_registers.cu</code>，每个线程都存完整数组，会发生寄存器溢出。notebook 说它比正常版本慢约 3 倍；它的 PTX 里能看到 <code>.local .align 16 .b8 __local_depot0[8320];</code>，8320 字节正好是完整的 <code>l_i</code>、<code>m_i</code>、<code>O_i</code> 的大小。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 用 cuda-python 和 NVRTC 编译</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=3076s" target="_blank">0:51:16</a>–0:56:37 · Thunder compiler integration（前半）</em></p>
+        <p>每次都做 PyTorch 扩展编译，久了就烦。他试了 NVIDIA 新出的 cuda-python，它提供 NVRTC（运行时编译器）的绑定，可以在线把 CUDA 代码编译成内核，而且编译很快。接口有点繁琐，调用约定比你想的还糟，官方教程自己都写着：“the following code example is not intuitive and subject to change in a future release”。做法是：内核参数会放在常量内存里，所以要在 CPU 上为每个参数分配 dtype 匹配的张量；对要传入的 CUDA 张量，分配一个 64 位整数保存它的数据指针；再把指向这些参数的指针放进数组，传给 <code>cuLaunchKernel</code>。“通过奇迹，它能工作，除了不工作的时候。”</p>
+        <p>结果：数值上一致，但即使在这么小的例子上，也比 PyTorch 内置的 <code>scaled_dot_product_attention</code> 慢得多。把输出从共享内存挪到寄存器之前，慢 10 倍；挪过去以后快了很多，但要小心别溢出寄存器。仓库 notebook 的结论是：小矩阵上和 SDPA 差不多，矩阵变大就变慢，因为没有高效利用 GPU 资源；溢出版本总是比 SDPA 慢很多。</p>
+        <h3>问答：怎么发现寄存器溢出</h3>
+        <p>Mark 问：写 CUDA 时你只显式控制共享内存，从不说“别用超过多少寄存器”，怎么判断有没有溢出风险？Thomas 说要事后看内核：他把代码贴进 Compiler Explorer（godbolt）看；下一步是用 <code>ncu</code> 跑，会有提示。他这里本来就想尽量多分配寄存器，但每个线程大约上限 255 个。他提到以前写 CTC loss 内核时，每个线程用了约 50 个寄存器，块大时这就是很大的限制。（结尾问答里他在 godbolt 上现场看了，寄存器数一路涨到 243 个，说应该给内核设 <code>__launch_bounds__</code>；还有一个编译选项可以在输出里显示用了多少寄存器，他会写进 notebook。仓库里给出的是 <code>nvcc -ptx</code> 看 PTX、再用 <code>ncu</code> 比较两个版本。）</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 用 Thunder 把内核接进模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=3397s" target="_blank">0:56:37</a>–1:00:49 · Thunder compiler integration（后半）</em></p>
+        <p>他们在 GTC 上发布了 Thunder，一个 PyTorch 的源到源编译器：对 PyTorch 函数或模型调用 <code>thunder.jit</code>，然后像原来一样调用。他演示了怎样把自定义内核接进模型：</p>
+        <ol>
+            <li>把内核注册为 Thunder 的算子：提供一个真正对张量做计算的实现，和一个小的 meta 函数，说明给定输入时返回什么形状。</li>
+            <li>提供一个转换函数，签名和 PyTorch 标准的 <code>scaled_dot_product_attention</code> 相同，内部调用刚注册的新注意力算子。</li>
+            <li>提供一个检查函数，规定什么条件下才用替换：他还没实现因果掩码、注意力掩码、dropout，也还不支持多头、多批，这些情况就返回 False。</li>
+        </ol>
+        <p>注册后直接运行，就会自动把 <code>scaled_dot_product_attention</code> 换成他的注意力；不适用的情况就跑标准 PyTorch。这样等你在课程里写出很多优化内核后，可以很方便地插进模型做对比。他说准备 Thunder 也是这一讲准备时间短的原因，希望以后能拿出更成熟的版本。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=3649s" target="_blank">1:00:49</a>–1:12:14 · Q&amp;A and concluding remarks</em></p>
+        <p>Mark 说最打动他的是看到“我的内核”和生产内核之间的差距，把这个差距缩到尽量小是很有教育意义的练习：有很多容易摘的果子，有些技巧难，可以不做，有一个能单步调试、能剖析、能看 PTX 的教学内核对社区很有帮助。</p>
+        <h3>Thunder 是在 ATen 层替换，还是在 prims 层</h3>
+        <p>Thunder 为 PyTorch 函数提供算子，和 ATen 层很像但不完全是，也可以声明替换其他函数。Thunder 内置一个 Python 解释器，把所有对 PyTorch 的调用重定向，记录成 Thunder trace。它的中间表示就是 Python 代码，可以复制出来直接运行；每次变换后都有一个 trace，最早的那个能看到 <code>scaled_dot_product_attention</code> 的原始记录。目标是好用、好懂、好扩展。</p>
+        <h3>能不能把算 QKV 的矩阵乘法也融合进来</h3>
+        <p>Thomas 说这里已经到了融合和物化中间结果的极限，资源已经用完了，FlashAttention 很难再塞进更多东西。人们常做的是把三个 QKV 投影的矩阵乘法合成一个，这有一点帮助。他提到 Groq 那种把整个模型放进片上内存的公司。Mark 补充：合并 QKV 投影是很常见的技巧；还有一个研究方向是持久化内核，用一个 CUDA 内核表示整个神经网络，持续喂不同批次进去，比如 Intel GPU 团队做过整个 MLP 一个内核；他认为约束是寄存器溢出，并预计近期会有更多这类 megakernel（本合集第 20 篇讲的就是两年后生产环境里的 megakernel）。</p>
+        <p>Mark 预告下一讲是 Andreas 讲 Ring Attention，把这一讲扩展到近乎无限的序列长度；Andreas 和 Discord 上一些人组了一个工作组在实现它。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“the attention is a classification problem of which rows of vs of the value uh part of the attention should we should we pick”（注意力是一个分类问题：该挑选值的哪些行。）<a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=392s" target="_blank">0:06:32</a></li>
+            <li>“the miracle is that uh the contraction Dimension and the uh sofx Dimension coincide um and that like enables the the entire thing”（奇迹在于收缩维度和 softmax 的维度重合，整件事就靠这一点成立。）<a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=1241s" target="_blank">0:20:41</a></li>
+            <li>“if you materialize your intermediate Matrix you're doing something wrong”（如果你把中间矩阵物化了，说明你做错了什么。）<a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=723s" target="_blank">0:12:03</a></li>
+            <li>“like a small two layer network uh uh but with a very large batch size due to the heads”（它是一个小的两层网络，只是因为有很多头，批量很大。）<a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=1046s" target="_blank">0:17:26</a></li>
+            <li>“I had like a 10 times Factor before I moved the outputs from shared memory to registers”（在把输出从共享内存挪到寄存器之前，我慢了 10 倍。）<a href="https://www.youtube.com/watch?v=zEuwuCTEf_0&t=3205s" target="_blank">0:53:25</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 12: Flash Attention · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

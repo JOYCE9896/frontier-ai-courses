@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CUDA 性能检查清单 | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="02_计算与内存架构基础.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 03</span>
+    <span><a href="04_归约.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 8 · CUDA 性能检查清单</h1>
+        <p class="subtitle">PMPP 第 6 章的优化清单，每条配一个小 .cu 程序用 ncu 验证：合并访存、占用率和占用率计算器、屋顶线与算术强度、分块、控制发散、线程粗化、私有化，最后用在线 softmax 说明“用更好的数学重写算法”</p>
+        <div class="author-meta">
+            主讲：Mark Saroufim（Meta PyTorch 团队工程师）· 发布日期：2024 年 3 月 4 日 · 时长：1 小时 8 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=SGhfUhlowB4" target="_blank">讲座录像 Lecture 8: CUDA Performance Checklist</a>（GPU MODE YouTube 频道公开）· 幻灯片/代码：<a href="https://github.com/gpu-mode/lectures/tree/main/lecture_008" target="_blank">lecture_008（.cu 示例代码）</a>、<a href="https://docs.google.com/presentation/d/1cvVpf3ChFFiY4Kf25S4e4sPY6Y5uRUO-X-A4nJ7IhFE/edit" target="_blank">幻灯片（Google Slides）</a>（本文依据录像字幕和代码整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>主讲人 Mark Saroufim 是 Meta PyTorch 团队的工程师。这段录像是重录版：他在 CUDA MODE 直播里讲过一次，但那次录音出了问题，于是单独重讲一遍，内容基本相同，只是少了直播里观众的一些提问。他把这一讲定位成第 1 讲（本合集第 01 篇）的直接续集，同样是“先有假设，再用性能分析器验证”的做法。他说 PMPP 这本书到第 6 章左右，后面的章节基本都是案例研究（scan、归约等），用的都是同一批技巧，所以这一讲把这些技巧一次性摆出来，每一条都能马上用在自己的内核里。</p>
+        <p>每条技巧配一个很短的 .cu 程序，用 <code>nvcc</code> 编译成名为 <code>benchmark</code> 的可执行文件，再用 ncu 分析。前置知识：上一篇讲过的 SM、warp、占用率、屋顶线，以及 Jeremy 那一讲的分块矩阵乘法。读过本站 CS149 笔记的话，合并访存、分支发散这些概念都见过，这一讲的价值在于每一条都用 ncu 看实际数字，也看到了几个“数字和预期对不上”的情况。</p>
+        <ol>
+            <li><a href="#t01">开场：为什么用 GPU 就是为了性能，ncu 和参考论文</a> · <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">SRAM 和 DRAM</a> · <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=304s" target="_blank">0:05:04</a></li>
+            <li><a href="#t03">优化清单总览</a> · <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=436s" target="_blank">0:07:16</a></li>
+            <li><a href="#t04">各级内存的延迟，“It's the Latency, Stupid”</a> · <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=695s" target="_blank">0:11:35</a></li>
+            <li><a href="#t05">第一个案例：合并访存</a> · <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=944s" target="_blank">0:15:44</a></li>
+            <li><a href="#t06">占用率：tile/wave 量化、对齐和占用率计算器</a> · <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=1328s" target="_blank">0:22:08</a></li>
+            <li><a href="#t07">屋顶线模型：ReLU 和矩阵乘法的算术强度</a> · <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=1860s" target="_blank">0:31:00</a></li>
+            <li><a href="#t08">访存受限和计算受限各做什么，分块</a> · <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=2345s" target="_blank">0:39:05</a></li>
+            <li><a href="#t09">减少控制发散</a> · <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=2515s" target="_blank">0:41:55</a></li>
+            <li><a href="#t10">线程粗化</a> · <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=2910s" target="_blank">0:48:30</a></li>
+            <li><a href="#t11">私有化和滑动窗口</a> · <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=3170s" target="_blank">0:52:50</a></li>
+            <li><a href="#t12">用数学重写算法：在线 softmax 和 FlashAttention</a> · <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=3420s" target="_blank">0:57:00</a></li>
+            <li><a href="#t13">收尾：PMPP 表 6.1，按瓶颈选优化</a> · <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=3944s" target="_blank">1:05:44</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场：为什么用 GPU 就是为了性能，ncu 和参考论文</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=0s" target="_blank">0:00:00</a>–0:05:04 · Introduction</em></p>
+        <p>他开场说，我们花钱买 GPU 的唯一理由是在乎性能；拿不到性能，用 GPU 就没有意义。好消息是有一小批常见技巧反复出现，这一讲就是把它们集中倒出来。他说这些技巧既能帮你理解 CUDA 的性能，也能帮你理解 PyTorch 的性能。</p>
+        <h3>怎么跟着跑</h3>
+        <p>所有代码都在 lectures 仓库的 lecture 8 文件夹里，仓库 README 只有两行命令：</p>
+        <pre><code>nvcc -o benchmark file.cu
+ncu benchmark</code></pre>
+        <p>ncu（Nsight Compute）是 NVIDIA 的内核级性能分析器，这一讲的所有结论都靠它。本地有 GPU 的话开箱即用；在云厂商的机器上配 ncu 比较麻烦（需要权限），他请大家如果在某家云上配通了就到 Discord 里说一声。他自己用的是 Lightning AI Studio，并感谢 Lightning 的 Luca Antiga 赞助了这些实验的算力；他说 Lightning 愿意给在 CUDA MODE 里写或复现有意思内核的人算力折扣，就像 Discord 里已经成立的 ring attention 小组那样。他说自己花这么多时间在 CUDA MODE 上，就是想让更多人做这类事。</p>
+        <h3>参考：Citadel 的微基准论文</h3>
+        <p>这一讲的思路很接近 Citadel 发表的一篇 GPU 架构剖析论文。NVIDIA 公开了不少架构信息，但不够，很多时候你会问“这到底是怎么工作的”。比如大家都知道共享内存比全局内存快，可快多少、怎么测、怎么排除 GPU 非确定性的干扰？这类论文就做这件事。他在 Graphcore 工作时读过这些作者写的 IPU 剖析文章，所以熟悉他们，强烈推荐浏览一遍。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. SRAM 和 DRAM</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=304s" target="_blank">0:05:04</a>–0:07:16 · SRAM vs DRAM</em></p>
+        <p>让 CUDA 程序变快的一条主线是少用 DRAM、多用 SRAM。这里 SRAM 基本就是指共享内存（shared memory，一个线程块内的线程共用的片上内存），容量是 KB 量级；DRAM 就是显存，几十 GB，常见规格是 24、40、80 GB。</p>
+        <p>为什么不把 SRAM 做大？他说自己不想深入物理，只讲最基本的几点：</p>
+        <ul>
+            <li>SRAM 更贵。DRAM 一个单元用一个晶体管加一个电容就能实现，SRAM 要大约 6 个晶体管，他推测成本大约贵 3 到 6 倍。</li>
+            <li>晶体管多、面积大，发热更多；面积大还意味着电路之间的连线更长，速度未必像你想的那么快。</li>
+            <li>发热多就要更多散热空间，GPU 会更大，放不进数据中心。</li>
+        </ul>
+        <p>他说自己本科是电子工程背景，但不是专家。真正的专家是 NVIDIA 首席科学家 Bill Dally，他推荐 YouTube 上 Bill Dally 的任何一场演讲，从底层一路讲到软件栈，能解释 GPU 为什么设计成现在这样。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 优化清单总览</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=436s" target="_blank">0:07:16</a>–0:11:35 · Software performance tricks</em></p>
+        <p>硬件我们改不了，但软件上有一批技巧可用。他的幻灯片列了下面这些，除了两条（幻灯片上用斜体标出）之外都出自 PMPP 一书：</p>
+        <ul>
+            <li><strong>合并全局内存访问</strong>（coalescing，让一个 warp 里的线程读写连续地址，硬件可以把它们合成少量的内存事务）。GPU 是面向吞吐的架构：一次读 50 个元素并不比读 1 个慢多少，但前提是这些元素在内存里连续，否则享受不到这个好处，缓存命中也会变少。</li>
+            <li>最大化占用率。Discord 里最常见的问题就是块大小该取多少、网格该多大、该启动多少线程，这一讲会回答。</li>
+            <li>弄清楚是访存受限还是计算受限。这一条不怎么靠 profiling，但决定了你该考虑哪一类优化，他会花不少时间讲。</li>
+            <li>减少控制发散。线程按 warp（32 个线程一组）调度，最好这 32 个线程做差不多的活、差不多同时做完，否则有几个线程会闲着。</li>
+            <li>复用数据的分块（tiling）。矩阵乘法那一讲已经讲透，这里不重复。</li>
+            <li>私有化（privatization）。给数据做一份本地副本，少碰全局内存。</li>
+            <li>线程粗化（thread coarsening）。到目前为止课上都在让每个线程做尽量少的活，但对访存受限的任务，这样并不理想，让一个线程多干一些，程序可以快很多。</li>
+            <li>用更好的数学重写算法。这一条书里没有。编译器做不到这件事，它不能改变程序语义，用一种数值上等价但快得多的方式重写。他说这里仍然藏着很多收益；社区里最有名的内核作者（他举了 Tim Dettmers 和 Tri Dao）都是既懂数学又懂系统的人，这也是他希望自己和社区里更多人达到的状态。</li>
+        </ul>
+    </section>
+
+    <section id="t04">
+        <h2>04. 各级内存的延迟，“It's the Latency, Stupid”</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=695s" target="_blank">0:11:35</a>–0:15:44 · Memory latency / Its latency stupid</em></p>
+        <h3>自己测延迟</h3>
+        <p>讲合并访存之前，先要知道各种内存的延迟。可以看 NVIDIA 的宣传材料，更好的办法是自己写微基准测。他推荐论文 <em>Demystifying the Nvidia Ampere Architecture through Microbenchmarking and Instruction-level Analysis</em>，里面给出了测加法延迟、共享内存延迟、L2 缓存延迟的 PTX 代码（测 L2 的那段准备工作复杂一些）。结论是这些数字：</p>
+        <ul>
+            <li>全局内存大约 290 个周期；</li>
+            <li>L2 缓存大约 200 个周期，和全局内存差距不小，但不到一个数量级；</li>
+            <li>到 L1 缓存才有质变，大约降为十分之一；共享内存也差不多。</li>
+        </ul>
+        <p>他顺便说，CUDA MODE Discord 里最高的身份组就叫 “shared memory”，因为它是我们能用到的最快的内存。</p>
+        <p>他还提醒，这些速度不是确定的。从“预测某个工作负载要跑多久”的角度看，GPU 不是确定性的架构，原因是程序员不能显式控制 L1 和 L2 缓存，能显式控制的只有全局内存（数据默认放在这里）和共享内存。这也是微基准有用的原因。</p>
+        <h3>延迟为什么难降</h3>
+        <p>有人可能想：GPU 每代都在变好，为什么全局内存不能下一代快 10 倍？他说这极不可能，并引用了一篇经典文章 <em>It's the Latency, Stupid</em>，是 PyTorch 最早的创始人之一 Greg Chanan 推荐给他的。文章讲的是互联网带宽，但道理同样适用于深度学习代码和 CUDA 内核：</p>
+        <ul>
+            <li>吞吐容易提高。一条电话线延迟 100 ms，并联 80 条线就能服务 80 倍的客户；但加线不能把延迟减半，要降延迟得做根本不同的事。GPU 也一样，我们做的是隐藏延迟，降不了延迟，手段之一就是合并访存。</li>
+            <li>文章还讨论了愿意牺牲一点质量换更快的信号，比如数据包从 32 位字换成 16 位字。他说这就像量化：发送的数据更少，总内存更少，但质量会下降，延迟这件事没有免费的午餐。</li>
+        </ul>
+    </section>
+
+    <section id="t05">
+        <h2>05. 第一个案例：合并访存</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=944s" target="_blank">0:15:44</a>–0:22:08 · First case study</em></p>
+        <h3>要看的三个指标</h3>
+        <p>他在 Lightning Studio 上切到一块 T4 GPU，提醒大家看 ncu 报告里的三个数：</p>
+        <ul>
+            <li>DRAM 吞吐，即全局内存被访问得多频繁；</li>
+            <li>内核总耗时，这是最终指标，其他数字如果不能让内核变快就没有意义；</li>
+            <li>L1 缓存吞吐。</li>
+        </ul>
+        <h3>两个拷贝内核</h3>
+        <p>内核做的事是把一块内存拷到另一块。张量在我们脑子里是二维、三维或 N 维的，在内存里却是一维的，下标用“块编号 × 块大小 + 线程编号”算出来。他说这个技巧和刷 LeetCode 时用数组存堆的下标计算类似。合并版每个线程读写同一个下标，读和写都落在连续内存上。非合并版是故意写的玩具：把读下标乘 2 再对 n 取模，结果仍然覆盖所有元素，但相邻线程读的地址隔了一个元素。他说 PyTorch 里的 stride（步长）就是这种情况：数据在内存里的位置不变，只改变读的方式。</p>
+        <pre><code>__global__ void copyDataNonCoalesced(float *in, float *out, int n) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index &lt; n) {
+        out[index] = in[(index * 2) % n];
+    }
+}
+
+__global__ void copyDataCoalesced(float *in, float *out, int n) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index &lt; n) {
+        out[index] = in[index];
+    }
+}</code></pre>
+        <h3>ncu 结果（T4）</h3>
+        <table>
+            <tr><th>内核</th><th>DRAM（内存）吞吐</th><th>L1 缓存吞吐</th><th>耗时</th></tr>
+            <tr><td>copyDataNonCoalesced</td><td>约 89%</td><td>约 30%</td><td>764 µs</td></tr>
+            <tr><td>copyDataCoalesced</td><td>降了约 8 个百分点</td><td>约 37%</td><td>558 µs</td></tr>
+        </table>
+        <p>他说合并版 L1 吞吐高了不少，但没有打满；DRAM 吞吐从约 90% 降了约 8%；耗时从 764 µs 降到 558 µs，提速可观。他提醒，这种非合并访问在复杂程序里常常是无意中写出来的；他推测输入更大时差距会更明显。</p>
+        <h3>基准程序的写法</h3>
+        <p>主程序用 <code>cudaMallocManaged</code> 分配输入输出，块大小初始化为 128，块数由 n 推出，依次启动两个内核，每次启动后调用 <code>cudaDeviceSynchronize()</code>。他强调 CUDA 的调用是异步的，不加同步的话计时会很奇怪、不正确。最后释放内存，避免泄漏。</p>
+        <pre><code>const int n = 1 &lt;&lt; 24; // Increase n to have a larger workload
+float *in, *out;
+
+cudaMallocManaged(&amp;in, n * sizeof(float));
+cudaMallocManaged(&amp;out, n * sizeof(float));
+
+initializeArray(in, n);
+
+int blockSize = 128; // Define block size
+// int blockSize = 1024; // change this when talking about occupancy
+int numBlocks = (n + blockSize - 1) / blockSize; // Ensure there are enough blocks to cover all elements
+
+// Launch non-coalesced kernel
+copyDataNonCoalesced&lt;&lt;&lt;numBlocks, blockSize&gt;&gt;&gt;(in, out, n);
+cudaDeviceSynchronize();
+
+initializeArray(out, n); // Reset output array
+
+// Launch coalesced kernel
+copyDataCoalesced&lt;&lt;&lt;numBlocks, blockSize&gt;&gt;&gt;(in, out, n);
+cudaDeviceSynchronize();</code></pre>
+    </section>
+
+    <section id="t06">
+        <h2>06. 占用率：tile/wave 量化、对齐和占用率计算器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=1328s" target="_blank">0:22:08</a>–0:31:00 · Occupancy / Occupancy Calculator</em></p>
+        <h3>ncu 的占用率提示</h3>
+        <p>合并版的 ncu 报告里有一条提示，他念了出来：这个内核的理论占用率没有受到任何块限制的影响，计算出的理论值 100% 和实测的 77% 之间的差距，可能来自 warp 调度开销或执行中的负载不均；负载不均既可能出现在同一块内的 warp 之间，也可能出现在同一内核的不同块之间；详见 CUDA Best Practices Guide 的占用率部分。</p>
+        <p>他随手把块大小从 128 改成 1024，重新编译、再跑 ncu，实测占用率从约 77% 升到约 86%，只改了一处。这看起来应该能做到 100%，可怎么改并不明显：调网格大小？手算？他说有工具可用，但先讲点理论。</p>
+        <h3>两种量化效应</h3>
+        <p>占用率差会表现为两个问题，他用矩阵乘法举例：</p>
+        <ul>
+            <li>tile 量化（tile quantization）：矩阵维度不能被线程块的 tile 大小整除，边上的 tile 只装了一部分有效数据，但仍然占用一个完整块的计算。</li>
+            <li>wave 量化（wave quantization）：tile 总数不能被 GPU 的 SM 数整除，最后一“波”只有部分 SM 在干活。</li>
+        </ul>
+        <p>从 ncu 的角度，这两个问题都会显示成上面那种提示。另一个发现办法是看实验曲线：两个矩阵 M×K 和 K×N 相乘，K 是内维，把 M、N 固定为 1024，让 K 在 1000 出头到 1024 之间变化（字幕里具体数字不清），测相对速度。他说结果很夸张：在 cuBLAS 10 里，某个 K 值比相邻的另一个 K 值快大约 4 倍。</p>
+        <h3>维度该取多少的倍数</h3>
+        <p>他说 PyTorch 代码里有很多照搬来的习惯：维度要不要是 2 的幂？8、16、32 的倍数？其实 NVIDIA 已经给了答案，这些数取决于存一个元素要几个字节，新架构上的 Tensor Core（专门做小矩阵乘加的硬件单元）还有各自的要求。按他念的表：INT8 最好是 16 的倍数，在 A100 上最好是 128 的倍数；换到 FP16，这个数减半成 64；TF32 再减半成 32；FP64 再减半。规律是有一个基数，除以数据类型的字节数，就能推出这些数。</p>
+        <p>所以 PyTorch 程序里填充（padding）很流行。比如 Llama 代码库里大部分维度都是 2 的倍数，词表大小是 32,000。他说在 PyTorch 里填充很重要；如果你在写 CUDA，可以改内核启动参数，让填充的影响没那么剧烈。</p>
+        <h3>占用率计算器</h3>
+        <p>回到拷贝内核。他承认块大小是“随手从帽子里抽的”，块数是推出来的，好不好、要不要多跑几组基准，并不知道。CUDA 提供了占用率计算器函数 <code>cudaOccupancyMaxPotentialBlockSize</code>：传入最小网格大小和块大小两个变量的引用，以及内核本身（这里是 <code>copyDataCoalesced</code>），它会把推荐的网格大小和块大小写回这两个变量，打印出来即可。</p>
+        <p>他在 T4 上跑，推荐块大小是 1024，最小网格大小是 40。这个函数的输出和硬件有关：直播时他在 A10G 上跑过，推荐块大小反而更小，是 768，推荐网格大小是 160，是 T4 的 4 倍。他说你也许能想出更好的启发式，或者改写内核来提高占用率，但如果想先试一个不太费时间的办法，他强烈推荐先用这个函数。以前占用率计算器是一个 Excel 表格，用起来麻烦得多。</p>
+        <p>仓库里的 <code>occupancy.cu</code> 是这样写的（函数调用被注释掉了，块大小 1024 和最小网格 40 直接写成了常数，也就是 T4 上的输出）：</p>
+        <pre><code>int blockSize = 1024; // Optimal block size for many devices
+int numBlocks = (n + blockSize - 1) / blockSize; // Calculate the number of blocks
+
+// Optimize grid dimensions based on device properties
+int minGridSize = 40;
+// cudaOccupancyMaxPotentialBlockSize(&amp;minGridSize, &amp;blockSize, copyDataCoalesced, 0, 0);
+
+// Print suggested block size and minimum grid size
+std::cout &lt;&lt; "Recommended block size: " &lt;&lt; blockSize
+          &lt;&lt; ", Minimum grid size: " &lt;&lt; minGridSize &lt;&lt; std::endl;</code></pre>
+        <h3>下一条提示：访存比计算忙</h3>
+        <p>再看 ncu，还有一条警告：内存的利用率明显高于计算，去看 Memory Workload Analysis 一节找 DRAM 瓶颈；检查内存重放（replay）和合并相关的指标，确认传输的字节都被有效利用；也考虑能否通过内核融合让每次访存多做些工作，或者有没有值可以重算。他说这些话的意思都是“多算一点，少用内存”，由此引出屋顶线模型。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 屋顶线模型：ReLU 和矩阵乘法的算术强度</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=1860s" target="_blank">0:31:00</a>–0:39:05 · Roof Line Model / Pointwise Function / Matrix Multiplication</em></p>
+        <h3>屋顶线</h3>
+        <p>屋顶线模型（roofline model）的横轴是运算强度（operational intensity，也叫算术强度 arithmetic intensity）：总运算次数（加法、乘法、比较等）除以总访存字节数，访存既包括读输入，也包括把输出写回去。纵轴是性能，也就是跑多快。</p>
+        <p>他说要记住的是：较小的工作负载通常卡在左边那条斜线上，那条线由内存带宽决定，瓶颈是能多快把数据喂给 GPU；到了右边的水平线，瓶颈变成 GPU 本身已经满载，送数据再快也没用，只能写更好的算法。</p>
+        <p>这部分的思路借自 NVIDIA 的一份 Tensor Core 性能指南（他称为 “tensor core performance ultimate guide”）。他说那份指南还讲了怎么判断有没有用上 Tensor Core（看内核名里有没有某些字样），但他最喜欢的是里面一张算术强度表，他试着自己把表里的数推出来。直播时这部分是当练习做的，重录版直接给答案。</p>
+        <h3>逐点函数：ReLU</h3>
+        <p>逐点函数（pointwise function）对向量的每个元素独立计算。$f(x)=\mathrm{ReLU}(x)=\max(0,x)$：每个元素小于 0 就换成 0。数一下读写次数和运算次数：</p>
+        <ul>
+            <li>FP32，每个元素 4 字节（32 位除以每字节 8 位）。一次比较，一次读、一次写，共 $2\times 4=8$ 字节，算术强度 $1/8$。</li>
+            <li>如果 x 的每个元素都大于 0，就不用写，只有一次比较和一次 4 字节的读，算术强度变成 $1/4$。他说指南里写的是 0.25，他一开始很困惑，推测指南假设的是这种最好情况，所以觉得自己重推一遍有意思。</li>
+            <li>FP16，一次读一次写各 2 字节，共 4 字节，算术强度 $1/4$。</li>
+        </ul>
+        <p>他的结论：量化提高了算术强度，从 $1/8$ 变成 $1/4$。这类操作是典型的访存受限，他说算术强度小于 1 的操作基本都受内存带宽限制。再往下用 FP8、INT4、甚至 2 位或 1 位，目的都是提高算术强度，把手上的 GPU 用满。</p>
+        <h3>矩阵乘法</h3>
+        <p>A 是 $M\times N$，B 是 $N\times K$，N 是内维，结果 $C=AB$ 是 $M\times K$。C 的每个元素要做 A 的一行和 B 的一列的点积，每一项一次乘法一次加法，所以</p>
+        $$\text{FLOPs}=2MNK$$
+        <p>分母是三个矩阵的大小（C 也要写），$MN+NK+MK$（他这里按元素个数数，没乘每个元素的字节数），所以</p>
+        $$\text{AI}=\frac{2MNK}{MN+NK+MK}$$
+        <p>他说这个式子告诉我们，几乎所有情况下矩阵乘法都是计算受限的，只有极小的矩阵（比如边长 1 或 2）才会变成访存受限。他留了作业：自己推矩阵乘向量、向量乘矩阵的算术强度，体会什么时候访存受限、什么时候计算受限。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 访存受限和计算受限各做什么，分块</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=2345s" target="_blank">0:39:05</a>–0:41:55 · Fusions / Tile</em></p>
+        <h3>两类内核的优化方向</h3>
+        <p>他说上面这些看似理论，其实有一条很实际的结论。对带宽受限的内核，真正有用的优化是：</p>
+        <ul>
+            <li>融合（fusion），每个内核多做些活。我们一般把融合理解成把两步合成一步，但线程粗化也算一种改进带宽受限内核的办法；</li>
+            <li>量化，发送的数据更少，就没那么受带宽限制；</li>
+            <li>编译，编译器擅长用 CUDA Graphs 减少开销、做融合，所以 <code>torch.compile</code> 这类编译器很擅长替你做这些事。</li>
+        </ul>
+        <p>计算受限的内核难得多，基本要写更好的算法。比如去写一个更好的矩阵乘法通常很难，他说矩阵乘法大概是人类历史上被优化得最多的程序。但对于不那么常见的算法，这是另一个值得想的方向；如果你的算法本身计算量很大，就别花时间做量化或融合，那不会带来神奇的加速，应该专注在计算本身。</p>
+        <h3>分块</h3>
+        <p>分块（tiling）他这次不展开：矩阵乘法这类运算里，有些元素会被重复使用很多次，最好把它们放进共享内存这样更快的存储里。这在普通的 CUDA 分块矩阵乘法里用得很多，也是 FlashAttention 的重要技巧。Jeremy 已经用一小时讲透了，他建议去看那一讲，这里只提醒一句：分块的目的是减少全局内存流量。分块算法看起来难写，但概念上就是对外层矩阵和内层 tile 维度的几层 for 循环嵌套，这样想就不难推理。仓库里给了朴素版和分块版对照：</p>
+        <pre><code>#define TILE_WIDTH 16
+
+__global__ void matrixMulTiled(float* A, float* B, float* C, int width) {
+    __shared__ float As[TILE_WIDTH][TILE_WIDTH];
+    __shared__ float Bs[TILE_WIDTH][TILE_WIDTH];
+
+    int bx = blockIdx.x, by = blockIdx.y;
+    int tx = threadIdx.x, ty = threadIdx.y;
+    int Row = by * blockDim.y + ty;
+    int Col = bx * blockDim.x + tx;
+
+    float value = 0;
+    for (int m = 0; m &lt; width/TILE_WIDTH; ++m) {
+        As[ty][tx] = A[Row*width + (m*TILE_WIDTH + tx)];
+        Bs[ty][tx] = B[(m*TILE_WIDTH + ty)*width + Col];
+        __syncthreads();
+
+        for (int k = 0; k &lt; TILE_WIDTH; ++k) {
+            value += As[ty][k] * Bs[k][tx];
+        }
+        __syncthreads();
+    }
+
+    if(Row &lt; width &amp;&amp; Col &lt; width) {
+        C[Row*width + Col] = value;
+    }
+}</code></pre>
+        <p>（这个分块版假设 width 是 TILE_WIDTH 的整数倍，录像里没有跑它。）</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 减少控制发散</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=2515s" target="_blank">0:41:55</a>–0:48:30 · Minimize Control Divergence</em></p>
+        <h3>问题在哪</h3>
+        <p>例子 <code>divergence.cu</code>：读一个数组，元素是偶数就乘 2，奇数就加 1。于是同一时刻，有的线程在执行 if 分支，有的在执行 else 分支。如果两个分支耗时不同（他说乘 2 大概比加 1 慢），有几个落后的线程卡在一个分支里，已经做完的线程就得等着。原因是 CUDA 按 warp 调度，32 个线程一组，一个线程做完了并不能去干别的活，要等同组的慢邻居都做完。</p>
+        <p>他说这个效应会被放大：如果某些 if 条件很少成立，程序在某些输入上的性能会变得很难预测；如果有三层嵌套的 if，发散的可能性会指数增长。他说发散太多的话，程序可能慢好几倍，因为没有真正用上 GPU 的并行。</p>
+        <h3>用代数改写掉分支</h3>
+        <p>他的改法是用一个 <code>isEven</code> 标志：偶数时它是 1，乘 2 那一项保留，加 1 那一项乘的是 0，被消掉；奇数时反过来。两个版本做的是同一件事：</p>
+        <pre><code>__global__ void processArrayWithDivergence(int *data, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx &lt; N) {
+        if (data[idx] % 2 == 0) {
+            data[idx] = data[idx] * 2;
+        } else {
+            data[idx] = data[idx] + 1;
+        }
+    }
+}
+
+__global__ void processArrayWithoutDivergence(int *data, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx &lt; N) {
+        int isEven = !(data[idx] % 2);
+        data[idx] = isEven * (data[idx] * 2) + (!isEven) * (data[idx] + 1);
+    }
+}</code></pre>
+        <h3>ncu 里看发散</h3>
+        <p>他发现用默认指标很难看出发散的影响，于是改用完整的指标集（<code>ncu --set full</code>），这样报告长很多，所以平时不默认开。在有发散的版本里，他依次翻过 SM 忙碌程度、Memory Workload Analysis、Warp State Statistics，最后找到 Instruction Statistics：</p>
+        <ul>
+            <li>有发散的版本大约 98,000 条分支指令，分支效率（branch efficiency）和平均发散分支数（avg. divergent branches）两项却都是 0；</li>
+            <li>改写后的版本大约 65,000 条分支指令。</li>
+        </ul>
+        <p>他说两项为 0 的原因，Vikram 在直播里解释过很多：可能需要更大的工作负载才测得出来，nvcc 也很可能自动做了编译优化去掉一部分发散，所以很难写出一个完全隔离这个效应的例子；这也是 Citadel 那样的团队要写上百页论文来做微基准的原因。分支指令数虽然没有归零，但明显少了。</p>
+        <p>计时结果他说很明显：从 0.74 降到 0.24（毫秒，程序打印的单位），接近 3 倍。他说这是最重要的优化之一。（整理者注：仓库里的 <code>benchmarkKernel</code> 对两个内核都只计时一次，没有预热，第一个内核的时间里可能包含首次启动的开销，读数字时可以留意。）</p>
+        <h3>for 循环和嵌套 if</h3>
+        <p>写 GPU 代码时，大家会尽量避免太多 for 循环，因为循环的结束条件（比如 i 大于 n）也会造成发散，同时也避免写一堆 if。他说 for 循环的问题没那么严重，一个 warp 里只会有一个线程在最后发散，问题不大；但大量嵌套的 if 可能让几乎所有线程都发散，那就很糟。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 线程粗化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=2910s" target="_blank">0:48:30</a>–0:52:50 · Thread Coarsening</em></p>
+        <p>前面的线程都只做最少的活，比如拷贝时就是 <code>out[i] = in[i]</code>。如果是内存带宽受限，似乎可以让每个线程多做一些。他说直播时这个例子震惊了所有人：一个向量加法，粗化因子取 2，内核快了大约 30 倍。</p>
+        <p>粗化版里，每个线程处理两个相邻元素 i 和 i+1，这叫粗化因子 2。Discord 里的 Zippy 后来用 4 和 8 的粗化因子跑过更多基准，他印象里没看到太大区别，建议去找他聊（他承认没细读那些结果，急着先把录像发出来）。</p>
+        <pre><code>// Original vector addition kernel without coarsening
+__global__ void VecAdd(float* A, float* B, float* C)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i &lt; N)
+        C[i] = A[i] + B[i];
+}
+
+// Vector addition kernel with thread coarsening
+// Assuming a coarsening factor of 2
+__global__ void VecAddCoarsened(float* A, float* B, float* C)
+{
+    int i = (blockIdx.x * blockDim.x + threadIdx.x) * 2; // Coarsening factor applied here
+    if (i &lt; N)
+        C[i] = A[i] + B[i];
+    if (i + 1 &lt; N) // Handle the additional element due to coarsening
+        C[i + 1] = A[i + 1] + B[i + 1];
+}</code></pre>
+        <p>粗化版的网格只需要一半的块：</p>
+        <pre><code>VecAddCoarsened&lt;&lt;&lt;(N + 2*THREADS_PER_BLOCK - 1) / (2*THREADS_PER_BLOCK), THREADS_PER_BLOCK&gt;&gt;&gt;(d_a, d_b, d_c);</code></pre>
+        <h3>重录时的结果和疑点</h3>
+        <p>重录时再跑一次，时间从约 0.23 降到约 0.02 的量级（字幕记作“23 到 0.2”），他说接近 10 倍，不知道为什么和直播时差这么多。但这仍是这一讲里最大的提速，对比合并访存只带来 20% 到 30%。</p>
+        <p>再跑 ncu，他原本预期粗化版的 DRAM 吞吐会低一些，结果内存吞吐从约 80% 掉到 1%，他当场说这像是个 bug。合理的预期是降一点，比如降一半。他推测输入太小，整个数据都能放进缓存（他口头说的是共享内存），测第二个内核时数据已经在缓存里了；他猜自己漏了某些释放或销毁操作。他建议大家自己重新测一遍，因为至少在他们的实验里，粗化带来的性能提升最显著。（整理者注：仓库里 <code>coarsening.cu</code> 的 <code>N</code> 是 1024，只有 4 KB 一个向量，两个内核依次读同一组数据，和他的推测一致。）</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 私有化和滑动窗口</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=3170s" target="_blank">0:52:50</a>–0:57:00 · Privatization</em></p>
+        <h3>什么是私有化</h3>
+        <p>私有化是另一种少用全局内存的办法：先把部分更新写到一份私有副本里，最后再写回全局内存。典型例子是滑动窗口算法：一个窗口（比如覆盖第 3、4、5 个元素）随时间在数据上滑动。</p>
+        <h3>插曲：滑动窗口注意力</h3>
+        <p>他说滑动窗口在注意力里很重要：不想对全部 query 和 key 做完整的缩放点积注意力，只在一个滑动窗口内做，操作就更局部。他打开 Mistral 论文的图解释：自回归解码通常用一个因果掩码，比如 “cat” 能看到自己，但不能看后面的 “sat”，不能偷看未来；问题是这样仍然要处理一个 $n^2$ 规模的矩阵。如果滑动窗口很小，QKV 运算的复杂度可以大幅下降。他说因为 Mistral 很流行，这个技巧已经很常见。</p>
+        <h3>例子一：向量加法，没有变快</h3>
+        <p><code>privatization.cu</code> 先把 <code>a[index]</code>、<code>b[index]</code> 从全局内存读到私有变量里再相加。他说这是私有化最简单的例子，但对性能没有任何影响，只用来说明私有化的意思：别直接在全局内存上做运算。</p>
+        <pre><code>// CUDA kernel for vector addition with privatization
+__global__ void vectorAddPrivatized(const float *a, const float *b, float *result, int n) {
+    int index = threadIdx.x + blockIdx.x * blockDim.x;
+    if (index &lt; n) {
+        float a_private = a[index]; // Load into private memory
+        float b_private = b[index]; // Load into private memory
+        result[index] = a_private + b_private;
+    }
+}</code></pre>
+        <h3>例子二：滑动窗口求和</h3>
+        <p>更有用的例子在 <code>privatization2.cu</code>。直接版在循环里对全局内存 <code>input</code> 做累加；私有化版先把块对应的数据放进 <code>__shared__</code> 数组（他说一时想不起这个双下划线写法在 C++ 里叫什么），累加时读的是共享内存。思路就是：把一块数据放进共享内存或私有变量，在私有副本上做运算。他说概念上这和分块很像，分块可以看成私有化的一个例子，只是分块足够有用、足够重要，值得单独讨论。</p>
+        <pre><code>// Kernel without privatization: Direct global memory access
+__global__ void windowSumDirect(const float *input, float *output, int n, int windowSize) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int halfWindow = windowSize / 2;
+    if (idx &lt; n) {
+        float sum = 0.0f;
+        for (int i = -halfWindow; i &lt;= halfWindow; ++i) {
+            int accessIdx = idx + i;
+            if (accessIdx &gt;= 0 &amp;&amp; accessIdx &lt; n) {
+                sum += input[accessIdx];
+            }
+        }
+        output[idx] = sum;
+    }
+}
+
+// Kernel with privatization: Preload window elements into registers
+__global__ void windowSumPrivatized(const float *input, float *output, int n, int windowSize) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int halfWindow = windowSize / 2;
+    __shared__ float sharedData[1024]; // Assuming blockDim.x &lt;= 1024
+
+    // Load input into shared memory (for demonstration, assuming window fits into shared memory)
+    if (idx &lt; n) {
+        sharedData[threadIdx.x] = input[idx];
+        __syncthreads(); // Ensure all loads are complete
+
+        float sum = 0.0f;
+        for (int i = -halfWindow; i &lt;= halfWindow; ++i) {
+            int accessIdx = threadIdx.x + i;
+            // Check bounds within shared memory
+            if (accessIdx &gt;= 0 &amp;&amp; accessIdx &lt; blockDim.x &amp;&amp; (idx + i) &lt; n &amp;&amp; (idx + i) &gt;= 0) {
+                sum += sharedData[accessIdx];
+            }
+        }
+        output[idx] = sum;
+    }
+}</code></pre>
+        <p>（整理者注：这个私有化版只加载本块自己的元素，窗口跨越块边界时，边界外的邻居会被跳过，所以块边缘的结果和直接版不同；另外 <code>__syncthreads()</code> 写在 <code>if (idx &lt; n)</code> 里面，n 不是块大小整数倍时有风险。录像里没有讨论这两点，也没有给出这个例子的计时。）</p>
+        <p>仓库里还有一个没有扩展名的文件 <code>privatization</code>，是 PMPP 里的经典直方图私有化例子：每个块先在共享内存里建一份私有直方图，用共享内存原子加更新，最后再把私有直方图原子加到全局直方图上。录像里没有讲到它。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 用数学重写算法：在线 softmax 和 FlashAttention</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=3420s" target="_blank">0:57:00</a>–1:05:44 · Flash Attention</em></p>
+        <h3>FlashAttention 卡在哪</h3>
+        <p>最后一条是书里没有的技巧：如果你数学不错，能改写算法，代码可以快很多。他说 Thomas 报名在两三周后讲 FlashAttention（本合集第 05 篇），这里只讲关键思路。</p>
+        <p>FlashAttention 那张图的第一层意思大家都懂：内存有层级，SRAM 比 DRAM 快得多。于是自然的想法是：从 Q、K、V 里各取一个 tile 放进共享内存，在共享内存里算完，再把输出写回全局内存。如果缩放点积注意力只是 Q 乘 K 乘 V，这样做没问题。麻烦在中间有一个非线性：要先对 $QK^\top$ 做 softmax 再乘 V。softmax 有一个归一化因子，指数要除以所有指数之和，这意味着要先读完所有输入，没法纯按 tile 做，除非读两遍，而那样代码会慢很多。</p>
+        <p>他说 FlashAttention 2 的论文（比第一篇）更好地画出了“归一化因子先是错的、随后逐步修正”这个想法。这个技巧来自论文 <em>Online normalizer calculation for softmax</em>，他说这是一篇写得极好的论文，不知道为什么只有 27 次引用。论文讲两件事：softmax 通常怎么算，以及怎么在 GPU 上算得快。他只讲第一部分，也就是怎么改写数学。</p>
+        <h3>朴素 softmax</h3>
+        <p>softmax 用来把输出归一化成类似概率的东西，所有 $y_i$ 加起来等于 1。它和 ReLU 一样是逐元素的操作，每个元素取指数，再除以所有指数之和：</p>
+        $$y_i=\frac{e^{x_i}}{\sum_{j=1}^{V} e^{x_j}}$$
+        <p>算法分两遍：第一遍扫全部数据求分母，第二遍每读一个元素就取指数、除以分母。所以数据要读两遍，再写一次输出。</p>
+        <h3>safe softmax</h3>
+        <p>问题是指数增长太快，尤其在低精度下很容易溢出。一个天真的办法是用 FP64 算 softmax，溢出可能小一些，但 FP64 仍会溢出，而且在新 GPU 上 FP64 慢得多，硬件厂商希望你用 BF16、FP8、INT8、INT4。</p>
+        <p>PyTorch、Keras 这些框架的做法是：取指数前先减去向量的最大值。数值上结果一样：</p>
+        $$m=\max_{k} x_k,\qquad y_i=\frac{e^{x_i-m}}{\sum_{j} e^{x_j-m}}$$
+        <p>但这让访存更糟：原来已经要读两遍（一遍求分母，一遍取指数），现在还要多一遍求最大值。本来就是访存受限的算法，变得更受限。</p>
+        <h3>在线 softmax</h3>
+        <p>在线 softmax（online softmax）的做法是维护一个“临时”的归一化因子：走到向量第 j 个位置时，只基于前 j 个元素和目前为止的最大值来算分母，边走边修正。设 $m_j$ 是前 j 个元素的最大值，$d_j$ 是到目前为止的分母：</p>
+        $$m_j=\max(m_{j-1},x_j),\qquad d_j=d_{j-1}\,e^{m_{j-1}-m_j}+e^{x_j-m_j}$$
+        <p>他分两种情况解释：</p>
+        <ul>
+            <li>最大值没变：$m_{j-1}-m_j=0$，$e^0=1$，于是 $d_j=d_{j-1}+e^{x_j-m_j}$，和普通的 safe softmax 一样。</li>
+            <li>最大值变了：用指数的恒等式 $e^{a-b}=e^{a}\cdot e^{-b}$ 修正旧的分母。旧分母里每一项是按旧的（假的）最大值减的，乘上 $e^{m_{j-1}-m_j}$ 就把旧最大值消掉、换成正确的最大值。</li>
+        </ul>
+        <p>这样每一步的局部修正最终得到全局正确的结果。扫完之后 $d_V$ 就是正确的分母，第二遍再算 $y_i=e^{x_i-m_V}/d_V$。他说读懂这一点帮他理解了 FlashAttention，推荐花一个下午读这篇论文。</p>
+        <p>结果是去掉了一次访存：现在是两次读、一次写，性能和普通 softmax 相当，但没有溢出问题。</p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 收尾：PMPP 表 6.1，按瓶颈选优化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=3944s" target="_blank">1:05:44</a>–1:08:10 · Flash Attention（结尾部分）</em></p>
+        <p>他说这一讲是很基础的一讲，因为 PMPP 后面的章节都是具体案例和算法。他强烈推荐 PMPP 的表 6.1：里面列了所有这些优化，以及每一种对计算和对内存的好处。用法是：先对一个算法有自己的直觉，再用 ncu 跑一遍，验证直觉对不对，还是例子太简单、编译器太聪明，或者书里没讲清楚 GPU 架构的某个部分。他说这些优化值得打印出来贴在墙上。</p>
+        <p>他补充的一点是弄清楚工作负载是计算受限还是访存受限，这也影响你在应用层（比如用 PyTorch 时）该做的优化：</p>
+        <ul>
+            <li>开销受限（overhead bound）：用 CUDA Graphs；</li>
+            <li>内存带宽受限：用融合；</li>
+            <li>严重内存带宽受限：量化，比如到 INT4；</li>
+            <li>计算受限：需要写更好的算法。他说计算受限是一个提示，说明你可能需要写 Triton 或 CUDA，而不是一直待在 PyTorch 里。</li>
+        </ul>
+        <p>他说 CUDA MODE 对他的意义，是同时精通数学和计算机，能结合硬件来协同设计软件。他认为这个领域最好的工程师都在这样做，这也是大家那么佩服 Tri（Tri Dao）和 Tim（Tim Dettmers）的原因。下一周的讲座是归约（reductions），他说喜欢这一讲里 softmax 和 ReLU 那些内容的人会喜欢下一讲。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“this is why like latency is generally hard and and gpus are no exception to this because we essentially hide latencies as opposed to reducing them”（所以延迟一般都很难对付，GPU 也不例外，因为我们做的是把延迟藏起来，没有把它降下来。）<a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=879s" target="_blank">0:14:39</a></li>
+            <li>“pretty much like any any arithmetic intensity that's less than one will be very memory bandwidth bound”（算术强度小于 1 的操作基本都受内存带宽限制。）<a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=2157s" target="_blank">0:35:57</a></li>
+            <li>“you can think of matrix multiplication as being like the single most optimized uh like program in like human history”（你可以把矩阵乘法看成人类历史上被优化得最多的程序。）<a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=2349s" target="_blank">0:39:09</a></li>
+            <li>“the reason why we tile things is to reduce like Global memory traffic”（我们分块，是为了减少全局内存流量。）<a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=2476s" target="_blank">0:41:16</a></li>
+            <li>“it's not like if a thread is done it can move on to other work it needs to wait for its other like Slowpoke neighbors to also be done”（一个线程做完了并不能去干别的，它得等同组那些慢吞吞的邻居也做完。）<a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=2544s" target="_blank">0:42:24</a></li>
+            <li>“this is like a paper that's worth spending an afternoon with”（这篇论文值得花一个下午读。）<a href="https://www.youtube.com/watch?v=SGhfUhlowB4&t=3881s" target="_blank">1:04:41</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 8: CUDA Performance Checklist · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

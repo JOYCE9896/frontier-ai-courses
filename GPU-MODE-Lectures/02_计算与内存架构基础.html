@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>计算与内存架构基础 | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="01_在PyTorch里剖析CUDA内核.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 02</span>
+    <span><a href="03_CUDA性能检查清单.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 4 · 计算与内存架构基础</h1>
+        <p class="subtitle">PMPP 第 4、5 章：SM 里有什么，线程块和 warp 怎么调度，分支发散和占用率，PyTorch 程序的时间花在哪，内核融合，理论速度上限，屋顶线模型，以及用共享内存做分块矩阵乘法</p>
+        <div class="author-meta">
+            主讲：Thomas Viehmann（Lernapparat 博客作者，经营小咨询公司 MathInf，录制时即将加入 Lightning AI）· 发布日期：2024 年 2 月 5 日 · 时长：57 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=lTmYrKwjSOU" target="_blank">讲座录像 Lecture 4 Compute and Memory Basics</a>（GPU MODE YouTube 频道公开）· 幻灯片/代码：<a href="https://github.com/gpu-mode/lectures/tree/main/lecture_004" target="_blank">lecture_004（PDF 幻灯片 + notebook）</a>（本文依据录像字幕、幻灯片和代码整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>GPU MODE 早期是一个读书会，按章节读 Wen-mei Hwu、David Kirk、Izzat El Hajj 写的 <em>Programming Massively Parallel Processors</em>（简称 PMPP）。这一讲由 Thomas Viehmann 讲第 4 章（计算架构和调度）和第 5 章（内存架构和数据局部性）。前两讲已经介绍了线程（thread）和线程块（block）的写法，这一讲回答两个问题：这些线程在硬件上到底怎么跑；为了让 GPU 一直有活干、少等内存，写内核时要注意什么。</p>
+        <p>他用自己的 RTX 3090 当例子，配一个 notebook：先写一个手工 GELU，看它为什么比 PyTorch 自带的慢，再把它融合成一个 CUDA 内核；接着估算 rgb2gray 内核的理论速度；最后写一个用共享内存的分块矩阵乘法。读过本站 CS149 笔记的话，SM、warp、SIMT、延迟隐藏这些概念会很熟，这一讲把它们落到具体的数字和代码上。</p>
+        <ol>
+            <li><a href="#t01">CPU 核心和 SM 的区别，RTX 3090 的硬件</a> · <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">线程块怎么分到 SM，warp、寄存器和共享内存</a> · <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=322s" target="_blank">0:05:22</a></li>
+            <li><a href="#t03">线程的线性编号和 warp 分支发散</a> · <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=649s" target="_blank">0:10:49</a></li>
+            <li><a href="#t04">占用率：在各种资源限制之间找平衡</a> · <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=975s" target="_blank">0:16:15</a></li>
+            <li><a href="#t05">PyTorch 程序的时间花在哪里</a> · <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=1297s" target="_blank">0:21:37</a></li>
+            <li><a href="#t06">访存是瓶颈：内核融合和 GELU 例子</a> · <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=1492s" target="_blank">0:24:52</a></li>
+            <li><a href="#t07">“在数值精度范围内相同”是什么意思</a> · <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=2015s" target="_blank">0:33:35</a></li>
+            <li><a href="#t08">理论速度上限：rgb2gray 能跑多快</a> · <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=2146s" target="_blank">0:35:46</a></li>
+            <li><a href="#t09">屋顶线模型和几种内存</a> · <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=2406s" target="_blank">0:40:06</a></li>
+            <li><a href="#t10">分块矩阵乘法</a> · <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=2671s" target="_blank">0:44:31</a></li>
+            <li><a href="#t11">练习和总结</a> · <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=3259s" target="_blank">0:54:19</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. CPU 核心和 SM 的区别，RTX 3090 的硬件</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=0s" target="_blank">0:00:00</a>–0:05:22 · Introduction / GPU compute architecture / Hardware overview / Streaming multiprocessor</em></p>
+        <h3>一个 SM 里有很多 ALU，共用取指和译码</h3>
+        <p>流式多处理器（Streaming Multiprocessor，SM）是 GPU 上独立执行计算的基本单元，一块 GPU 有几十到一百多个。Thomas 先拿 CPU 核心对比：一个 CPU 核心里有取指、译码等大量控制逻辑，只配一个（或差不多一个）算术逻辑单元（ALU）。幻灯片右边画的是 SM 的四分之一，里面有很多 ALU，每个 ALU 跑一个线程，每个线程有一点自己的上下文，但更多的东西是共享的，尤其是取指和译码：一组线程一起取同一条指令。</p>
+        <p>他指出书里有一处过时了。早期 GPU（Pascal 及以前）一个 warp 里的线程共用一个程序计数器（program counter，告诉硬件下一条执行哪条指令），从 Volta 开始每个线程有自己的程序计数器。幻灯片的说法是：粗略地看，1 个 SM 大约相当于 4 个“CPU 核心”。</p>
+        <h3>RTX 3090 的整体结构</h3>
+        <ul>
+            <li>82 个 SM，彼此基本独立。</li>
+            <li>所有 SM 共用一个 L2 缓存，在芯片中间。</li>
+            <li>消费级（非数据中心）GPU 几乎没有 FP64 单元：每个 SM 只有 2 个 FP64 单元，对比 128 个 FP32 单元，FP64 吞吐是 FP32 的 1/64。这两个单元只是为了让 FP64 程序能跑起来，不会快。</li>
+        </ul>
+        <p>他提到 Andreas Köpf 发现过的问题：常数没写 <code>f</code> 后缀，被当成 64 位浮点数，一部分计算就进入了 64 位路径，结果变慢。</p>
+        <h3>一个 SM 的内部</h3>
+        <p>图来自 NVIDIA 的 GA102 白皮书。一个 SM 分成 4 个部分（partition），每个部分有自己的寄存器文件和调度/分发单元，每个时钟周期能发射 32 个线程的指令。每个部分有 32 个 FP32 单元，其中一半（16 个）也能做 INT32；还有 Tensor Core，这一讲不细讲。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 线程块怎么分到 SM，warp、寄存器和共享内存</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=322s" target="_blank">0:05:22</a>–0:10:49 · Scheduling and resources / Memory and synchronization / Warp execution and AMD</em></p>
+        <h3>块的分配</h3>
+        <p>启动内核时要给出两个布局：每个块里有多少线程（block 布局），一共启动多少个块（grid 布局）。每个线程块被分到某一个 SM 上，程序员不能控制哪个块去哪个 SM（Hopper 开始有线程块簇 thread block cluster，可以把几个块编成一组，这里先不讲）。</p>
+        <p>一个 SM 能同时容纳的线程数比单个块的最大线程数多，所以只要其他资源够，多个块可以同时分到同一个 SM 上。RTX 3090 每个 SM 最多可分配 1536 个线程。他的建议是让块大小能整除这个数：256 或 512 个线程的块比 1024 个线程的块好，因为 1536 / 1024 只能放下一个块，剩下 512 个线程的位置空着，等待执行的线程就少了。</p>
+        <h3>warp 和寄存器文件</h3>
+        <p>warp 是 32 个线程组成的执行单位，同一 warp 的线程同时执行同一条指令。SM 的每个部分每个周期处理一个 warp。warp 里的线程有时步调不一致，这叫分支发散（divergence），这时一个周期只执行 warp 里的一部分线程，后面细讲。</p>
+        <p>寄存器文件是共享的。CPU 做多线程切换时，要把寄存器保存起来再恢复；GPU 在 warp 之间切换（它一直在切换）时，寄存器原地不动，每个 warp 在寄存器文件里占一块。所以写内核时要盯住寄存器用量，不能超过限制。RTX 3090 每个 SM 共有 64K 个 32 位寄存器（幻灯片写的是每个部分 16K），SM 上所有线程共用。</p>
+        <h3>L1 缓存和共享内存</h3>
+        <p>L1 缓存直接挂在 SM 上，共享内存（shared memory，一个线程块内所有线程都能读写的片上内存）用的是同一块硬件，共 128 KB。共享内存可以配置成 0/8/16/32/64/100 KB，剩下的给 L1（至少 28 KB）。</p>
+        <h3>块之间完全独立</h3>
+        <ul>
+            <li>同一个块里的线程在同一个 SM 上并行执行，能访问这个块的共享内存，也可以同步。</li>
+            <li>块与块之间互相独立：CUDA 可以任意把块分到 SM 上，执行顺序未知。不能指望哪个块先跑，也没法有效地等另一个块。</li>
+            <li>每个块被切成 32 个线程的 warp，每个 warp 固定在 SM 的某一个处理单元上；分到同一处理单元的所有 warp 轮流执行，寄存器一直留着。</li>
+        </ul>
+        <p>顺带一提，AMD 硬件上 warp 叫 wavefront，通常是 64 个线程，有一个编译选项可以降到 32。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 线程的线性编号和 warp 分支发散</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=649s" target="_blank">0:10:49</a>–0:16:15 · Thread indexing and warps / Warp divergence</em></p>
+        <h3>多维线程块怎么排成一列</h3>
+        <p>块可以是多维的（Jeremy 上一讲的矩阵乘法就用了二维块）。那么哪些线程属于同一个 warp？答案是按线性顺序编号，<code>threadIdx.x</code> 变化最快，然后是 y，再是 z。他说这里的写法和书里的不太一样，并在 notebook 最底下写了一个小内核来验证：用 shuffle 指令（warp 内线程直接交换寄存器值的指令），启动 8×8×8 的块，打印每个线程在 warp 里的位置，可以看到 x 变化最快，同一个 warp 里是连续的 x 值。他的建议是读书或听人讲时，对不相信的说法自己做实验验证。</p>
+        <h3>Pascal 及以前的分支发散</h3>
+        <p>warp 里 32 个线程做同一件事时，GPU 最快。碰到 <code>if</code> 时，老的做法是：所有线程共用一个程序计数器，但有一个“活动掩码”（active mask）。GPU 先关掉不满足条件的线程，按顺序执行 if 分支；再反过来，打开刚才关掉的线程、关掉另一些，执行 else 分支；到 if 结束处，线程重新汇合（reconverge）。图来自 NVIDIA 的博客：<code>threadIdx.x &lt; 4</code> 的线程执行 A、B，其他线程执行 X、Y。</p>
+        <p>需要小心两点：</p>
+        <ul>
+            <li>不能在分支里做线程间通信或同步（没有掩码的情况下），在 warp 内等另一部分线程，会卡死。</li>
+            <li>分支发散时，GPU 有一部分单元闲着。所以能避免就避免。</li>
+        </ul>
+        <p>有一个例外：GPU 有条件加载/存储指令，所以 <code>cond ? x[i] : 0.0f</code> 这种常见写法不会造成发散。他自己喜欢这么写加载，后面的矩阵乘法里会看到。</p>
+        <h3>Volta 及以后：每个线程有自己的程序计数器</h3>
+        <p>新 GPU 给每个线程一个程序计数器。GPU 按程序计数器把 warp 里的线程分组执行，于是可以让 if 和 else 两组线程交替执行。好处是延迟隐藏更好：一组在等内存时，另一组可以继续算（比如两个分支都要读 DRAM）。坏处是重新汇合不再自动发生，if 之后的代码 Z 可能被一组一组地分开执行，效率低。可以插入 <code>__syncwarp()</code> 让 warp 里的线程重新同步，之后又能一步执行同一条指令。shuffle 这类线程间通信也会同步参与的线程。<code>__syncthreads()</code> 同步的是整个块，范围比 warp 大。</p>
+        <p>另一种发散来自循环：如果各线程的 for 循环上界不同，迭代次数不一样，效果一样。一个 warp 要等所有线程都做完才算完。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 占用率：在各种资源限制之间找平衡</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=975s" target="_blank">0:16:15</a>–0:21:37 · Optimization strategies / API and resource query / Properties and scheduling</em></p>
+        <p>占用率（occupancy）他称为“让所有部件都忙起来”的正式说法，严格的定义是 SM 上实际驻留的 warp 数与最大可驻留 warp 数之比。想要好的占用率，就要平衡所有约束，不让任何一项成为单独的瓶颈。他按 RTX 3090 列了几条：</p>
+        <ul>
+            <li>有 82 个 SM，所以块多是好事，才能让所有 SM 都有活干。对比：嵌入式 GPU（如 Jetson Xavier）只有 8 个 Volta SM。</li>
+            <li>每个 SM 最多调度 1536 个线程，所以块大小取小于 512 的 2 的幂比较好（有些 GPU 是 2048），这样每个周期可选的 warp 更多。</li>
+            <li>避免 warp 内发散，才能每个周期执行满 32 个线程。</li>
+            <li>在 GeForce/工作站 GPU（GA102 一类）上尽量避免 FP64 和 INT64。他讲了自己踩过的坑：把 PyTorch 的 batchnorm 内核从旧的 TH 接口移植到新接口时，不小心把索引换成了 64 位，新内核变慢，他做了一堆其他优化才找到真正的原因。现在 PyTorch 的 batchnorm 内核还算快。</li>
+            <li>共享内存和寄存器用多了，会限制一个 SM 上能同时调度的线程数。可以用 <code>__launch_bounds__</code>（PyTorch 里是 <code>C10_LAUNCH_BOUNDS</code>）告诉编译器块里有多少线程，帮它分配寄存器。但寄存器溢出（register spill，寄存器不够时把变量放进慢得多的 local memory）会让程序变慢。</li>
+        </ul>
+        <p>这些计算比较繁琐。以前 NVIDIA 有一个 Excel 表格做占用率计算，现在集成进了 Nsight Compute，后面的性能分析讲座会看到。</p>
+        <h3>用 API 查硬件参数</h3>
+        <p>这些“魔法数字”不用背，可以查询。PyTorch 里用 <code>torch.cuda.get_device_properties(device)</code>：能看到名字、计算架构、总显存、处理器数量（82）；把返回值存下来还能看到更多字段，比如每个 SM 的寄存器数（64K）、每个 SM 最多线程数（1536）。CUDA 运行时 API 直接提供的属性更多。</p>
+        <pre><code>props = torch.cuda.get_device_properties(0)
+print(props.name, props.multi_processor_count)
+print(props.max_threads_per_multi_processor)  # 1536 on RTX 3090</code></pre>
+        <p>（上面这段是按讲座里的演示写的示意，字段名按 PyTorch 的 <code>_CudaDeviceProperties</code>。）</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. PyTorch 程序的时间花在哪里</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=1297s" target="_blank">0:21:37</a>–0:24:52 · Memory and performance / Kernel computation</em></p>
+        <p>第 5 章讲内存架构和数据局部性，因为很多内核的速度受限于内存访问。在细看之前，他先退一步，看一个 PyTorch 程序在最高层面上把时间花在哪：</p>
+        <ul>
+            <li>Python 处理；</li>
+            <li>数据的“管理开销”（分配张量结构等）；</li>
+            <li>数据获取（I/O）；</li>
+            <li>GPU 计算，又分三块：固定开销（内核启动等）、访存（读输入、写结果）、真正的计算（FLOPs）。</li>
+        </ul>
+        <p>他给了两条自己的经验规则（幻灯片上叫 Thomas Rules of Thumb）：</p>
+        <ul>
+            <li>只要 <code>nvidia-smi</code> 里的 GPU 利用率还没接近 100%，先去查数据获取。他说咨询客户那里，这一步最常出问题；如果瓶颈在这里，GPU 上优化再多也看不到效果。</li>
+            <li>只要张量有几百个元素以上（别不小心造出一堆单元素张量），Python 慢和管理开销就不是主要问题。不改别的、只把代码从 Python 搬到 C++，通常只能快个位数百分比，有时 5%，有时 2%。</li>
+        </ul>
+        <p>这一讲关心的是 GPU 计算：第 4 章的占用率对应“真正的计算”，第 5 章对应“访存”。固定开销他用 notebook 里的一个空内核来估计，后面会讲。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 访存是瓶颈：内核融合和 GELU 例子</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=1492s" target="_blank">0:24:52</a>–0:33:35 · Kernel fusion benefits / Memory bandwidth and speed / Fusing pointwise operations / Profiling kernels / Custom kernel implementation</em></p>
+        <h3>融合的思路和 PyTorch 的历史</h3>
+        <p>Eager 模式的 PyTorch 每个操作都是“读输入、计算、写输出”。把几个内核合起来，变成“读输入、算、算、算……、写输出”，读写就只做一次，显然更快。这叫内核融合（kernel fusion）。他说 PyTorch 很早就在做这件事：</p>
+        <ul>
+            <li>PyTorch JIT 最初的动机之一就是把逐元素（pointwise）操作融合成一个内核，这是让 LSTM 在 PyTorch 里接近 cuDNN 性能的关键（他参与过这部分）。</li>
+            <li>第二代 JIT 融合器加入了对矩阵乘法这类“收缩”（contraction）操作的支持。第二代有两个，其中 NVIDIA 的 nvFuser 已经独立出 PyTorch，仓库很活跃。</li>
+            <li>现在的 Inductor 和基于 Triton 的优化也部分是在做融合，但用一门语言加模板，支持更复杂的操作。</li>
+        </ul>
+        <p>减少全局内存访问也是 FlashAttention 的核心成分之一。FlashAttention 论文的图里，A100 的高带宽内存（HBM）带宽标为 1.5 TB/s（他的 RTX 3090 只有 900 GB/s），共享内存（SRAM）的带宽高出 10 倍以上，但容量只有它的几千分之一。所以要尽量少访问全局内存，多用共享内存。</p>
+        <h3>手写 GELU 慢在哪</h3>
+        <p>他以前最喜欢拿 LSTM 举例，这次换成更现代的近似 GELU。公式取自 PyTorch 文档：GELU 本来用标准正态分布的累积分布函数定义，近似版本用 tanh：</p>
+        $$\mathrm{GELU}(x) \approx 0.5\,x\left(1+\tanh\left(\sqrt{2/\pi}\,\left(x+0.044715\,x^3\right)\right)\right)$$
+        <pre><code># as per the pytorch doc, implemented manually
+def gelu(x):
+    return 0.5 * x * (1+ torch.tanh((2/torch.pi)**0.5 * (x+0.044715 * x**3)))
+
+x = torch.randn(1024, 1024, device="cuda")
+
+%timeit gelu(x); torch.cuda.synchronize()
+%timeit torch.nn.functional.gelu(x, approximate='tanh'); torch.cuda.synchronize()</code></pre>
+        <p>PyTorch 自带的实现大约 60 微秒，手写的版本慢 7 到 8 倍。原因是每个小操作都单独启动一个内核：先算 $x^3$，写回内存；再读出来乘常数，写回；再读出来加 $x$……大量读写。</p>
+        <p>用 PyTorch profiler 可以看到这一点：</p>
+        <pre><code>with torch.profiler.profile() as prof:
+    for i in range(10_000):
+        module.rgb_to_grayscale_out(out, t)
+        torch.cuda.synchronize()
+
+print(prof.key_averages().table())</code></pre>
+        <p>（notebook 里这段 profiler 代码用在 rgb2gray 上，他现场对 GELU 做了同样的事。）结果表里是一堆 vectorized elementwise 内核，每个调用 7000 次，有一个调用次数是它的三倍（某个加法或乘法）。这些逐元素内核各自读输入、写输出。</p>
+        <h3>融合成一个内核</h3>
+        <p>写成一个内核并不难，把公式用 C++ 写出来就行。按 Andreas 的提醒，常数都加了 <code>f</code> 后缀，保持在 FP32：</p>
+        <pre><code>__global__ void my_gelu_kernel(float* out, float* inp, int n) {
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if (i &gt;= n) return;
+    float x = inp[i];
+    out[i] = 0.5f * x * (1.0f+ tanhf(sqrtf(2.0f/3.141592653589793f) * (x+0.044715f * (x*x*x))));
+}
+
+torch::Tensor my_gelu_out(torch::Tensor output, const torch::Tensor&amp; inp) {
+    CHECK_INPUT(inp);
+    int n = inp.numel();
+    TORCH_CHECK((output.sizes() == inp.sizes())  || (output.device() == inp.device())
+                || (output.scalar_type() == inp.scalar_type()));
+    int threads = 256;
+    my_gelu_kernel&lt;&lt;&lt;cdiv(n, threads), threads&gt;&gt;&gt;(
+        output.data_ptr&lt;float&gt;(), inp.data_ptr&lt;float&gt;(), n);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return output;
+}</code></pre>
+        <p>调用方式和 Jeremy 上一讲一样，用 <code>torch.utils.cpp_extension.load_inline</code> 编译。他习惯单独写一个 <code>_out</code> 版本，把输出张量从外面传进去，这样计时不会把内存分配算进去（有缓存分配器时分配本身也挺快）。结果和 PyTorch 的版本在数值精度范围内一致，速度比 PyTorch 自带的还快一点，他猜可能是省掉了 PyTorch 分发（dispatch）的一些开销。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. “在数值精度范围内相同”是什么意思</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=2015s" target="_blank">0:33:35</a>–0:35:46 · Numerical accuracy issues</em></p>
+        <p>Andreas 请他顺便解释一下这句话。浮点数相加的结果取决于加的顺序：给 1 加上 $10^{-8}$ 量级的小数，结果还是 1.0，真的就是 1.0。所以像 $(1 + \epsilon) - 1$ 这样的计算会得到 0，换个顺序先把两个大数相减，再加小数，就能得到一个正数。</p>
+        <p>很多人说浮点加法“不满足交换律”，他纠正说两个数交换顺序没问题，问题出在三个以上的数：浮点加法不满足结合律。这是所有数值精度问题的根源。FP32 的相对精度大约在 $10^{-7}$ 到 $10^{-8}$；FP64 要好得多，他演示时要把小数取得更小才看到同样的现象。所以融合内核和 PyTorch 的结果只能“在数值精度范围内”相同。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 理论速度上限：rgb2gray 能跑多快</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=2146s" target="_blank">0:35:46</a>–0:40:06 · Theoretical speed limit / Measuring kernel launch</em></p>
+        <p>Discord 频道里有人在比赛谁能把 rgb2gray（把 RGB 图转灰度）内核写得最快。那么它最快能多快？对每个像素：</p>
+        <ul>
+            <li>读 3 个字节（R、G、B）；</li>
+            <li>算索引：1 次乘法 + 1 次加法，32 位整数。每个线程都要算，而每个处理单元只有 16 个 INT32 单元对 32 个线程，要分两次；</li>
+            <li>算 5 次浮点运算（3 乘 2 加，最好用 32 位），加上类型转换；</li>
+            <li>写 1 个字节。</li>
+        </ul>
+        <p>以 2048×2048 的图为例，在 RTX 3090 上：</p>
+        <ul>
+            <li>内存：NVIDIA 标的带宽约 900 GB/s，一共传 4×4M = 16 MB，约 18 微秒。在理想访问模式下这是理论下限，大家开玩笑叫它“光速”（speed of light）。</li>
+            <li>计算：规格是 35.6 FP32 TFLOP/s、16.8 INT32 TFLOP/s，算下来大约 2 微秒（已经算得很宽松）。这里没考虑 warp 之间的并行：一个 warp 等内存时另一个可以计算，对这么小的内核未必看得到这种效果。</li>
+            <li>内核启动：notebook 里有一个空内核，把 GELU 那套调用代码保留、计算全部删掉，用 <code>%timeit</code> 测得约 3 微秒的固定开销。</li>
+        </ul>
+        <pre><code>__global__ void my_empty_kernel(float* out, float* inp, int n) {
+}</code></pre>
+        <p>加起来理论上大约 21 到 23 微秒。他拿 Jeremy 第 3 讲的内核，在常数后面加上 <code>f</code>，实测约 26 到 27 微秒，达到理论可能速度的四分之三左右（幻灯片写 74%）。幻灯片还提醒：用 32 位或 16 位元素时别忘了乘元素大小；对齐有帮助，可以试试带偏移的拷贝内核。</p>
+        <pre><code>__global__ void rgb_to_grayscale_kernel(unsigned char* out, unsigned char* in, int n) {
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if (i &gt;= n) return;
+    out[i] = 0.2989f*in[i] + 0.5870f*in[i+n] + 0.1140f*in[i+2*n];  // fix with f found by Andreas...
+}</code></pre>
+    </section>
+
+    <section id="t09">
+        <h2>09. 屋顶线模型和几种内存</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=2406s" target="_blank">0:40:06</a>–0:44:31 · Roofline model / Computational intensity / Memory types summary</em></p>
+        <h3>计算强度和屋顶线</h3>
+        <p>要对一般的内核做同样的估算，常用屋顶线模型（roofline model）。关键量是计算强度（computational intensity，也叫算术强度），即每传输一个字节做多少次浮点运算（FLOP/Byte）。它告诉你内核是计算受限（compute bound）还是内存受限（memory bound）。</p>
+        <p>rgb2gray 每像素 5 次 FP32 运算、传 4 个字节，计算强度 $5/4 = 1.25$，很低。计算强度低时，每做一点计算就要搬很多数据，总吞吐被带宽限制，落在图上的斜线段，属于内存受限；计算强度高时，同样的数据能算很多次，峰值吞吐就是 GPU 浮点单元的速度，落在水平段，属于计算受限。</p>
+        <p>为什么形状是“屋顶”？前面估算时把内存时间和计算时间相加。但如果同一个 SM 上有多个 warp，一个 warp 等内存时其他 warp 可以计算，传输延迟就被隐藏了，加号变成了取最大值：</p>
+        $$T \approx \max\left(\frac{\text{bytes}}{\text{bandwidth}},\ \frac{\text{FLOPs}}{\text{peak FLOP/s}}\right),\qquad \text{throughput} = \min\left(\text{peak FLOP/s},\ I \times \text{bandwidth}\right)$$
+        <p>其中 $I$ 是计算强度。吞吐取最小值，画出来就是屋顶线。</p>
+        <h3>几种内存</h3>
+        <ul>
+            <li>全局内存（global memory）：GPU 显存，传给内核的 GPU 指针指向这里；也可以在程序里声明全局变量，但不常用。</li>
+            <li>寄存器：局部变量默认放在寄存器里，计算主要用它。</li>
+            <li>本地内存（local memory）：局部变量是数组时会放到这里，物理上在显存里，慢。</li>
+            <li>共享内存：每个块一份，用 <code>__shared__</code> 声明，是内存金字塔里快的那一层，后面会大量使用。</li>
+            <li>常量内存（constant memory）：可以显式声明，主要用途是隐式地传内核启动参数。</li>
+        </ul>
+        <p>幻灯片上问：rgb2gray 内核用了哪几种内存？可以对照这张表自己想。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 分块矩阵乘法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=2671s" target="_blank">0:44:31</a>–0:54:19 · Tiling for matrix mult / Block matrix multiplication / Matrix tiled kernel / Synchronization in tiles / Padding and non-square</em></p>
+        <h3>为什么要分块</h3>
+        <p>共享内存最典型的用法是分块（tiling），在 FlashAttention 和卷积里都很重要，这里用矩阵乘法讲。Jeremy 上一讲做的是长方形矩阵，这里简化成 $n \times n$ 的方阵（他的 N、M、K 全取 $n$）。</p>
+        <p>结果矩阵有 $n^2$ 个元素，每个用到 $2n$ 个输入，所以每个输入被用 $n$ 次。朴素内核每次都从主存读，读了 $n$ 次，效率低。分块的想法是把一部分输入读一次放进共享内存，让块里的很多线程重复使用。读取次数降不到 1，但可以降一个倍数。</p>
+        <h3>分块公式</h3>
+        <p>矩阵乘法可以按块来写，公式和按元素的一样，只是每一项变成块：块之间的乘法是矩阵乘法，加法是逐元素相加。设 $T$ 为块大小（TILE_SIZE），先假设它整除 $n$：</p>
+        $$C_{IJ} = \sum_{K=1}^{n/T} A_{IK}\,B_{KJ}$$
+        <p>要算一个输出块，就要做 $A$ 的第一个块乘 $B$ 的第一个块，加上下一对块的乘积，依次累加。一个输出块依赖 $2n/T$ 个大小为 $T \times T$ 的输入块；一共有 $(n/T)^2$ 个输出块。如果每次块乘法能让每个输入块元素只从主存读一次，那么每个输入只被读 $n/T$ 次。代价是要把输入块存在共享内存里，供块里的不同线程做 $T$ 次计算。最简单的设置是每个块 $T^2$ 个线程，每个线程负责输出块里的一个元素。</p>
+        <h3>朴素版本</h3>
+        <p>先是 Jeremy 原来的内核，最简单的实现。对 1024×1024 方阵，结果和 PyTorch 的矩阵乘法一致，耗时约 0.9 毫秒。</p>
+        <pre><code>__global__ void simple_matmul_k(float* m, float* n, float* out, int h, int w, int k) {
+    int r = blockIdx.y*blockDim.y + threadIdx.y;
+    int c = blockIdx.x*blockDim.x + threadIdx.x;
+
+    if (r&gt;=h || c&gt;=w) return;
+    float o = 0;
+    for (int i = 0; i&lt;k; ++i) o += m[r*k+i] * n[i*w+c];
+    out[r*w+c] = o;
+}</code></pre>
+        <h3>分块版本</h3>
+        <p>块大小取 16，一个线程块是 16×16 = 256 个线程，每个线程负责块里一个元素。声明两个 $T^2$ 大小的共享内存数组；需要两套索引，一套是块内索引，一套是全局索引；然后对 K 方向的块循环，每轮每个线程从全局内存读一个 M 元素、一个 N 元素放进共享内存，再在块内做矩阵乘法累加，最后写出结果。</p>
+        <pre><code>constexpr int TILE_SIZE = 16;
+
+__global__ void tiled_matmul_kernel(float* out, float* M, float* N, int h, int w, int k) {
+  __shared__ float M_tile[TILE_SIZE][TILE_SIZE];
+  __shared__ float N_tile[TILE_SIZE][TILE_SIZE];
+
+  // idxes into tile
+  int ir = threadIdx.y;
+  int ic = threadIdx.x;
+
+  int r = blockIdx.y * blockDim.y + threadIdx.y;
+  int c = blockIdx.x * blockDim.x + threadIdx.x;
+
+  // note: cannot just exit if we want to do padding!
+
+  float res = 0.0f;
+  for (int K_tileidx = 0; K_tileidx &lt; (k + TILE_SIZE -1) / TILE_SIZE; K_tileidx++) {
+    // note how threadIdx.x is the fastes moving bit --&gt; coalesced memory access
+    M_tile[ir][ic] = (((r &lt; h) &amp;&amp; (K_tileidx * TILE_SIZE + ic &lt; k)) ? M[r * k + K_tileidx * TILE_SIZE + ic] : 0.f);
+    N_tile[ir][ic] = ((((K_tileidx * TILE_SIZE + ir) &lt; k) &amp;&amp; (c &lt; w)) ? N[(K_tileidx * TILE_SIZE + ir) * w + c] : 0.f);
+    //M_tile[ir][ic] = M[r * k + K_tileidx * TILE_SIZE + ic];
+    //N_tile[ir][ic] = N[(K_tileidx * TILE_SIZE + ir) * w + c];
+    __syncthreads();
+    for (int idx = 0; idx &lt; TILE_SIZE; idx++) {
+       res += M_tile[ir][idx] * N_tile[idx][ic];
+    }
+    __syncthreads(); // important! (why?)
+  }
+  if ((r &lt; h) &amp;&amp; (c &lt; w)) {
+    out[r * w + c] = res;
+  }
+}</code></pre>
+        <p>几个要点：</p>
+        <ul>
+            <li>读全局内存时，列索引（由 <code>threadIdx.x</code> 决定）始终是变化最快的那一维。下一讲会讲为什么这很重要，那就是合并访存（coalesced memory access）。</li>
+            <li>两个 <code>__syncthreads()</code> 都不能少。第一个在读完块之后：每个线程只往共享内存写了一个 M 值和一个 N 值，却要用到别的线程写的所有值，必须等所有值都到位，否则先完成的线程会往前跑，用到还没写进去的数据。第二个在块内计算之后：不能让一些线程去加载下一块、覆盖共享内存，而其他线程还在用当前块计算。</li>
+            <li>矩阵大小不是块大小的整数倍时要补齐（padding）：读全局内存时，越界的位置填 0，把整块补完整。公式因此复杂一点，每次都问“这个索引还在矩阵里吗”，在就读，不在就设为 0。正因为要补齐，线程不能像朴素版本那样在开头越界就直接 <code>return</code>，只在最后写结果时判断。</li>
+        </ul>
+        <p>幻灯片上的提醒：他喜欢用三元表达式 <code>valid ? x[i] : 0.0f</code> 写这种条件读，这样心里对发散比较踏实（就算写成 if，也会被编译成条件加载）；要平衡共享内存的用量，以免伤到占用率。</p>
+        <h3>结果</h3>
+        <p>朴素版本 900 多微秒，分块版本约 700 微秒，快了大约四分之一（他说“20%、四分之一”）。每个值从内存读的次数降为原来的 1/16，因为块大小在每个维度上是 16。他又用非方阵（500×200 乘 200×1000）检查，结果在数值精度范围内正确，算法的通用性保住了。</p>
+        <p>notebook 最后有一个关于占用率的小结：共享内存 64K / 2K → 32 个块，线程 1536 / 256 → 6 个块，所以还能用更大的块。后面会讲“每个线程做多少活”，也就是线程粗化（thread coarsening），能把块大小进一步加大。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 练习和总结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=3259s" target="_blank">0:54:19</a>–0:56:55 · Tiling exercise / Conclusion</em></p>
+        <p>他留了一个练习，说本想当成一次现场编程：按论文伪代码从零实现原版 FlashAttention。FlashAttention 也是把三个输入和输出分块，再全部组合进一个内核（论文报告在 GPT-2 上端到端快 3 倍，对更大的模型影响也很大）。本合集第 05 篇（Lecture 12）也由他主讲，讲的就是 FlashAttention。</p>
+        <p>第 4、5 章的要点：</p>
+        <ul>
+            <li>GPU 按线程、warp、块组织计算，以及哪些硬件单元在做实际计算；</li>
+            <li>尽量用满硬件（占用率），平衡各种限制，不让单一资源成为瓶颈；</li>
+            <li>避免线程分支发散；</li>
+            <li>屋顶线模型和“理论最高速度”；</li>
+            <li>尽量少读写全局内存。</li>
+        </ul>
+        <p>下一章讲怎样让读写落在连续、对齐的全局内存地址上，也就是合并访存，以及其中的很多细节。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“always good to check those assumptions when you read something in a book or I'm telling you something that you don't believe try to experiment with it”（读书或听我讲时，对不相信的说法，最好自己做实验检验。）<a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=714s" target="_blank">0:11:54</a></li>
+            <li>“if you don't have like close to 100% GPU utilization in Nvidia SMI or some of those tools uh one thing to the first thing to check probably is the data acquisition”（如果 nvidia-smi 之类的工具里 GPU 利用率还没接近 100%，第一件该查的多半是数据获取。）<a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=1362s" target="_blank">0:22:42</a></li>
+            <li>“going from python to C++ without any other changes will give you single digigit percentages sometimes 5% sometimes only two”（不做其他改动、只从 Python 换到 C++，提升是个位数百分比，有时 5%，有时只有 2%。）<a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=1427s" target="_blank">0:23:47</a></li>
+            <li>“this is jokingly called the speed of light because it's the theoretical limit uh for the speed”（这被开玩笑地叫作“光速”，因为它是速度的理论上限。）<a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=2212s" target="_blank">0:36:52</a></li>
+            <li>“many people say it's not commutative but actually two numbers you can exchange it's just when you have multiple of them and this is because it's not associative”（很多人说它不满足交换律，其实两个数可以交换，问题在多个数的时候，因为它不满足结合律。）<a href="https://www.youtube.com/watch?v=lTmYrKwjSOU&t=2015s" target="_blank">0:33:35</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 4: Compute and Memory Basics · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>低比特 Triton 内核 | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="11_Liger_Kernel.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 12</span>
+    <span><a href="13_CUTLASS与FlashAttention3.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 34 · 低比特 Triton 内核</h1>
+        <p class="subtitle">GemLite 作者讲怎样在 Triton 里写快的量化矩阵乘法：线性量化和分组，比特打包，融合反量化的 GEMM、GEMV 和 split-K，十来个不写进文档的性能技巧，以及接进 torch.compile 和 CUDA Graph 时要处理的问题</p>
+        <div class="author-meta">
+            主讲：Hicham Badri（Mobius Labs 首席研究科学家，Mobius Labs 是一家做计算机视觉的创业公司）· 发布日期：2024 年 11 月 4 日 · 时长：1 小时 45 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=7c3c3bCGzKU" target="_blank">讲座录像 Lecture 34: Low Bit Triton Kernels</a>（GPU MODE YouTube 频道公开）· 幻灯片/代码：<a href="https://github.com/gpu-mode/lectures#lecture-34-low-bit-triton-kernels" target="_blank">讲座仓库 README 里的幻灯片链接</a>（本文依据录像字幕整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>Hicham Badri 是 Mobius Labs 的首席研究科学家，GemLite 项目的作者。GemLite 是一个开源的低比特矩阵乘法内核库，全部用 Triton 写。这一讲的问题是：权重被量化成 8/4/3/2 比特之后，怎样让矩阵乘法真的跑快。一般人会用 CUDA 或 CUTLASS 写这类内核，他选了 Triton。他开场就说，在 Triton 里按朴素方式写，性能会让你很失望，所以大半时间在讲他这两个月摸索出来的技巧。</p>
+        <p>前置知识：矩阵乘法的分块（tiling），Triton 的 <code>tl.load</code>/<code>tl.dot</code>/<code>tl.atomic_add</code> 写法（本站第 06 篇），访存受限和计算受限的区别（本站第 02、03 篇的屋顶线模型，CS149 也讲过）。LLM 推理的预填充（prefill）和解码（decode）两个阶段在本站 CS2680 笔记里讲过，这一讲按这两个阶段选不同的内核。这一讲没有仓库代码，内核代码在幻灯片上，下面按他讲的内容用文字和公式记录。</p>
+        <ol>
+            <li><a href="#t01">开场和 GemLite 项目概览</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">为什么要量化，量化是什么</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=165s" target="_blank">0:02:45</a></li>
+            <li><a href="#t03">线性量化：零点、缩放因子和分组</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=450s" target="_blank">0:07:30</a></li>
+            <li><a href="#t04">比特打包和融合反量化内核</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=715s" target="_blank">0:11:55</a></li>
+            <li><a href="#t05">访存受限和计算受限，现有方案</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=1180s" target="_blank">0:19:40</a></li>
+            <li><a href="#t06">为什么用 Triton</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=1420s" target="_blank">0:23:40</a></li>
+            <li><a href="#t07">写内核前的难点：统一的比特打包格式</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=1642s" target="_blank">0:27:22</a></li>
+            <li><a href="#t08">先写一个不量化的 Triton GEMM</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=1930s" target="_blank">0:32:10</a></li>
+            <li><a href="#t09">改成读打包权重的 GEMM</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=2240s" target="_blank">0:37:20</a></li>
+            <li><a href="#t10">缩放因子、零点和反量化的各种情况</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=2605s" target="_blank">0:43:25</a></li>
+            <li><a href="#t11">GEMV 和 split-K</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=2960s" target="_blank">0:49:20</a></li>
+            <li><a href="#t12">性能技巧</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=3330s" target="_blank">0:55:30</a></li>
+            <li><a href="#t13">技巧的效果和 GemLite 基准结果</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=3940s" target="_blank">1:05:40</a></li>
+            <li><a href="#t14">3 比特、5 比特这类非 2 的幂位宽</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=4273s" target="_blank">1:11:13</a></li>
+            <li><a href="#t15">接进 PyTorch：torch.compile、CUDA Graph、缓存和自动调优</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=4400s" target="_blank">1:13:20</a></li>
+            <li><a href="#t16">端到端性能和使用示例</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=4755s" target="_blank">1:19:15</a></li>
+            <li><a href="#t17">未来工作和“愿望清单”</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=5103s" target="_blank">1:25:03</a></li>
+            <li><a href="#t18">问答</a> · <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=5415s" target="_blank">1:30:15</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场和 GemLite 项目概览</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=0s" target="_blank">0:00:00</a>–0:02:45 · Introduction / Project Overview</em></p>
+        <p>Mark 这次休假，由另外两位主持人主持。他们介绍 Hicham 是 Mobius Labs 的首席研究科学家。</p>
+        <p>Hicham 说这一讲是关于怎么写低比特 Triton 内核，也就是在权重被量化后做低比特矩阵乘法的内核。这是当前的热门方向，大家通常用 CUDA 或 CUTLASS，因为它们做 GEMM（通用矩阵乘法）很强；他要讲的是在 Triton 里做，并且确保真的快。</p>
+        <p>大纲：先简单介绍量化和其中的挑战，以及为什么开了这个项目，项目叫 GemLite，开源；然后讲写内核本身和他过去两个月发现的技巧；再讲怎么把这些内核接进生产，因为有几件事不检查就没法端到端跑；然后是一个简短的实践示例；最后是未来工作、当前挑战，以及他的“圣诞老人愿望清单”，也就是希望有的功能。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 为什么要量化，量化是什么</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=165s" target="_blank">0:02:45</a>–0:07:30 · The Need for Quantization / Quantization Benefits / Types of Quantization / Defining Quantization</em></p>
+        <h3>模型太大，跑起来太贵</h3>
+        <p>他举例：Llama 2 70B 用 FP16 跑，需要两张 80 GB 的 A100，一张 A100 约 2.5 万美元，跑一个模型就要 5 万美元。训练更糟，他提到 Discord 频道里有人两周前讲过量化训练（应指本系列 Lecture 30）。LLM 和视觉语言模型都很吃资源。</p>
+        <h3>量化能带来什么</h3>
+        <p>Transformer 模型里大部分权重在线性层，几乎所有计算也在线性层和注意力里。把线性层权重量化，显存大幅减少；在访存受限时还能跑得更快，因为要加载的数据少了。以 Llama 2 70B 为例，他说量化后显存能减少 3.5 到 4 倍，推理最多快 3 到 4 倍，成本降到约 1/8，而且不损失精度。他认为 LLM 能普及，部分原因就在量化：没有量化，大家没法在本地跑这些模型。</p>
+        <h3>量化的几种对象</h3>
+        <ul>
+            <li>权重：这一讲的重点。</li>
+            <li>激活：通常在计算受限时用，比如用 vLLM 服务很多用户时，把激活也量化来提速，vLLM 就这么做。</li>
+            <li>KV cache（推理时缓存的每层 key、value，避免重复计算）：提示很长时，有工作专门量化 KV cache。</li>
+        </ul>
+        <h3>定义</h3>
+        <p>量化就是降低数据的位宽：从 FP16/FP32 降到 INT8、FP8、INT4、FP4。幻灯片上的简单例子是把一个 FP16 张量量化成 INT4 张量，取值在 0 到 15。理论上任何向量、张量都可以量化，看情况是否值得。</p>
+        <p>量化不是无损压缩，会损失精度，所以要保证量化后的质量，这是量化方法的话题，不在这一讲范围。效率方面也有两件事：一是量化过程本身要快，这一讲不谈；二是量化后的模型要跑得快、跑得省，这需要写自定义内核，是这一讲的主题。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 线性量化：零点、缩放因子和分组</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=450s" target="_blank">0:07:30</a>–0:11:55 · Quantization Methods / Linear Quantization Details</em></p>
+        <h3>线性和非线性量化</h3>
+        <p>线性量化数学上很简单，反量化是一个线性运算。更先进的方法效果更好，叫非线性量化，比如用向量量化（vector quantization）或查找表的方法，这一讲不讲。这一讲只讲线性量化，对应 GPTQ、AWQ、HQQ 这类方法，它们可以带校准也可以不带，这里无关紧要。</p>
+        <h3>激活量化</h3>
+        <p>激活要在推理时实时量化，所以需要动态量化，速度要快。通常用 INT8 或 FP8，配上按通道的对称量化，加一些技巧一般就够用。有些方法用 INT4 激活（字幕里像是 QuaRot），但 Triton 不支持 INT4 的 Tensor Core 运算，他就不谈了。所以这一讲的场景是：激活是 FP16、INT8 或 FP8，权重是量化过的，要把它们做矩阵乘法。</p>
+        <h3>线性量化的三个参数</h3>
+        <p>用 GPTQ、AWQ、HQQ 这类方法量化后，得到三样东西：量化后的权重 $W_q$，零点（zero point）$z$，缩放因子（scale）$s$。反量化就是：</p>
+        $$\hat{W} = (W_q - z)\cdot s$$
+        <p>$z = 0$ 时就是对称量化，只有缩放因子。</p>
+        <h3>分组（grouping）</h3>
+        <p>按通道（channel-wise）量化指 $W$ 的每一行只有一个零点和一个缩放因子，各一个标量。他说低于 8 比特（4、3、2 比特）时这样效果通常不好，需要分组：把矩阵 reshape 成更小的组，每组各有自己的零点和缩放因子，参数变多，精度变好。极端情况下组大小为 1，缩放因子和零点就和权重一样大，那就是无损的。</p>
+        <p>这就是用 GPTQ、AWQ、HQQ 时看到的 group size 参数：每一段连续的权重（32、64、128 等）配一个零点和一个缩放因子；组大小等于输入特征数时就是按通道量化。他说分组会给 CUDA 和 Triton 内核带来不少麻烦，后面要处理。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 比特打包和融合反量化内核</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=715s" target="_blank">0:11:55</a>–0:19:40 · Bitpacking Techniques / Fused Kernel Concept</em></p>
+        <h3>为什么要比特打包</h3>
+        <p>按上面的公式算出来的 $W_q$，数据类型其实还是 FP16，只是取值变成了 0、1、2……15（4 比特时）。Python/PyTorch 里没有原生的 INT4 类型（没有 <code>torch.int4</code> 这种东西），所以 FP16 的 $W_q$ 一点显存都不省。</p>
+        <p>比特打包（bitpacking）是用已有的数据类型去装不被支持的数据类型：比如两个 4 比特值放进一个 8 比特整数，或者八个 4 比特值放进一个 32 比特整数。做法就是位运算，移位加按位或。这是无损的，他说甚至算不上压缩，只是换了数值的表示。在出现原生支持的数据类型之前，这一步到处都要用。</p>
+        <p>幻灯片上有一段 Python 打包和解包的代码。他讲的 8 比特装两个 4 比特的例子：把矩阵的一半列左移 4 位，再和另一半列按位或，就打包好了；解包时反过来移位、取掩码。他说任何量化代码里都会看到某种比特打包。</p>
+        <h3>融合反量化</h3>
+        <p>原来的线性层有权重 $W$ 和偏置（这里不管偏置），输入激活 $X$。量化后的线性层多了 $W_q$、$z$、$s$ 三个参数，激活也可以量化，这里为简单起见不画。</p>
+        <p>最省事的做法是先反量化出 $\hat W$，再调用 <code>torch.matmul(x, W_hat)</code>。但这样会很慢，因为完全没有利用权重已经被量化、占显存少这件事。所以要把反量化和点积融合进同一个内核：内核从显存读的是打包后的小权重，在片上解包、反量化，再做乘加。</p>
+        <h3>问答：零点和缩放因子的作用</h3>
+        <p>有人确认：零点和缩放因子的目的是让每组反量化后的权重尽量接近原始权重，减少损失？Hicham 说对，它们是帮助保持精度的参数；对称量化又不做校准的话效果会很差。他补充：即使是对称量化，也往往还需要一个零点来做平移，因为打包用的是无符号整数（比如 uint8），全是正数，而权重可以是负的，所以要加一个偏移把它们映射成正数，内核里再平移回来。零点一方面用于这个偏移，一方面也用于提高精度。8 比特通常不需要零点，到 4、3、2 比特时零点就很重要。非线性量化没有零点，有的是查找表之类的东西。</p>
+        <h3>问答：为什么把前后两半打包在一起，而不是相邻元素</h3>
+        <p>Eric 问。Hicham 说这只是个简单例子，实际不这样做。比特打包有很多种方式，关键是写内核时读取要快，而读取速度取决于打包方式，所以打包方式取决于你写的内核。比如写一个 CUDA GEMV 内核，参数预先定好，数据按 32 一块处理，那就可以按这个内核的读法来打包，让加载最快。难点在于不同的内核要用同一种打包格式，后面会讲。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 访存受限和计算受限，现有方案</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=1180s" target="_blank">0:19:40</a>–0:23:40 · Memory vs Compute Bound / Existing Solutions</em></p>
+        <h3>预填充和解码要不同的内核</h3>
+        <p>输入提示进入模型的第一步叫预填充（prefill），一次处理整段提示，通常是计算受限（compute bound）：计算很多，加载数据的速度不太重要。之后逐个 token 解码，每步计算很少，但每一步仍然要把所有权重加载一遍，和预填充时加载的量一样，所以速度取决于加载数据的速度，叫访存受限（memory bound）。</p>
+        <p>所以要为不同情况写不同的内核：计算受限时要 GEMM（矩阵乘矩阵）；访存受限时要 GEMV（矩阵乘向量），或者 batched GEMV。每种都要写。</p>
+        <h3>现有方案及其不足</h3>
+        <p>低比特推理需要这种融合内核，PyTorch 本身不直接提供，要靠外部库。他列了几个：</p>
+        <ul>
+            <li><strong>tinygemm</strong>（torchao 里的自定义 CUDA 内核）：他最喜欢的 4 比特运行方式，很快。但它是 GEMV 内核，专门为解码优化，batch 超过 8 就很慢，预填充会很慢；也不支持 2 比特、3 比特这些他感兴趣的位宽。</li>
+            <li>Marlin（vLLM 在用）：基本是最快的 4 比特内核，很难比它更快。问题是它的零点是量化过的，像 HQQ 这类方法需要 FP16 的零点就没法用；同样不支持 2、3 比特。</li>
+            <li>BitBLAS（Lei Wang 写的，上周他在 Discord 做过分享）：用 TVM 生成各种内核，很快，但很难定制：代码库很大，依赖 TVM 编译内核，想做很特定的改动很难。</li>
+            <li>Triton：很容易定制，但性能不好。</li>
+        </ul>
+        <p>他说两个月前面对这些问题，他决定干脆全用 Triton 来做。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 为什么用 Triton</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=1420s" target="_blank">0:23:40</a>–0:27:22 · Why Use Triton</em></p>
+        <p>项目的第一版其实是 CUDA。他两个月前才开始认真用 Triton，之前做的是 CUDA GEMV，效果很好；但试着做一些特殊的 GEMM 时性能很差，因为高性能 GEMM 很难写。他以前试过 Triton，性能不行，这次想再试试看到底怎么回事。他列的 Triton 优点：</p>
+        <ul>
+            <li>好写、好学。他鼓励 Discord 里的人至少试一试，一两天就能上手，推荐本系列 Umer 讲的 Triton 入门（本站第 06 篇）。</li>
+            <li>好调试。不像 CUDA 每次调试都要编译，设几个环境变量就能打印形状和张量内容，开发快很多。他说作为研究员，他的工作不是写最快的内核，而是检验想法是否成立，Triton 很适合，很快就能知道想法行不行。</li>
+            <li>和 PyTorch 集成好，torch.compile 本身也依赖 Triton。</li>
+            <li>支持不同设备，CPU 支持在做，AMD GPU 应该也能用，他自己没试过。</li>
+        </ul>
+        <h3>问答：要不要先学 CUDA</h3>
+        <p>他说要。先学一点 CUDA 再学 Triton，很多东西会更好理解；不建议完全不懂 CUDA 就盲学 Triton。不需要学到 Tensor Core 那么深，只要理解线程怎么工作、warp 是什么，就能让你的 Triton 内核写得更好，因为有些事会说得通。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 写内核前的难点：统一的比特打包格式</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=1642s" target="_blank">0:27:22</a>–0:32:10 · Developing Kernels</em></p>
+        <p>前面说了要为不同情况写多个内核。这时又回到打包方式的问题：对某个 CUDA GEMV 内核最快的打包方式，对 Triton 内核不一定最快。你可能有一个很快的 GEMV CUDA 内核和一个很快的 GEMM Triton 内核，但它们的打包格式不同，于是两边各存一份 4 比特权重，相当于存了 8 比特，只为了享受各自的速度。</p>
+        <p>所以他想要同一种打包格式，只存一份张量，供所有内核用。代价是会影响一点性能：知道某个内核最适合什么参数，就可以为它优化打包让加载更快，但那些参数对别的内核不一定好。现状是每个内核用自己的格式，Marlin 一种，tinygemm 另一种，没法直接互换，所以需要一种标准化的打包方式。</p>
+        <p>此外，同一个内核要支持多种数据类型；要同时支持未打包和打包的数据，比如 INT8×INT8 不用打包，已经有 <code>torch.int8</code>，转一下类型就行，4 比特、2 比特就要打包；还要处理量化过的激活，它的处理方式又有些不同。</p>
+        <h3>问答：预填充结束后重新打包权重行不行</h3>
+        <p>Eric 问：能不能在预填充结束、开始生成之前把权重重新打包？Hicham 说他认识一个人做过这件事：那人解码用 tinygemm，预填充用另一个内核，两者打包格式不同，就试着重新打包，但重新打包很慢。如果能让它变快，确实就能用不同的内核。另一个问题是你得知道权重是怎么打包的才能写重新打包的函数；Triton 内核可以读代码，但如果拿到的是一个很复杂的内核，你又不想读那些难懂的代码，很快就会迷失。总之重新打包快的话可行，但解决不了其他问题。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 先写一个不量化的 Triton GEMM</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=1930s" target="_blank">0:32:10</a>–0:37:20 · Triton GMM Kernel</em></p>
+        <h3>数据格式：行优先和列优先</h3>
+        <p>先看不量化的 FP16 情况：$A \times B = C$，$A$ 是 $M \times K$，$M$ 是批大小，$K$ 可以理解为通道数。幻灯片上每个矩阵旁有一个箭头，表示存储顺序：行优先（row-major）就是一行的元素在内存里挨着放。他说这个细节如果不注意，即使内核写得再好，数据按错误的行/列优先送进去，内核会慢 10 倍。</p>
+        <p>通常的做法是行优先乘列优先：输入是行优先，这是 PyTorch 里任何新建张量的默认；权重要列优先。怎么得到列优先的权重？只转置不够，转置后行方向上不连续；要转置再调用 <code>.contiguous()</code>。他说他为这个 <code>.contiguous()</code> 抓狂了好几个小时，它能让整个内核白写。</p>
+        <h3>分块和 program 遍历顺序</h3>
+        <p>做法是取 $A$ 的一块和 $B$ 的一块做点积，得到 $C$ 的一块。Triton 帮你把这些块并行化：你按块写程序，“这块乘那块存到这块”，这就是 Triton 的工作方式。</p>
+        <p>每个 program 先拿到自己的 program id，然后决定怎么遍历块：可以线性（linear tile）按行一块块走，也可以用 swizzle，换一种顺序走，有助于 L2 缓存的利用。他说有些内核 swizzle 有用，有些没用，最后差别不大，属于细节：可以直接用 Triton 自带的 <code>tl.swizzle2d</code>，至少在 Triton 里差别不大，也许多几个 token/s，两种都试试，哪个好用哪个。</p>
+        <p>接下来算出各个指针和偏移，然后沿 $K$ 维循环：按块加载、做点积、累加，最后存回。这就是基本的 GEMM 算法。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 改成读打包权重的 GEMM</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=2240s" target="_blank">0:37:20</a>–0:43:25 · Packed Weight Kernel</em></p>
+        <h3>和普通 GEMM 的区别</h3>
+        <p>现在权重是打包过的，形状和 $B$ 不同，此外还要加载缩放因子和零点。逻辑基本一样：</p>
+        <ol>
+            <li>累加器初始化为 0。</li>
+            <li>沿 $K$ 维循环：加载 $A$ 的块，加载 $B$（打包权重）的块，加载缩放因子和零点。</li>
+            <li>解包权重。</li>
+            <li>反量化：减零点、乘缩放因子（$(W_q - z)\cdot s$）。</li>
+            <li>做点积，推进指针，进入下一轮。</li>
+        </ol>
+        <p>内核里有一个参数他叫 elements per sample，表示一个存储单元里打包了几个元素。用 8 比特存 4 比特就是 2；他们用的是 32 比特，4 比特时就是 $32/4 = 8$。另外要初始化缩放因子和零点的指针，以及告诉内核怎么解包的移位量（shifts）。他说整体改动很直接。</p>
+        <h3>问答：打包解包会不会溢出</h3>
+        <p>有人一开始担心打包解包的溢出问题，后来意识到计算是在解包后的数据上做的，不在打包数据上。Hicham 确认，没有溢出，解包后的数据和原值完全一样。</p>
+        <h3>问答：新硬件的异步加载怎么办</h3>
+        <p>同一个人接着说，根本挑战在于新一代硬件有异步的 load/store，可以直接把数据加载给 Tensor Core（指 Hopper 的 TMA，Tensor Memory Accelerator，一个专门搬运张量块的硬件单元），这里讲的一些技巧就会很难用，问他怎么处理。Hicham 说对，在 H100 上也没法用 TMA 按特定方式加载权重，这些挑战他最后会讲；这里只是教学用的简化版。</p>
+        <p>他先预告了一下：在 Triton 里加载打包权重有两种做法。</p>
+        <ul>
+            <li>按原样加载打包权重，再拼接。最终需要一个 BLOCK_SIZE_K × BLOCK_SIZE_N 的块，但打包数据是 (BLOCK_SIZE_K / 8) × BLOCK_SIZE_N，所以加载后要做几次 <code>tl.interleave</code>（他记不清是三次还是四次），或者用 <code>tl.join</code> 拼接几次。这样慢得多，因为有拼接这一步。</li>
+            <li>他现在的做法：用交错的重复下标（repeated, interleaved indices）去加载，形状和最终块一样。普通偏移是 0,1,2,3,4,5…，改成让 Triton 按 0,0,0,0,0,0,0,0,1,1,1,1…,2,2,2,2…,3,3,3,3 这样的下标去读，这样直接得到 BLOCK_SIZE_K × BLOCK_SIZE_N 的块，再按位置做移位解包。缺点是这种方式不能用 block pointer，也不能用 TMA。</li>
+        </ul>
+    </section>
+
+    <section id="t10">
+        <h2>10. 缩放因子、零点和反量化的各种情况</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=2605s" target="_blank">0:43:25</a>–0:49:20 · Packed Weight Kernel（续）</em></p>
+        <h3>分组和按通道要分开处理</h3>
+        <ul>
+            <li>分组的缩放因子和零点：必须在 $K$ 循环里面加载，这对性能是个问题。你只能希望 Triton 能缓存它们，意识到不用加载那么频繁。</li>
+            <li>按通道的：不用在循环里加载，可以在循环结束后加载，因为这是一个后缩放（post-scaling）操作。他说这样效率高得多，如果在代码里能这样处理，对速度影响很大，相当于明确告诉 Triton 程序不用在循环里加载它们。</li>
+        </ul>
+        <p>以按通道对称量化为例（他讲的“循环后缩放”成立的原因，用公式写出来是）：</p>
+        $$C_{mn} = \sum_k X_{mk}\,(W_q)_{kn}\, s_n = s_n \sum_k X_{mk}\,(W_q)_{kn}$$
+        <p>缩放因子只和输出列 $n$ 有关，可以提到求和外面，循环结束后乘一次。分组时 $s$ 随 $k$ 所在的组变化，就提不出来。</p>
+        <h3>激活也量化时</h3>
+        <p>如果激活被量化成 FP8 或 INT8，并且有按通道的缩放因子，就要和权重的缩放因子结合起来（权重是对称量化时）。做法是外积：激活的缩放因子和权重的缩放因子做外积；如果权重没有按通道的缩放因子，就用全 1 向量照样做外积。他说外积很快，不是大问题，只是提醒内核里得写这段，不会自动发生。</p>
+        <h3>不要量化零点</h3>
+        <p>很多内核（他举了一个例子，字幕不清）会量化零点，这是个问题：HQQ 这类方法需要未量化的零点，2 比特和 3 比特也需要未量化的零点。</p>
+        <h3>一个看起来会快、其实不快的技巧</h3>
+        <p>可以把缩放因子和零点各 16 比特，打包进同一个 32 比特张量，想法是加载指令少一些。但解包它们要花时间，还要分配新的小张量，最后反而影响性能。所以就让它们分开放。他说这是按端到端性能测的结论，在自定义 CUDA 内核里也许更有意义，在 Triton 里没什么意义。</p>
+        <h3>其他要处理的情况</h3>
+        <ul>
+            <li>对称量化，没有零点。</li>
+            <li>只有平移、没有缩放：比如 FP8×FP8，模型本身就是 FP8 训练的，不需要任何缩放；或者 FP8×INT8，INT8 因为按某种格式打包而带一个平移，这时只有零点。</li>
+        </ul>
+        <p>他说这些是边缘情况，但写内核时要把所有可能都想到。</p>
+        <h3>反量化操作和 A100 上的怪问题</h3>
+        <p>反量化有两种：未打包的权重只需要类型转换；打包的权重要先解包。这里就回到前面有人说的硬件问题：在某些设备上这是个问题，奇怪的是 A100 上出现了，按理不该出现。RTX 3090 这一代没有问题。比如在 4090 或 3090 上用这个技巧，batch 为 1 时 4 比特权重的加载预期能快 3.5 倍左右，但在 A100 上达不到。他说这是个未解决的问题，A100 上本不该这样，他在 Triton 的 GitHub 上开了 issue，需要调查原因，最后还会再提。之后就是反量化本身，很直接。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. GEMV 和 split-K</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=2960s" target="_blank">0:49:20</a>–0:55:30 · GEMV and Split-K / Split-K Algorithm</em></p>
+        <h3>GEMV：batch 为 1 的解码</h3>
+        <p>前面的 GEMM 适合预填充。batch 为 1 时访存受限，需要另一种算法 GEMV。思路是不沿 $K$ 维循环，而是启动更多 program，每个只算一段部分点积（幻灯片上用灰色虚线表示每一小段只算部分积），最后把部分积加起来。</p>
+        <p>加法用原子加（atomic add，多个线程对同一地址做加法时由硬件保证不丢失更新）：把 <code>tl.store</code> 换成 <code>tl.atomic_add</code>。用原子加时输出必须初始化为 0。平常输出用 empty 初始化，反正会被写满；这里不初始化为 0 结果就是错的。</p>
+        <p>另一个区别是不用 <code>tl.dot</code>，也就不用 Tensor Core。Tensor Core 要在二维块上用，这里只有一个向量，补零再 <code>tl.dot</code> 纯属浪费时间；而且访存受限时不需要更快的计算，只需要尽快把权重读进来。所以直接用 <code>tl.sum</code> 做点积，在对应维度上求和。</p>
+        <h3>问答：原子加是整数还是浮点</h3>
+        <p>他说当然是浮点，反量化后得到的就是浮点。即使是 INT8×INT8，他的实现里 GEMV 也用浮点原子加，因为 <code>tl.atomic_add</code> 有限制，比如不支持 BF16，只支持 FP16 和 FP32。GEMM 的 split-K 版本他记得可能是整数，不确定，取决于你指定的输出数据类型。</p>
+        <h3>split-K：中间的 batch 大小</h3>
+        <p>GEMM 用于大 batch（预填充），GEMV 用于解码，batch 为 1 或 2，最多到 8，看实现。中间 batch 大约 2 到 32 需要别的算法，叫 GEMM split-K，是 GEMV 和 GEMM 的混合。</p>
+        <p>做法是在 GEMM 的基础上，把原来一个 $K$ 循环拆给更多线程：比如拆成 4 份，每次循环步长从 BLOCK_SIZE_K 变成 BLOCK_SIZE_K × SPLIT_K，SPLIT_K 是可指定的参数。SPLIT_K = 1 时就是普通 GEMM，所以它是 GEMM 的一个“元版本”。SPLIT_K 大于 1 时也要原子加：同样算部分点积，但这里用 Tensor Core（<code>tl.dot</code>），得到比如 4 个块，再把这 4 个块原子加起来。</p>
+        $$C = \sum_{j=0}^{S-1} A_{:,\,K_j}\, B_{K_j,\,:}$$
+        <p>其中 $K_j$ 是第 $j$ 段 $K$ 区间，$S$ 是 SPLIT_K。他说这个小改动对性能影响很大，split-K 是目前做批量解码最好的算法，CUTLASS 里也实现了，从 GEMM 改出 split-K 版本不难。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 性能技巧</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=3330s" target="_blank">0:55:30</a>–1:05:40 · Performance Tricks</em></p>
+        <p>他说把上面这些内核直接放进代码，不会快，会很失望。下面是他发现的一部分技巧，没有全列，有些很怪，但要知道。</p>
+        <h3>1. 加载顺序</h3>
+        <p>先加载权重再加载激活，和先激活后权重，性能不一样。你以为 Triton 编译器会处理，但它不会。这不是一个固定规律，取决于内核，也取决于 GPU：有的 GPU 一种顺序好，有的另一种好。他说没在别处见过，是自己随便调换顺序发现的。他的做法是把顺序做成一个可调参数，放进 autotune，0 表示一种顺序，1 表示另一种。他说“有效”指的是快 2 倍。</p>
+        <h3>2. eviction policy（驱逐策略）</h3>
+        <p>在 Triton 里你没法控制什么放共享内存、什么被缓存，唯一能用的工具是 eviction policy（加载时给缓存的提示，告诉它这份数据该早点还是晚点被替换出去）。PTX 里有更多选项，Triton 里只暴露了一部分。默认是不设；有用的两个是 <code>evict_last</code> 和 <code>evict_first</code>。</p>
+        <p>这对小 batch（split-K、GEMV）很重要：你希望把激活缓存住。<code>evict_last</code> 表示最后才删它，尽量缓存。他类比 CUDA GEMV 的写法：激活数据不多，可以整个拷进共享内存缓存起来；这里同理，就是告诉 Triton 这份数据小、缓存它会更快。他说这让 GEMV 和 split-K 快了不少。</p>
+        <h3>3. 用 <code>tl.range</code> 写循环</h3>
+        <p>Triton 内核的循环通常写 <code>for k in range(...)</code>，但这在某些情况下会崩，他不知道为什么，Triton 有一个还开着的 issue。他发现改成 <code>for k in tl.range(...)</code> 能修好，而且奇怪的是内核也变快了，原因他也不知道。</p>
+        <h3>问答：加载顺序为什么有影响</h3>
+        <p>有人问是不是激活被缓存了之类的原因。他说他想过的解释是加载是异步的，先发起较大的权重加载会稍微快一点；但这解释不通，因为别的 GPU 上反过来更好。他说真要搞清楚得去看生成的代码，不想琢磨的话就放进 autotune 让它挑。</p>
+        <h3>4. autotune 配置要和形状兼容：提前剪枝</h3>
+        <p>尤其是 split-K 和分组：$K$ 必须能被 BLOCK_SIZE_K 整除；组大小也要和块大小兼容，BLOCK_SIZE_K 不能大于组大小。比如按通道时最好的 BLOCK_SIZE_K 是 128，你以为就用它，结果用了组大小 64，就开始出垃圾结果。这种情况要把配置剪掉，选和组大小最接近的 BLOCK_SIZE_K，即 64 或 32。split-K 还要求 $K$ 能被 BLOCK_SIZE_K × SPLIT_K 整除，有些 SPLIT_K 值和你的配置不兼容。</p>
+        <p>办法是 Triton autotune 的提前剪枝（early config pruning），自定义一个函数检查组大小、形状，剔掉不合法的配置。他强调这种情况不会崩，只会出垃圾结果，所以一定要检查。</p>
+        <h3>5. 很多 Triton 调用的默认参数很差</h3>
+        <ul>
+            <li>原子加的默认设置比改成 relaxed 或 release 慢得多。</li>
+            <li><code>tl.reshape</code> 以前默认 <code>can_reorder=True</code>（字幕里是这个意思），极慢；现在默认改成 False 了。</li>
+        </ul>
+        <p>所以每个调用都去读文档，试不同组合，看哪个快。</p>
+        <h3>问答：内存一致性语义要小心</h3>
+        <p>有位参与者提醒：原子操作的 relaxed、release、acquire-release 定义的是内存一致性模型，随便改默认参数不一定保证正确，要了解你的数据，选对语义。Hicham 说他的做法是改了之后用各种形状跑测试，都通过就是对的；他想说的是不要卡在默认参数上，很多内核不去想还有哪些参数可调，而这些参数能让内核快很多。对方说这不完全是 Triton 的问题，语言和编译器的开发者无法知道你会用什么数据；reshape 改顺序也可能影响浮点精度。Hicham 说检查很简单，改了跑一遍看对不对。他还说 eviction policy 默认也是关的，改它不会改变结果，但有些内核设成 <code>evict_first</code> 会快很多。</p>
+        <h3>6. 输出清零用 pre-hook</h3>
+        <p>用原子加的内核要把输出初始化为 0。直接 <code>torch.zeros</code> 慢得多。技巧是用 <code>torch.empty</code> 分配，再在 Triton 里设一个 pre-hook（内核启动前执行的 Python 回调）把它清零，这能让内核快很多。</p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 技巧的效果和 GemLite 基准结果</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=3940s" target="_blank">1:05:40</a>–1:11:13 · Performance Results</em></p>
+        <h3>给现成内核加上这些技巧</h3>
+        <ul>
+            <li>AutoGPTQ 的 Triton GEMM 内核：加上这些技巧、确认正确性后，性能提升很大。两边都用了 autotune，但都没开 max autotune，所以还能更高。他说这是要说明这些技巧很重要，不是写好 <code>tl.load</code> 就会快，要去调这些东西，包括那个奇怪的加载顺序。</li>
+            <li>GEMV split-K：来自 Meta 和 IBM 的一篇论文，他拿他们的 split-K 内核加上这些技巧，性能几乎翻倍。</li>
+        </ul>
+        <h3>按 batch 大小选内核</h3>
+        <p>GemLite 有多个内核，需要一段逻辑：batch 是多少就选哪个内核，batch 大于 32 用 GEMM。下面报告的是每个 batch 上最好的那个，不是单一内核。理想曲线是：batch 到 32 之前加速比很高，然后下降，最后接近 1 倍（大 batch 时计算受限，量化不再带来加速）。</p>
+        <h3>基准结果（4090 上，相对 FP16）</h3>
+        <ul>
+            <li>INT8 权重、按通道：曲线符合预期。还测了 A8W8（INT8 激活）、FP8 激活、A16W8（16 比特激活）。</li>
+            <li>4 比特：对比 torchao 的 tinygemm（GEMV）、BitBLAS 和 Marlin。对这个特定形状，Triton 内核比 Marlin 还快，他说完全出乎意料，因为 Marlin 很强。其他形状可以去仓库看。</li>
+            <li>2 比特：只能和 BitBLAS 比，它是唯一支持 2 比特的。</li>
+            <li>4 比特权重 + FP8 激活；A16W4 对称量化。对称时不用在循环里加载缩放因子和零点，循环后加载一次，所以更快；图上能看到按通道和分组的差别，按通道更快，因为缩放因子和零点加载得少。</li>
+        </ul>
+    </section>
+
+    <section id="t14">
+        <h2>14. 3 比特、5 比特这类非 2 的幂位宽</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=4273s" target="_blank">1:11:13</a>–1:13:20 · Handling N-Bit</em></p>
+        <p>1、2、4、8 比特很简单，因为位宽是 2 的幂，能整齐地装进 32 位。3 比特、5 比特就会碰到很多问题。他的一个办法是把 3 比特拆成 2 比特加 1 比特，用位运算分成两个矩阵。内核里两个都加载，转成 INT8（不需要 INT32），解包时再合起来；要同时跟踪两份权重，加上缩放因子和零点，推进两组 B 指针。他说在 CUDA 里做 3 比特也行，但很麻烦，在 Triton 里只是几行代码。</p>
+        <p>结果：解码（访存受限）时，希望 3 比特比 4 比特快、5 比特比 4 比特慢，实测就是这样；batch 变大后两者都收敛到相对 FP16 的 1 倍。加载两份权重看起来对性能影响不大，不过他说测得不多，还在实验阶段，掉几个 token/s 也完全可以接受。</p>
+    </section>
+
+    <section id="t15">
+        <h2>15. 接进 PyTorch：torch.compile、CUDA Graph、缓存和自动调优</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=4400s" target="_blank">1:13:20</a>–1:19:15 · Kernel Integration / Autotuning and Caching</em></p>
+        <h3>torch.compile</h3>
+        <p>写好的内核不会开箱即用。首先 torch.compile 会因为很多原因和内核冲突，比如用了不支持的特性：pre-hook 和提前剪枝，这两个他偏偏很需要，PyTorch 里都不支持，直接 compile 会失败。而很多库依赖 torch.compile，因为 Triton 内核启动开销大，不 compile 的话性能会让人失望。</p>
+        <p>办法是把 Triton 内核包成一个 custom op：注册 custom op，给出输入 dtype，再定义一个 fake tensor 函数，只返回形状正确的空张量。这样就能工作。代价是 torch.compile 看不到 custom op 里面是个 Triton 内核，没法把它和别的操作融合，会损失一点性能。他说这是他找到的让任何 Triton 内核和 torch.compile 共存的办法，即使用了 Triton 里不被支持的特性。</p>
+        <h3>CUDA Graph</h3>
+        <p>CUDA Graph 把一串内核启动录下来，之后一次重放，省掉每次启动的 CPU 开销。要用它，调内核的函数里不能有任何往 CPU 传数据的操作，比如 <code>.item()</code>。</p>
+        <p>他还发现，对一个用了 Triton custom op 的整模型做 compile，CUDA Graph 用得不够好。有时自己手动包 CUDA Graph 比 torch.compile 更快：他在 H100 上的例子，用 torch.compile 的 reduce-overhead 模式是 255 tokens/s；改成 torch.compile max-autotune 再自己手动包 CUDA Graph，是 300 tokens/s。手动做只要三行代码，前提是你知道在哪包。</p>
+        <h3>缓存内核选择结果</h3>
+        <p>需要一段逻辑按形状选最好的内核，并且把结果缓存下来，不用每次都跑一遍：比如在一台 A100 上把 Llama 3 或 Llama 2 的所有形状跑一次，存起来，以后跑模型时就不用再挑。他保证存这些结果的字典可序列化：Triton config 对象不能序列化，所以改成存字符串之类的东西。</p>
+        <h3>autotune 太慢</h3>
+        <p>Triton 的 autotune 很花时间。IBM 有个工具 triton-dejavu 能缓存和保存 autotune 结果，他没试过，认识的人试过遇到一些问题。他认为可以自己用技巧做，但这是大家都在抱怨的需求，Triton 团队应该官方支持：同一个形状每次都重新编译，没有任何道理。</p>
+    </section>
+
+    <section id="t16">
+        <h2>16. 端到端性能和使用示例</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=4755s" target="_blank">1:19:15</a>–1:25:03 · End-to-End Performance / Practical Implementation</em></p>
+        <p>这部分是端到端跑模型的结果，还在进行中，尤其 A100、H100 还要再做。数字来自 master 分支，git clone 下来选这个配置就是这个性能。</p>
+        <h3>预填充</h3>
+        <p>整体不错，A100 除外，就是前面说的 <code>tl.load</code> 问题，预填充时 4090 大幅领先 A100。他补充：A100 的 autotune 不完整，那份 autotune 是在 4090 上做的；而且他当天才意识到，加载顺序这个参数在 A100 上是 0（先加载激活再加载权重）更好，4090 上是另一种好，他忘了放进 A100 的 autotune。为什么 A100 上先加载激活更好，他说别问他，他也不知道。重新调优后应该会更好。</p>
+        <h3>解码（用 gpt-fast）</h3>
+        <ul>
+            <li>和 tinygemm（CUDA GEMV）比，batch 为 1 时略差，A100 上离他想要的性能还差不少；其他几张卡（字幕不清）表现还行。</li>
+            <li>即使 A100 的 autotune 不理想，批量解码时性能好很多。</li>
+            <li>这些是组大小 64 的结果，不分组（按通道）应该快得多。</li>
+        </ul>
+        <p>录到这里只剩三分钟，主持人问能不能继续录，因为讲得太好，Hicham 说可以。</p>
+        <h3>Llama 3</h3>
+        <p>幻灯片标题忘了写“3”。Llama 3 有些特别的形状（字幕不清，听起来是 1024 和 4096 一类），他没有专门做 autotune。他说这就是 Triton 的麻烦，要把所有可能的形状都考虑到，多跑 autotune 多实验；不代表内核差，只是需要更多调优。A100 因为 <code>tl.load</code> 的问题让人担心。好笑的是 4090 跑得比 H100 快，他说很奇怪，但也说得过去：H100 需要一个 TMA 版本，他有草稿但没集成也没测。TMA 对大 batch 会有帮助，但只能用在激活和输出上，不能用在权重上，因为 TMA 加载的是 block pointer，不能用交错下标去读，所以不知道有没有用，要试试看。</p>
+        <h3>使用示例</h3>
+        <p>可以通过 HQQ 库试用，他给了一个简单示例；最好的方式是通过 torchao，他们正在集成。示例结果：4090 上 Llama 2 加速 8 倍，和 tinygemm 的性能很接近，只差几个 token/s，他觉得完全可以。他说这说明用 Triton 也能达到不错的性能。</p>
+    </section>
+
+    <section id="t17">
+        <h2>17. 未来工作和“愿望清单”</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=5103s" target="_blank">1:25:03</a>–1:30:15 · Future Work / Autotuning Challenges</em></p>
+        <p>他先感谢 PyTorch AO 和 inductor 团队，在调试 torch.compile 的各种怪问题时帮了很多忙。</p>
+        <h3>对 Triton 的愿望</h3>
+        <ul>
+            <li>修 A100 上 <code>tl.load</code> 慢的问题，他说这是低比特内核的阻碍。他强调不是自己臆想：在 Lambda Labs、Vast AI 等多台不同机器的 A100 上都是同样的问题，他开了 issue。</li>
+            <li>修 nightly 构建。他想做 TMA 版本，但 nightly 版里没有，nightly 构建坏了三个月没人修。自己编译可以，但每次要等十几分钟（他这里说 14 分钟），每开一台新机器都要重新编。</li>
+            <li>FP8×FP8 用 16 比特累加，他不确定有没有，如果有请加上。他注意到用 FP16 累加时这些内核快不少，质量上没有差别。</li>
+        </ul>
+        <h3>自己要做的</h3>
+        <ul>
+            <li>扩展到基于查找表（LUT）的量化方法：只是换掉反量化那一步。他猜要用 eviction policy，免得每次都加载查找表，还没试过。</li>
+            <li>3 比特、5 比特的集成：前面讲过，还没测完，不在 master 分支。</li>
+            <li>部分 TMA 版本：H100 上激活和输出可以用 TMA，权重目前不行，不确定对大 batch 有没有帮助。</li>
+            <li>更酷的是融合内核：也许能把整个模型（包括注意力）写进一个 Triton 内核，至少做一个融合 MLP，把两层 MLP 放进一个 Triton 内核。</li>
+            <li>扩展到训练：要做 GEMM 的转置版本，这样就能做 2 比特、4 比特训练。</li>
+        </ul>
+        <h3>对 torch inductor 的愿望</h3>
+        <ul>
+            <li>支持提前剪枝和 pre-hook。</li>
+            <li>更好的 CUDA Graph 支持。手动包 CUDA Graph 有时比 torch.compile 快很多，可能是 reduce-overhead 没检测对输入输出之类的原因。这不是阻碍，但修好会让一切更快。</li>
+        </ul>
+        <h3>最后一个问题：autotune 不一定选到最好的</h3>
+        <p>Triton 的 autotune 挑出的配置，在 torch.compile 后的端到端推理里不一定是最好的。他不知道为什么，所以不能只靠 autotune，还要手动试。</p>
+    </section>
+
+    <section id="t18">
+        <h2>18. 问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=5415s" target="_blank">1:30:15</a>–1:45:30 · Q&amp;A</em></p>
+        <h3>问答：集成进 vLLM、SGLang 了吗，torchao 那边进度如何</h3>
+        <p>他说正在集成进 torchao，还在进行中，A100 的问题还在想办法。现在在 torchao 里用 gpt-fast 做基准，看整体是否正常，AO 团队的 Charles 在做这件事，只需要把内核放过去。vLLM 和 SGLang 也许在 AO 之后。</p>
+        <p>追问：集成是指把内核搬过去，还是依赖 GemLite 这个库？他说最好是搬内核，免得多一个依赖：现在项目里还有 CUDA 内核，每次 pip install 都要编译，挺烦，他在考虑把 CUDA 部分移到另一个仓库，Triton 内核运行并不需要它们。但搬过去也不简单，因为有一套“元自动调优”的逻辑：每个内核自己 autotune 之外，还要按形状选哪个内核。现在有两个版本的 GEMV，正在加第三个，因为不同设备上表现不同、他没法预测哪个好，只能多实现几种算法去测；加上一个 split-K 和一个 GEMM，一共会有五个内核。比如 batch 为 1 时要把三个 GEMV 都跑一遍选最好的，这是他自己加的外部调优，结果存在一个只含字符串的字典里，可以保存。好在整体就一个文件，每个内核单独一个文件。</p>
+        <h3>评价：应该叫“Triton 性能调优”</h3>
+        <p>一位参与者说这次分享里有很多基于经验的坑，他以前一直以为 Triton 是魔法，实际不是；Triton 自身的最佳实践指南很重要，还有很多事要做。Hicham 说 Triton 做对了能达到很好的性能，但也缺很多功能。</p>
+        <h3>问答：会集成到 TensorRT-LLM 吗</h3>
+        <p>他说不了解这个项目。对方说那是 NVIDIA 的。他说既然是 NVIDIA 的，用的会是 CUDA 和 CUTLASS，这个项目只是 Triton；不过项目开源，有兴趣集成可以找他帮忙。</p>
+        <h3>他自己的 Triton 经历</h3>
+        <p>他说两个月前他还不知道 eviction policy 是什么，还在学。之前做过少量 CUDA，一直以为 Triton 是写了就能跑快的魔法。第一次照着教程写，花了两天，结果失望到放弃 Triton 回去写 CUDA；后来偶然又想试试，给了它更多时间。不加这些技巧、朴素地写，性能只有 CUDA 内核的一半左右。</p>
+        <p>他举了一个例子：一个内核在 4090 上正常，在 A100 上 for 循环里莫名其妙地崩，他花了三天，最后在循环里加了一句“如果 k 小于 num_pid_k”就好了，完全说不通。也有别人报告过一模一样的问题，有两个 issue 是关于在循环里对打包数据解包时崩溃的。他说本来可以把时间花在算法上，比如组大小满足某些条件时避免多次加载缩放因子，结果却花在这些对性能影响很大的琐碎怪事上，而他本以为编译器会处理这些。</p>
+        <p>有人说这反映了大家对 Triton 稳定性的担忧。他说有些东西没问题，但做复杂一点就会遇到很多问题。另一个烦人的是 torch.compile：写好 Triton 内核需要剪枝配置来保证结果正确，但这些在 torch.compile 里不支持，因此损失不少性能。他展示的结果看着不错，但不是能达到的最好结果。设备方面：4090 很好，3090 不错，2080 Ti 和 Titan RTX 这种老卡也还行；A100、H100 需要“照看”，要花更多工夫弄清楚，也许需要不同的算法。</p>
+        <h3>问答：CUDA 和 Triton 能不能一起学</h3>
+        <p>他说可以。他说的“先学 CUDA”只是能写个向量加法，知道线程是什么，知道 warp 怎么工作，这能帮你理解数据怎么加载更快，不需要高级的东西。他自己也写不了很快的 CUDA GEMM，能写一个效果很好的 GEMV，但写不了 GEMM。Triton 不是按单个线程，而是按块工作，当成并行编程，想清楚怎么把问题切成块就行，一两天就能学会。Triton 的函数很少，一页就列完，不像 PTX 文档那么大：加载用 <code>tl.load</code>，存储用 <code>tl.store</code>，点积用 <code>tl.dot</code>。他说学会 Triton 不是问题，让它跑快才是问题。</p>
+        <h3>问答：Triton 能用 Hopper 的新特性吗</h3>
+        <p>他说自己从源码编译就可以，官方版和 nightly 版里没有，因为构建坏了三个月，pip install 拿不到；clone 下来自己编大约要 30 分钟。他用 Triton 的 TMA 实现过 GEMM，效果符合预期，和参考实现性能一样。有人说 Discord 上提到 inductor 团队有人在看构建的问题，他猜只是修 wheel 构建，可能是某个测试挂了。他说 TMA 用起来很简单；以前的版本 TMA 极慢，后来他们改进了，descriptor 初始化很快，现在效果很好。</p>
+        <p>最后主持人感谢他，说幻灯片等资料会放在 GPU MODE 资源和视频简介里。Hicham 说有问题可以在 Discord 上找他（用户名 mobicham）。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“this single detail will make your kernel like 10 times slower if you don't if you don't pay attention to this step”（如果不注意这一步，这一个细节就能让你的内核慢 10 倍。）<a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=1966s" target="_blank">0:32:46</a></li>
+            <li>“the default parameters are not always the the the best ones”（默认参数不一定是最好的。）<a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=3764s" target="_blank">1:02:44</a></li>
+            <li>“I'm not hallucinating I tried this on multiple instances”（我不是在幻想，我在好几台机器上试过。）<a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=5103s" target="_blank">1:25:03</a></li>
+            <li>“I was always thinking hey Triton is Magic but uh in reality it is not”（我一直以为 Triton 是魔法，但实际上不是。）<a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=5617s" target="_blank">1:33:37</a></li>
+            <li>“making it work fast that's that's the problem”（让它跑快，那才是问题。）<a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=6130s" target="_blank">1:42:10</a></li>
+            <li>“you just need to have basic understanding how things work like how threads work”（你只需要对东西怎么运作、线程怎么工作有基本的理解。）<a href="https://www.youtube.com/watch?v=7c3c3bCGzKU&t=6065s" target="_blank">1:41:05</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 34: Low Bit Triton Kernels · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

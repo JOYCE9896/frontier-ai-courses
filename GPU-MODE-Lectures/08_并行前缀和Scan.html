@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>并行前缀和 Scan | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="07_NCCL集合通信.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 08</span>
+    <span><a href="09_vLLM里的投机解码.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 20 · 并行前缀和 Scan</h1>
+        <p class="subtitle">PMPP 第 11 章：scan 的定义和用途，怎样用分段 scan 打破循环依赖，现场写一个线程块内的 Kogge-Stone scan 内核，修掉越界和竞态，用双缓冲去掉一次同步，再比较 Kogge-Stone 和 Brent-Kung 的工作效率</p>
+        <div class="author-meta">
+            主讲：Izzat El Hajj（PMPP 一书作者之一，在大学教这门课）· 发布日期：2024 年 5 月 27 日 · 时长：1 小时 2 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY" target="_blank">讲座录像 Lecture 20: Scan Algorithm</a>（GPU MODE YouTube 频道公开）· 幻灯片：<a href="https://docs.google.com/presentation/d/1MEMsE5LKi6ush_60hlYu3-cz4DUCFzSL/edit" target="_blank">Google Slides</a>（本文依据录像字幕整理，内核代码按讲座现场编写的过程复原，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>前缀和（prefix sum），也叫扫描（scan），是并行计算里最基础的原语之一：输出的第 $i$ 个元素是输入前 $i$ 个元素的累计结果。它用来给各个线程分配输出位置，也是很多线性递推（比如 Mamba 一类状态空间模型的并行扫描）的基础。主讲人 Izzat El Hajj 是 PMPP 的作者之一，这是两讲中的第一讲：先讲一个简单实现和几项优化，下一讲（Lecture 21）讲更复杂的优化。</p>
+        <p>讲座开始时 Zoom 房间被捣乱的人闯入，耽误了大约 35 分钟，所以中途不开放语音提问，问题由 Mark Saroufim 从 Discord 和聊天区转述。他在讲座里现场写代码，主机端代码（分配、拷贝、和串行版本比对）事先写好，只写内核。</p>
+        <ol>
+            <li><a href="#t01">scan 的定义和用途</a> · <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=6s" target="_blank">0:00:06</a></li>
+            <li><a href="#t02">串行 scan 和循环携带依赖</a> · <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=196s" target="_blank">0:03:16</a></li>
+            <li><a href="#t03">分段 scan：块内 scan 加部分和 scan</a> · <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=323s" target="_blank">0:05:23</a></li>
+            <li><a href="#t04">Kogge-Stone：把多棵归约树叠在一起</a> · <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=578s" target="_blank">0:09:38</a></li>
+            <li><a href="#t05">现场实现：加载到共享内存和步长循环</a> · <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=836s" target="_blank">0:13:56</a></li>
+            <li><a href="#t06">越界检查和写回结果</a> · <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=1282s" target="_blank">0:21:22</a></li>
+            <li><a href="#t07">竞态条件和第二个 __syncthreads</a> · <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=1667s" target="_blank">0:27:47</a></li>
+            <li><a href="#t08">问答：compute-sanitizer，同一 warp 为什么也会竞态</a> · <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=1927s" target="_blank">0:32:07</a></li>
+            <li><a href="#t09">真依赖、假依赖和双缓冲</a> · <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=2183s" target="_blank">0:36:23</a></li>
+            <li><a href="#t10">工作效率：Kogge-Stone 做了多少加法</a> · <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=2821s" target="_blank">0:47:01</a></li>
+            <li><a href="#t11">Brent-Kung：步数更多、工作量更少</a> · <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=3016s" target="_blank">0:50:16</a></li>
+            <li><a href="#t12">问答</a> · <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=3272s" target="_blank">0:54:32</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. scan 的定义和用途</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=6s" target="_blank">0:00:06</a>–0:03:16 · Introduction to scan</em></p>
+        <p>scan 的输入是数组 $x_0, x_1, \dots, x_{n-1}$ 和一个满足结合律的运算符 $\oplus$（加、乘、最小值、最大值等），输出数组 $y_0, \dots, y_{n-1}$。有两个版本：</p>
+        <ul>
+            <li>包含式 scan（inclusive scan）：$y_i = x_0 \oplus x_1 \oplus \cdots \oplus x_i$；</li>
+            <li>排除式 scan（exclusive scan）：$y_i = x_0 \oplus \cdots \oplus x_{i-1}$，$y_0$ 是运算符的单位元（加法是 0）。</li>
+        </ul>
+        <p>例子：输入 [3, 6, 7, 4, 8, 2, 1, 9]，用加法。包含式 scan 是 [3, 9, 16, …]，9 = 3+6，16 = 3+6+7；排除式 scan 是 [0, 3, 9, 16, …]。一般地，包含式 scan 第 3 位是 $x_0$ 到 $x_3$ 的运算结果，排除式 scan 第 3 位是 $x_0$ 到 $x_2$ 的结果。</p>
+        <h3>最常见的用途</h3>
+        <p>并行计算里最常见的是加法的排除式 scan。比如多个线程都要往同一个数组里放元素：线程 0 有 3 个，线程 1 有 6 个，线程 2 有 7 个，线程 3 有 4 个……对元素个数做一次排除式 scan，每个线程就知道自己从哪个下标开始放：线程 0 放在 0、1、2，线程 1 从 3 开始，线程 2 从 9 开始，依此类推。前缀最小值、前缀最大值在某些堆和优先队列里也有用处。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 串行 scan 和循环携带依赖</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=196s" target="_blank">0:03:16</a>–0:05:23 · Sequential scan</em></p>
+        <p>串行 scan 很简单，一个循环就行。包含式 scan：<code>output[0] = input[0]</code>，然后从 1 循环到 $n-1$，<code>output[i] = output[i-1] + input[i]</code>。排除式 scan：<code>output[0]</code> 设为单位元，<code>output[i] = output[i-1] + input[i-1]</code>。</p>
+        <pre><code>// sketch based on the talk: sequential inclusive / exclusive scan
+void inclusive_scan(const float* input, float* output, unsigned int N) {
+    output[0] = input[0];
+    for (unsigned int i = 1; i &lt; N; ++i) {
+        output[i] = output[i - 1] + input[i];
+    }
+}
+
+void exclusive_scan(const float* input, float* output, unsigned int N) {
+    output[0] = 0.0f;  // identity of +
+    for (unsigned int i = 1; i &lt; N; ++i) {
+        output[i] = output[i - 1] + input[i - 1];
+    }
+}</code></pre>
+        <p>问题在于这里有循环携带依赖（loop-carried dependence）：每次迭代依赖上一次迭代的结果。它不是那种每个迭代分给一个线程、各干各的“易并行”（embarrassingly parallel）模式，线程之间必须协作，要想办法打破这个依赖。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 分段 scan：块内 scan 加部分和 scan</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=323s" target="_blank">0:05:23</a>–0:09:38 · Parallel scan concept</em></p>
+        <p>线程要协作就要同步。GPU 上同一线程块内的线程同步便宜，跨块同步贵。所以采用分段 scan（segmented scan）：</p>
+        <ol>
+            <li>每个线程块 scan 输入的一段；</li>
+            <li>对各段的部分和（partial sums）再做一次 scan；</li>
+            <li>每个线程块用 scan 过的部分和更新自己那一段。</li>
+        </ol>
+        <p>为什么第 2 步又是 scan：块 1 的输出缺了块 0 所有元素的和，要把它加到块 1 的每个元素上；块 2 缺的是块 0 加块 1 的和；块 3 缺的是块 0、1、2 最后一个值之和。这就是对“每块最后一个值”的 scan。于是每个块产出自己的部分和，对部分和做 scan，每个块再把对应于前面所有块的那个值加到自己的元素上。</p>
+        <p>今天只讲第 1 步：一个线程块怎么并行 scan 自己那一段。他的代码里，三步分别是三次网格启动：结束一次网格，启动下一个做部分和 scan，再启动一个做加法。还有别的组合方式，下一讲再讲。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. Kogge-Stone：把多棵归约树叠在一起</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=578s" target="_blank">0:09:38</a>–0:13:56 · Hillis-Steele approach</em></p>
+        <p>设一个线程块要 scan 8 个元素 $x_0 \dots x_7$。一种思路是做很多次归约，顺便拿到其他值。</p>
+        <ul>
+            <li>先对最后一个元素做归约：一个线程算 $x_0+x_1$，一个算 $x_2+x_3$，一个算 $x_4+x_5$，一个算 $x_6+x_7$，写回同一个数组；继续这棵归约树，最后得到 $x_0 \dots x_7$ 的和。顺带还得到了 $x_0..x_3$（在位置 3）、$x_0..x_1$（在位置 1）和 $x_0$。</li>
+            <li>其他位置还不完整。位置 6 需要 $x_0..x_6$，再做一棵归约树，顺带得到位置 2 的 $x_0..x_2$。</li>
+            <li>还缺两个值，再各做一棵树。四棵归约树之后，所有值都有了。</li>
+        </ul>
+        <p>当然不必一棵一棵做，可以把它们叠在一起同时做：第一轮，每个元素加上它前一个元素；第二轮，每个元素加上它前面隔 2 的元素；第三轮，加上隔 4 的元素。书里把它叫作 Kogge-Stone 方法，因为和 Kogge-Stone 加法器的设计相似（YouTube 章节标题里叫 Hillis-Steele，是同一类算法在文献里的另一个名字）。</p>
+        <p>并行化方式：每个元素分一个线程。第 1 轮线程把前面隔 1 的值加到自己的元素上，第 2 轮隔 2，第 3 轮隔 4，直到得到最终结果。</p>
+        <p>实现前先定一项优化：输入在全局内存里，结果最终也要写回全局内存，但反复读写全局内存不划算。所以先把输入读进共享内存的缓冲区，在共享内存里做这些连续的加法，最后把结果写回全局内存。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 现场实现：加载到共享内存和步长循环</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=836s" target="_blank">0:13:56</a>–0:21:22 · Implementing the kernel</em></p>
+        <p>内核参数：输入数组、输出数组、长度 N，以及数组 <code>partialSums</code>，每个线程块把自己的部分和放进去。主机代码启动这个内核，结束后启动另一个内核 scan 部分和，再回来把部分和加到各块的元素上。</p>
+        <ol>
+            <li>每个线程负责一个元素，就是它全局索引对应的那个：<code>i = blockIdx.x * blockDim.x + threadIdx.x</code>。</li>
+            <li>静态分配共享内存缓冲区。为方便，他用宏定义块大小 1024，每块负责 1024 个元素。他说更好的写法是用模板参数传这个常数，类型也用模板 <code>T</code> 而不是写死 <code>float</code>；这里不用模板是为了让第一次接触的人好跟。他习惯给共享内存变量加 <code>_s</code> 后缀，提醒自己这是共享内存对象。</li>
+            <li>每个线程把自己的元素放到缓冲区里块内索引的位置：<code>buffer_s[threadIdx.x] = input[i]</code>。之后 <code>__syncthreads()</code>，确保所有线程都加载完再继续。</li>
+            <li>步长循环：第一轮 stride 是 1，然后 2、4、8、16、32……一直翻倍，直到跨过半个数组，即 <code>BLOCK_DIM / 2</code>。每轮线程取前面隔 stride 的元素加到自己的元素上，比如线程 7 读位置 6 和 7，相加后放回位置 7。</li>
+        </ol>
+        <p>第一版写成这样，他说里面有好几个错误，会一个个修：</p>
+        <pre><code>// sketch based on the talk: first (buggy) version
+#define BLOCK_DIM 1024
+
+__global__ void scan_kernel(float* input, float* output, float* partialSums, unsigned int N) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ float buffer_s[BLOCK_DIM];
+    buffer_s[threadIdx.x] = input[i];
+    __syncthreads();
+    for (unsigned int stride = 1; stride &lt;= BLOCK_DIM / 2; stride *= 2) {
+        buffer_s[threadIdx.x] += buffer_s[threadIdx.x - stride];  // bug: out of bounds + race
+    }
+    ...
+}</code></pre>
+    </section>
+
+    <section id="t06">
+        <h2>06. 越界检查和写回结果</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=1282s" target="_blank">0:21:22</a>–0:27:47 · Addressing race conditions（前半）</em></p>
+        <h3>越界</h3>
+        <p>第一个问题：有些线程不该往前读。线程 0 的值已经完整，<code>0 - stride</code> 是越界访问。stride 为 1 时只有线程 0 不该计算；为 2 时线程 0、1 不该；为 4 时线程 0 到 3 不该。规律是线程索引小于 stride 的线程不计算，所以加上 <code>if (threadIdx.x &gt;= stride)</code>。</p>
+        <p>另一种理解：访问 <code>buffer_s[threadIdx.x - stride]</code> 时，下标必须非负，检查方式就是第一项大于等于第二项。他给的经验规则是：写 CUDA 或任何并行代码时，每一次内存访问都应该有某个条件守着，确保不越界。他调试时会逐个检查内存访问，把每个都对应到一个 if 条件或循环边界上。之后每轮结束 <code>__syncthreads()</code>。</p>
+        <h3>写回</h3>
+        <p>循环结束后，每个线程负责的值在共享内存的 <code>threadIdx.x</code> 位置、全局内存的 <code>i</code> 位置，所以 <code>output[i] = buffer_s[threadIdx.x]</code>。线程块还要把部分和写进 <code>partialSums</code>，只需要一个线程做。哪个线程都行，部分和在最后一个线程手里，用最后一个线程最自然：<code>if (threadIdx.x == BLOCK_DIM - 1) partialSums[blockIdx.x] = buffer_s[threadIdx.x];</code>。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 竞态条件和第二个 __syncthreads</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=1667s" target="_blank">0:27:47</a>–0:32:07 · Addressing race conditions（后半）</em></p>
+        <p>他说平时在课上会让学生猜还剩哪个错误，这次为了安全不互动，直接讲：<code>+=</code> 那一行有竞态条件（race condition）。竞态是多个线程访问同一内存位置、并且其中至少一个访问是写。多个线程只读同一位置没有竞态；一个写一个读，或多个写，才有。</p>
+        <p>图示：绿色的线程 2 要读 $x_1$ 加到 $x_2$ 上；橙色的线程 1 也读 $x_1$，加上 $x_0$，再写回 $x_1$ 所在的位置（图里一层层画的都是同一个 <code>buffer_s</code> 的不同时刻）。如果线程 1 先读、加、把 $x_0+x_1$ 写回，线程 2 才读，线程 2 读到的就是 $x_0+x_1$，结果错了。</p>
+        <p>解决：所有线程读完之后，任何线程才能写。把 <code>+=</code> 拆开：先读到临时变量 <code>temp</code>，<code>__syncthreads()</code>，再写回。</p>
+        <p>但 <code>__syncthreads()</code> 不能直接放在 if 里：只有当块里所有线程都到达这个位置时，放 <code>__syncthreads()</code> 才是合法的，否则行为未定义，编译器可能做出不想要的事。所以要关掉 if，同步，再打开一个 if，<code>temp</code> 声明挪到外面：</p>
+        <pre><code>// sketch based on the talk: race fixed with a second barrier
+for (unsigned int stride = 1; stride &lt;= BLOCK_DIM / 2; stride *= 2) {
+    float temp;
+    if (threadIdx.x &gt;= stride) {
+        temp = buffer_s[threadIdx.x] + buffer_s[threadIdx.x - stride];
+    }
+    __syncthreads();   // everyone finishes reading before anyone writes
+    if (threadIdx.x &gt;= stride) {
+        buffer_s[threadIdx.x] = temp;
+    }
+    __syncthreads();   // writes visible before the next iteration reads
+}
+if (threadIdx.x == BLOCK_DIM - 1) {
+    partialSums[blockIdx.x] = buffer_s[threadIdx.x];
+}
+output[i] = buffer_s[threadIdx.x];</code></pre>
+    </section>
+
+    <section id="t08">
+        <h2>08. 问答：compute-sanitizer，同一 warp 为什么也会竞态</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=1927s" target="_blank">0:32:07</a>–0:36:23</em></p>
+        <h3>手工检查越界还是用工具</h3>
+        <p>Trevor 说他觉得 <code>compute-sanitizer</code> 比手工推理越界更好用。Izzat 说它当然很有用，能帮你找越界访问的 bug；不过写代码时快速看一遍每个内存访问是否有对应的条件，往往比跑一遍 sanitizer 再回来查还快。更棘手的情况，他推荐用 sanitizer。</p>
+        <h3>都在执行同一条 SIMD 指令，怎么会有人先写后读</h3>
+        <p>他给了三个原因：</p>
+        <ul>
+            <li>这些线程在同一个线程块里，但可能在不同 warp。两个线程可能正好跨在 warp 边界上，一个 warp 可能在另一个被调度之前就读完写完了。</li>
+            <li>即使在同一个 warp 里，编译器也可能做优化，重排内存指令，把内存里的值提升到寄存器，等等。<code>__syncthreads()</code> 也起到内存栅栏（memory fence）的作用，保证该在内存里的东西在内存里。</li>
+            <li>从 Volta 架构开始有独立线程调度（independent thread scheduling），同一 warp 的线程不一定同步执行。他说这个话题对本讲来说太复杂，不展开。</li>
+        </ul>
+        <p>结论是：代码里永远不要假设同一 warp 的线程会按 SIMD 同步执行，虽然很多情况下确实如此。优化时可以利用这一点（比如避免控制发散），但编程模型不保证它。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 真依赖、假依赖和双缓冲</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=2183s" target="_blank">0:36:23</a>–0:47:01 · Optimization with buffering</em></p>
+        <h3>先测一下</h3>
+        <p>他在一块 Volta GPU 上 scan $2^{25}$（约 3200 万）个元素。有三次内核启动：scan、scan 部分和、再 scan 第二个内核的部分和。总耗时 0.89 毫秒。</p>
+        <h3>两个同步的性质不同</h3>
+        <p>为了消除竞态加了两个 <code>__syncthreads()</code>，它们都有延迟。这种计算没多少运算，ALU 不忙，是延迟受限（latency bound）的，流水线里有很多停顿，循环里两次同步很贵。</p>
+        <ul>
+            <li>第二个同步（循环末尾）保证的是真依赖（true dependence），即写后读（read after write）：线程必须写完 <code>buffer_s</code>，下一轮的线程才能读，因为确实需要这个值。</li>
+            <li>第一个同步（读和写之间）保证的是假依赖（false dependence），即读后写（write after read）：我不能在别人读完之前写这个位置。我的计算并不需要别人读完，只是因为用的是同一块缓冲区。如果不用同一个位置，我写我的，别人读别人的，就不用等。</li>
+        </ul>
+        <h3>双缓冲</h3>
+        <p>消除假依赖的常见手段是双缓冲（double buffering），更一般地叫多缓冲：每轮的输入和输出用不同的缓冲区。第一轮从 buffer 1 读、写到 buffer 2，线程 1 把 $x_0+x_1$ 写进 buffer 2，不会覆盖线程 2 还要读的 $x_1$，第一个同步就不需要了。</p>
+        <p>不想要和迭代次数一样多的缓冲区，所以第一轮之后 buffer 1 就空出来了，下一轮把它当输出。为此，不做加法的线程现在也要做事：把自己的值原样传到输出缓冲区，因为最后要用。</p>
+        <p>实现上分配两个共享数组，用两个指针 <code>inBuffer_s</code>、<code>outBuffer_s</code> 指向它们，每轮结束交换指针。读从 <code>inBuffer_s</code>，写到 <code>outBuffer_s</code>，两个 if 合并，不再需要 <code>temp</code>，加上 else 分支传值。他第一次编译时忘了交换指针，后来补上。循环结束后，最后一轮的输出因为已经交换过，现在是 <code>inBuffer_s</code>，所以写回用 <code>inBuffer_s</code>。</p>
+        <pre><code>// sketch based on the talk: Kogge-Stone scan with double buffering
+#define BLOCK_DIM 1024
+
+__global__ void scan_kernel(float* input, float* output, float* partialSums, unsigned int N) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ float buffer1_s[BLOCK_DIM];
+    __shared__ float buffer2_s[BLOCK_DIM];
+    float* inBuffer_s = buffer1_s;
+    float* outBuffer_s = buffer2_s;
+
+    inBuffer_s[threadIdx.x] = input[i];   // boundary check omitted in the talk for time
+    __syncthreads();
+
+    for (unsigned int stride = 1; stride &lt;= BLOCK_DIM / 2; stride *= 2) {
+        if (threadIdx.x &gt;= stride) {
+            outBuffer_s[threadIdx.x] = inBuffer_s[threadIdx.x] + inBuffer_s[threadIdx.x - stride];
+        } else {
+            outBuffer_s[threadIdx.x] = inBuffer_s[threadIdx.x];   // propagate unchanged values
+        }
+        __syncthreads();   // only the true (read-after-write) dependence remains
+        float* tmp = inBuffer_s;
+        inBuffer_s = outBuffer_s;
+        outBuffer_s = tmp;
+    }
+
+    if (threadIdx.x == BLOCK_DIM - 1) {
+        partialSums[blockIdx.x] = inBuffer_s[threadIdx.x];
+    }
+    output[i] = inBuffer_s[threadIdx.x];
+}</code></pre>
+        <p>结果从 0.89 毫秒降到 0.72 毫秒，再跑一次约 0.7 毫秒。他说本来期望多一点，提升不算大，但内核优化往往就是一点点小改进的累积；这也说明第二个同步确实有代价，按他的说法，大约 12.5%（八分之一）的时间花在了那个强制假依赖的同步上。</p>
+        <p>双缓冲在很多场景都会用到。比如分块矩阵乘法：从内存加载一块到共享内存、相乘，再加载下一块、相乘。用不同缓冲区分别放正在计算的块和正在加载的块，就能让一块的计算和下一块的加载重叠。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 工作效率：Kogge-Stone 做了多少加法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=2821s" target="_blank">0:47:01</a>–0:50:16 · Work efficiency analysis</em></p>
+        <p>定义：如果一个并行算法做的工作量和串行算法相同（同一数量级），它就是工作高效的（work efficient）。串行 scan 做 $n$ 次（准确说 $n-1$ 次）加法，是 $O(n)$。</p>
+        <p>Kogge-Stone：数组大小为 $n$（图里是 8），第一轮做 $n-1$ 次加法（7 次），第二轮 $n-2$ 次（6 次），第三轮 $n-4$ 次（4 次）……stride 每轮翻倍，共 $\log n$ 步，第 $k$ 步做 $n - 2^k$ 次：</p>
+        $$\sum_{k=0}^{\log_2 n - 1} \left(n - 2^k\right) = (n-1) + (n-2) + (n-4) + \cdots + \left(n - \tfrac{n}{2}\right) = O(n \log n)$$
+        <p>从串行的 $O(n)$ 次加法变成了 $O(n \log n)$ 次。如果并行度很充足，这些加法真的同时发生，这个代价值得付。但在 GPU 上，如果启动的线程块超过硬件能同时容纳的数量，GPU 会一批批地顺序跑，块之间出现串行化，多出来的加法就白做了。所以这个算法不是工作高效的，资源有限时并行版本可能因为工作效率低而更慢。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. Brent-Kung：步数更多、工作量更少</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=3016s" target="_blank">0:50:16</a>–0:54:32 · Blelloch scan and Q&amp;A</em></p>
+        <p>Mark 说因为开头耽误了很多时间，他可以讲多久都行。Izzat 又讲了 5 到 10 分钟。</p>
+        <p>另一种工作高效的并行 scan，书里叫 Brent-Kung 方法，因为它和 Brent-Kung 加法器的做法相似。</p>
+        <ol>
+            <li>归约阶段：只做一棵归约树，就是讲 Kogge-Stone 时的第一棵。</li>
+            <li>归约后阶段：再补几次加法，把还不完整的元素补完。比如某个位置有 $x_4+x_5$，另一个位置有 $x_0..x_3$，两者相加就完整了；$x_4$ 只缺 $x_0..x_3$，加上即可。依此类推。</li>
+        </ol>
+        <p>和 Kogge-Stone 对比：Kogge-Stone 步数少，但每步做很多加法，图上箭头多得多；Brent-Kung 步数多，但总加法少。具体：</p>
+        <table>
+            <thead><tr><th></th><th>步数</th><th>加法次数</th></tr></thead>
+            <tbody>
+                <tr><td>Kogge-Stone</td><td>$\log n$</td><td>$O(n \log n)$</td></tr>
+                <tr><td>Brent-Kung 归约阶段</td><td>$\log n$</td><td>$n/2 + n/4 + n/8 + \cdots = n - 1$</td></tr>
+                <tr><td>Brent-Kung 归约后阶段</td><td>$\log n - 1$</td><td>$(2-1) + (4-1) + \cdots + (n/2 - 1) = n - 2 - (\log n - 1)$</td></tr>
+                <tr><td>Brent-Kung 合计</td><td>$2\log n - 1$</td><td>$2n - \log n - 2 = O(n)$</td></tr>
+            </tbody>
+        </table>
+        <p>Brent-Kung 更工作高效，但步数更多。哪个更快？他把这个问题留作悬念，下一讲一起实现 Brent-Kung，并做更高级的优化。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=3272s" target="_blank">0:54:32</a>–1:02:19</em></p>
+        <h3>NVIDIA 的归约内核是单独实现的，还是用 scan 实现的</h3>
+        <p>Mark 说朴素版本的 scan 看起来和书里的归约内核很像，问高性能代码里归约是不是就当 scan 做。Izzat 说具体要问 NVIDIA 的人。他知道的是：对整数类型有 warp 级原语，一条内建函数（intrinsic）就能在硬件上完成 warp 内归约；他认为浮点数没有。跨 warp 的归约可以用这样的归约树，有些情况也可能用原子操作，取决于有多少 warp 和具体情况。CUB 里的归约是模板化的，可以传复杂的运算符；但有时按代码的形状，自己写归约更方便。</p>
+        <h3>Brent-Kung 和 Blelloch scan 有关系吗</h3>
+        <p>Jack 问的。他说他认为是的，并行计算文献里 Kogge-Stone 和 Brent-Kung 都有别的名字。</p>
+        <h3>下一讲会讲 bank conflict 吗</h3>
+        <p>Andreas 问 bank conflict（共享内存 bank 冲突，多个线程同时访问同一 bank 的不同地址导致串行化）在现在的硬件上还是问题吗。他说在老硬件上问题大得多，新硬件上没那么严重。课程里另有一讲专门讲它，讲到这部分时默认学生已经熟悉，所以下一讲不讲。</p>
+        <h3>长度不是 2 的幂怎么办</h3>
+        <p>Brian 问会不会要串行 scan 剩下的部分，Byron 猜可以补齐。Izzat 说这里的 scan 是单个线程块内的，有很多线程块，只有最后一个块的段可能不是 2 的幂。那里需要边界条件：加载时越界就放 0，不用真的补齐输入，加载时即时补齐；写回时越界就不写。他为了节省时间，代码里没写这些边界条件。</p>
+        <h3>scan 能推广到二维、三维张量吗</h3>
+        <p>他说这是个好问题，他没想过，应该可以推广。Mark 把它留作作业。Thomas 建议把 scan 算法做两次，推广就是免费的。</p>
+        <p>Mark 说下周五 Izzat 会再来讲下一讲，并会换一个更难让陌生人闯入的 Zoom 流程。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“every memory access that you do should be have some kind of condition that's guarding to make sure that you don't go out of Bounce for that memory access”（你做的每一次内存访问，都应该有某个条件守着，确保它不越界。）<a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=1477s" target="_blank">0:24:37</a></li>
+            <li>“if I have multiple threads reading from the same location we don't have a race condition”（多个线程只从同一位置读，不会有竞态。）<a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=1667s" target="_blank">0:27:47</a></li>
+            <li>“you should never assume in your code that threads in the same work will be executing in Syd even though they do uh in many cases”（代码里永远不要假设同一个 warp 的线程会按 SIMD 同步执行，尽管很多情况下确实如此。）<a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=2052s" target="_blank">0:34:12</a></li>
+            <li>“the dependence is only there because we're using the same memory location for different things”（这个依赖之所以存在，只是因为我们把同一块内存位置用在了不同的事情上。）<a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=2312s" target="_blank">0:38:32</a></li>
+            <li>“a lot of times these kernel optimizations are really an accumulation of all these little little little improvements that you do to the code”（很多时候，内核优化就是你对代码做的一个个小改进累积起来的。）<a href="https://www.youtube.com/watch?v=ZKrWyEqqPVY&t=2758s" target="_blank">0:45:58</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 20: Scan Algorithm · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

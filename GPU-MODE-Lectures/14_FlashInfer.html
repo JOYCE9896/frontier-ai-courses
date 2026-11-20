@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FlashInfer | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="13_CUTLASS与FlashAttention3.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 14</span>
+    <span><a href="15_在H100上超过cuBLAS.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 41 · FlashInfer</h1>
+        <p class="subtitle">推理服务用的注意力引擎：把分页 KV cache、基数树、投机解码的树形掩码统一成块稀疏矩阵，用字符串拼接的 JIT 模板定制注意力变体，再用运行时调度器给变长请求做确定性的负载均衡</p>
+        <div class="author-meta">
+            主讲：Zihao Ye（华盛顿大学研究生，FlashInfer 主要作者，当时还在一家公司兼职，公司名字幕不清）· 发布日期：2025 年 1 月 25 日 · 时长：1 小时 9 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=iOLBJwENuvA" target="_blank">讲座录像 Lecture 41: FlashInfer</a>（GPU MODE YouTube 频道公开）· 幻灯片/代码：<a href="https://github.com/gpu-mode/lectures" target="_blank">gpu-mode/lectures 讲座资料库</a>（本讲在资料库里没有单独的代码文件夹；本文依据录像字幕整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>这是 GPU MODE 2025 年的第一讲。主持人说，Zihao Ye 是之前的版主 Byron（本系列第 11 篇 Liger Kernel 的主讲人）推荐来的。Zihao 在华盛顿大学读研究生，FlashInfer 是他和合作者做了一年多的项目，已经被 vLLM、SGLang、MLC Engine 等推理引擎采用。他的题目是“面向 LLM 推理服务的高效、可定制的注意力引擎”。他说 FlashInfer 不只有注意力内核，这一讲只讲注意力部分。</p>
+        <p>他要回答的问题是：推理服务里的 KV cache 有很多种组织方式（vLLM 的分页、SGLang 的基数树、投机解码的候选树、按页剪枝），注意力又有很多变体，请求的长度还参差不齐，怎么用一套内核把这些都高效地覆盖住。前置知识：注意力和 KV cache 的基本概念，FlashAttention 的分块和在线 softmax（本系列第 5 篇、第 13 篇），稀疏矩阵的 CSR 格式，以及 CS149 讲过的负载均衡。</p>
+        <ol>
+            <li><a href="#t01">为什么还要一个注意力引擎：分页注意力和基数树</a> · <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">投机解码的候选树、KV cache 剪枝和相关问答</a> · <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=317s" target="_blank">0:05:17</a></li>
+            <li><a href="#t03">块稀疏格式：把分页 KV cache 看成 BSR 矩阵</a> · <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=704s" target="_blank">0:11:44</a></li>
+            <li><a href="#t04">向量稀疏：列宽为 1 的块也能用 Tensor Core</a> · <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=899s" target="_blank">0:14:59</a></li>
+            <li><a href="#t05">共享前缀：可组合格式</a> · <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=1213s" target="_blank">0:20:13</a></li>
+            <li><a href="#t06">注意力变体和 JIT 编译</a> · <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=1469s" target="_blank">0:24:29</a></li>
+            <li><a href="#t07">从全局内存搬到共享内存：为什么用不上 TMA</a> · <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=1917s" target="_blank">0:31:57</a></li>
+            <li><a href="#t08">编译期调度：按算术强度选 tile 大小</a> · <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=2070s" target="_blank">0:34:30</a></li>
+            <li><a href="#t09">运行时调度器：确定性的负载均衡</a> · <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=2300s" target="_blank">0:38:20</a></li>
+            <li><a href="#t10">和推理框架对接：init、plan、run 与 CUDA Graph</a> · <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=2686s" target="_blank">0:44:46</a></li>
+            <li><a href="#t11">性能结果</a> · <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=2928s" target="_blank">0:48:48</a></li>
+            <li><a href="#t12">社区和下一步：NanoFlow、可复现性、FlexAttention 对齐</a> · <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=3390s" target="_blank">0:56:30</a></li>
+            <li><a href="#t13">问答：FlexAttention 这类框架能表达哪些注意力</a> · <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=3975s" target="_blank">1:06:15</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 为什么还要一个注意力引擎：分页注意力和基数树</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=0s" target="_blank">0:00:00</a>–0:05:17 · Introduction to FlashInfer / KV cache management</em></p>
+        <h3>vLLM 的分页注意力</h3>
+        <p>KV cache 是推理时缓存下来的每个已生成 token 的 key 和 value，后面每生成一个新 token 都要拿当前 query 去和它们做注意力，省得重算。Zihao 从 vLLM 讲起。LLM 推理的请求长度各不相同，如果给每个序列预留一个最大长度的连续空间，显存会大量碎片化。vLLM 提出用操作系统的页表思路管理 KV cache：把每个请求的 KV cache 切成页，每页大约 16 个 token，用页表记录每个请求用了哪些页。这样就能套用操作系统里的换出（swapping）等技术来管理显存。</p>
+        <p>为了在页表上高效算注意力，vLLM 论文提出了 PagedAttention：不用先把一批请求的 KV 从各个页里收集（gather）到一块连续的缓冲区再调 FlashAttention，它写了一个内核直接读页表里的条目。他说这篇论文已经是两年前的了，页表设计现在是推理引擎的标准做法。</p>
+        <h3>SGLang 的基数树</h3>
+        <p>页表只是 KV cache 管理的一种选择。SGLang 发现 KV cache 里有很多可以复用的前缀，提出把 KV cache 组织成基数树（radix tree），所有共享的前缀挂在树上。它用的是页表的一个特例：每页只有 1 个 token，也就是页大小为 1。好处有两点。一是碎片更少。二是开启前缀缓存时命中率更高：页大小为 1 时，只要单个 token 对得上就能匹配；页大小为 16 时，要整页 16 个 token 全部一样才算命中。</p>
+        <p>他总结两者的区别：一个是页大小为 1；另一个是基数树把共享前缀显式地建模成树结构。页表加上前缀缓存也能做到类似的事，后面会讲。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 投机解码的候选树、KV cache 剪枝和相关问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=317s" target="_blank">0:05:17</a>–0:11:44 · Challenges in attention computation / Sparse attention and compression</em></p>
+        <h3>树形投机解码</h3>
+        <p>投机解码（speculative decoding）的做法是先用一个小的草稿模型（draft model）生成一些候选 token，再让大模型并行验证（本系列第 9 篇专门讲过）。Zihao 提到 Medusa 和 SpecInfer：它们生成的候选是一棵树，不止一条链。整棵树一起送进大模型验证，看树里有没有一条路径和大模型的输出一致。这对 KV cache 和注意力内核都是新的挑战：草稿模型提出的那部分 KV cache 本身是树形的，注意力掩码也跟着变成树形。这是他列出的第三种情况。</p>
+        <h3>问答：KV cache 管理的设计空间还活跃吗</h3>
+        <p>主持人问：KV cache 管理的设计空间是否还是活跃的研究方向，还是说 RadixAttention 这类东西已经差不多到头了。Zihao 说他认为没有到头。现有的 KV cache 设计都只考虑 GPU 本身；有很多研究项目在用 CPU 内存（DRAM）甚至 SSD 存 KV cache，但还没有一个大家公认的系统化建模。另一个方向是利用页块之间的相似性：两个页块语义上相近，也许可以合并，不必严格匹配，只是可能会损失效果。</p>
+        <p>主持人追问：既然还在研究，为什么各大推理框架都只选一种方案，vLLM 用分页，SGLang 用基数树，不能随意换？他答：每个框架有自己的优先级。比如 SGLang 想做结构化生成，这类负载里有大量公共前缀，所以选了 RadixAttention。他说后面会讲 FlashInfer 怎么把这些 KV cache 设计统一起来。</p>
+        <h3>KV cache 剪枝：Quest</h3>
+        <p>第四种趋势是不用全部 KV cache，对它剪枝或压缩。他举 Quest 为例（他说来自 MIT 和华盛顿大学）。Quest 仍然把 KV cache 放在页表里，但注意力分两轮算：</p>
+        <ol>
+            <li>第一轮：每个页块有一个缩减后的 key（reduced key）。用 query 和这些缩减 key 算注意力分数，作为每个页块的重要性，再取 top-k。</li>
+            <li>第二轮：只在选中的 k 个页上算真正的注意力。</li>
+        </ol>
+        <p>即使上下文有几百万 token 甚至更长，k 也可以设得比较小，第二轮的访存量就很小；第一轮只在页粒度的缩减 key 上算，访存量也小。要支持这种做法，KV cache 的数据结构和注意力内核需要一起设计。</p>
+        <h3>问答：推理框架用不用 KV cache 量化</h3>
+        <p>有人问主流推理框架是否也用 KV cache 量化来省计算。他答：用。INT8 和 FP8 KV cache 已经是推理引擎的标准配置，很多公司和 API 提供商都有这个选项，效果都不错。不少框架也支持 INT4，比如 LMDeploy 有很好的 INT4 KV cache 内核，但他对 INT4 在推理任务上能否达到理想效果没有确切的判断。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 块稀疏格式：把分页 KV cache 看成 BSR 矩阵</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=704s" target="_blank">0:11:44</a>–0:14:59 · Block sparse data structures</em></p>
+        <h3>为什么选块稀疏</h3>
+        <p>面对上面四类 KV cache 和注意力计算的挑战，FlashInfer 用一种统一的数据格式：块稀疏表示（block sparse representation）。它是普通稀疏矩阵的推广，区别只在于矩阵里的最小元素是一个 $B_r \times B_c$ 的小矩阵，不是单个标量。</p>
+        <p>大家偏爱块稀疏，是因为它对 Tensor Core 友好。Tensor Core 是 NVIDIA GPU 上专门做小矩阵乘加的硬件单元，一条 MMA（matrix multiply-accumulate）指令算一个固定形状的小矩阵乘法。他说在 Ampere 上 MMA 的最小形状大约是 16×8×16，Hopper 上更大。计算的最小粒度必须和 MMA 形状对齐，才能把这些单元用满。如果稀疏结构没有任何约束，就得先找出哪些非零元可以凑成一个块去做 MMA，这既费时间，很多情况下也凑不出非零元足够多的块。</p>
+        <h3>BSR 的存储</h3>
+        <p>存储上用 BSR（Block Sparse Row）格式，三个数组：</p>
+        <ul>
+            <li><code>indptr</code>（index pointer）：记录每一块行在整个紧凑数组里的起始偏移。</li>
+            <li><code>indices</code>：记录每个非零块的列号。</li>
+            <li><code>values</code>：可选。只有当每个 $B_r \times B_c$ 小块内部还需要掩码或数值时才用。</li>
+        </ul>
+        <h3>分页注意力就是一个块稀疏矩阵</h3>
+        <p>他们发现分页注意力可以直接用块稀疏格式建模。幻灯片上的例子有三个请求，每个请求的 query 长度不同。把整个 KV cache 的地址空间当作块稀疏矩阵的列，每个请求用到的那些页就是这一块行里的非零块。页表里的页号对应 <code>indices</code>，每个请求的页数前缀和对应 <code>indptr</code>。</p>
+        <p>他提到图形学界大约十年前（或更早）就有类似发现，只是方向相反：图形学里有很多用稀疏矩阵的层次数据结构，他们借用页表和 TLB 那样的结构来加速稀疏数据的查找。FlashInfer 反过来，处理的是页表结构，却把它建模成块稀疏矩阵。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 向量稀疏：列宽为 1 的块也能用 Tensor Core</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=899s" target="_blank">0:14:59</a>–0:20:13 · Block sparse data structures / Storage and performance optimization</em></p>
+        <h3>16×16 的块在树形掩码上会浪费</h3>
+        <p>块稀疏矩阵的块大小如果固定成 16×16，有些场景会失效。树形投机解码的注意力掩码很稀疏（它是在用稀疏矩阵表示一棵树），稀疏率很高。用 16×16 的块，虽然能用 Tensor Core，但每个块里零比非零多，大部分 FLOPs 都浪费了。他说多数块稀疏库用的块更大，比如 128×128，浪费的计算量可想而知。</p>
+        <h3>把块的列数降到 1</h3>
+        <p>FlashInfer 仍然用块稀疏矩阵，但块的列数可以灵活设置，最小到 1。这个想法受一篇大约六年前的论文启发，题目大意是“在低精度下用 Tensor Core 做结构化稀疏的高效 GPU 内核”。列数为 1 时，块退化成长度为 $B_r$ 的列向量，所以叫向量稀疏（vector sparse）。</p>
+        <p>他算了一笔账：以前 16×16 块里只要有一个非零元，整个块都要激活，最坏浪费 $255/256$；现在只要一个长度 16 的向量里有一个非零元就激活这个向量，最坏浪费 $15/16$。还是浪费不少，但比以前好得多。他说这是 FlashInfer 一个重要的设计：既用上了 Tensor Core，又减少了块结构带来的无效计算。</p>
+        <h3>为什么向量稀疏对 Tensor Core 友好</h3>
+        <p>他用矩阵乘 $A X$ 举例。$A$ 的列在内存里不连续，$X$ 的行也不连续，但可以先把它们从全局内存收集到共享内存（shared memory，一个线程块内共享的片上内存）。到了共享内存里数据就是稠密的，可以直接喂给 Tensor Core。</p>
+        <p>LLM 注意力里有一个有利条件：最后一维是 head dimension，在内存里是连续的。所以从 HBM 收集到 SRAM 时，每一行内部的访问是合并的，不会出现非合并访存（合并访存 coalescing：一个 warp 的线程访问相邻地址，硬件合成少数几次大事务）。而且 head dimension 通常是 128 这样的大小，足够填满 GPU 的缓存行。结果是：从全局内存读稀疏的行和列时带宽能跑满，在片上的稠密数据上又能用稠密 Tensor Core。</p>
+        <h3>问答：幻灯片上引用的 HPC 工作</h3>
+        <p>主持人问幻灯片上几个名字（其中一个是 Magicube，另一个字幕不清）是什么。Zihao 说这些是 HPC 文献里的工作，它们已经用了类似策略：把稀疏的行和列从不连续的全局内存搬到共享内存，再在连续的共享内存上用 Tensor Core。他举它们是为了说明，用 Tensor Core 不一定需要 16×16 的块，向量稀疏矩阵也可以。FlashInfer 从这些工作里得到启发，用同样的技术处理向量稀疏结构。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 共享前缀：可组合格式</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=1213s" target="_blank">0:20:13</a>–0:24:29 · Storage and performance optimization</em></p>
+        <h3>把一个稀疏矩阵拆成几个块大小不同的稀疏矩阵</h3>
+        <p>另一个发现和共享前缀有关。比如 SGLang 的基数树里常有一段很长的共享前缀。把这个基数树看成块稀疏矩阵时，如果不加约束，块行的大小只能取小值，因为一般情况下请求之间没有 KV cache 复用。但看共享前缀那一部分，很多请求都访问同一段 KV cache，这一部分可以用更大的块（块的行数覆盖多个请求的 query）。</p>
+        <p>用块稀疏的语言说，就是把一个稀疏矩阵分解成几个稀疏矩阵，每个用不同的块大小。他把这叫可组合格式（composable format）。</p>
+        <h3>软件管理的缓存比硬件缓存好</h3>
+        <p>分解的好处在于：大块那部分，注意力内核可以先把 KV cache 从全局内存载入共享内存和寄存器，在软件里复用，多个 query 共享这次读取。如果只用小块，内核会把每个块（每个 tile）分派到不同的 CTA（cooperative thread array，即线程块）或 SM 上，复用只能靠硬件管理的 L1、L2 缓存。事先知道哪些部分可以用大块，就能让这一批 query 在内核里共享 KV 访问，享受更高的有效带宽。</p>
+        <p>他说在“一段很长的共享前缀加很多短的独有后缀”的场景下，软件管理的缓存比硬件管理的 L1/L2 好得多。同期的 Hydragen、ChunkAttention 等工作也提出了类似技术。FlashInfer 的不同点在于它用块稀疏矩阵建模，能用统一的方式管理 KV cache：共享前缀部分和独有后缀部分各用一个块稀疏矩阵组合起来，而且不需要改动数据本身，只记录索引和数据结构，不复制 KV。这对推理引擎的 KV cache 管理很方便。</p>
+        <p>到这里，存储部分讲完：块稀疏数据结构，加上用于前缀共享的可组合格式。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 注意力变体和 JIT 编译</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=1469s" target="_blank">0:24:29</a>–0:31:57 · Compiler and runtime design / JIT compilation and customization</em></p>
+        <h3>注意力变体的维护成本</h3>
+        <p>计算部分讲模板、运行时和编译器。他先说注意力变体是个老话题：现在很少有人用 2017 年原版的多头注意力，常见的是分组查询注意力（GQA，多个 query 头共用一组 KV 头）、多头潜在注意力（MLA），还有 Gemma、Grok 用的 logits soft cap。这些变体只改注意力内核的一小部分，但如果你在 FlashAttention 代码库上做，要改内核实现，还要改 C++ 和 Python 之间的胶水代码，很费时间；改完多半合不回上游，也跟不上库的最新开发。</p>
+        <p>PyTorch 的 FlexAttention 想解决这个问题，他说自己很喜欢这个工作，FlashInfer 的方案大量借鉴了它。FlashInfer 的计算侧由编译器和运行时两部分组成：</p>
+        <ul>
+            <li>编译器借鉴 FlexAttention，让用户通过定义函子（functor，可以理解为函数）定制自己的注意力变体。</li>
+            <li>注意力模板同时支持连续 KV cache 和块稀疏 KV cache。</li>
+            <li>编译期调度：根据硬件和问题形状（prefill 还是 decode 等）分派到最合适的 tile 大小。</li>
+            <li>运行时：针对变长序列做动态调度，实现负载均衡。</li>
+            <li>编程接口和开源 LLM 引擎兼容。</li>
+        </ul>
+        <h3>模板和函子</h3>
+        <p>JIT 编译器的输入是一个用 CUDA 和 CUTLASS 写的模板，有 FlashAttention 2 和 FlashAttention 3 两个版本，支持单请求和批处理，最重要的是支持任意块大小的块稀疏数据结构（前面说的小列宽块仍能用 Tensor Core）。</p>
+        <p>他举 sigmoid attention 为例，这是 Apple 提出的变体：不用 softmax，对注意力 logits 用 sigmoid 这样的非线性函数。写成公式（这里是整理者补的写法）：</p>
+        <p>$$O = \sigma\!\left(\frac{QK^\top}{\sqrt{d}} + b\right) V$$</p>
+        <p>在 FlashInfer 里只要提供“logits 怎么变换”就能实现。他们提供几个可编程函子：query transform、logits transform、logits mask，和 FlexAttention 的 <code>score_mod</code>、<code>mask_mod</code> 类似。</p>
+        <p>目前用户需要用大约 10 行 CUDA 代码写注意力规格，作为 Python 字符串嵌进去，放进一个注意力规格类（attention specification），同时指定数据类型、额外传给内核的张量和标量。系统用一个 Jinja 模板接收用户写的变体描述和这些类型信息，生成代码、编译，并注册成 PyTorch 自定义算子。</p>
+        <h3>问答：为什么用 Jinja 模板做元编程</h3>
+        <p>主持人说 PyTorch 2 的 <code>torch.compile</code> 栈（包括 FlexAttention）也大量用 Jinja 模板，而 JAX 那边更多用基于 MLIR 的机制，问他为什么选 Jinja。Zihao 说自己做了很久机器学习编译器，但还是用 Jinja，因为简单、开发方便。如果用 MLIR 那一套，用户要重新编译整个项目；用 Jinja，在 Python 侧调用类似 <code>torch</code> 的加载函数就能把内核载入。缺点是没有类型检查，出错时很难调试，但他认为这是开发者的问题，不是用户的问题。主持人补充：用户也许更喜欢这样，因为能直接看到最终生成的代码，容易理解。</p>
+        <p>他说这里没有用任何复杂的编译器 pass，就是字符串拼接，刚好能用。</p>
+        <h3>这个抽象能表达哪些变体</h3>
+        <p>他们发现这个抽象能覆盖很多注意力变体。FlexAttention 里展示过的一些变体（字幕里能听出滑动窗口和自定义掩码）都能用 logits transform 描述。query transform 可以做类似把 softmax 缩放系数预先乘到 query 上的优化。</p>
+        <p>注意力规格的字符串还能声明一个结构体，在里面放成员变量。内核启动时参数在参数字符串里指定，可以先预计算一些值存进结构体成员，这些成员会成为 CUDA 内核里寄存器上的数据。他说这可以给某些注意力变体做优化。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 从全局内存搬到共享内存：为什么用不上 TMA</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=1917s" target="_blank">0:31:57</a>–0:34:30 · Memory copy and scheduling</em></p>
+        <p>模板的下一部分是从全局内存到共享内存的数据拷贝。前面说过，query 和 KV cache 的最后一维（head dimension）是连续的，所以每次读取仍能打满 GPU 缓存行，充分利用带宽。</p>
+        <p>幻灯片左边是从稀疏存储载入共享内存，右边是从稠密存储载入。到了共享内存里两者完全一样，都是连续的；区别只在全局内存里数据是分散的还是连续的。稀疏存储需要一次索引映射：先去全局内存里的 <code>indices</code> 数组查出页号。然后对每一行（准确地说是每个子 warp 负责一部分）发出 Ampere 风格的异步拷贝 LDGSTS（global 到 shared 的异步拷贝，对应 CUDA 里的 <code>cp.async</code>）。</p>
+        <p>Hopper 上的 TMA（Tensor Memory Accelerator，按张量描述符把一整块数据从全局内存异步搬到共享内存的硬件单元）能进一步加速数据搬运，但 TMA 2D 只适用于地址线性映射的情况。这里全局内存地址到共享内存地址的映射要经过一个间接的索引数组，是非线性的，所以用不了 TMA 2D，只能退回 LDGSTS。他说好在性能受影响不大，主要开销在寄存器：比用 TMA 多用了很多寄存器。后面评测部分会看到这一点。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 编译期调度：按算术强度选 tile 大小</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=2070s" target="_blank">0:34:30</a>–0:38:20 · Compile-time and runtime scheduling</em></p>
+        <h3>推理负载的三种形态</h3>
+        <p>需要编译期选 tile 大小，是因为 LLM 推理的负载是异构的。他把注意力计算分成几种：</p>
+        <ul>
+            <li>Prefill：给定用户输入或上下文，对整段 KV cache 做注意力。query 长度等于 KV 长度，加上因果掩码后注意力图是一个三角形。</li>
+            <li>Decode：之后一个一个生成 token（不用投机解码时），注意力图相当于在三角形下面再加一行。query 长度永远是 1。</li>
+            <li>Append：有些文献叫增量 prefill（incremental prefill），一次往后追加几个 token。比如投机解码时草稿模型生成接下来 5 个或 10 个 token，query 长度就是 5 或 10。再比如多轮对话或分块 prefill（chunked prefill），一次填 1000 个新 token，但 KV 长度是全部历史。这时 query 长度小于 KV 长度，相当于在三角形下面加一个梯形。</li>
+        </ul>
+        <p>这几种情况的算术强度（operational intensity，每读一个字节做多少次运算）差别很大，tile 大小要仔细选。</p>
+        <h3>CUDA Core 版和 Tensor Core 版模板</h3>
+        <p>他们准备了一组模板，有 CUDA Core 实现也有 Tensor Core 实现。比如纯 decode 且不用 GQA（普通多头注意力），注意力内核的算术强度只有 1 左右，这时更适合 CUDA Core 实现，可以用很大的 tile。其他情况，包括 append、prefill，以及用 GQA 的 decode（多个 query 头共享同一份 KV，算术强度提高），就用一组 query tile 大小分别为 16、32、64、128 的 Tensor Core 注意力内核。</p>
+        <p>根据输入的统计信息（比如平均 query 长度）选出最合适的 tile 大小。这组内核可以预先编译好。不同架构的流水线设计也会微调，比如 FA3 模板上要用 warp 专用化（warp specialization，让一部分 warp 只搬数据、另一部分只做计算）才能拿到最好性能。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 运行时调度器：确定性的负载均衡</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=2300s" target="_blank">0:38:20</a>–0:44:46 · Runtime scheduler mechanics</em></p>
+        <h3>算法</h3>
+        <p>编译期调度处理的是负载类型的差异（decode 还是 prefill），运行时调度器看的是一个批次里各个请求的统计：有的长，有的短。他们的算法是：</p>
+        <ol>
+            <li>先把所有请求的注意力切成 tile，每个 tile 的最大尺寸是总工作量除以 CTA 数。</li>
+            <li>把所有工作按大小从大到小排序。</li>
+            <li>为每个 CTA 维护一个优先队列（按已累计的工作量），每次把最大的那块工作分给累计工作量最小的 CTA。</li>
+        </ol>
+        <p>算法结束后，每个 CTA 的总工作量几乎相同。（这是经典的“最长处理时间优先”贪心调度。）这部分目前在 CPU 上执行，以后可能放到 GPU 上。</p>
+        <p>目标有两个。一是负载均衡：某个序列太长就必须拆开。二是零 wave 量化（wave quantization）。他解释，wave 量化是指有些 SM 闲着、另一些 SM 上堆了太多工作；他们要让所有执行的 CTA 都在跑，而且差不多同时结束。</p>
+        <h3>两阶段内核：注意力加归并</h3>
+        <p>调度器算出“工作到 CTA”的映射，执行一次调度后这个映射会被缓存。FlashInfer 提供两个内核，都以持久化内核（persistent kernel，只启动和 SM 数量相当的线程块，每个线程块循环处理分给它的多份工作）的方式写，内核配置保持不变：</p>
+        <ul>
+            <li>第一阶段的注意力内核：计算每个 tile 的输出，存到一块临时内存里，叫部分输出（partial output）。</li>
+            <li>第二阶段的 split-K 归并内核（他叫 contraction kernel）：一个请求如果被拆成多份工作，就把属于同一个请求的所有部分输出合并起来。</li>
+        </ul>
+        <p>部分输出合并用的是在线 softmax 的标准做法（这里是整理者补的公式）：两段各自保存输出 $O_i$ 和 log-sum-exp $s_i$，合并为</p>
+        <p>$$s = \log\left(e^{s_1} + e^{s_2}\right),\qquad O = e^{s_1 - s}\,O_1 + e^{s_2 - s}\,O_2$$</p>
+        <p>这个算法受 Stream-K 启发，但没有直接用 Stream-K，因为不想用原子加（atomic）聚合。他说和很多推理框架讨论过，大家希望内核输出是确定的，每次运行结果一样。Stream-K 默认有一种原子归约模式，浮点数的累加顺序不确定，输出就可能不确定。FlashInfer 的调度器保证同样的输入有确定的执行顺序。</p>
+        <h3>问答：和 Sarathi、分块 prefill 有什么不同</h3>
+        <p>主持人说这让他想到 Sarathi-Serve 和分块 prefill，它们也在处理 prefill 和 decode 之间的负载不均衡，问有什么不同，以及调度时该考虑什么。Zihao 说他同意多数推理框架能在服务层处理负载均衡，不一定要把 KV 长度差别很大的请求放进同一批。但如果考虑其他目标，比如最近大家关心的公平性：不只看性能，还要降低不同用户之间延迟的差异，这时框架发出的批次里序列长度就可能不相近。所以他认为在内核层处理长度差异仍有意义，两种做法会并存。</p>
+        <h3>问答：CTA 到 SM 的映射不公开，怎么保证所有 SM 都在干活</h3>
+        <p>聊天区有人问：CUDA 里 CTA 到 SM 的调度器不对外公开，怎么保证所有 SM 都活跃？他答：H100 上的内核通常每个 SM 只放一个 CTA，因为内核本身已经用掉 SM 大部分寄存器和共享内存，放不下第二个。其他情况下，CUDA 提供了 API 可以算出为了最大占用率每个 SM 最多能放几个块。他们先调这个 API，再按“每 SM 最大块数 × SM 总数”启动 CTA。他用内核级 profiler 看过，所有 CTA 确实都在执行。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 和推理框架对接：init、plan、run 与 CUDA Graph</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=2686s" target="_blank">0:44:46</a>–0:48:48 · Integration with serving frameworks</em></p>
+        <h3>三个阶段</h3>
+        <ul>
+            <li>init：创建一个叫 wrapper 的数据结构，传入任务信息（比如问题大小）。如果要对新的注意力变体做 JIT 编译，就在这里给出 JIT 参数，编译也在这一步完成。</li>
+            <li>plan：每个生成步开始时执行。主要做上一节的负载均衡算法，并保证输出确定。</li>
+            <li>run：按 plan 算出的调度信息执行内核。</li>
+        </ul>
+        <p>有人可能担心 plan 的开销。他说大多数 LLM 的所有层可以复用同一个 KV cache 布局数据结构，所以只需 plan 一次，然后在大约 100 层上复用，成本被摊薄了。他们也在和一些推理框架团队合作做双缓冲：执行当前步时预先算好下一步的 plan，进一步降低开销。</p>
+        <h3>CUDA Graph 兼容</h3>
+        <p>FlashInfer 的内核兼容 <code>torch.compile</code> 和 CUDA Graph（把一串内核启动录下来，之后整体重放，省掉每次启动的 CPU 开销）。用 CUDA Graph 跑推理的流程是：先预热；每一步之前调 plan；把所有层的计算捕获成一张 CUDA Graph，里面不只有注意力算子，也有 LayerNorm 和 GEMM。重放阶段先调 plan，再重放对应 100 层计算的整张图。</p>
+        <h3>小结图</h3>
+        <p>他用一张图回顾整体设计。存储侧：统一的块稀疏数据结构作为 KV cache 管理的格式。计算侧：编译器是一个很简单的基于字符串拼接的代码生成器，输入用户写的注意力变体信息和任务信息，编译出对应的 CUDA 内核；wrapper 有 init、plan、run 三阶段，plan 每个生成步根据序列长度信息执行运行时调度；运行时内核接收块稀疏的 KV cache 和 query，wrapper 维护一块 workspace 缓冲区，存 split-K 算法产生的部分输出。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 性能结果</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=2928s" target="_blank">0:48:48</a>–0:56:30 · Performance results / Benchmarking and community</em></p>
+        <h3>稀疏 KV 和稠密 KV 的差距</h3>
+        <p>FlashInfer 内部用块稀疏数据结构，同时为块稀疏和连续 KV cache 都提供注意力内核。对比实验在分页注意力负载的 prefill 阶段做，页大小取 1，分别用 FA2 模板和 FA3 模板：</p>
+        <ul>
+            <li>FA2 模板：连续 KV cache 和稀疏 KV cache 的差距在 10% 以内。</li>
+            <li>FA3 模板：差距大一些，但即使是向量稀疏的 KV cache 也能跑到 500 TFLOPs 以上。</li>
+        </ul>
+        <p>FA3 差距更大的原因：FA3 模板平常用 TMA 载入 KV cache，这里稀疏 KV 只能退回 Ampere 风格的 LDGSTS，指针运算要用更多寄存器；用 TMA 就完全不需要这些指针运算。他说问题还是在 TMA 不支持非线性的内存访问，希望以后能支持。因为寄存器压力更大，必须调整 producer 和 consumer（warp 专用化里负责搬数据和负责计算的两类 warp）各自的寄存器数量，保证不发生寄存器溢出（register spilling，寄存器不够时变量被挤到慢得多的本地内存），否则性能会掉很多。为了省寄存器，KV 维度上的 tile 也要缩小。所以 FA3 模板上稀疏和稠密的差距更大，他认为仍可接受。</p>
+        <h3>负载均衡：和 vLLM 的 FlashAttention 比</h3>
+        <p>负载均衡算法的对比对象是 vLLM 用的 FlashAttention 内核库。他们生成了几组 KV 长度分布：</p>
+        <ul>
+            <li>常数分布：所有请求的 KV cache 长度一样。</li>
+            <li>均匀分布：KV 长度在一个区间内变化（字幕里上限是 2048，下限听不清）。</li>
+            <li>Zipf 分布：一种偏斜分布。</li>
+        </ul>
+        <p>常数分布下两者性能差不多，因为这时 FlashInfer 用的就是 FA2 模板，算法相当。均匀分布和偏斜分布下 FlashInfer 更好，原因是负载均衡算法。上图是 decode 阶段的带宽利用率，下图是 prefill 阶段在 FA2 和 FA3 模板上的 FLOPs 利用率，两个模板都更高。</p>
+        <h3>问答：Zipf 分布真的代表真实负载吗</h3>
+        <p>主持人问：说“在真实世界的变长设置上做基准”，具体是不是就是 Zipf 分布（第 n 个元素正比于 $1/n$）？大家都这样模拟真实长度吗？Zihao 说有一些关于真实负载分布的研究，真实分布并不完全是这些分布中的任何一种，这里只是演示。很多公司有这类统计，但不一定愿意公开，所以他倾向于说这是模拟。</p>
+        <h3>端到端：SGLang 里替换 Triton 后端</h3>
+        <p>端到端基准在 SGLang 上做，对比 SGLang 自带的 Triton 后端。模型是 Llama 3.1 8B 和 70B，分别在 1 张 H100 和 4 张 H100 上。FlashInfer 最多把延迟降到一半（两倍延迟下降）。他给的原因：一是能用最新的 NVIDIA 特性，比如 warp 专用化，Triton 也许很快会支持，但目前用 CUTLASS 和 CUDA 模板还有优势；二是 FlashInfer 有专门的内存载入模块，能把稀疏的行从全局内存收集到共享内存，Triton 目前没有。他说相信 Triton 是好的，也愿意以后支持 Triton 后端。</p>
+        <h3>定制注意力：融合 RoPE</h3>
+        <p>StreamingLLM 需要融合 RoPE 的注意力：按它的设计，不能预先把 RoPE 作用到 key 上再存进 KV cache，所以必须有融合 RoPE 的注意力内核。用 FlashInfer 的定制能力，内核层面比不融合快 2 倍，端到端的 inter-token latency 也有下降（字幕里的说法是“30 times”，像是识别或口误，数字这里不采用）。</p>
+        <h3>可组合格式：并行生成</h3>
+        <p>前面讲过，共享前缀部分用大块，独有后缀用小块。测试场景是并行生成：类似 ChatGPT 和 OpenAI API 的参数 <code>n</code>，一次并行生成 n 个不同的回复。这些回复可以看成共享同一前缀的不同请求。对比可组合格式和单一格式：</p>
+        <ul>
+            <li>n 在中等范围（4 到 32）时，inter-token latency 有大约 50% 的提速。</li>
+            <li>time to first token 最多有 20% 的提速。</li>
+            <li>n 再大就看不到更多加速了，主要因为推理框架本身的其他开销，这时注意力已经不是主要因素。</li>
+        </ul>
+        <p>这组结果是在 MLC Engine 上测的，他们还在往 SGLang 和 vLLM 上移植。他认为可组合格式对结构化生成和并行生成有前景。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 社区和下一步：NanoFlow、可复现性、FlexAttention 对齐</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=3390s" target="_blank">0:56:30</a>–1:06:15 · Benchmarking and community / Next steps and Q&amp;A</em></p>
+        <h3>社区现状</h3>
+        <p>FlashInfer 起初是研究项目，开发了一年半，字幕里说有 15 位以上来自工业界和学术界的贡献者，被 vLLM、SGLang、MLC Engine、TGI 等开源推理引擎采用。路线图和功能需求都公开在 GitHub issues 里。他们的定位是在现有内核库之外做扩展：要拿到推理服务的最佳性能，不能完全依靠静态编译、只为特定形状设计的库；推理服务需要和算法协同设计，需要灵活性。他们关注注意力、GEMM，还有采样（sampling）这类特定算子，采样也是 FlashInfer 的一个重要功能，这次没时间讲。目标是做好用于基础模型的开源 CUDA 内核生成器和库。他们有一个 Slack 频道。</p>
+        <h3>下一步一：支持 NanoFlow 式的设备内并行</h3>
+        <p>NanoFlow 是华盛顿大学的研究工作，目标是让 LLM 推理吞吐最优。做法是把请求切成更细的 nano-batch，比如原本的 GEMV、QKV 投影都被拆成几份。不同算子有的受访存限制（IO-bound），有的受计算限制（compute-bound），还有通信算子，切细以后就能在 nano-batch 之间做流水，把三类算子重叠起来。</p>
+        <p>NanoFlow 用的是设备内并行：在同一张 GPU 的不同 SM 上分别跑计算密集、访存密集和网络算子。比如 H100 有 132 个 SM，可以分 100 个给 GEMM、30 个给注意力、2 个给通信。这要求内核能在有限的 SM 预算下执行，而不是占满所有 SM。他们正在给注意力内核加一个参数，指定可用的 SM 数。NanoFlow 本身用了 FlashInfer，但改的是自己 fork 的代码，没有合回上游，他们要把这些改动带回主线。GEMM 和通信算子也需要同样的支持，有社区成员在做。CUDA 提供了 green context，可以让一些算子只在一部分 SM 上执行；他看过 PyTorch，暂时没有 green context 的支持，认为这对 PyTorch 和推理引擎都会是个好功能。</p>
+        <h3>下一步二：完全可复现的推理内核</h3>
+        <p>社区反馈：同一个请求单独跑和放进批次里跑，输出不一样。比如一个请求单独执行有一个结果，和其他 127 个请求一起放进 128 的批次里，LLM 生成的结果可能稍有不同。原因是只有一个请求时，他们倾向用 split-K 和 Stream-K 把 KV cache 切块以用满 SM，浮点累加顺序就和整批执行时不同；有的请求不切，有的切成 4 块，累加顺序都不一样，跑过 100 层之后差异会变大。</p>
+        <p>多数情况下输出仍然合理，但有些场景要求完全可复现。他举的例子是用 LLM 做数据压缩：压缩时把数据转成每个 token 在 logits 排序中的名次，解压时再用这个名次数组还原。他写过一个小演示，发现压缩和解压阶段只要内核选择不同、结果有一点偏差，整个压缩解压算法就失效，因为名次上不能容忍任何差别。</p>
+        <p>所以他们想要的可复现性包括：prefill 阶段和 decode 阶段之间一致；同型号 GPU 的不同机器之间一致（不指望 CPU 和 GPU 一致）；不同批处理选择之间一致，单个请求和 100 个请求一起跑结果相同。要做到这一点可能要牺牲一些性能，比如在某些负载上关掉 split-K。他们写了一个 RFC 征求意见，以后可能加一个开关来支持可复现。</p>
+        <h3>社区里的其他工作</h3>
+        <ul>
+            <li>有社区成员在做和 FlexAttention 的对齐，目标是给 FlexAttention 提供一个 CUDA 后端，目前还在初期，建了一个仓库（名字字幕不清），接下来几个月推进。</li>
+            <li>MLA（DeepSeek 的多头潜在注意力）的 decode 加速已经进了主分支，之后会支持基于 Tensor Core 的 MLA decode 内核，以及 H100 版本，他说大约下个月。</li>
+        </ul>
+    </section>
+
+    <section id="t13">
+        <h2>13. 问答：FlexAttention 这类框架能表达哪些注意力</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=3975s" target="_blank">1:06:15</a>–1:08:50 · Next steps and Q&amp;A</em></p>
+        <p>聊天区有人问：用 FlexAttention 这类方式能建模哪些注意力模式？比如 differential attention，它取两个 softmax 的差，有没有这类框架表达不了的注意力？</p>
+        <p>Zihao 说当然有。比如线性注意力，计算模式完全不同：它通常先算 $K^\top V$，再和 $Q$ 相乘。他认为 FlexAttention 这类框架覆盖的空间大致是：</p>
+        <ol>
+            <li>先算 $Q$ 和 $K$ 的乘积；</li>
+            <li>接一个可定制的逐元素算子；</li>
+            <li>再接一个可定制的扫描（scan）算子。在线 softmax 就是一种扫描，FlashAttention 用的是在线 softmax，但可以换成别的；</li>
+            <li>最后可能还有一个聚合。</li>
+        </ol>
+        <p>也就是说，对 $Q$、$K$、$V$ 做可定制的逐元素运算，中间阶段做可定制的扫描，这就是它能覆盖的范围。主持人最后说幻灯片和录像会很快放出，第二天的讲座是 Adam Paszke 讲 Mosaic GPU。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“their operational intensity of these stages are quite different”（这几个阶段的算术强度差别很大。）<a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=2173s" target="_blank">0:36:13</a></li>
+            <li>“it is very simple we we don't have we don't use any of the complicated compiler pass or compiler techniques for that is is just string concatenation but it happens to work”（它很简单，我们没用任何复杂的编译器 pass 或编译技术，就是字符串拼接，但刚好能用。）<a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=1851s" target="_blank">0:30:51</a></li>
+            <li>“the main overhead is the registers”（主要开销在寄存器。）<a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=2047s" target="_blank">0:34:07</a></li>
+            <li>“in that case attention is not a dominant Factor”（这种情况下注意力已经不是主要因素。）<a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=3390s" target="_blank">0:56:30</a></li>
+            <li>“we cannot totally rely on libraries because they are statically compiled and designed for certain shapes”（我们不能完全依靠现有的库，因为它们是静态编译的，只为特定形状设计。）<a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=3455s" target="_blank">0:57:35</a></li>
+            <li>“we cannot tolerate any of the difference in terms of the ranking”（名次上我们不能容忍任何差别。）<a href="https://www.youtube.com/watch?v=iOLBJwENuvA&t=3846s" target="_blank">1:04:06</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 41: FlashInfer · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

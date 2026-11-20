@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NCCL 集合通信 | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="06_Triton实践指南.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 07</span>
+    <span><a href="08_并行前缀和Scan.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 17 · NCCL 集合通信</h1>
+        <p class="subtitle">从 PyTorch DDP 的梯度 all-reduce 讲起：DDP 怎么在另一条 CUDA stream 上把通信和反向计算重叠，NCCL 的 communicator 怎么初始化，ring all-reduce 怎么由 reduce-scatter 加 all-gather 组成</p>
+        <div class="author-meta">
+            主讲：Dan Johnson · 发布日期：2024 年 5 月 5 日 · 时长：1 小时 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=T22e3fgit-A" target="_blank">讲座录像 Lecture 17: NCCL</a>（GPU MODE YouTube 频道公开）· 幻灯片/代码：<a href="https://github.com/gpu-mode/lectures/tree/main/lecture_017" target="_blank">lecture_017（slides.pdf、ddp_simple.py、ddp_example.py）</a>（本文依据录像字幕、幻灯片和代码整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>NCCL（NVIDIA Collective Communications Library，读作 “nickel”）是 NVIDIA 的 GPU 集合通信库，多卡训练时 GPU 之间交换数据靠它。Dan Johnson 按自上而下的顺序讲：先说集合通信是什么、为什么深度学习需要 all-reduce；再用 PyTorch DDP（分布式数据并行）的两个小例子和 profiler trace 看 PyTorch 在哪里、怎样调用 NCCL；然后看 NCCL 的 API 和 communicator 对象，走一遍 NCCL 文档里的单进程示例；最后读 NCCL 源码里 ring all-reduce 的实现。主持人是 Mark Saroufim，后半段有不少问答，包括 GPU 故障怎么处理、NCCL 为什么常“死锁”。</p>
+        <p>读过本站 CS149 或 CS336 笔记的话，all-reduce、数据并行这些概念会熟悉。这一讲的价值在于把 PyTorch 层和 NCCL 内核层接起来。</p>
+        <ol>
+            <li><a href="#t01">NCCL 和几种集合通信</a> · <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">为什么需要 all-reduce：DDP 的原理</a> · <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=253s" target="_blank">0:04:13</a></li>
+            <li><a href="#t03">ddp_simple.py 演示</a> · <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=571s" target="_blank">0:09:31</a></li>
+            <li><a href="#t04">更真实的例子和 profiler trace</a> · <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=892s" target="_blank">0:14:52</a></li>
+            <li><a href="#t05">CUDA stream 和通信计算重叠</a> · <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=1214s" target="_blank">0:20:14</a></li>
+            <li><a href="#t06">ncclAllReduce API 和 communicator 对象</a> · <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=1467s" target="_blank">0:24:27</a></li>
+            <li><a href="#t07">NCCL 文档里的单进程 all-reduce 示例</a> · <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=1913s" target="_blank">0:31:53</a></li>
+            <li><a href="#t08">ring all-reduce 的实现</a> · <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=2236s" target="_blank">0:37:16</a></li>
+            <li><a href="#t09">更多可以研究的方向</a> · <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=2620s" target="_blank">0:43:40</a></li>
+            <li><a href="#t10">问答</a> · <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=2749s" target="_blank">0:45:49</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. NCCL 和几种集合通信</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=0s" target="_blank">0:00:00</a>–0:04:13 · Introduction to nccl / Allreduce in deep learning</em></p>
+        <p>NCCL 让多块 GPU 之间方便地做点对点通信和集合通信（collective communication，一组进程一起参与的通信操作）。幻灯片列出的操作有 Scatter、Gather、All-to-all、AllReduce、Broadcast、Reduce、AllGather、ReduceScatter。每个参与的进程叫一个 rank。</p>
+        <h3>All-gather</h3>
+        <p>图来自 NCCL 文档。每个 rank 是一列，各自有一份数据，要发给所有其他 rank。all-gather 之后，每个 rank 都有全部数据：rank 0 的蓝色数据成了所有 rank 的第一个元素，rank 1 的红色数据成了所有 rank 的第二个元素，绿色、黄色同理。</p>
+        <h3>Scatter 和 broadcast 的区别</h3>
+        <p>这两个看起来像，但有区别。scatter 是一个进程给其他每个进程发不同的数据，像邮递员把各家的信分别送到各家；broadcast 是一个进程给所有进程发相同的数据，像电台播一首歌，每台收音机收到的都一样。根据 rank 数、GPU 拓扑和互连方式等因素，可以用不同算法加速这些集合通信，后面细讲。</p>
+        <h3>All-reduce</h3>
+        <p>对深度学习最重要的是 all-reduce：在多块 GPU 之间累加（平均）梯度。目标是每块 GPU 都拿到所有输入的归约结果。三卡的例子：归约前 GPU 0 有 A、B、C，GPU 1 有 D、E、F，GPU 2 有 G、H、I；归约运算取求和（也可以是平均等），对对应元素做归约。完成后每块 GPU 都有同样的结果：第一行是 A+D+G，中间是 B+E+H，最后一行是 C+F+I。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 为什么需要 all-reduce：DDP 的原理</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=253s" target="_blank">0:04:13</a>–0:09:31 · Distributed data parallel</em></p>
+        <p>多卡训练的一种常见方式是分布式数据并行（Distributed Data Parallel，DDP）：每块 GPU 放一份完整的模型，把一个大批次拆开，每块 GPU 算其中一部分，之后在 GPU 之间交换结果。</p>
+        <ol>
+            <li>批次拆成 $x_0$、$x_1$，分给两块 GPU。</li>
+            <li>每块 GPU 上的模型相同，各自跑前向，得到 $y_0$、$y_1$。输入不同，所以输出不同。</li>
+            <li>各自跑反向，算出本地梯度（这是 PyTorch 擅长的）。此时模型相同、梯度不同。</li>
+            <li>每次迭代都要保证所有 GPU 上的模型一致，所以每个 rank 都需要所有 rank 梯度的平均值。这时调用 all-reduce：每块 GPU 提供自己的梯度，结束时每块 GPU 都有相同的平均梯度。</li>
+            <li>各 GPU 独立用平均梯度更新模型。梯度相同，所以下一次迭代模型仍然一致。</li>
+        </ol>
+        <h3>问答：浮点非结合性会影响确定性吗</h3>
+        <p>聊天区有人问：浮点加法不满足结合律，NCCL 这里要不要专门考虑这一点来保证确定性？Dan 的回答是，各 GPU 上模型相同、只是输出不同，他不认为这比单卡情况多引入了数值精度问题。</p>
+        <h3>玩具模型</h3>
+        <p>模型是 $y = w \cdot 7 \cdot x$，$w$ 初始化为 5，是要训练的参数，各 rank 上应该相同；$x$ 是输入，各 rank 不同。数据 0 和 1 分给两块 GPU：</p>
+        <ul>
+            <li>GPU 0：$y_0 = 5 \cdot 7 \cdot 0 = 0$；GPU 1：$y_1 = 5 \cdot 7 \cdot 1 = 35$。</li>
+            <li>$\partial y / \partial w = 7x$，本地梯度在 GPU 0 上是 0，在 GPU 1 上是 7。</li>
+            <li>all-reduce 取平均，两块 GPU 都得到 3.5，用它更新模型，下一次迭代两边模型一样。</li>
+        </ul>
+    </section>
+
+    <section id="t03">
+        <h2>03. ddp_simple.py 演示</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=571s" target="_blank">0:09:31</a>–0:14:52 · DDP code walkthrough</em></p>
+        <p>他在 Lightning AI 上用 4 块 Tesla T4 演示（<code>nvidia-smi</code> 能看到）。用 <code>torchrun</code> 启动，它做的事只是在多个进程上运行同一份代码，这里指定 2 个进程，所以只用两块 GPU，“Running” 会打印两次。</p>
+        <pre><code># modified from https://pytorch.org/tutorials/intermediate/ddp_tutorial.html
+
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+from torch.profiler import profile
+
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+
+class ToyModel(nn.Module):
+    def __init__(self):
+        super(ToyModel, self).__init__()
+        self.w = nn.Parameter(torch.tensor(5.0))
+
+    def forward(self, x):
+        return self.w * 7.0 * x
+
+
+def demo_basic():
+    dist.init_process_group("nccl")
+    rank = dist.get_rank()
+    print(f"Start running basic DDP example on rank {rank}.")
+
+    model = ToyModel().to(rank)
+    ddp_model = DDP(model, device_ids=[rank])
+
+    with profile() as prof:
+        x = torch.tensor(dist.get_rank(), dtype=torch.float)
+        y = ddp_model(x)
+        print(f"rank {rank}: y=w*7*x: {y.item()}={ddp_model.module.w.item()}*7*{x.item()}")
+        print(f"rank {rank}: dy/dw=7*x: {7.0*x.item()}")
+        y.backward()
+        print(f"rank {rank}: reduced dy/dw: {ddp_model.module.w.grad.item()}")
+    if rank == 0:
+        print("exporting trace")
+        prof.export_chrome_trace("trace_ddp_simple.json")
+    dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    print("Running")
+    demo_basic()
+
+# torchrun --nnodes=1 --nproc_per_node=2 --rdzv_id=100 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 ddp_simple.py</code></pre>
+        <p>逐段说明：</p>
+        <ul>
+            <li><code>torch.distributed</code> 是前端，后端调用 NCCL 完成所需的通信操作。</li>
+            <li><code>dist.init_process_group("nccl")</code> 建立所有进程，说明哪些进程参与这些集合通信；传入 <code>"nccl"</code> 表示用 NCCL 做后端，这里也会做一些 NCCL 的初始化。</li>
+            <li><code>dist.get_rank()</code> 给每个进程一个唯一编号，所以 rank 0 和 rank 1 各自打印自己的那行。</li>
+            <li>把模型放到各自的 GPU 上，再包一层 <code>DDP</code>，它负责所有梯度归约。</li>
+            <li><code>profile()</code> 记录 CPU 和 GPU 上运行了什么，生成 trace（上一讲 Taylor Robie 讲过 profiler）。</li>
+            <li>rank 0 输入 0，rank 1 输入 1。前向结果：rank 0 得到 0，rank 1 得到 35。同一个模型在不同 GPU 上因输入不同得到不同输出。</li>
+            <li><code>y.backward()</code> 跑 autograd，算出 7x（即 0 和 7），然后调用 all-reduce，把平均值 3.5 放进参数的 <code>.grad</code>。两边打印的归约后梯度都是 3.5。这个例子没有优化器，实际会用这个梯度更新模型。</li>
+        </ul>
+        <h3>问答：同步发生在什么时候</h3>
+        <p>Mark 问：调用 <code>y.backward()</code> 时，是每块 GPU 跑完反向，然后在 <code>.item()</code> 时才同步吗？还是在反向的每一层同步？Dan 说是在反向过程中：它跑完反向、算本地梯度、调用 all-reduce，在 backward 里就更新了。后面看 trace 会更清楚。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 更真实的例子和 profiler trace</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=892s" target="_blank">0:14:52</a>–0:20:14 · Profiling and cuda streams</em></p>
+        <p>第二个例子还是玩具模型，但有真正的矩阵乘法：三层线性层，中间夹 ReLU。代码大部分相同，主要区别是有了优化器（SGD）和更真实的损失函数（MSE），会真正更新模型。</p>
+        <pre><code>SIZE = 4000
+
+
+class ToyModel(nn.Module):
+    def __init__(self):
+        super(ToyModel, self).__init__()
+        self.net1 = nn.Linear(SIZE, SIZE)
+        self.relu = nn.ReLU()
+        self.net2 = nn.Linear(SIZE, SIZE)
+        self.net3 = nn.Linear(SIZE, SIZE)
+
+    def forward(self, x):
+        return self.net3(self.relu(self.net2(self.relu(self.net1(x)))))
+
+
+def demo_basic():
+    dist.init_process_group("nccl")
+    rank = dist.get_rank()
+    print(f"Start running basic DDP example on rank {rank}.")
+
+    model = ToyModel().to(rank)
+    ddp_model = DDP(model, bucket_cap_mb=25, device_ids=[rank])
+
+    loss_fn = nn.MSELoss()
+    optimizer = optim.SGD(ddp_model.parameters(), lr=0.001)
+
+    with profile(
+        record_shapes=True,
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+    ) as prof:
+        for i in range(10):
+            optimizer.zero_grad()
+            outputs = ddp_model(torch.randn(1000, SIZE, device=rank))
+            labels = torch.randn(1000, SIZE, device=rank)
+            loss_fn(outputs, labels).backward()
+            optimizer.step()
+    if rank == 0:
+        prof.export_chrome_trace("trace_ddp_example.json")</code></pre>
+        <p>运行时不打印什么，关键是 <code>prof.export_chrome_trace</code> 生成的 JSON，用 Chrome tracing 打开。他看的是 rank 0 的 trace（只是其中一块 GPU）：</p>
+        <ul>
+            <li>上方是 CPU 操作，有前向和反向；下方是 GPU 操作，有两条不同的 stream。</li>
+            <li>跑了 10 次迭代，能看到 10 段，每段是一个完整迭代（前向、反向、优化器步骤）。</li>
+            <li>放大一次迭代：先有一些内存操作把输入搬到 GPU，然后是 GEMM 内核（第一层线性层的矩阵乘法），接着是 ReLU（能看到 clamp），再 GEMM、ReLU、GEMM，这是前向。然后是损失计算，接着开始反向。</li>
+            <li>点击 flow 箭头，可以看到哪个 CPU 操作启动了哪些 GPU 内核，比如反向中的 GEMM 是由反向的 CPU 操作启动的。</li>
+            <li>反向里有计算梯度的 GEMM，还有 all-reduce，尽管 Python 代码里没有显式调用它。最后是优化器更新步骤。</li>
+        </ul>
+        <p>两个问题留给下一节：Python 里没写 all-reduce，它是怎么被调用的？它为什么在另一条 stream 上，和计算重叠意味着什么？</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. CUDA stream 和通信计算重叠</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=1214s" target="_blank">0:20:14</a>–0:24:27 · Communication overlapping</em></p>
+        <h3>CUDA stream</h3>
+        <p>CUDA stream 是在 GPU 上按发出顺序执行的一串操作。同一条 stream 里的操作必须按启动顺序执行；不同 stream 里的操作可以并发。trace 里，反向的矩阵乘法和 all-reduce 在 GPU 上是同时运行的。幻灯片推荐了 Simon Boehm 的一篇博客（siboehm.com 上讲数据并行训练的文章）。</p>
+        <h3>为什么要重叠</h3>
+        <p>反向是从最后一层开始算梯度，一层层往前，直到第一层。一种做法是等整个反向结束，拿到所有本地梯度，再一次性对所有层的梯度调用 all-reduce。但更快的做法是：最后一层的梯度一算好就开始它的集合通信，没理由等。这像流水线，计算和通信重叠，反向结束时只剩前几层的一小部分梯度还要归约。</p>
+        <p>他说这里简化了：DDP 实际上把梯度分成一个个桶（bucket）来归约（ddp_example.py 里的 <code>bucket_cap_mb=25</code> 就是桶的大小）。另外，可以让一条 stream 上的 all-reduce 等待另一条 stream 上的梯度算完，所以 all-reduce 不是立即启动的，先排进去，等梯度就绪再发，避免传出垃圾数据。</p>
+        <h3>DDP 内部</h3>
+        <p>调用 all-reduce 和安排重叠都是 DDP 做的。幻灯片引用了 PyTorch 文档的原话：</p>
+        <blockquote>“DDP uses autograd hooks registered at construction time to trigger gradients synchronizations… the Reducer kicks off an asynchronous allreduce on that bucket to calculate mean of gradients across all processes… When this is done, averaged gradients are written to the param.grad field of all parameters. So after the backward pass, the grad field on the same corresponding parameter across different DDP processes should be the same.”</blockquote>
+        <p>也就是：DDP 在构造时注册 autograd 钩子（hook），算梯度时触发同步；某个桶就绪后，Reducer 对它发起异步 all-reduce 算平均；完成后平均梯度写进各参数的 <code>.grad</code>，反向结束后所有进程上同一参数的梯度相同。</p>
+        <p>NCCL 不是唯一的后端，集合通信也不限于 GPU，CPU 上也能跑，可以用 MPI、Gloo 等。想看 NCCL API 具体怎么被调用，可以读 GitHub 上 PyTorch 的 <code>ProcessGroupNCCL.cpp</code>，从 PyTorch 层到 NCCL 层的一切都是开源的。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. ncclAllReduce API 和 communicator 对象</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=1467s" target="_blank">0:24:27</a>–0:31:53 · Nccl communicator setup</em></p>
+        <h3>API</h3>
+        <p>PyTorch 调用的是 NCCL 的 all-reduce API。它接收大小为 count 的发送缓冲区，用 op 运算归约，把结果拷到接收缓冲区；还要传数据类型、CUDA stream，以及一个 communicator 对象。下面是 NCCL 文档里的函数签名（幻灯片上是截图）：</p>
+        <pre><code>ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
+                           ncclDataType_t datatype, ncclRedOp_t op,
+                           ncclComm_t comm, cudaStream_t stream);</code></pre>
+        <h3>Communicator 对象</h3>
+        <p>communicator 表示一起工作的一组 GPU，和前面的 <code>init_process_group</code> 很像，告诉每个进程要和哪些进程通信。初始化方式取决于 CPU 进程和 GPU 的对应关系：</p>
+        <ul>
+            <li>每个 CPU 进程管一块 GPU：根进程在主机端生成一个 unique ID，用 MPI 之类的方式广播给所有进程（这些都在主机代码里）；每个进程用同一个 ID 和自己的 rank（比如 MPI rank）初始化 communicator；之后每个进程各自启动 all-reduce 内核，传入 communicator，大家就知道和谁一起做。</li>
+            <li>一个 CPU 进程管多块 GPU：生成 unique ID，不需要广播，因为信息都在这个进程里；循环为每个 rank 初始化。NCCL 提供包装函数 <code>ncclCommInitAll</code> 一次做完（创建 ID、设置设备、对每个设备调用初始化）；然后这个进程启动所有 all-reduce 内核。</li>
+        </ul>
+        <h3>问答：一个进程出错时怎么办</h3>
+        <p>有人问：多进程中一个进程出错要关闭，有没有办法优雅地关掉整组进程，或者通知 rank 0？Dan 说这是一个活跃的问题，GPU 越多，越可能有一块出故障。PyTorch 的一个做法是心跳超时（heartbeat timeout），一直检查一切是否在运行。办法有很多，有的扩展性比别的好，总的来说还是一个开放问题。</p>
+        <p>Mark 补充：目前主要的做法就是心跳，发现有 GPU 掉了，就停下整个任务（stop the world），等新 GPU 拉起来再继续，这是现在做训练弹性的主要方式。不用更少的 GPU 继续训练，是因为这会改变程序的数值：全局批大小变小，无法复现同样的损失曲线。但他认为到几十万块 GPU 的规模，等待不可接受，大家可能会更能接受精度上的损失。</p>
+        <h3>问答：两种进程模式怎么选</h3>
+        <p>Mark 又问两种方式的取舍。Dan 说 PyTorch 用的是每个 CPU 进程一块 GPU，并一直这样运行；他认为好处是每个进程有自己的线程，各自跟踪和同时启动这些操作。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. NCCL 文档里的单进程 all-reduce 示例</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=1913s" target="_blank">0:31:53</a>–0:37:16</em></p>
+        <p>为了脱离 PyTorch、看清主机端怎么启动内核、设置缓冲区，他走了一遍 NCCL 文档里的示例：一个主机进程管理多块 GPU。</p>
+        <ol>
+            <li>导入库，定义错误检查宏。全部在主机上。</li>
+            <li>分配 communicator 对象，每个对应一块 GPU，稍后初始化。示例用 4 个设备，每个设备 3200 万个 float，4 个设备总共约半 GB。</li>
+            <li>在主机端分配数组，记录每个设备上的发送和接收缓冲区指针；为每个设备创建一条 CUDA stream。</li>
+            <li>在每个设备上分配发送缓冲区和接收缓冲区，发送缓冲区全设为 1，接收缓冲区全设为 0。</li>
+            <li>调用前面说的初始化包装函数。因为是单进程，所有 communicator 一次初始化完，之后传给集合通信调用。</li>
+            <li>对每个设备调用 all-reduce，传入各自的发送缓冲区、接收缓冲区、元素个数、数据类型、运算 <code>ncclSum</code>、communicator 和 stream。</li>
+            <li>同步，等所有 NCCL 操作完成。</li>
+            <li>释放 GPU 内存，销毁 communicator。他指出示例忘了释放主机内存。</li>
+        </ol>
+        <p>他特别强调：从设备端看，NCCL 内核没什么特别的，就是普通的 CUDA 内核，做内存拷贝，要和其他内核争同样的资源：内存带宽、寄存器、SM 等等。</p>
+        <p>每个 CPU 进程一块 GPU 的版本几乎一样，主要区别是：开头要广播 unique ID；每个进程初始化一次；每个进程只调用一次 <code>ncclAllReduce</code>，因为每个进程都在并行运行同一份主机代码。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. ring all-reduce 的实现</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=2236s" target="_blank">0:37:16</a>–0:43:40 · Allreduce implementation / Ring algorithm details</em></p>
+        <h3>reduce-scatter 加 all-gather</h3>
+        <p>all-reduce 有几种实现方式。NCCL 会根据网络拓扑估计每种方法要多久，挑最快的。其中一种是环形（ring）结构，先做 reduce-scatter，再做 all-gather：</p>
+        <ul>
+            <li>reduce-scatter：做完后每个 rank 只持有一部分的归约结果。</li>
+            <li>all-gather：把这些分散的归约结果发到每个 rank 上。</li>
+        </ul>
+        <p>两步合起来，从“数据分散在各 rank”到“所有 rank 都有完整归约结果”，就是 all-reduce。</p>
+        <h3>读 NCCL 源码</h3>
+        <p>NCCL 的代码比较密，他只做高层解读。这是 all-reduce 的 ring 算法，下面的代码在每块 GPU 上并行执行：</p>
+        <ul>
+            <li>开头是熟悉的 CUDA 内容：block ID、thread ID；初始化集合通信的结构，建立环，创建负责收发的原语（primitives，<code>prims</code>）。</li>
+            <li>算法每次处理发送缓冲区的一个块（chunk）。第一部分代码从各 GPU 的发送缓冲区里取一块。</li>
+            <li>“step 0” 注释之后，把这块数据推给环上的下一块 GPU，用的是 <code>prims.send</code>。底层有很多方式，超出本讲范围：单节点内 GPU 之间有 NVLink 这种很快的直连；跨节点可以用 InfiniBand、RoCE 直接把数据放到其他 GPU 上。用哪种连接在 NCCL 初始化时就确定了。</li>
+        </ul>
+        <h3>三卡例子走一遍</h3>
+        <p>回到 A–I 的三卡例子。每块 GPU 取一块发给下一块（A 从 GPU 0 发往 GPU 1，依此类推），各 GPU 处理的块是错开的，这样效率最高。</p>
+        <ol>
+            <li>reduce-scatter 阶段：沿环收、归约、发。GPU 1 从 GPU 0 收到 A，和自己的 D 相加得到 A+D，发给 GPU 2；GPU 2 再加上 G。绕环一圈后，把最终归约结果存进输出缓冲区。</li>
+            <li>此时每块 GPU 只有一部分结果：GPU 2 有 A+D+G，GPU 0 有 B+E+H，GPU 1 有 C+F+I。</li>
+            <li>all-gather 阶段：完成归约的 GPU 把结果拷到输出缓冲区，并发给下一块。A+D+G 发往 GPU 0；收到的 GPU 做“收、拷贝、转发”，一圈下来所有 GPU 都有了全部结果。</li>
+        </ol>
+        <p>幻灯片注明：环只沿一个方向遍历。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 更多可以研究的方向</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=2620s" target="_blank">0:43:40</a>–0:45:49 · Q&amp;A and scaling tips</em></p>
+        <ul>
+            <li>其他 all-reduce 算法，比如树形（tree）all-reduce：每块 GPU 是一片叶子，把块发给父节点，父节点收到后归约，再传给它的父节点，一路到顶，做最后一次归约，然后广播回到底部（Reduce + Broadcast）。NVIDIA 有博客讲不同算法，NCCL 会挑最快的。</li>
+            <li>网络拓扑和 rank 之间的连接：NVLink、InfiniBand/RoCE、IP。他推荐 NVIDIA 的白皮书 <em>Introduction to InfiniBand for End Users</em>，对理解 InfiniBand 和 RoCE 很有帮助。</li>
+            <li>集合通信原语的实现。幻灯片补充：<code>prims.send</code>、<code>prims.recvReduceSend</code> 等函数负责在 GPU 之间传数据，有三种同步方式不同的“协议”：Simple；LL（low latency，8 字节存储是原子的，4 字节数据加 4 字节标志）；LL128（128 字节存储是原子的，120 字节数据加 8 字节标志）。all-reduce 有 3 种算法、3 种协议，一共 9 种运行方式。</li>
+        </ul>
+    </section>
+
+    <section id="t10">
+        <h2>10. 问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=2749s" target="_blank">0:45:49</a>–0:59:43</em></p>
+        <h3>全局 rank 和本地 rank</h3>
+        <p>一个节点可能有 8 块 GPU，之间通过 NVLink 等更快的连接传数据，本地 rank 是 0 到 7。跨节点通信时，另一个节点也有 0 到 7，合起来全局 rank 是 0 到 15。这些都在初始化时设好。</p>
+        <h3>什么时候值得用 DDP</h3>
+        <p>Mark 问有没有估算何时该上 DDP、何时留在单节点的方法。Dan 说确实存在一些规模区间，多卡算矩阵乘法再通信会比单卡快。但他认为目前人们用多卡的主要动机是单卡内存不够。DDP 要求整个模型能放进一块 GPU；FSDP（全分片数据并行）是另一种数据并行，把模型切成块分到多块 GPU 上，能训练单卡放不下的模型。什么时候能拿到性能收益，要多试；他和人聊过，有一些大致的经验，通常看模型参数量，超过某个水平才看得到收益，但主要还是靠实验。</p>
+        <p>他还提到开源库 nccl-tests：编译时链接 NCCL，在你所有的 GPU 上跑各种操作，得到每个操作的总线带宽（bus bandwidth），并且走完整的 NCCL 初始化，确保用上它能找到的最好网络拓扑。Mark 说这就是搭好分布式环境后应该马上做的微基准测试。</p>
+        <h3>分布式训练的性能分析工具</h3>
+        <p>Byron Hsu 问有没有开源工具能在一个视图里看多卡的 profile。Dan 说他不知道有开源的，他一般打开多个 trace 对比。为什么要这样做：比如 rank 0 在做数据预处理，其他 rank 没有这些重活，先启动了 NCCL 内核，trace 上它看起来是一个很长的内核，其实只是在等 rank 0 加入集合通信。他写过分析工具，读入各 rank 的 trace，在集合通信上取最小值，得到真实的数据传输时间，用 Python 解析 JSON 即可。Mark 补充有一个开源工具 Holistic Trace Analysis（HTA），能给出重叠百分比之类的数字。Dan 一般用 Chrome tracing 看 trace；Byron 说 Perfetto 他用起来容易崩，Dan 也有类似经历。FSDP 和 DDP 用的是每个进程一块 GPU。</p>
+        <h3>各 rank 的张量必须一致吗</h3>
+        <p>Andreas 问：各设备上的张量是不是必须相同（比如一个是 8 位，另一个是 32 位就不行），操作顺序也必须相同，否则会死锁？Dan 说他不确定是会挂起还是会报错，可能会报错。</p>
+        <h3>为什么都说 NCCL 爱死锁</h3>
+        <p>Mark 问这个说法从何而来。Dan 说一方面，写分布式代码本来就难。他见过一个例子：输入在不同设备上，前向里用 all-gather 或 all-to-all 传数据，再在各 GPU 上算损失；他们在 PyTorch 层（通过 c10d 分布式类）实现了包含 all-to-all 的前向，反向写成每个进程调用逆操作，但写法让各进程加入的是不同的集合通信，于是互相等对方，永远挂在那里。</p>
+        <p>另一方面，在很大的任务里，有些 rank 在做预处理之类的事，由于某种原因花得久，其他 rank 一直在等 rank 0 加入集合通信；同时心跳计时器在走，一旦超时就报 NCCL 错误，其实和 NCCL 关系不大，是 rank 0 的数据预处理太慢。很多时候查日志看到 NCCL 报错，就以为是 NCCL 出了问题，这会误导人，原因在别处。</p>
+        <p>结尾 Mark 预告下一讲是同样来自 Meta 的 Kapil Sharma，讲优化内核的经验，会是一次以性能分析为主的讲座。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“scatter involves one process sending distinct information to each of the other processes so this is like a mail carrier delivering specific individual mail to each house”（scatter 是一个进程给其他每个进程发不同的信息，像邮递员给每家送各自的信。）<a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=127s" target="_blank">0:02:07</a></li>
+            <li>“it's actually faster to start the collective for the last layer um when those gradients are are ready”（最后一层的梯度一就绪就开始它的集合通信，其实更快。）<a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=1277s" target="_blank">0:21:17</a></li>
+            <li>“there's nothing special about it being a nickel kernel um it's just just a regular Cuda kernel from the device side”（作为 NCCL 内核它没什么特别的，从设备端看就是一个普通的 CUDA 内核。）<a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=2108s" target="_blank">0:35:08</a></li>
+            <li>“the reason why people don't continue training a job with fewer gpus in case one failed is because this would change the numerics of your program”（一块 GPU 坏了，人们不用更少的 GPU 继续训练，是因为这会改变程序的数值。）<a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=1787s" target="_blank">0:29:47</a></li>
+            <li>“I think the main motivation for people to run DDP at the moment is because you run out of memory on a single GPU at at some point”（我觉得现在人们用 DDP 的主要动机，是单块 GPU 迟早会内存不够。）<a href="https://www.youtube.com/watch?v=T22e3fgit-A&t=2874s" target="_blank">0:47:54</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 17: NCCL · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

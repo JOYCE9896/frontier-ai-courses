@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>vLLM 里的投机解码 | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="08_并行前缀和Scan.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 09</span>
+    <span><a href="10_Tensor_Core与CUTLASS3.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 22 · vLLM 里的投机解码</h1>
+        <p class="subtitle">投机解码为什么只在内存受限时有用、怎样估算加速、拒绝采样为什么无损，以及 vLLM 里 propose/score/verify 三段框架的代码结构、bonus token 和 recovered token、动态投机解码、batch expansion、测试方法和可以贡献的方向</p>
+        <div class="author-meta">
+            主讲：Cade Daniel（Anyscale 软件工程师，vLLM 投机解码框架作者，此前在 Amazon 做模型并行系统）· 主持：Mark Saroufim、Andreas Köpf · 发布日期：2024 年 6 月 2 日 · 时长：1 小时 9 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=9wNAgpX6z_4" target="_blank">讲座录像 Lecture 22: Hacker's Guide to Speculative Decoding in VLLM</a>（GPU MODE YouTube 频道公开）· 幻灯片：<a href="https://docs.google.com/presentation/d/1p1xE-EbSAnXpTSiSI0gmy_wdwxN5XaULO3AnCWWoRe4/edit" target="_blank">Google Slides</a>（本文依据录像字幕整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>投机解码（speculative decoding）是一种让自回归解码更并行的技巧：先用一个便宜的方法猜出后面几个 token，再让大模型一次前向把这些猜测都检查一遍，猜对的直接收下。Mark 在开场说 vLLM 托管着 LLM 推理里最重要的一批高吞吐内核，他自己是在做 GPT-fast 时第一次学到投机解码。</p>
+        <p>Cade Daniel 说这一讲不求面面俱到，目标是给出在 vLLM 里改投机解码代码所需的最少知识，吸引更多贡献者。前半讲背景，后半讲框架代码。讲座期间聊天区很活跃，Mark 和 Andreas 不断插入问题，下面按出现位置记录。注意这是 2024 年 6 月的状态：当时 vLLM 开源版的投机解码框架已完成、有正确性测试，但还没有提速。</p>
+        <ol>
+            <li><a href="#t01">vLLM 的三个核心原则</a> · <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">投机解码的基本思路</a> · <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=572s" target="_blank">0:09:32</a></li>
+            <li><a href="#t03">问答：内存层级、prefix cache、吞吐与延迟</a> · <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=763s" target="_blank">0:12:43</a></li>
+            <li><a href="#t04">怎样估算加速：接受率和系统效率</a> · <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=1149s" target="_blank">0:19:09</a></li>
+            <li><a href="#t05">拒绝采样保证输出无损</a> · <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=1659s" target="_blank">0:27:39</a></li>
+            <li><a href="#t06">vLLM 框架现状和 propose/score/verify</a> · <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=1848s" target="_blank">0:30:48</a></li>
+            <li><a href="#t07">读代码：SpecDecodeWorker、proposer、rejection sampler</a> · <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=2162s" target="_blank">0:36:02</a></li>
+            <li><a href="#t08">top-1 与 top-k 树形注意力</a> · <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=2547s" target="_blank">0:42:27</a></li>
+            <li><a href="#t09">bonus token 和 recovered token</a> · <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=2676s" target="_blank">0:44:36</a></li>
+            <li><a href="#t10">动态投机解码</a> · <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=2992s" target="_blank">0:49:52</a></li>
+            <li><a href="#t11">batch expansion</a> · <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=3184s" target="_blank">0:53:04</a></li>
+            <li><a href="#t12">怎样测试正确性</a> · <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=3376s" target="_blank">0:56:16</a></li>
+            <li><a href="#t13">可以贡献的方向</a> · <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=3572s" target="_blank">0:59:32</a></li>
+            <li><a href="#t14">结尾问答</a> · <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=4019s" target="_blank">1:06:59</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. vLLM 的三个核心原则</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=0s" target="_blank">0:00:00</a>–0:09:32 · Introduction to vLLM / Speaker background / vLLM core principles</em></p>
+        <p>Cade 在 Anyscale 做 LLM 推理和 vLLM。Anyscale 是 Ray 的创造者，他说“ChatGPT 是在 Ray 上训练的”是他们的招牌。他认为 vLLM 像 PyTorch 一样把三件事结合在一起：</p>
+        <ul>
+            <li>易用：Python API 简单，不需要复杂的安装，也不需要懂很多性能知识就能用好。当时 GitHub 星数已超过 2 万。易用让它在新用户里很流行。他用 TensorFlow 1 类比：开箱性能好但限制多，PyTorch 把开发者效率和易用放在前面才赢了。</li>
+            <li>性能好：除了各家推理框架都有的 PagedAttention、张量并行，还有多 LoRA（一个实例服务很多不同的 LoRA 微调，用到 UC Berkeley 的工作和定制 CUDA 内核）、chunked prefill（一种降低平均每 token 时间的调度策略）、自动 prefix caching、guided decoding（按 JSON 等语法限制输出 token）、大量量化工作（FP8 在做）、多节点流水线并行（服务 400B 参数级别的新模型需要），以及 prefill/decode 分离（prefill 和 decode 放在不同节点）。有的已完成，有的还是原型。</li>
+            <li>硬件无关：他展示了 AMD 一次发布会的截图，AMD 提供了 vLLM 的首日支持。大模型领域越热，硬件厂商越会优化自己的私有栈，跨平台、跨后端的优化库很难做，这是 vLLM 的定位。</li>
+        </ul>
+        <h3>问答：多后端怎么做</h3>
+        <p>Mark 问：vLLM 仓库大部分看起来是 CUDA 内核，多后端怎么支持？Cade 说这三条原则还没完全实现。NVIDIA 和 AMD 支持不错；Inferentia 能跑但缺很多功能；TPU 基本功能还是原型。功能上它很偏向 NVIDIA，但战略上应该支持所有后端和功能。AMD 方面现在是“代码行数暴涨”的状态，有 HIP 内核，也做自动翻译；未来方向还在讨论，可能是 torch.compile，或者像 Amazon 为 Inferentia 那样由硬件厂商提供定制 worker。Byron 问 TPU 是否要写 XLA 内核：负责 TPU 的是 vLLM 联合作者之一 Woosuk，因为 JAX 和可变状态配合不好，用了 Pallas 写的定制内核。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 投机解码的基本思路</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=572s" target="_blank">0:09:32</a>–0:12:43 · Speculative decoding basics</em></p>
+        <p>他推荐先读 Andrej Karpathy 讲投机解码的推文。两个关键观察：</p>
+        <ul>
+            <li>LLM 推理可以是计算受限，也可以是内存受限。计算受限是批量推理，GPU 算力已被占满；内存受限是在线推理，更在乎延迟，算力没有占满。投机解码需要额外的 FLOPs 来做猜测和打分，所以只在内存受限时有用。</li>
+            <li>生成每个 token 并不需要大模型的全部参数。Llama 2/3 70B 有 700 亿个 FP16 参数，回答“加州首府是哪”大概用不着这么多；回答里还有很多信息量很低的 token，比如 the、a、is。</li>
+        </ul>
+        <p>做法：用某种提议方法（可以是一个草稿模型 draft model，也可以是别的建模方法）预测大模型会说什么；拿到这些预测在大模型下的概率；用某种算法根据大模型的概率接受或拒绝。因为是内存受限，生成一个 token 的时间大部分花在加载参数上；如果猜对了两三个 token，就把一次参数加载分摊到多个 token 上，每 token 时间直接降低。</p>
+        <h3>问答：大批量时有用吗</h3>
+        <p>Mark 问：内存受限主要在小批量时出现，而 vLLM 以高吞吐批量推理闻名，两者什么关系？Cade 说投机解码能否在大批量时有帮助是个开放研究问题，他相信永远不会有帮助，但还需要验证。vLLM 以高吞吐引擎和高质量 beam search 采样出名，加投机解码花了很多时间和精力，就是因为这是一个让 vLLM 也成为低延迟框架的项目，TensorRT-LLM 在低延迟上很好，他们希望 vLLM 在低延迟部署上也好且可配置。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 问答：内存层级、prefix cache、吞吐与延迟</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=763s" target="_blank">0:12:43</a>–0:19:09 · Evaluating performance（前半）</em></p>
+        <h3>“加载参数”是什么意思</h3>
+        <p>有人问参数是一层层加载，还是一次放进显存。Cade 打开 FlashAttention 论文里的内存金字塔图：CPU DRAM 容量在 TB 级以上，带宽当时约 12.8 GB/s 量级（他说“十几 GB/s”）；A100 起的 GPU 有高带宽内存 HBM，约 1.5 TB/s，但容量小得多，现在 80 GB 是标配，新卡有 90 多 GB；GPU 上还有片上 SRAM，速度约 20 TB/s，造价很高，只有约 20 MB，新卡约 40 MB。他说的“内存 IO 受限”，指的是把 GPU HBM 里的参数加载到 SRAM 和各级缓存，让计算核心能对参数和激活做矩阵乘法。</p>
+        <h3>能缓存 LLM 的响应吗</h3>
+        <p>可以在传统 Web 服务层面按输入和采样参数匹配，直接返回输出。vLLM 能在块的层面做：计算新提示最贵的部分是算出每个 token 的键值激活，vLLM 把输入 token 映射到预先算好的 KV 块（prefix caching）。把投机解码和 prefix caching 结合，是一个可以贡献的方向。</p>
+        <h3>草稿模型怎样选才和大模型对齐</h3>
+        <p>简单说，KL 散度是很多人用的度量，后面会再讲。</p>
+        <h3>vLLM 为什么偏吞吐、不偏延迟</h3>
+        <p>设计框架时要做取舍。vLLM 最初设计时考虑的是高吞吐场景：内存是约束，批量很大。LLM 服务栈几乎每一层都可以按吞吐或延迟取舍，vLLM 大多选了吞吐：用的内核、all-reduce 操作，甚至连续批处理的调度都和模型前向同步执行。这让它性能好、省钱。Anyscale 和 vLLM 一直在推动低延迟：自动调优 MoE 内核、为延迟优化的一次性（one-shot）定制 all-reduce，以及很快会去掉 worker 里的一些连续批处理开销。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 怎样估算加速：接受率和系统效率</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=1149s" target="_blank">0:19:09</a>–0:27:39 · Evaluating performance（后半）</em></p>
+        <h3>一个直观例子</h3>
+        <p>他展示了论文 <em>Accelerating LLM Inference with Staged Speculative Decoding</em> 里的图：一个代码补全任务，灰色是带 docstring 的提示，红色是目标模型（大模型）生成的 token，绿色是 CPU 上的 n-gram 草稿模型提议并被接受的 token，蓝色是 GPU 上的小 Transformer 草稿模型提议并被接受的 token。对空白、return、else 这类好猜的词，两种草稿模型都猜得很准。绿色和蓝色的 token，从目标模型的角度看等于被跳过了，这就是内存受限时加速的来源。</p>
+        <h3>简化的估算</h3>
+        <p>更严谨的数学见 DeepMind 的 Leviathan 等人的 <em>Fast Inference from Transformers via Speculative Decoding</em>。他给的实用版本是：token 间延迟（inter-token latency，ITL）等于一步的时间除以每步期望得到的 token 数。</p>
+        $$\text{ITL} = \frac{\text{step time}}{\mathbb{E}[\text{tokens per step}]}$$
+        <ul>
+            <li>不用投机解码：一步 30 毫秒、得到 1 个 token，就是每 30 毫秒一个 token。</li>
+            <li>用投机解码：提议、打分、拒绝采样都有开销，假设同一模型一步变成 40 毫秒，但平均每个序列每步得到 2.5 个 token，就是每 16 毫秒一个 token，延迟改善接近 50%。</li>
+        </ul>
+        <p>所以要看三件事：提议要多久（Transformer 草稿模型提议质量高，但要占 GPU 时间；n-gram 只用 CPU、很快，但预测能力远不如 Transformer）；提议有多准；验证并拿到提议 token 的概率要多久，以及其他框架开销。</p>
+        <h3>vLLM 里的指标</h3>
+        <ul>
+            <li>草稿接受率（draft acceptance rate）：很经验化的值，记录你的工作负载上每个被提议的 token 有多少被目标模型按配置的接受规则接受。它不等于 KL 散度这类理论度量，但很好地反映草稿模型和目标模型在你的数据上对齐得怎样。</li>
+            <li>系统效率（system efficiency）：相对于 100% 接受率时的效率。考虑到后面讲的 bonus token，最好情况每步能拿 3 个 token，实际拿到 2.5 个，效率就是 2.5/3.0。</li>
+        </ul>
+        <h3>问答：提议和验证是交替进行还是并行</h3>
+        <p>Andreas 问。Cade 说这归根结底是个建模问题，做法很灵活。vLLM 里是同步的：跑目标模型、做拒绝采样、再提议下一批，因为要知道目标模型上一轮接受了什么才能提议下一批；将来可以把一部分做成异步，取决于性能收益。</p>
+        <p>每次提议几个 token 合适？他去年在 Anyscale 的 vLLM 分支里实现了投机解码框架，12 月部署到生产，在小批量下延迟降低 50%，当时是每个序列 3 个投机 token，数量很小；增加投机数量、或按批量大小调整，还有很长的优化尾巴。</p>
+        <p>n-gram、prompt lookahead 这些方法都能加速吗？Mark 插话：任何能猜 token 的过程都能加速；如果词表只有两个 token，抛硬币就是不错的投机方法。Cade 说他不是做建模的，词表小确实不需要太强的建模能力；训练的 Transformer 草稿模型在更多数据集上都有更好的预测能力（在 ShareGPT 上训练的，也许对代码也不错），n-gram 可能只适合摘要这类工作负载。不同方法在不同数据集上效率不同，vLLM 的目标是让你按数据集选提议方法。有人在聊天区开玩笑说给 Llama 3 抛的是 128K 面的硬币。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 拒绝采样保证输出无损</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=1659s" target="_blank">0:27:39</a>–0:30:48 · Ensuring lossless output</em></p>
+        <p>投机解码的输出和只用目标模型不同吗？用拒绝采样（rejection sampling）的话，不会不同。拒绝采样让你相对高效地采样，并使结果分布等于目标模型的分布。DeepMind 的论文里有无损性的证明。唯一的限制是低精度数据类型和硬件数值带来的误差。</p>
+        <p>（标准算法如下，讲座里没有展开推导，这里按论文写出供参考：草稿分布为 $q$、目标分布为 $p$，对草稿提议的 token $x$，以概率 $\min\left(1, \frac{p(x)}{q(x)}\right)$ 接受；被拒绝时，从 $\mathrm{norm}\left(\max(0,\, p - q)\right)$ 里重新采样一个 token。）</p>
+        <p>他展示了合入拒绝采样器时 PR 里的图：x 轴是一个约 30 个 token 的词表，y 轴是密度，草稿分布和目标分布差别很大，但经过拒绝采样器后的输出分布和目标分布很接近，采样次数趋于无穷时差异很小。</p>
+        <p>Andreas 问：presence penalty、temperature 这些采样选项，是不是要同样作用于草稿模型和验证模型？Cade 说对，论文证明里的约束之一就是提议分布和目标分布必须用同样的采样参数修改，比如 temperature、frequency penalty 等。做对了，就能得到无损输出，质量和目标模型一样，不受草稿模型影响。</p>
+        <p>也可以换成有损的采样方法，比如 Medusa 的 typical acceptance：接受率和加速更高，但牺牲一些质量。有人正在把它接进 vLLM 框架。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. vLLM 框架现状和 propose/score/verify</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=1848s" target="_blank">0:30:48</a>–0:36:02 · vLLM framework status / Framework architecture</em></p>
+        <h3>现状（2024 年 6 月）</h3>
+        <ul>
+            <li>框架已完成，有正确性测试：每个 PR 都会跑一组验证无损性的测试，覆盖各种单元测试和采样参数。</li>
+            <li>但还没有提速。Anyscale 内部分支做了一些开源版没有的优化，在批量 1 到 8、temperature 为 1 时把 ITL 降低了 50%。剩余工作有一个 issue 跟踪，他和 Anyscale 的几位同事下个月会做。他说现在别指望把开源版投机解码部署到生产，也许有点加速，他没测过。</li>
+            <li>提议方法：草稿模型可用，n-gram 正确；Medusa 的 PR 快合并了；IBM 合入了 MLP Speculator，和 Medusa、EAGLE 很像。还有跳过某些序列的投机等功能。他说这说明框架确实是框架，没有只适配草稿模型。</li>
+            <li>去年 12 月 Anyscale 预发布环境里 Llama 2 7B 的数字：刚部署时 ITL 从约 26 毫秒降到 12 毫秒。他说这是很理想的情况，批量大约 5，提示也比较简单，但说明 temperature 为 1 时 vLLM 也能做低延迟框架。</li>
+        </ul>
+        <h3>三段结构</h3>
+        <p>新增了一种 worker：SpecDecodeWorker，和 vLLM 普通 GPU worker 的接口相同，投机解码的所有状态、逻辑和执行都在里面。三类组件：</p>
+        <ul>
+            <li>proposer（提议者）：输入是要在其上投机的前缀，输出投机 token 及其在提议方法下的概率。目前有 n-gram 和草稿模型。</li>
+            <li>scorer（打分者）：输入前缀和投机 token，输出投机 token 在目标模型下的概率。目前做 top-1 打分，将来可以多于 top-1。</li>
+            <li>verifier（验证者）：输入投机 token ID、它们在提议者下的概率、在目标模型下的概率，输出被接受的 token。目前只有无损拒绝采样，将来会有有损方法。</li>
+        </ul>
+        <p>理论上可以有很多提议者实现：草稿模型及其变体（staged、tree、cascading，即草稿模型还有自己的草稿模型），Medusa、EAGLE，用提示微调思路的方法，n-gram，UCSD 的 Jacobi 解码，基于输入的投机（像 n-gram），以及用检索出的相关数据库内容来提议的 RAG 投机。验证者也有多种：无损拒绝采样（已有）、各种有损拒绝采样，比如 Medusa 的 typical acceptance，还有贪心接受（投机 token 和目标模型的输出一致就接受；他认为 TGI 用的是这个）。他认为 temperature 高时拒绝采样表现更好，希望有人做个消融研究。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 读代码：SpecDecodeWorker、proposer、rejection sampler</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=2162s" target="_blank">0:36:02</a>–0:42:27 · Draft model implementation / Advanced verification logic</em></p>
+        <h3>SpecDecodeWorker</h3>
+        <p><code>execute_model</code> 是所有 vLLM worker 的入口，平常只跑一次前向拿 token。这里先由一个判断条件决定要不要走投机解码；要走的话进入 <code>_run_speculative_decoding_step</code>：从 proposer worker（比如草稿模型）拿提议，用 scorer 打分，用验证流程确定接受的 token。中间会把批里的序列分成投机的和不投机的两组，比如序列太长、草稿模型不支持投机的情况；然后调用拒绝采样器决定接受哪些、拒绝哪些；最后做序列化，转成 CPU 张量返回给 vLLM 引擎。代码有很好的 docstring，他推荐读。</p>
+        <p>worker 还处理一些杂事，比如 vLLM 启动时会做一次 profiling，确定当前配置下能安全存多少个 KV 块，SpecDecodeWorker 处理草稿模型也有 KV 的特殊情况。他说投机解码里“不好玩”的活都由它替你做了。</p>
+        <h3>问答：两个模型必须用同一个 tokenizer 吗</h3>
+        <p>Andreas 问能不能把草稿模型的输出解码成文本、再用目标模型的 tokenizer 重新编码。Cade 说他应该早点提：提议方法必须和目标模型用同一个 tokenizer，因为拒绝采样要求两组概率在同一个词表上。也许有高级技巧能换一种方式表示这些数学，但为了性能，几乎肯定要用同一个 tokenizer。</p>
+        <h3>proposer 的两个实现</h3>
+        <ul>
+            <li>草稿模型的 proposer 叫 <code>MultiStepWorker</code>，继承自普通 worker，共享很多信息。它就是在一个 for 循环里把模型跑若干次（要几个投机 token 就跑几次），把输出接上，很简单的自回归生成；另有一些管理提议的逻辑。</li>
+            <li><code>NGramWorker</code>：最近由外部贡献者贡献，流程相同，对批里每个序列做 n-gram 窗口匹配，看提示或已生成的 token 里有没有可能再次出现的接续。</li>
+        </ul>
+        <h3>rejection sampler</h3>
+        <p>目前是一个 torch module，forward 的输入是目标模型的概率、bonus token ID（后面讲）、草稿模型的概率和投机 token，里面实现拒绝采样所需的数学，他说代码可读性不错。另外，Roblox 的一位贡献者正在实现 Medusa 的 typical acceptance，提高接受率、牺牲一些质量。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. top-1 与 top-k 树形注意力</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=2547s" target="_blank">0:42:27</a>–0:44:36</em></p>
+        <p>top-1 还是 top-k，指提议方法在每个位置给出几个候选 token。最早的投机解码论文只对前缀给出一条接续，每个位置一个 token。后来有论文提出用专门的注意力掩码做树形投机：同一个前缀可以有多个不同的投机 token 供目标模型选择。让这种做法流行起来的是 2023 年 9 月的 Medusa。效果是：草稿模型的第一候选错了、没被目标模型选中，但第二候选也可能是对的，可以大幅增加提议数量。Together 还有一篇博客讲如何调整树的大小，让每个位置采样的 token 数可变。</p>
+        <p>vLLM 目前只支持 top-1，唯一原因是简单，将来会支持 top-k。关键技术难点是需要合适的掩码内核：写投机解码框架时只有朴素的 PagedAttention，不支持掩码（只有单 token 掩码）。最近 FlashInfer 等在做掩码支持。代码里有一个 <code>Top1Proposer</code> 类，负责把提议整理成目标模型 top-1 打分需要的格式，将来会有 top-k 版本。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. bonus token 和 recovered token</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=2676s" target="_blank">0:44:36</a>–0:49:52 · Batch expansion challenges（前半）</em></p>
+        <p>这两个名字来自最早的投机解码论文之一，Charlie Chen 等人的论文。</p>
+        <h3>bonus token</h3>
+        <p>top-1 投机的例子：A、B 是前缀，1、2、3 是投机 token。给目标模型组织批次，求出每个投机 token 之前的分布：A B 之后、A B 1 之后、A B 1 2 之后各是什么分布，就能看出每个投机 token 在目标模型下有多可能，交给拒绝采样。bonus token 是在批里再多加一个查询位置（A B 1 2 3 之后），这个位置没有投机 token 可比；但如果 1、2、3 全被接受，从这个位置的分布里采样出来的 token 一定是正确的，因为它来自目标模型。所以在顺利的情况下能多拿一个 token。投机长度小（k=2、k=3）时，这个加速很显著。</p>
+        <h3>recovered token</h3>
+        <p>假设投机了 3 个 token，但第一个就错了。后面的 token 是否正确依赖前面的，所以要全部拒绝，白干了很多活。这时与其一个 token 都不输出、毫无进展，可以用一些数学技巧，从已打分的结果里恢复出目标模型的分布（即上面括号里提到的 $\max(0, p-q)$ 归一化后的分布），采出一个正确的 token。这保证每一步至少得到一个 token。他展示了 DeepMind 论文里的例子：绿色是草稿模型的提议，红色是被拒绝的 token，第一个被拒的是 “Bond”，用恢复技术修改目标模型在这个位置的分布，得到一个正确的 token。</p>
+        <p>Andreas 说两者内部看起来很像：都是对一个没有从投机中得到、或被拒绝的位置，取目标模型的 logits 采一个 token。Cade 说对，两者都在拒绝采样器里，都有测试，欢迎优化。</p>
+        <h3>问答：结果是确定的吗</h3>
+        <p>拒绝采样基于概率，每次生成会变吗？Cade 说不清楚开源版的现状。在他们的分支里有每个请求一个种子，设定种子就能一路确定；他认为开源版目前只在框架层面保证确定性，需要再确认。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 动态投机解码</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=2992s" target="_blank">0:49:52</a>–0:53:04</em></p>
+        <p>投机解码只在内存受限时有用。批量增大时，空闲的 FLOPs 越来越少，甚至为零。如果投机 token 数固定不变，验证时一旦超出空闲 FLOPs，每步时间就会变长。超出后是线性增加，差距不算巨大，但会缩小在给定 ITL 降幅下能用的批量。</p>
+        <p>动态投机解码（dynamic speculative decoding，DSD）要保证投机解码不比不用更差。有好几篇论文研究这个问题。UC Berkeley 的博士生 Lily（也在 Anyscale 实习）在 vLLM 里实现了它，目标是在不同 QPS 下开关投机解码，永远不比非投机的性能差。目前还在进行中，策略很朴素，现在只能对某些序列关掉投机，将来可以按序列设定投机长度。</p>
+        <p>Lily 的图：随请求率增加，在某个假设的接受率 $\alpha$ 下，不用投机解码的平均请求延迟（蓝线）随着越来越计算受限而上升；Medusa top-1 加 DSD（红线）的延迟从不比不用投机差；而没有 DSD 策略时，延迟会因验证花的时间迅速飙升。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. batch expansion</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=3184s" target="_blank">0:53:04</a>–0:56:16 · Batch expansion challenges（后半）</em></p>
+        <p>问题是：PagedAttention 每个序列只支持一个查询 token，怎么给多个投机 token 打分？写这部分时，PagedAttention 只支持每序列生成一个 token。他写了一份文档专门讲这个。</p>
+        <p>结论是：SpecDecodeWorker 创建虚拟序列，每个虚拟序列只有一个查询 token，相当于把批“扩展”了，这样目标模型就能用朴素 PagedAttention 打分。这有性能代价：目标模型前向时，注意力层会重复加载 KV。从目标模型角度看，它只是收到一个更大的批，不知道这些序列共享前缀 A B；序列越长，影响越大，因为重复加载的 KV 是否命中缓存全凭运气。树形注意力时 batch expansion 尤其糟糕，因为唯一查询 token 数随树的大小爆炸，这也是 vLLM 还没有树形注意力的主要原因：内核层面还没有高效的掩码。</p>
+        <p>Lily 在主导去掉 batch expansion 的工作，靠一个优化过的内核：FlashInfer 的人在做一个掩码内核，可以动态指定查询 token，这样就能去掉 batch expansion，他预计 ITL 能再降 10% 到 20%。batch expansion 的代码都在一个文件里：top-1 batch expansion 先扩展批，在目标模型上执行，再收缩批，得到所有 token 的概率。他希望这部分消失，是很好的贡献点；但它也有用，比如一个新硬件后端还没有 MQA 内核时，可以用 batch expansion 先拿到不错的加速。</p>
+        <p>Andreas 问：缺的是支持变长和 KV 分页的内核吗？Cade 说缺的是能意识到多个查询 token 共享同一前缀的内核。他说用 Triton 写不难，但他们测过的 Triton 内核不太好，FlashAttention 和 FlashInfer 的内核好得多。之所以暂时可以接受这种“hack”，是因为对较小的投机长度、批量和序列长度，影响不大；但对很大的投机树或很长的序列，就必不可少。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 怎样测试正确性</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=3376s" target="_blank">0:56:16</a>–0:59:32 · Testing and correctness</em></p>
+        <p>他花了很多功夫让别人能放心地贡献：投机解码很复杂，端到端理解要很长时间。vLLM 里关键的测试性质是：temperature 为 0 时，结果应与不用投机解码完全相等（有一些注意事项写在测试文件的 docstring 里）。这个断言很好用，可以测不同的投机长度、投机类型、采样参数等，输出都应一样。</p>
+        <p>大部分测试在 <code>test_multistep_correctness</code> 里。一个简单的例子：用很小的模型、批量为 1 测贪心正确性，用 pytest 的参数化把模型组合跑两遍，一遍没有投机模型，一遍用 <code>JackFram/llama-68m</code> 作草稿、5 个投机 token；不用和用投机解码各生成约 1500 个 token，验证输出完全一致。同样的断言也用于另一个模型（160M，与 68M 略有不同）。这套端到端框架还能测其他功能，比如 vLLM 返回生成的 log prob，就用同样的设置在目标模型上取 log prob 并验证。</p>
+        <p>还有单元测试，最重要的是拒绝采样器的单元测试：前面那张分布收敛的图，在 vLLM 的每次提交上都会测。</p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 可以贡献的方向</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=3572s" target="_blank">0:59:32</a>–1:06:59 · Future contributions</em></p>
+        <h3>偏工程，基本可以直接动手</h3>
+        <ul>
+            <li>检索加速：做 RAG 时，用和提示相关的数据库内容作为提议。已有论文原型实现了这一点，任务就是把它实现成一个 proposer。</li>
+            <li>chunked prefill 加投机解码：chunked prefill 消耗的就是投机解码依赖的那些 FLOPs，但对单节点场景好处很大。要统一两者，用一个策略动态调整验证长度，做 chunked prefill 时不投机，让平均 ITL 两头都占便宜。</li>
+            <li>prefix caching 加投机解码：prefix caching 在缓存未命中时也要用这些 FLOPs 回填 KV，结合起来，共享部分块时能同时拿到两种加速。</li>
+            <li>guided decoding 加投机解码：输出被语法限制时（比如 JSON 里只能是逗号或右引号），允许的 token 是一个子集，投机准确率会高得多，就像 Mark 说的词表只有两个 token 的情况。</li>
+            <li>其他后端：框架在架构上支持，但没有测试。AMD GPU 有，CPU、TPU、Inferentia 没有。</li>
+        </ul>
+        <h3>偏建模</h3>
+        <ul>
+            <li>投机长度的元模型：草稿模型对某些 token 置信度很低时，不如不浪费 FLOPs 去验证。用一个元模型，输入草稿模型的概率（置信度），决定哪些投机真正交给目标模型验证。上限能提升多少他不清楚，Lily 更懂；在他看来这让 vLLM 更省 FLOPs，也能让 chunked prefill 和投机解码组合得更好。</li>
+            <li>投机类型的元模型：类似模型路由，同时跑 n-gram、草稿模型、RAG 提议者，按各自的置信度或看前缀猜哪个提议最好，选一个送去验证。</li>
+        </ul>
+        <h3>大项目</h3>
+        <ul>
+            <li>在线学习：Lily 的论文 <em>Online Speculative Decoding</em>，按实际看到的请求分布动态更新提议方法的参数。比如大量请求是代码，草稿模型就会在线学得更会预测代码。他说这有点科幻，需要 vLLM 里大量基础设施支持；论文显示，针对某个领域专门化的草稿模型，比通用草稿模型或在 ShareGPT 上训练的模型加速多得多。</li>
+            <li>多 LoRA 草稿模型：一个基础草稿模型加多个 LoRA，各自专攻代码、摘要、莎士比亚等领域，如果做得高效，一个提议方法就能覆盖很多领域，少付投机失败的代价。</li>
+            <li>UCSD 的 lookahead / 并行解码（他说的 “Pat batch parallelity coding”，字幕不清）以及 consistency LLM：用 n-gram 和迭代的 Jacobi 解码打破 LLM 的串行性。他还不确定这该放在投机解码框架里还是单独做。</li>
+        </ul>
+        <p>他致谢了 Lily、Cody、Anthony、vLLM 团队和作者们，以及去年在 Anyscale 的实习生等人。</p>
+    </section>
+
+    <section id="t14">
+        <h2>14. 结尾问答</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=4019s" target="_blank">1:06:59</a>–1:09:24</em></p>
+        <p>Mark 说最打动他的是协作的范围：核心投机解码代码写得好、测试充分，别人才能在上面搭研究想法，他之前不知道 vLLM 是这样构建的。Andreas 说他准备时看了 Cade 的 PR，文档写得很专业。</p>
+        <ul>
+            <li>要不要针对特定数据集调草稿模型？关键是接受率有多高。生产中很可能需要针对数据集调。Anyscale 拿到 50% 加速时，预训练了一个很小的 68M 草稿模型（字幕说“60nm”，应指 68M）。</li>
+            <li>想看投机解码的最佳效果，该从内存受限的模型还是计算受限的模型开始？他说这个问题有点难，一个模型是内存受限还是计算受限，取决于工作负载大小。选一个在你的负载下内存受限的模型就对了。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“specy code is an optimization that helps when we're memory bound and the reason why is the tricks we do to get speed up require additional flops”（投机解码是在内存受限时才有帮助的优化，因为它获得加速的技巧需要额外的 FLOPs。）<a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=572s" target="_blank">0:09:32</a></li>
+            <li>“it's an open research question if specular decoding can help with larger batch sizes I believe that it will never help but I need to validate that a little bit”（投机解码能不能在更大的批量下有帮助是个开放研究问题，我相信永远不会，但还需要验证一下。）<a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=698s" target="_blank">0:11:38</a></li>
+            <li>“the actual proposal method you'll use will depend on your data set”（你用哪种提议方法，取决于你的数据集。）<a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=1659s" target="_blank">0:27:39</a></li>
+            <li>“one key constraint for your proposal method is that it uses the same tokenizer um as the as the Target Model”（提议方法的一个关键约束是，它要和目标模型用同一个 tokenizer。）<a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=2291s" target="_blank">0:38:11</a></li>
+            <li>“when temperature is equal to zero we expect exact equality with without spect de code”（temperature 为 0 时，我们期望结果和不用投机解码时完全相等。）<a href="https://www.youtube.com/watch?v=9wNAgpX6z_4&t=3442s" target="_blank">0:57:22</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 22: Hacker's Guide to Speculative Decoding in VLLM · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

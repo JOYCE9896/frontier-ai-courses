@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Triton 实践指南 | GPU MODE 讲座笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="05_FlashAttention入门实现.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">GPU MODE 讲座目录</a> · 06</span>
+    <span><a href="07_NCCL集合通信.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>Lecture 14 · Triton 实践指南</h1>
+        <p class="subtitle">从 Triton 的编程模型讲起，在 CPU 模拟器里调试，依次写张量复制、图像灰度化、朴素矩阵乘法、带 swizzling 的分组矩阵乘法，最后做基准测试和自动调优</p>
+        <div class="author-meta">
+            主讲：Umer Adil（德国独立 ML 工程师，2023 年 10 月前做管理咨询，之后给 LangChain、gpt-engineer、Hugging Face diffusers 做开源贡献）· 发布日期：2024 年 4 月 16 日 · 时长：1 小时 22 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=DdTsX6DQk24" target="_blank">讲座录像 Lecture 14: Practitioners Guide to Triton</a>（GPU MODE YouTube 频道公开）· 幻灯片/代码：<a href="https://github.com/gpu-mode/lectures/tree/main/lecture_014" target="_blank">lecture_014（notebook A_Practitioners_Guide_to_Triton.ipynb + triton_util.py）</a>（本文依据录像字幕、notebook 和代码整理，是中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>主讲人 Umer Adil 自我介绍说，他到 2023 年 10 月还在做管理咨询，之后转做技术方向的 AI 工作：先给 LangChain 和 gpt-engineer 提交代码（在 gpt-engineer 当过一段时间维护者），后来给 Hugging Face diffusers 贡献了 ControlNet-XS 等功能。这一讲整场都在一个 Jupyter notebook 里进行，notebook 放在 GPU MODE 的 lectures 仓库里，可以照着跑。</p>
+        <p>这一讲回答几个问题：Triton 是什么，和 CUDA、<code>torch.compile</code> 什么关系，什么时候该用它；Triton 要你怎样组织一个内核（它的编程模型）；怎样在 CPU 上调试 Triton 内核。然后用四个由浅到深的例子把写法走一遍，最后看基准测试和自动调优。前置知识：知道 CUDA 里 grid、block、thread 的层次（本站 CS149 笔记和本合集前几篇讲过），会用 PyTorch。第 02 篇讲过的 L2 缓存、分块矩阵乘法，在后半段会用到。</p>
+        <ol>
+            <li><a href="#t01">开场：主讲人和这一讲的路线</a> · <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">Triton 是什么，什么时候用它</a> · <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=189s" target="_blank">0:03:09</a></li>
+            <li><a href="#t03">在 CPU 上模拟运行，像普通程序一样调试</a> · <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=749s" target="_blank">0:12:29</a></li>
+            <li><a href="#t04">编程模型：只分块，不分线程，一切都是向量</a> · <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=998s" target="_blank">0:16:38</a></li>
+            <li><a href="#t05">例子一：复制张量，找出一个偏移量 bug</a> · <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=1651s" target="_blank">0:27:31</a></li>
+            <li><a href="#t06">例子二：把图片转成灰度，二维偏移和掩码</a> · <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=2231s" target="_blank">0:37:11</a></li>
+            <li><a href="#t07">例子三：朴素矩阵乘法</a> · <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=2845s" target="_blank">0:47:25</a></li>
+            <li><a href="#t08">例子四：用 swizzling 重排块的顺序，提高 L2 命中率</a> · <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=3478s" target="_blank">0:57:58</a></li>
+            <li><a href="#t09">基准测试：和 PyTorch 比，块大小的影响</a> · <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=4356s" target="_blank">1:12:36</a></li>
+            <li><a href="#t10">自动调优和结尾</a> · <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=4624s" target="_blank">1:17:04</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场：主讲人和这一讲的路线</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=0s" target="_blank">0:00:00</a>–0:03:09 · Introduction to Triton</em></p>
+        <p>Umer 先介绍自己（见上文），屏幕右边放着他的 Discord、GitHub 和 Twitter 头像。然后他说明路线：先讲为什么用 Triton、什么时候用；再讲怎么写 Triton 内核，Triton 的编程模型是什么，也就是 Triton 希望你怎样组织代码。基础讲完就进代码，从最简单的复制一个张量开始，一步步加难度，最后写一个快速的矩阵乘法内核。之后做基准测试和自动调优，看自己写的到底快不快、还能怎样更快。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. Triton 是什么，什么时候用它</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=189s" target="_blank">0:03:09</a>–0:12:29 · Why and when to use Triton</em></p>
+        <h3>Triton 是什么</h3>
+        <p>他的定义：Triton 是一种给 GPU 编程的语言，比 CUDA 方便得多。你写的是类 Python 代码，编译成 PTX。PTX（Parallel Thread Execution）是 NVIDIA GPU 的中间汇编语言，CUDA 代码也编译成它，所以 Triton 能覆盖和 CUDA 一样的硬件。编译过程中 Triton 编译器会尝试优化代码：在不改变程序含义的前提下重新安排其中的部分，让它跑得更快。</p>
+        <h3>和 CUDA 比</h3>
+        <p>notebook 里放了一张对比图（来源是知乎的一篇文章）。他用相机打了个比方：CUDA 像高端单反，有成千上万个旋钮，能拿到可能的最佳性能；Triton 像高端手机相机，你控制不了一切，多半拿不到绝对最佳的性能，但很容易拿到很好的性能。notebook 里列的对比：</p>
+        <ul>
+            <li>CUDA：一切都能控制，所以有可能拿到绝对最高性能；但要拿到“还不错”的性能更难；写起来和调试都繁琐得多；更复杂，学起来更难。</li>
+            <li>Triton：有些事交给自动优化，你控制不了，所以多半拿不到绝对最高性能；但要拿到好性能容易得多；好写好调试；语法像 Python，入门更容易。</li>
+        </ul>
+        <h3>和 torch.compile 比</h3>
+        <p><code>torch.compile</code> 也能让模型变快，但方式不同。他说 <code>torch.compile</code> 优化的是你的代码，而不是代码调用的那些内核：它改写代码，让代码更好地利用现有的 GPU 内核，某些情况下也会生成一些简单的新内核。这些简单的新内核就是 Triton 内核。所以想入门的话，可以先用 PyTorch 写，用 <code>torch.compile</code> 编译，从生成的 Triton 内核起步。怎么拿到这些生成的内核，见本合集第 01 篇（Mark Saroufim 的 Lecture 1）。</p>
+        <h3>什么时候用 Triton：四步</h3>
+        <p>从你的 AI 模型出发：</p>
+        <ol>
+            <li>不够快，就先 <code>torch.compile</code>。</li>
+            <li>还不够快，看能不能改写代码，让它更适合 <code>torch.compile</code>。</li>
+            <li>还不够快，找出慢的部分，为它们写自定义 Triton 内核。</li>
+            <li>还不够快，再找出慢的部分，如果它们已经是 Triton 内核了，可以考虑花时间写 CUDA 内核。</li>
+        </ol>
+        <p>第 2 步他举了例子。<code>torch.compile</code> 会用到 CUDA Graph：简单说，把要启动多个内核的意图一次性发给 GPU，而不是一个接一个地发。他说细节不重要，要点是：如果你的代码能表示成一张 CUDA Graph，就会很快。如果编译后发现代码有图中断（graph break，编译器在某处没法继续把代码收进同一张图，只好切成几段），就可以研究怎么改写代码消掉图中断，让整段代码编进一张图，这样也会变快。</p>
+        <p>他补充：如果事先就知道需要绝对最高性能（他认为这种情况少见），当然可以直接从 CUDA 开始。</p>
+        <h3>粗糙的地方</h3>
+        <p>Triton 是比较新的项目，有些地方还粗糙，代码有时不按预期工作。他在 notebook 里遇到的每一处都用 <code>Weirdness: ...</code> 注释标了出来，并说预计以后会打磨得好很多。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 在 CPU 上模拟运行，像普通程序一样调试</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=749s" target="_blank">0:12:29</a>–0:16:38 · Debugging Triton kernels</em></p>
+        <h3>TRITON_INTERPRET=1</h3>
+        <p>和 CUDA 不同，Triton 内核可以像任何 CPU 程序一样调试。做法是设置环境变量 <code>TRITON_INTERPRET</code> 为字符串 <code>'1'</code>（他特别提醒是字符串，不是数字 1），而且要在 import triton 之前设置。这时 Triton 把内核放到 CPU 上模拟执行，假装自己在 GPU 上。这样就能随时中断、设断点、打印变量。</p>
+        <p>他给这一点加了感叹号：强烈建议先在模拟器里写内核，用很小的例子确认代码正确，然后再放到 GPU 上跑。他说听过有人讲 Triton 没法调试、调试是噩梦，他不同意，认为其实挺容易，希望这一讲能说服大家。</p>
+        <h3>几个调试小工具</h3>
+        <p>他写了几个工具函数，说可以直接复制到自己的代码里：</p>
+        <ul>
+            <li><code>check_tensors_gpu_ready</code>：断言所有张量在内存中是连续的（contiguous），并且在不模拟时断言它们都在 GPU 上。</li>
+            <li><code>breakpoint_if</code>：按 pid（下一节解释）的条件设断点，比如只在第 0 个程序里停下。</li>
+            <li><code>print_if</code>：按 pid 的条件打印。</li>
+        </ul>
+<pre><code>import os
+from IPython.core.debugger import set_trace
+
+os.environ['TRITON_INTERPRET'] = '1' # needs to be set *before* triton is imported
+
+def check_tensors_gpu_ready(*tensors):
+    for t in tensors:
+        assert t.is_contiguous, "A tensor is not contiguous"
+        if not os.environ.get('TRITON_INTERPRET') == '1': assert t.is_cuda, "A tensor is not on cuda"
+
+def test_pid_conds(conds, pid_0=[0], pid_1=[0], pid_2=[0]):
+    '''Test if condition on pids are fulfilled
+    E.g.:
+        '=0'  checks that pid_0 == 0
+        ',&gt;1' checks that pid_1 &gt; 1
+        '&gt;1,=0' checks that pid_0 &gt; 1 and pid_1 == 0
+    '''
+    pids = pid_0[0], pid_1[0], pid_2[0]
+    conds = conds.replace(' ','').split(',')
+    for i, (cond, pid) in enumerate(zip(conds, pids)):
+        if cond=='': continue
+        op, threshold = cond[0], int(cond[1:])
+        if op not in ['&lt;','&gt;','&gt;=','&lt;=','=', '!=']: raise ValueError(f"Rules may only use these ops: '&lt;','&gt;','&gt;=','&lt;=','=', '!='. Invalid rule: '{condition}'.")
+        op = '==' if op == '=' else op
+        if not eval(f'{pid} {op} {threshold}'): return False
+    return True
+
+def breakpoint_if(conds, pid_0=[0], pid_1=[0], pid_2=[0]):
+    '''Stop kernel, if any condition of pids is fulfilled'''
+    if test_pid_conds(conds, pid_0, pid_1, pid_2): set_trace()
+
+def print_if(txt, conds, pid_0=[0], pid_1=[0], pid_2=[0]):
+    '''Print txt, if any condition of pids is fulfilled'''
+    if test_pid_conds(conds, pid_0, pid_1, pid_2): print(txt)
+
+def cdiv(a,b): return (a + b - 1) // b
+assert cdiv(10,2)==5
+assert cdiv(10,3)==4</code></pre>
+        <p><code>cdiv</code> 是向上取整的除法，$\mathrm{cdiv}(a,b)=\lceil a/b \rceil$，用来算需要几个块。后面这些函数被挪进了仓库里的 <code>triton_util.py</code>。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 编程模型：只分块，不分线程，一切都是向量</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=998s" target="_blank">0:16:38</a>–0:27:31 · Triton programming model</em></p>
+        <h3>CUDA 分两层，Triton 只分一层</h3>
+        <p>编程模型指的是 Triton 希望你怎样组织程序。CUDA 把整个计算分两层：先分成块（block），每个块再分成线程（thread）。每个线程处理一个标量，也就是一个数。同一个块里的线程跑在同一个 SM（streaming multiprocessor，流式多处理器，GPU 上独立执行计算的单元）上，共用同一块共享内存（shared memory，SM 上的一小块高速片上内存，同一块内的线程可以读写）。</p>
+        <p>Triton 只分一层：整个计算分成块，块不再分成线程。他说这是 Triton 的核心：它要求你在向量上做运算，不在标量上做。又因为没有线程这一层，你没法手动管理共享内存，也不需要管，Triton 替你做。</p>
+        <h3>例子：两个长度 8 的向量相加</h3>
+        <p>x、y 长度都是 8，结果写进 z，块大小取 4，于是有 $8/4=2$ 个块。</p>
+        <ul>
+            <li>CUDA：跑 2 个块，每块 4 个线程，8 个线程各算一个位置，比如 <code>z[0] = x[0] + y[0]</code>。</li>
+            <li>Triton：也跑 2 个块，没有线程，每个块做一次向量化加法，向量长度就是块大小 4，比如 <code>z[0:3] = x[0:3] + y[0:3]</code>（notebook 原文写法）。</li>
+        </ul>
+        <p>他强调 Triton 里所有操作都是向量化的：读数据、对数据做运算、写回数据、检查越界用的掩码，全都是向量。</p>
+        <h3>例子：长度 6，块大小 4</h3>
+        <p>现在 x、y 长度是 6，块大小还是 4，块数是 $\mathrm{cdiv}(6,4)=2$。x = [1,2,3,4,5,6]，y = [0,1,0,1,0,1]。第二个块只有两个有效位置，所以需要越界检查。他先给出 CUDA 内核“等价的 C 逻辑”，用 Python 写成，便于看：</p>
+<pre><code># x,y = input tensors, z = output tensors, n = size of x, bs = block size
+def add_cuda_k(x, y, z, n, bs):
+    # locate which part of the overall computation this specific kernel is doing
+    block_id = ... # in our example: one of [0,1]
+    thread_id = ... # in our example: one of [0,1,2,3]
+
+    # identify the location of the data this specific kernel needs
+    offs = block_id * bs + thread_id
+
+    # guard clause, to make sure we're not going out of bounds
+    if offs &lt; n:
+
+        # read data
+        x_value = x[offs]
+        y_value = y[offs]
+
+        # do operation
+        z_value = x_value + y_value
+
+        # write data
+        z[offs] = z_value
+
+    # Important: offs, x_value, y_value, x_value are all scalars!
+    # The guard condition kind of is also a scalar, as it check one condition on one value.</code></pre>
+        <p>步骤是：确定这个内核负责计算的哪一部分（block_id 是 0 或 1，thread_id 是 0 到 3）；定位需要的数据；检查是否越界；读数据、运算、写回。notebook 里有一张表，列出每个块、每个线程的各变量取值，全是标量。</p>
+        <p>然后是 Triton 版。他说明这段不是完全正确的 Triton 语法，只为说明概念，正确写法在后面：</p>
+<pre><code># Note: this is for illustration, and not quite syntactically correct. See further below for correct triton syntax
+
+def add_triton_k(x, y, z, n, bs):
+    # locate which part of the overall computation this specific kernel is doing
+    block_id = tl.program_id(0)  # in our example: one of [0,1]
+
+    # identify the location of the data this specific kernel needs
+    offs = block_id * bs + tl.arange(0, bs) # &lt;- this is a vector!
+
+    # the guard clause becomes a mask, which is a vector of bools
+    mask = offs &lt; n # &lt;- this is a vector of bools!
+
+    # read data
+    x_values = x[offs] # &lt;- a vector is read!
+    y_values = y[offs] # &lt;- a vector is read!
+
+    # do operation
+    z_value = x_value + y_value  # &lt;- vectors are added!
+
+    # write data
+    z[offs] = z_value  # &lt;- a vector is written!</code></pre>
+        <p>步骤几乎一样，区别在于每样东西都是向量：数据位置 <code>offs</code> 是向量，CUDA 里的 if 守卫变成了掩码（mask），一个布尔向量；读进来的数据、运算结果、写回的数据也都是向量。对应的表里，两个块各自的变量都是长度 4 的向量。以第二个块为例，按这段代码，<code>offs</code> = [4,5,6,7]，<code>mask</code> = [True, True, False, False]，后两个位置不读也不写。</p>
+        <h3>术语：program 和 pid</h3>
+        <p>Triton 的说法里，处理一个块的那个内核实例叫一个 program。上面的例子跑了 2 个 program。所以 block_id 一般叫 pid，即 program id，意思一样。他也更正了自己的口误：这里应该说“每个内核”，不是“每个块”。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 例子一：复制张量，找出一个偏移量 bug</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=1651s" target="_blank">0:27:31</a>–0:37:11 · Writing a tensor copy kernel</em></p>
+        <h3>从 Python 启动内核</h3>
+        <p>任务：把形状为 (n) 的张量 x 复制到另一个张量 z。为了简单，用很小的块大小。和 CUDA 一样，写好内核后要启动它，Triton 里直接从 Python 启动。他说熟悉 CUDA 的人会觉得这段很眼熟：先为输出分配空间，检查数据能上 GPU，取数据大小，算出要多少个块。块的布局叫 grid，可以是 1D、2D、3D 的元组，也可以是返回这种元组的函数。<code>kernel_fn[grid](...)</code> 这一行是“魔法发生的地方”，它为 grid 里的每个点启动一个内核。</p>
+<pre><code># # This is a normal python function, which launches the triton kernels
+def copy(x, bs, kernel_fn):
+    z = torch.zeros_like(x)
+    check_tensors_gpu_ready(x, z)
+    n = x.numel()
+    n_blocks = cdiv(n, bs)
+    grid = (n_blocks,)  # how many blocks do we have? can be 1d/2d/3d-tuple or function returning 1d/2d/3d-tuple
+
+    # launch grid!
+    # - kernel_fn is the triton kernel, which we write below
+    # - grid is the grid we constructed above
+    # - x,z,n,bs are paramters that are passed into each kernel function
+    kernel_fn[grid](x,z,n,bs)
+
+    return z    </code></pre>
+        <h3>内核本身，故意带一个逻辑 bug</h3>
+        <p>出于教学目的，下面这个内核有 bug。语法没错，能跑（在 GPU 上能跑，这里是在模拟器里），但逻辑错了，他让观众先找。</p>
+        <p>几个要点。用 <code>@triton.jit</code> 装饰的 Python 函数会被解析并编译成 Triton 内核，函数里只允许一部分 Python 操作，比如不模拟时不能 print、不能设断点，因为 GPU 上没有这些。外面传进来的是 torch 张量，到了内核里每个张量变成指向它第一个元素的指针，所以参数名是 <code>x_ptr</code>。<code>bs: tl.constexpr</code> 告诉 Triton 这个数编译时就确定、不会变，编译器优化时可以利用这一点。<code>x_ptr + offs</code> 不用细想，就当成 <code>x_ptr[offs]</code> 这种下标访问：在 NumPy 或 PyTorch 里 offs 是张量，结果也是张量，这里一样。</p>
+<pre><code># # This is the triton kernel:
+
+# The triton.jit decorator takes a python function and turns it into a triton kernel, which is run on the GPU.
+# Inside this function only a subset of all python ops are allowed.
+# E.g., when NOT simulating, we can't print or use breakpoints, as these don't exist on the GPU.
+@triton.jit
+# When we pass torch tensors, they are automatically converted into a pointer to their first value
+# E.g., above we passed x, but here we receive x_ptr
+def copy_k(x_ptr, z_ptr, n, bs: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = tl.arange(0, bs)  # compute the offsets from the pid
+    mask = offs &lt; n
+    x = tl.load(x_ptr + offs, mask) # load a vector of values, think of `x_ptr + offs` as `x_ptr[offs]`
+    tl.store(z_ptr + offs, x, mask) # store a vector of values
+
+    print_if(f'pid = {pid} | offs = {offs}, mask = {mask}, x = {x}', '')
+
+    # Question: What is wrong with this kernel?</code></pre>
+        <h3>用 print_if 逐个程序看变量</h3>
+        <p>x = [1,2,3,4,5,6]，<code>bs=2</code>，所以有 3 个程序。运行时 <code>print_if</code> 打印出每个程序的 offs、mask 和 x：</p>
+<pre><code>pid = [0] | offs = [0 1], mask = [ True  True], x = [1 2]
+pid = [1] | offs = [0 1], mask = [ True  True], x = [1 2]
+pid = [2] | offs = [0 1], mask = [ True  True], x = [1 2]</code></pre>
+        <p>每个程序做的事完全一样，这不对。输出 z 是 [1, 2, 0, 0, 0, 0]，只有前两个值被复制了，正好等于块大小 2。问题在定位数据那一步：偏移量必须依赖当前是哪个块，也就是 pid。</p>
+        <p>第二次尝试把偏移量写成 <code>pid * n + tl.arange(0, bs)</code>。还是不对：</p>
+<pre><code>pid = [0] | offs = [0 1], mask = [ True  True], x = [1 2]
+pid = [1] | offs = [6 7], mask = [False False], x = [1 1]
+pid = [2] | offs = [12 13], mask = [False False], x = [1 1]</code></pre>
+        <p>偏移量会变了，但步子不对。每个程序应该前进块大小 bs，不是总元素数 n。第三版：</p>
+<pre><code>@triton.jit
+def copy_k(x_ptr, z_ptr, n, bs: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * bs + tl.arange(0, bs)
+    mask = offs &lt; n
+    x = tl.load(x_ptr + offs, mask)
+    tl.store(z_ptr + offs, x, mask)
+    print_if(f'pid = {pid} | offs = {offs}, mask = {mask}, x = {x}', '')</code></pre>
+<pre><code>pid = [0] | offs = [0 1], mask = [ True  True], x = [1 2]
+pid = [1] | offs = [2 3], mask = [ True  True], x = [3 4]
+pid = [2] | offs = [4 5], mask = [ True  True], x = [5 6]</code></pre>
+        <p>这次 x 和 z 内容一致。他想传达的是：写 GPU 程序涉及很多下标，很容易出错，所以先在模拟模式里写和调试，用很小的例子测，交互式地调试很容易，直接去做就行。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 例子二：把图片转成灰度，二维偏移和掩码</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=2231s" target="_blank">0:37:11</a>–0:47:25 · Example: image grayscale</em></p>
+        <h3>为什么要重启 notebook 内核</h3>
+        <p>这个例子开始前要重启 Jupyter 内核。他坦白说自己也不知道为什么：不重启的话 torchvision 导入不了（notebook 里猜测是循环依赖）。另一个原因是这个内核要用到的一个操作在模拟器里跑不通：notebook 记录的是，模拟时浮点数乘 uint 向量会失败，在 GPU 上不模拟就没问题，看起来是 <code>TRITON_INTERPRET</code> 的 bug。所以这次要关掉模拟模式，在 GPU 上跑，他现场切换到了 GPU 环境。</p>
+        <h3>例子的来源</h3>
+        <p>代码改编自 Jeremy Howard 讲座里的 Colab 例子，连小狗图片也沿用了，他说这只小狗现在是“官方 GPU 小狗”。原图读进来是 <code>torch.Size([3, 1066, 1600])</code>，uint8，缩放到高 150 后是 3 × 150 × 225，共 33750 个像素。这个例子要说明怎样处理二维数据，三维数据同理。</p>
+        <h3>二维偏移怎么构造</h3>
+        <p>原则还是那几步：确定这个程序负责哪部分，定位数据，检查越界，读数据，运算，写回。现在数据是二维的，偏移、运算、掩码、写回都可以是二维的。</p>
+        <p>他用一个 4 × 7 的矩阵演示，两个维度的块大小都是 2，要取的是行方向第 2 个块、列方向第 3 个块（从 0 数分别是 1 和 2）。先像之前一样分别算两个方向的一维偏移：行方向是 [2, 3]，列方向是 [4, 5]。再用 None 索引把它们变成二维：行偏移变成 2 × 1 的矩阵，列偏移变成 1 × 2 的矩阵。行偏移要表示真实的数据位置，所以乘上行长度 7，[2, 3] 变成 [14, 21]。两者相加，通过广播（broadcasting）得到 2 × 2 的偏移矩阵：</p>
+        <p>$$\begin{bmatrix}14\\21\end{bmatrix} + \begin{bmatrix}4 & 5\end{bmatrix} = \begin{bmatrix}18 & 19\\25 & 26\end{bmatrix}$$</p>
+        <p>二维掩码的构造方式不一样：两个方向各自独立检查是否越界，任一方向都不能越界，所以对两个一维掩码做逻辑与。</p>
+<pre><code>@triton.jit
+def rgb2grey_k(x_ptr, out_ptr, h, w, bs0: tl.constexpr, bs1: tl.constexpr):
+    pid_0 = tl.program_id(0)
+    pid_1 = tl.program_id(1)
+
+    offs_0 = pid_0 * bs0 + tl.arange(0,bs0)  # 1d vector
+    offs_1 = pid_1 * bs1 + tl.arange(0,bs1)  # 1d vector
+
+    # Weirdness: None-slicing currently doesn't work when simulating on cpu. Use tl.expand_dim instead.
+    # offs = w * tl.expand_dims(offs_0, 1) + tl.expand_dims(offs_1, 0)
+    offs = w * offs_0[:,None] + offs_1[None, :]  # 2d matrix! - we multiply first offset by width, see image above
+
+    mask_0 = offs_0 &lt; h  # 1d vector
+    mask_1 = offs_1 &lt; w  # 1d vector
+
+    # mask = tl.expand_dims(mask_0, 1) &amp; tl.expand_dims(mask_1, 0)
+    mask = mask_0[:,None] &amp; mask_1[None,:]  # 2d matrix! - data musn't go out of bounds along either axis, therefore `logical and` of the individual masks
+
+    r = tl.load(x_ptr + 0*h*w+offs, mask=mask)
+    g = tl.load(x_ptr + 1*h*w+offs, mask=mask)
+    b = tl.load(x_ptr + 2*h*w+offs, mask=mask)
+
+    # Weirdness: multiplying float with uint vectors fails when simulating on cpu
+    out = 0.2989*r + 0.5870*g + 0.1140*b  # don't worry why it's these 3 numbers we're multiplying with
+
+    tl.store(out_ptr + offs, out, mask=mask)</code></pre>
+        <p>又一处粗糙的地方：<code>[:, None]</code> 这种写法当时在模拟器里不能用，模拟时要改用 <code>tl.expand_dims</code>（注释里给了替代写法）。读数据时，彩色图片按通道存放：先是整个 R 通道，然后 G，然后 B。所以从起始指针加上偏移，再加上“第几个通道 × 一个通道的大小 h*w”，就拿到对应通道的数据。三个通道按公式 $0.2989R + 0.5870G + 0.1140B$ 合成灰度值，用同一个二维偏移和二维掩码写回。</p>
+        <h3>grid 用函数</h3>
+<pre><code>def rgb2grey(x, bs):
+    c,h,w = x.shape
+    out = torch.empty((h,w), dtype=x.dtype, device=x.device)
+
+    # grid can be a function returning a 1d/2d/3d-tuple
+    # (having a grid function is not more useful than a grid tuple in this case, but will be below when benchmarking &amp; auto-tuning)
+    grid = lambda meta: (cdiv(h, meta['bs0']), cdiv(w,  meta['bs1']))
+
+    rgb2grey_k[grid](x, out, h, w, bs0=bs[0], bs1=bs[1]) # all kwargs are passed into grid function
+    return out.view(h,w)</code></pre>
+        <p>他说这里 grid 用函数只是为了演示。这个例子里用函数没什么好处，完全可以先算好元组再传。到后面基准测试和自动调优时函数才有用。传给这个函数的参数是所有关键字参数，再加上基准测试和自动调优带来的额外参数。用 <code>bs=(32, 32)</code> 运行，得到一只灰色的小狗。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 例子三：朴素矩阵乘法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=2845s" target="_blank">0:47:25</a>–0:57:58 · Matrix multiplication</em></p>
+        <h3>这个例子要学什么</h3>
+        <p>这一步不必重启内核，但为了代码简单他还是重启了，并把工具函数挪进了单独的文件 <code>triton_util.py</code>。例子改编自 OpenAI 发布 Triton 的博客文章。要学三件事：一种拆分计算的方法；在内核里调用其他函数；在块内部使用 Triton 预先实现好的向量和矩阵运算。他说 GPU 的做法就是把大计算拆成小块，怎么拆由写代码的人决定，这里看其中一种。</p>
+        <h3>三个方向的拆分</h3>
+        <p>目标：把 $m\times k$ 的矩阵 A 乘以 $k\times n$ 的矩阵 B，得到 $m\times n$ 的矩阵 C。</p>
+        <ul>
+            <li>沿 m 方向拆，用块维度 0 表示；</li>
+            <li>沿 n 方向拆，用块维度 1 表示；</li>
+            <li>沿共享的 k 方向也拆，但不用块表示，所有 k 方向的分段都在同一个块里依次算完。</li>
+        </ul>
+        <p>以输出里的一个块为例，要算它，需要 A 的一行块乘以 B 的一列块。k 方向再拆成几个阶段（phase）：A 的第 0 段乘 B 的第 0 段，加上 A 的第 1 段乘 B 的第 1 段，加起来得到这个输出块：</p>
+        <p>$$C_{ij} = \sum_{p} A_{ip}\,B_{pj}$$</p>
+        <p>他预想到一个问题：Triton 的 grid 可以是三维的，计算也拆成了三个方向，为什么不把 k 方向也映射成块？他的回答是，k 方向上的各个阶段互相依赖：要得到这个输出块的结果，需要所有阶段的输出加在一起，它们不是独立的，所以不能作为独立的块。</p>
+        <h3>在内核里调用 jit 函数</h3>
+        <p>一维、二维的偏移和掩码用得很多，他把它们写成函数。只要这些函数也用 <code>triton.jit</code> 装饰，就能在其他 jit 函数（内核）里调用：</p>
+<pre><code>@triton.jit
+def get_1d_offset(size, n_prev_chunks):
+    return n_prev_chunks * size + tl.arange(0, size)
+
+@triton.jit
+def get_2d_offset(offs_0, offs_1, stride_0, stride_1=1):
+    return tl.expand_dims(offs_0, 1)*stride_0 + tl.expand_dims(offs_1, 0)*stride_1
+
+@triton.jit
+def get_1d_mask(offs, max):
+    return offs &lt; max
+
+@triton.jit
+def get_2d_mask(offs_0, offs_1, max_0, max_1):
+    return (tl.expand_dims(offs_0, 1) &lt; max_0) &amp; (tl.expand_dims(offs_1, 0) &lt; max_1)</code></pre>
+        <p><code>get_2d_offset</code> 带了步长（stride，沿某个维度前进一格在内存里要跨过多少个元素），行主序（row-major，同一行的元素在内存里挨着存）以外的布局也能用。</p>
+        <h3>朴素矩阵乘法内核</h3>
+        <p>取两个 pid；沿 m、n 方向的一维偏移要看自己在哪个块里；k 方向也分段，但不需要知道块号，因为每个块都从第 0 段开始，走完所有段，所以 <code>n_prev_chunks=0</code>。用一维偏移组合出 A、B 的二维偏移，然后循环 k 方向的每一段：读 A、B 的一块，做块内矩阵乘法，累加到累加器，再把偏移往后挪 bk 个元素，下一轮读下一段。</p>
+<pre><code>@triton.jit
+def naive_matmul_k(
+    a_ptr, b_ptr, c_ptr,
+    m, n, k,
+    stride_am, stride_ak,
+    stride_bk, stride_bn,
+    stride_cm, stride_cn,
+    bm: tl.constexpr, bn: tl.constexpr, bk: tl.constexpr
+):
+    pid_m, pid_n = tl.program_id(0), tl.program_id(1)
+    # chunks along m/n/k dimensions
+    rm = get_1d_offset(size=bm, n_prev_chunks=pid_m)
+    rn = get_1d_offset(size=bn, n_prev_chunks=pid_n)
+    rk = get_1d_offset(size=bk, n_prev_chunks=0)
+    # relevant offsets of a, b
+    offs_a = a_ptr + get_2d_offset(rm, rk, stride_am, stride_ak)
+    offs_b = b_ptr + get_2d_offset(rk, rn, stride_bk, stride_bn)
+    # initialize and iteratively update accumulator
+    acc = tl.zeros((bm, bn), dtype=tl.float32)
+    for _ in range(0, k, bk):
+        # todo umer: don't we need mask when loading a &amp; b?
+        a = tl.load(offs_a)
+        b = tl.load(offs_b)
+        acc += tl.dot(a, b, allow_tf32=False) # matmul in block ; Weirdness: allow_tf32 must be set to False for older GPUs, otherwise won't compile
+        # increase offets, so next iteration loads next chunks
+        offs_a += bk * stride_ak
+        offs_b += bk * stride_bk
+    c = c_ptr + get_2d_offset(rm, rn, stride_cm, stride_cn)
+    mask = get_2d_mask(rm, rn, m, n)
+    tl.store(c, acc, mask=mask)</code></pre>
+        <p><code>tl.dot</code> 就是他说的块内预实现矩阵运算。<code>allow_tf32</code> 在较旧的 GPU 上必须设成 False，否则编译不过。TF32 是 NVIDIA 从 Ampere 开始在 Tensor Core 上支持的一种 19 位浮点格式，指数位和 FP32 一样，尾数位只有 10 位。累加器用 FP32，最后写回时用了二维掩码。</p>
+        <p>代码注释里留了一个问题：读 A 和 B 时难道不需要掩码吗？他现场说：“我觉得需要，但这里没加。”也就是说，当 m、n、k 不是块大小的整数倍时，这几次 <code>tl.load</code> 会读到矩阵范围之外。仓库里的 <code>Qs.md</code> 链接了作者写的一篇 “Memory Safety in Triton” 说明。</p>
+        <h3>启动函数和测试</h3>
+<pre><code>from functools import partial
+
+def matmul(a, b, matmul_k_fn, bs=16, group_sz=None):
+    assert a.shape[1] == b.shape[0], "matrix dims not compatible for matmul"
+    check_tensors_gpu_ready(a, b)
+    (m, k), (_, n) = a.shape, b.shape
+    c = torch.empty((m, n), device=a.device, dtype=torch.float16)
+    grid = lambda meta: (triton.cdiv(m, meta['bm']),  triton.cdiv(n, meta['bn']))
+    group_sz = {} if group_sz is None else {"group_sz":group_sz} # not used in naive_matmul, but will be in grouped_matmul further below
+    matmul_k_fn[grid](
+        a, b, c,
+        m, n, k,
+        a.stride(0), a.stride(1),
+        b.stride(0), b.stride(1),
+        c.stride(0), c.stride(1),
+        bm=bs, bn=bs, bk=bs, # Weirdness: allow_tf32 must be set to False for older GPUs, otherwise won't compile
+        **group_sz
+    )
+    return c
+
+naive_matmul = partial(matmul, matmul_k_fn=naive_matmul_k)</code></pre>
+        <p>先测最简单的情况：3 × 4 和 4 × 5 的全 1 矩阵，结果应该是 3 × 5、每格等于 k = 4 的矩阵，输出确实全是 4。再用 512 × 512 的随机 fp16 矩阵和 <code>torch.matmul</code> 对比（<code>atol=5e-2</code>），结果一致。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 例子四：用 swizzling 重排块的顺序，提高 L2 命中率</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=3478s" target="_blank">0:57:58</a>–1:12:36 · Optimizing with swizzling</em></p>
+        <h3>能调的旋钮：块的执行顺序</h3>
+        <p>怎样让内核更快？他说一个旋钮是选择块的处理顺序，从而影响内存访问的顺序。块内部的内存访问怎么安排由 Triton 自动处理，你决定不了；但块与块之间的访问顺序你可以决定。安排得好，能提高 L2 缓存的命中率，需要从显存读的数据就少，内核就快。这个例子取自 Triton 官方文档的矩阵乘法教程。</p>
+        <p>L2 缓存是所有 SM 共用的一级片上缓存，比显存快。思路是复用最近读过、很可能还留在 L2 里的数据，办法是减少一批“相邻”内核需要的不同数据块数。他说的“相邻”指差不多同一时间在执行的内核。比如块 1 正在执行，块 2 需要和它一样的数据，这份数据很可能已经在 L2 里，块 2 直接用就行。（讲到这里他卡了一下，说自己脑子一时空白，然后重新理顺。）</p>
+        <h3>90 块对 54 块</h3>
+        <p>图里的输出矩阵其实是 10 × 10 个块，他说就当成 9 × 9 来算。按朴素顺序，先连续算出第一行的 9 个输出块，需要 A 的 9 个块（第一行块），以及 B 的所有 81 个块，一共 90 个不同的块。换一种顺序，先算左上角 3 × 3 的 9 个输出块，只需要 A 的前三行块（27 个）和 B 的前三列块（27 个），共 54 个：</p>
+        <p>$$\text{行顺序：}\ 9 + 81 = 90,\qquad \text{分组顺序：}\ 3\times 9 + 3\times 9 = 54$$</p>
+        <p>同样算 9 个输出块，要读的不同数据块从 90 降到 54。这种分组在 Triton 文档里叫 super-grouping。</p>
+        <h3>怎样改变处理顺序：改 pid</h3>
+        <p>办法是：拿到 pid，变换一下，然后把变换后的值当成原来的 pid 用。他用一个纯 Python 的小例子说明：</p>
+<pre><code>def process_item(id): print(f"I'm processing item {id}")
+
+for i in range(5): process_item(i)
+
+def change_id(old_id): return 5-old_id
+
+for i in range(5): process_item(change_id(i))</code></pre>
+        <p>第一个循环依次处理 0 到 4；第二个循环把 id 变换后再用，处理顺序变成 5、4、3、2、1（notebook 输出如此，<code>5-old_id</code> 的结果是 5 到 1）。这说明换一下 id 就换了处理顺序。</p>
+        <h3>swizzling 的样子</h3>
+        <p>下一个问题是：什么样的 pid 变换能从朴素顺序变成分组顺序。notebook 的图是一个 5 × 7 的输出矩阵，共 35 个格子；但 Triton 处理的是块不是格子，这个例子里块大小是 1 × 2，所以有 $\mathrm{cdiv}(5,1)\times\mathrm{cdiv}(7,2)=5\times 4=20$ 个块。左边是默认的行主序：0、1、2、3 排第一行，以此类推。右边是想要的顺序：把 3 行编成一组，在组内先沿列往下走 3 个块，再移到下一列往下走，依此类推。这样最先处理的 9 个块正好是左上角的 3 × 3 方块，这就是想要的顺序。一组编几行可以自己选，叫 group size。从左边矩阵映射到右边矩阵的这种操作叫 swizzling，他说这个词应该来自计算机图形学。</p>
+        <h3>先在小例子上验证 tl.swizzle2d</h3>
+        <p>不用自己写 swizzling，Triton 提供了 <code>tl.swizzle2d</code>。他的习惯是先在很简单的例子上确认自己理解了一个函数，再用到真正的例子里。这里的小目标：在一个 5 × 4 的矩阵上用 <code>swizzle2d</code>，每格放的是它的行主序位置 0 到 19，期望得到按分组顺序排列的矩阵。</p>
+<pre><code>@triton.jit
+def swizzle_k(x_ptr, z_ptr, group_sz: tl.constexpr):
+    pid_m, pid_n = tl.program_id(0), tl.program_id(1)
+    num_pid_m, num_pid_n = tl.num_programs(0), tl.num_programs(1)
+
+    pid_m_, pid_n_ = tl.swizzle2d(pid_m, pid_n, num_pid_m, num_pid_n, group_sz)  # Weirdness: tl.swizzle2d doesn't work when simulating on CPU
+
+    offs_m = get_1d_offset(1, n_prev_chunks=pid_m)
+    offs_n = get_1d_offset(1, n_prev_chunks=pid_n)
+
+    offs = get_2d_offset(offs_m, offs_n, stride_0=num_pid_n)
+    mask = get_2d_mask(offs_m, offs_n, max_0=num_pid_m, max_1=num_pid_n )
+
+    offs_sw_m = get_1d_offset(1, n_prev_chunks=pid_m_)
+    offs_sw_n = get_1d_offset(1, n_prev_chunks=pid_n_)
+
+    offs_sw = get_2d_offset(offs_sw_m, offs_sw_n, stride_0=num_pid_n)
+    mask_sw = get_2d_mask(offs_sw_m, offs_sw_n, max_0=num_pid_m, max_1=num_pid_n)
+
+    x = tl.load(x_ptr + offs, mask=mask)
+    tl.store(z_ptr + offs_sw, x, mask=mask_sw)</code></pre>
+        <p>他一开始说代码细节不重要，后来又说“这是我自己的代码，我应该懂”，就重新走了一遍：取 pid 和各方向的程序数（<code>tl.num_programs</code>），做 swizzle；用原 pid 算偏移和掩码，再用 swizzle 后的 pid 算一套偏移和掩码；按原位置读数据，按 swizzle 后的位置写回。比如位置 3 那个数会被写到它在分组顺序里的位置。注意 <code>tl.swizzle2d</code> 当时在 CPU 模拟器里也跑不了。用 <code>group_sz=3</code> 跑，输入和输出（未写的位置初始化为 -1）：</p>
+<pre><code># x (row-major ids)
+tensor([[ 0,  1,  2,  3],
+        [ 4,  5,  6,  7],
+        [ 8,  9, 10, 11],
+        [12, 13, 14, 15],
+        [16, 17, 18, 19]], device='cuda:0')
+
+# z after swizzle_k[(blocks_m,blocks_n)](x,z, group_sz=3)
+tensor([[ 0,  3,  6,  9],
+        [ 1,  4,  7, 10],
+        [ 2,  5,  8, 11],
+        [12, 14, 16, 18],
+        [13, 15, 17, 19]], device='cuda:0')</code></pre>
+        <p>读法：z 里写着数字 i 的格子，就是第 i 个启动的程序实际负责的输出块。前 9 个程序（0 到 8）覆盖左上角 3 × 3；前三行一组，组内先竖着走；最后剩两行，自成一组，同样竖着走。和期望一致。</p>
+        <h3>分组矩阵乘法</h3>
+        <p>更快的矩阵乘法就是朴素版加一行 swizzle。swizzle 需要知道各方向一共有多少个块，用 <code>tl.num_programs</code> 拿到：</p>
+<pre><code>@triton.jit
+def grouped_matmul_k(
+    a_ptr, b_ptr, c_ptr,
+    m, n, k,
+    stride_am, stride_ak,
+    stride_bk, stride_bn,
+    stride_cm, stride_cn,
+    bm: tl.constexpr, bn: tl.constexpr, bk: tl.constexpr, group_sz: tl.constexpr
+):
+    pid_m, pid_n = tl.program_id(0), tl.program_id(1)
+    num_pid_m, num_pid_n = tl.num_programs(0), tl.num_programs(1)
+    # determine location of block in grouped ordering - swizzle!
+    pid_m, pid_n = tl.swizzle2d(pid_m, pid_n, num_pid_m, num_pid_n, group_sz)  # Weirdness: tl.swizzle2d doesn't work when simulating on CPU
+    # chunks along m/n/k dimensions
+    rm = get_1d_offset(size=bm, n_prev_chunks=pid_m)
+    rn = get_1d_offset(size=bn, n_prev_chunks=pid_n)
+    rk = get_1d_offset(size=bk, n_prev_chunks=0)
+    # relevant offsets of a, b
+    offs_a = a_ptr + get_2d_offset(rm, rk, stride_am, stride_ak)
+    offs_b = b_ptr + get_2d_offset(rk, rn, stride_bk, stride_bn)
+    # initialize and iteratively update accumulator
+    acc = tl.zeros((bm, bn), dtype=tl.float32)
+    for _ in range(0, k, bk):
+        # todo umer: don't we need mask when loading a &amp; b?
+        a = tl.load(offs_a)
+        b = tl.load(offs_b)
+        acc += tl.dot(a, b, allow_tf32=False) # block level matrix multiplication ; Weirdness: allow_tf32 must be set to False for older GPUs, otherwise won't compile
+        # increase offets, so next iteration loads next chunks
+        offs_a += bk * stride_ak
+        offs_b += bk * stride_bk
+    c = c_ptr + get_2d_offset(rm, rn, stride_cm, stride_cn)
+    mask = get_2d_mask(rm, rn, m, n)
+    tl.store(c, acc, mask=mask)
+
+grouped_matmul = partial(matmul, matmul_k_fn=grouped_matmul_k)</code></pre>
+        <p>测试同前：全 1 的 3 × 4 乘 4 × 5（<code>group_sz=4</code>）得到全 4；512 × 512 随机矩阵（<code>group_sz=32</code>）和 PyTorch 结果一致。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 基准测试：和 PyTorch 比，块大小的影响</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=4356s" target="_blank">1:12:36</a>–1:17:04 · Benchmarking and tuning</em></p>
+        <h3>Triton 自带的基准测试工具</h3>
+        <p>目标是让模型变快，所以要知道到底快没快、快多少。Triton 自带基准测试工具，他没细讲代码，只说可以提供要比较的几个函数和要扫描的参数范围。代码改编自 Triton 官方的向量加法教程：</p>
+<pre><code># adapted from https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=['square_matrix_size'],  # Argument names to use as an x-axis for the plot.
+        x_vals=[2**i for i in range(5, 12, 1)],  # Different possible values for `x_name`.
+        x_log=True,  # x axis is logarithmic.
+        line_arg='provider',  # Argument name whose value corresponds to a different line in the plot.
+        line_vals=['naive', 'grouped', 'torch'],  # Possible values for `line_arg`.
+        line_names=['Naive', 'Grouped', 'Torch'],  # Label name for the lines.
+        styles=[('blue', '-'), ('green', '-'), ('orange','-')],  # Line styles.
+        ylabel='GB/s',  # Label name for the y-axis.
+        plot_name='matmul-performance',  # Name for the plot. Used also as a file name for saving the plot.
+        args={},  # Values for function arguments not in `x_names` and `y_name`.
+    ))
+def benchmark(square_matrix_size, provider):
+    sz = square_matrix_size
+    a = torch.rand((sz, sz), device='cuda', dtype=torch.float32)
+    b = torch.rand((sz, sz), device='cuda', dtype=torch.float32)
+    quantiles = [0.5, 0.2, 0.8]
+    if provider == 'naive':   ms, min_ms, max_ms = triton.testing.do_bench(lambda: naive_matmul(a, b), quantiles=quantiles)
+    if provider == 'grouped': ms, min_ms, max_ms = triton.testing.do_bench(lambda: grouped_matmul(a, b, group_sz=8), quantiles=quantiles)
+    if provider == 'torch':   ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a,b), quantiles=quantiles)
+    gbps = lambda ms: 12 * sz / ms * 1e-6
+    return gbps(ms), gbps(max_ms), gbps(min_ms)
+
+benchmark.run(print_data=True, show_plots=True)</code></pre>
+        <p><code>do_bench</code> 多次运行一个函数，返回中位数以及 0.2、0.8 分位的耗时（毫秒）。</p>
+        <h3>结果一：默认块大小 16</h3>
+        <p>他没有现场运行（太花时间），直接看 notebook 里存好的图。方阵从 32 扫到 2048。他的观察：小矩阵上他的内核比 PyTorch 快；大矩阵上 PyTorch 快得多。notebook 里保存的数据：</p>
+        <table>
+            <thead><tr><th>方阵边长</th><th>Naive</th><th>Grouped</th><th>Torch</th></tr></thead>
+            <tbody>
+                <tr><td>32</td><td>0.085106</td><td>0.085106</td><td>0.053691</td></tr>
+                <tr><td>64</td><td>0.129730</td><td>0.125000</td><td>0.107143</td></tr>
+                <tr><td>128</td><td>0.159468</td><td>0.154341</td><td>0.170515</td></tr>
+                <tr><td>256</td><td>0.097909</td><td>0.099071</td><td>0.125654</td></tr>
+                <tr><td>512</td><td>0.030346</td><td>0.030361</td><td>0.111079</td></tr>
+                <tr><td>1024</td><td>0.006971</td><td>0.007279</td><td>0.034461</td></tr>
+                <tr><td>2048</td><td>0.001405</td><td>0.001749</td><td>0.006355</td></tr>
+            </tbody>
+        </table>
+        <p>他画完图后想过：为什么所有实现在某个尺寸之后都往下掉？CUDA MODE 聊天里有人说，可能是过了某个点 L1 或 L2 缓存满了，内核要做多得多的数据搬运。notebook 里他自己的备注是：本以为矩阵越大 GB/s 越高，猜测可能是共享内存满了，内核花越来越多时间重新加载。</p>
+        <p>整理者注：notebook 里的 <code>gbps = 12 * sz / ms * 1e-6</code> 分子只随边长线性增长，而矩阵乘法的耗时随边长大约按三次方增长，所以这个指标随尺寸变大而下降有一部分来自公式本身。它适合比较同一尺寸下几种实现的相对快慢（比值等于耗时之比的倒数），不宜当成真实带宽，也不宜跨尺寸比较。</p>
+        <h3>结果二：块大小的影响</h3>
+        <p>块大小可以调。固定 512 × 512，块大小取 16、32、64（notebook 里这个参数名写成了 <code>batch_size</code>，他口头更正说应该是 block size）。结论：块越大越好；再大的话这块 GPU 会内存不足（out of memory）。</p>
+        <table>
+            <thead><tr><th>块大小</th><th>Naive</th><th>Grouped</th><th>Torch</th></tr></thead>
+            <tbody>
+                <tr><td>16</td><td>0.030404</td><td>0.030433</td><td>0.111111</td></tr>
+                <tr><td>32</td><td>0.060683</td><td>0.061127</td><td>0.111111</td></tr>
+                <tr><td>64</td><td>0.083660</td><td>0.084026</td><td>0.111111</td></tr>
+            </tbody>
+        </table>
+        <h3>结果三：用最大的块大小 64 再比</h3>
+        <p>用块大小 64 重画第一张图：大矩阵上他的内核和 PyTorch 接近了很多，但有意思的是，小矩阵上现在 PyTorch 快得多。notebook 的结论是：大尺寸下差距缩小，但 PyTorch 仍然更好。</p>
+        <table>
+            <thead><tr><th>方阵边长</th><th>Naive</th><th>Grouped</th><th>Torch</th></tr></thead>
+            <tbody>
+                <tr><td>32</td><td>0.039867</td><td>0.038710</td><td>0.053215</td></tr>
+                <tr><td>64</td><td>0.077922</td><td>0.071006</td><td>0.106667</td></tr>
+                <tr><td>128</td><td>0.109091</td><td>0.107143</td><td>0.169912</td></tr>
+                <tr><td>256</td><td>0.137733</td><td>0.136364</td><td>0.126150</td></tr>
+                <tr><td>512</td><td>0.084731</td><td>0.083916</td><td>0.111047</td></tr>
+                <tr><td>1024</td><td>0.021879</td><td>0.025362</td><td>0.034691</td></tr>
+                <tr><td>2048</td><td>0.005257</td><td>0.005919</td><td>0.007440</td></tr>
+            </tbody>
+        </table>
+        <p>从表里看，分组版在 1024 和 2048 上比朴素版高一些（0.025 对 0.022，0.0059 对 0.0053），在小尺寸上差不多甚至略低。</p>
+        <h3>用 Nsight Compute 找优化方向</h3>
+        <p>他觉得很有用的一个技巧：用 Nsight Compute（命令行工具 ncu）分析内核，它会给出怎样让内核更快的提示：</p>
+<pre><code>ncu --target-processes all your_python_file.py</code></pre>
+    </section>
+
+    <section id="t10">
+        <h2>10. 自动调优和结尾</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=4624s" target="_blank">1:17:04</a>–1:21:43 · Autotuning and wrap-up</em></p>
+        <h3>什么是自动调优</h3>
+        <p>有些参数和配置对结果在逻辑上没有影响。比如矩阵乘法里的块大小不会改变输出矩阵，它只是 Triton 里的实现细节。所以可以试一试哪些配置让矩阵乘法最快。notebook 的说法：元参数（如块大小）和编译选项（如 <code>num_warps</code>，每个 program 用几个 warp，warp 是 32 个线程一起执行同一条指令的单位）都会影响内核速度。Triton 允许你给出一组候选，全部跑一遍，然后用最快的那组编译内核，这叫自动调优（auto-tuning）。代码改编自 Triton 官方矩阵乘法教程。</p>
+        <p>如果问题规模变了（矩阵乘法里由 m、n、k 决定），会针对新的规模重新调优。<code>triton.autotune</code> 也是一个装饰器：内核第一次运行时先编译，再调优。</p>
+<pre><code>@triton.autotune(
+    # Choices of configs to auto-tune over
+    configs=[
+        triton.Config({'bm': 128, 'bn': 256, 'bk': 64, 'group_sz': 8}, num_stages=3, num_warps=8),
+        triton.Config({'bm': 64, 'bn': 256, 'bk': 32, 'group_sz': 8}, num_stages=4, num_warps=4),
+        triton.Config({'bm': 128, 'bn': 128, 'bk': 32, 'group_sz': 8}, num_stages=4, num_warps=4),
+        triton.Config({'bm': 128, 'bn': 64, 'bk': 32, 'group_sz': 8}, num_stages=4, num_warps=4),
+        triton.Config({'bm': 64, 'bn': 128, 'bk': 32, 'group_sz': 8}, num_stages=4, num_warps=4),
+        triton.Config({'bm': 128, 'bn': 32, 'bk': 32, 'group_sz': 8}, num_stages=4, num_warps=4),
+        triton.Config({'bm': 64, 'bn': 32, 'bk': 32, 'group_sz': 8}, num_stages=5, num_warps=2),
+        triton.Config({'bm': 32, 'bn': 64, 'bk': 32, 'group_sz': 8}, num_stages=5, num_warps=2),
+    ],
+    # Definition of problem size. If it changes, a new auto-tune is run for the new problem size.
+    key=['m', 'n', 'k'],
+)
+@triton.jit
+def grouped_autotuned_matmul_k(
+    a_ptr, b_ptr, c_ptr,
+    m, n, k,
+    stride_am, stride_ak,
+    stride_bk, stride_bn,
+    stride_cm, stride_cn,
+    bm: tl.constexpr, bn: tl.constexpr, bk: tl.constexpr, group_sz: tl.constexpr
+):
+    # ... body identical to grouped_matmul_k above ...</code></pre>
+        <p>内核体和分组版完全相同（上面省略处由整理者标注）。<code>num_stages</code> 是 Triton 编译器做软件流水线时的级数，即同时有几份数据块在路上；这个解释是整理者补充，讲座没展开。</p>
+        <p>调用函数里不能再传 bm、bn、bk、group_sz，因为它们由自动调优决定。grid 写成函数在这里就有用了：块大小要等调优选出配置后才知道，grid 函数从 <code>meta</code> 里取：</p>
+<pre><code>def grouped_autotuned_matmul(a, b):
+    matmul_k_fn = grouped_autotuned_matmul_k
+
+    assert a.shape[1] == b.shape[0], "matrix dims not compatible for matmul"
+    check_tensors_gpu_ready(a, b)
+    (m, k), (_, n) = a.shape, b.shape
+    c = torch.empty((m, n), device=a.device, dtype=torch.float16)
+    grid = lambda meta: (triton.cdiv(m, meta['bm']),  triton.cdiv(n, meta['bn']))
+    matmul_k_fn[grid](
+        a, b, c,
+        m, n, k,
+        a.stride(0), a.stride(1),
+        b.stride(0), b.stride(1),
+        c.stride(0), c.stride(1),
+        # bm=bs, bn=bs, bk=bs, &lt;- will be autotuned
+        # **group_sz &lt;- will be autotuned
+    )
+    return c</code></pre>
+        <p>全 1 矩阵测试得到同样的结果。notebook 里另有一条备注：这一行有时会返回错误结果，他没法稳定复现，请复现出来的人在 Twitter 上告诉他。至于怎样挑选要调优的配置，他推荐 Mark Saroufim 的讲座 “CUDA Performance Checklist”（本合集第 03 篇），说其中大部分也适用于 Triton。</p>
+        <h3>自动调优版的基准结果</h3>
+        <p>再跑一遍基准测试，这次很耗时，因为每个尺寸都要重新调优（7 个尺寸）。他说结果很有意思：本以为自动调优版不可能比普通版慢，结果却让他意外，如果有人知道原因，请在 Twitter 上告诉他。notebook 保存的数据：</p>
+        <table>
+            <thead><tr><th>方阵边长</th><th>Naive</th><th>Grouped</th><th>Grouped &amp; Auto-Tuned</th><th>Torch</th></tr></thead>
+            <tbody>
+                <tr><td>32</td><td>0.040067</td><td>0.037500</td><td>0.062176</td><td>0.054795</td></tr>
+                <tr><td>64</td><td>0.077170</td><td>0.074303</td><td>0.091954</td><td>0.104803</td></tr>
+                <tr><td>128</td><td>0.110218</td><td>0.107143</td><td>0.117936</td><td>0.169912</td></tr>
+                <tr><td>256</td><td>0.139738</td><td>0.136364</td><td>0.137339</td><td>0.126482</td></tr>
+                <tr><td>512</td><td>0.083953</td><td>0.082937</td><td>0.066864</td><td>0.110983</td></tr>
+                <tr><td>1024</td><td>0.023112</td><td>0.025932</td><td>0.020007</td><td>0.033520</td></tr>
+                <tr><td>2048</td><td>0.005235</td><td>0.005912</td><td>0.004629</td><td>0.007076</td></tr>
+            </tbody>
+        </table>
+        <p>表里能看到：自动调优版在 32 到 128 上比手工版高，32 上还超过了 Torch；从 512 往上反而比手工分组版（块大小 64）低。</p>
+        <h3>结尾和延伸资料</h3>
+        <p>他祝贺大家学完，鼓励自己动手写几个 Triton 内核，notebook 里列了继续学习的资料：</p>
+        <ul>
+            <li>Sasha Rush、Tejas Ramesh、Keren Zhou 的 Triton Puzzles：<a href="https://github.com/srush/Triton-Puzzles" target="_blank">github.com/srush/Triton-Puzzles</a></li>
+            <li>官方文档：<a href="https://triton-lang.org/" target="_blank">triton-lang.org</a></li>
+            <li>LightLLM 仓库里有很多真实场景的 Triton 内核：<a href="https://github.com/ModelTC/lightllm/tree/main/lightllm/common/basemodel/triton_kernel" target="_blank">lightllm/common/basemodel/triton_kernel</a></li>
+            <li>Unsloth 仓库也有：<a href="https://github.com/unslothai/unsloth/tree/main/unsloth/kernels" target="_blank">unsloth/kernels</a></li>
+        </ul>
+        <p>最后他说自己现在是做开源的独立 ML 工程师，放了 ko-fi 打赏链接。这一讲没有现场问答。</p>
+    </section>
+
+    <section>
+        <h2>这一讲值得记下的原话</h2>
+        <ul>
+            <li>“you can actually debug a Triton kernel just like any CPU program”（Triton 内核可以像任何 CPU 程序一样调试。）<a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=749s" target="_blank">0:12:29</a></li>
+            <li>“Triton doesn't run your kernel code actually on the GPU”（设了这个环境变量后，Triton 并不在 GPU 上真正运行你的内核代码。）<a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=749s" target="_blank">0:12:29</a></li>
+            <li>“each block does stuff on multiple values”（每个块处理的是多个值。）<a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=1227s" target="_blank">0:20:27</a></li>
+            <li>“we cannot decide how memory is accessed inside a block”（块内部的内存怎么访问，我们决定不了。）<a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=3511s" target="_blank">0:58:31</a></li>
+            <li>“I think that term comes from computer graphics”（我想这个词来自计算机图形学。说的是 swizzling。）<a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=4016s" target="_blank">1:06:56</a></li>
+            <li>“the block size is just an implementation detail in Triton”（块大小只是 Triton 里的实现细节。）<a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=4635s" target="_blank">1:17:15</a></li>
+            <li>“I would have expected that the auto-tuned version can't be slower”（我本以为自动调优版不可能更慢。）<a href="https://www.youtube.com/watch?v=DdTsX6DQk24&t=4804s" target="_blank">1:20:04</a></li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>GPU MODE · Lecture 14: Practitioners Guide to Triton · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>
