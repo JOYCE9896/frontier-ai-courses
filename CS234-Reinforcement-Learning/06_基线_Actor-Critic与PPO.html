@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 6 讲：基线、Actor-Critic 与 PPO | Stanford CS234 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="05_策略梯度与REINFORCE.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS234 目录</a> · Lecture 6</span>
+    <span><a href="07_GAE与模仿学习.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 6 讲：基线、Actor-Critic 与 PPO</h1>
+        <p class="subtitle">证明基线不引入偏差，vanilla 策略梯度，用 Q 和 V 代替蒙特卡洛回报（actor-critic、优势函数、n 步估计的偏差和方差），策略梯度的两个难题（样本效率、参数空间距离不等于策略距离），性能差异引理、重要性采样和 KL 界，以及 PPO 的自适应 KL 惩罚和裁剪目标</p>
+        <div class="author-meta">
+            主讲：Emma Brunskill · 时长：1 小时 19 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o" target="_blank">课堂录像</a>（Stanford Online 公开，2024 年春季，本文依据录像字幕整理）；补充：<a href="https://web.stanford.edu/class/cs234/modules.html" target="_blank">2026 年冬季课件</a>（2026 年的录像只对选课学生开放；文中标“2026 版更新”的内容来自 2026 年课件；进阶策略梯度部分的课件改编自 Joshua Achiam 的幻灯片）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            上一讲推出了 REINFORCE：无偏，但噪声大。这一讲继续降低方差：先证明减去一个只依赖状态的基线不改变梯度的期望，再把蒙特卡洛回报换成学出来的 Q 或 V，这就是 actor-critic，并比较 n 步估计在偏差和方差上的取舍。
+        </p>
+        <p>
+            后半讲进入进阶策略梯度。普通策略梯度每批数据只走一步，样本效率差；参数空间里的小步可能让策略大变。为了用旧数据走多步又不走过头，Emma 讲了性能差异引理、重要性采样、忽略状态分布差异的近似，以及这个近似误差被 KL 散度控制的界。由此得到 PPO（Proximal Policy Optimization）的两个版本。PPO 用在 ChatGPT 的训练中，也是作业 2 要实现的算法，这一讲覆盖了作业需要的大部分内容。
+        </p>
+        <ol>
+            <li><a href="#t01">开场投票：策略梯度的性质</a> · <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">基线不引入偏差：证明</a> · <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=160s" target="_blank">0:02:40</a></li>
+            <li><a href="#t03">Vanilla 策略梯度算法</a> · <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=724s" target="_blank">0:12:04</a></li>
+            <li><a href="#t04">换掉蒙特卡洛回报：actor-critic 和优势函数</a> · <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=883s" target="_blank">0:14:43</a></li>
+            <li><a href="#t05">n 步估计和投票：偏差与方差</a> · <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=1195s" target="_blank">0:19:55</a></li>
+            <li><a href="#t06">策略梯度的问题一：样本效率</a> · <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=1877s" target="_blank">0:31:17</a></li>
+            <li><a href="#t07">策略梯度的问题二：步长和参数化</a> · <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=2179s" target="_blank">0:36:19</a></li>
+            <li><a href="#t08">性能差异引理和重要性采样</a> · <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=2589s" target="_blank">0:43:09</a></li>
+            <li><a href="#t09">忽略状态分布差异：近似和 KL 界</a> · <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=3323s" target="_blank">0:55:23</a></li>
+            <li><a href="#t10">PPO 一：自适应 KL 惩罚</a> · <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=3724s" target="_blank">1:02:04</a></li>
+            <li><a href="#t11">PPO 二：裁剪目标和投票</a> · <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=3987s" target="_blank">1:06:27</a></li>
+            <li><a href="#t12">PPO 的实验结果和实现细节</a> · <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=4583s" target="_blank">1:16:23</a></li>
+            <li><a href="#t13">2026 版更新</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场投票：策略梯度的性质</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=5s" target="_blank">0:00:05</a>–0:02:40</em></p>
+        <p>
+            选出关于策略梯度的正确说法：
+        </p>
+        <ol>
+            <li>$\nabla_\theta V(\theta) = \mathbb{E}_{\pi_\theta}[\nabla_\theta\log\pi_\theta(s,a)Q^{\pi_\theta}(s,a)]$。对，写法有多种，本质是在策略参数空间里，沿“对数策略的梯度乘以价值（回报）”的方向走。</li>
+            <li>$\theta$ 总是沿 $\nabla_\theta\ln\pi(S_t,A_t,\theta)$ 的方向增加。错，有些分歧。方向还要乘以回报或 Q 函数，推不推高取决于朝那个方向走时奖励高不高。</li>
+            <li>平均而言，估计 Q 值更高的状态-行动对，概率会提高。对。目标是找到让策略访问 Q 值或奖励更高的状态和行动的那部分策略空间。</li>
+            <li>保证收敛到策略类的全局最优。错，所有人都答对了：只保证局部最优。</li>
+        </ol>
+    </section>
+
+    <section id="t02">
+        <h2>02. 基线不引入偏差：证明</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=160s" target="_blank">0:02:40</a>–0:12:04</em></p>
+        <p>
+            策略可以是高斯、softmax，或者常见的深度网络。上一讲的梯度估计无偏但噪声大，因为它像蒙特卡洛估计一样依赖回报。已经用过一个办法：时间结构（第 3 步的奖励不依赖第 3 步之后的行动）。现在讲基线。目标始终是尽快收敛，所以希望梯度估计的方差尽量小，每一步走得更好。
+        </p>
+        <p>
+            直觉：调整策略时，不只看拿到多少奖励，还看相对于其他做法好多少。基线 $b(s_t)$ 只是状态的函数，不是 $\theta$ 或 $a$ 的函数（Emma 提到包括她实验室在内，有工作研究依赖更多信息的基线，今天只考虑依赖状态的）。要证明的是：对任意这样的 $b$，下式为 0，所以减去它不改变梯度估计的期望，接近最优的选择是期望回报。
+        </p>
+        $$\begin{aligned}
+        &amp;\mathbb{E}_\tau\big[\nabla_\theta\log\pi(a_t\mid s_t;\theta)\,b(s_t)\big]\\
+        &amp;= \mathbb{E}_{s_{0:t},a_{0:(t-1)}}\Big[\mathbb{E}_{s_{(t+1):T},a_{t:(T-1)}}\big[\nabla_\theta\log\pi(a_t\mid s_t;\theta)\,b(s_t)\big]\Big] &amp;&amp;\text{(拆开期望)}\\
+        &amp;= \mathbb{E}_{s_{0:t},a_{0:(t-1)}}\Big[b(s_t)\,\mathbb{E}_{s_{(t+1):T},a_{t:(T-1)}}\big[\nabla_\theta\log\pi(a_t\mid s_t;\theta)\big]\Big] &amp;&amp;\text{(提出基线)}\\
+        &amp;= \mathbb{E}_{s_{0:t},a_{0:(t-1)}}\Big[b(s_t)\,\mathbb{E}_{a_t}\big[\nabla_\theta\log\pi(a_t\mid s_t;\theta)\big]\Big] &amp;&amp;\text{(去掉无关变量)}\\
+        &amp;= \mathbb{E}_{s_{0:t},a_{0:(t-1)}}\Big[b(s_t)\sum_a\pi_\theta(a_t\mid s_t)\frac{\nabla_\theta\pi(a_t\mid s_t;\theta)}{\pi_\theta(a_t\mid s_t)}\Big] &amp;&amp;\text{(似然比)}\\
+        &amp;= \mathbb{E}_{s_{0:t},a_{0:(t-1)}}\Big[b(s_t)\sum_a\nabla_\theta\pi(a_t\mid s_t;\theta)\Big] = \mathbb{E}_{s_{0:t},a_{0:(t-1)}}\Big[b(s_t)\,\nabla_\theta\sum_a\pi(a_t\mid s_t;\theta)\Big]\\
+        &amp;= \mathbb{E}_{s_{0:t},a_{0:(t-1)}}\big[b(s_t)\,\nabla_\theta 1\big] = \mathbb{E}_{s_{0:t},a_{0:(t-1)}}\big[b(s_t)\cdot 0\big] = 0
+        \end{aligned}$$
+        <p>
+            两个关键步骤：第一，把对整条轨迹的期望拆成 $s_t$ 之前和之后两部分，基线只依赖当前状态，可以提到内层期望外面；内层只依赖 $a_t$ 和 $s_t$，与之后的状态和行动无关，于是变成对 $a_t$ 的期望，而 $a_t$ 就是按当前策略选的。第二，展开对行动的期望、用对数求导，$\pi_\theta$ 约掉；交换求导和求和后，所有行动的概率和为 1，是常数，对 $\theta$ 求导为 0。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. Vanilla 策略梯度算法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=724s" target="_blank">0:12:04</a>–0:14:43</em></p>
+        <p>
+            同时利用时间结构和基线，得到常说的“vanilla”策略梯度：
+        </p>
+        <pre><code>Initialize policy parameter theta, baseline b
+for iteration = 1, 2, ...:
+    Collect a set of trajectories by executing the current policy
+    At each timestep t in each trajectory tau_i, compute
+        Return G_t^i = sum_{t'=t}^{T-1} r_{t'}^i
+        Advantage estimate A_hat_t^i = G_t^i - b(s_t^i)
+    Re-fit the baseline by minimizing sum_t |b(s_t^i) - G_t^i|^2
+    Update the policy using a policy gradient estimate g_hat,
+        which is a sum of terms grad_theta log pi(a_t | s_t, theta) * A_hat_t
+    (Plug g_hat into SGD or ADAM)</code></pre>
+        <p>
+            优势估计（advantage estimate）是从该状态到回合结束的回报减去基线。基线一般每轮重新拟合。选什么基线都无偏，但有好坏之分：基线为 0 就等于没有；希望基线有信息量，值接近当前策略的价值。
+        </p>
+        <p>
+            有学生问回报里为什么没有折扣因子。Emma 说目前假设完全回合式，不需要折扣，想加也可以。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 换掉蒙特卡洛回报：actor-critic 和优势函数</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=883s" target="_blank">0:14:43</a>–0:19:55</em></p>
+        <p>
+            这些都很像前面的蒙特卡洛估计：用回报 $G$ 估计策略从这一步到回合结束的表现，噪声一般很大。公式里有两处可以换：从某个行动起到回合结束的回报，以及在这个状态的一般表现估计（基线）。回想 Q 函数和价值函数：
+        </p>
+        $$Q^\pi(s,a) = \mathbb{E}_\pi[r_0 + \gamma r_1 + \gamma^2 r_2 + \cdots\mid s_0 = s, a_0 = a],\qquad V^\pi(s) = \mathbb{E}_\pi[r_0 + \gamma r_1 + \gamma^2 r_2 + \cdots\mid s_0 = s] = \mathbb{E}_{a\sim\pi}[Q^\pi(s,a)]$$
+        <p>
+            可以把回报换成当前策略的 Q 值，把基线换成状态价值函数（回合式可以令 $\gamma = 1$）。$G$ 就相当于 Q 函数，$V$ 相当于价值函数。
+        </p>
+        <h3>Actor-critic</h3>
+        <p>
+            单次推演得到的 $G^i_t$ 是 $s_t$ 处价值的估计，无偏但方差高。可以像 TD 对比 MC、像价值函数近似那样，用自举和函数近似引入一些偏差来降低方差。这就是 actor-critic 方法：actor（行动者）是策略，通常由 $\theta$ 参数化；critic（评论者）是价值函数或状态-行动价值函数，表示 V 或 Q。Actor 做决策，critic 评价它做得多好。两者都显式维护并同时更新：用策略收集数据，用数据拟合 critic，再在策略梯度里用 critic，希望更快学到好策略。A3C（Mnih et al. ICML 2016）是很流行的 actor-critic 方法，很多 RL 算法实际上都是 actor-critic。实现上可以有一个深度网络表示策略、另一个表示价值函数，参数可以共享，也可以不共享。
+        </p>
+        <p>
+            把回报换成参数为 $w$ 的 Q 函数：
+        </p>
+        $$\nabla_\theta\mathbb{E}_\tau[R] \approx \mathbb{E}_\tau\Big[\sum_{t=0}^{T-1}\nabla_\theta\log\pi(a_t\mid s_t;\theta)\big(Q(s_t,a_t;w) - b(s_t)\big)\Big]$$
+        <p>
+            现在有两组参数：$\theta$ 给策略，$w$ 给价值函数。令基线为 V 的估计，就得到用状态-行动优势函数（advantage function）表示的梯度：
+        </p>
+        $$\nabla_\theta\mathbb{E}_\tau[R] \approx \mathbb{E}_\tau\Big[\sum_{t=0}^{T-1}\nabla_\theta\log\pi(a_t\mid s_t;\theta)\hat A^\pi(s_t,a_t)\Big],\qquad A^\pi(s,a) = Q^\pi(s,a) - V^\pi(s)$$
+        <p>
+            Emma 提到，深度 Q 学习刚出来后，人们提出过各种改进，其中关于用优势函数的工作在 2016 年左右得了最佳论文。这里是在策略梯度里使用它。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. n 步估计和投票：偏差与方差</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=1195s" target="_blank">0:19:55</a>–0:31:17</em></p>
+        <p>
+            两个极端：一端是从这个状态和行动出发、一直推演到回合结束的蒙特卡洛回报；另一端是直接代入 Q 函数。中间可以混合，叫 n 步估计（n-step estimators）。TD(0) 是即时奖励加上 $\gamma V(s')$：在树上看，就是看到一个真实奖励，然后马上代入估计。一般地，可以走一步、两步、三步再代入：
+        </p>
+        $$\begin{aligned}
+        \hat R^{(1)}_t &amp;= r_t + \gamma V(s_{t+1})\\
+        \hat R^{(2)}_t &amp;= r_t + \gamma r_{t+1} + \gamma^2 V(s_{t+2})\\
+        \hat R^{(\infty)}_t &amp;= r_t + \gamma r_{t+1} + \gamma^2 r_{t+2} + \cdots
+        \end{aligned}$$
+        <p>
+            $\hat R^{(\infty)}$ 就是普通的蒙特卡洛回报，完全不自举。每个都可以看成 Q 的估计；减去当前状态的 $V(s_t)$ 就得到对应的优势估计 $\hat A^{(n)}_t = \hat R^{(n)}_t - V(s_t)$。$n$ 是自举之前的步数。
+        </p>
+        <h3>投票：哪个偏差高，哪个方差高</h3>
+        <p>
+            比较 $\hat A^{(1)}_t = r_t + \gamma V(s_{t+1}) - V(s_t)$ 和 $\hat A^{(\infty)}_t = r_t + \gamma r_{t+1} + \cdots - V(s_t)$。答案分散，讨论时 Emma 引导学生：先忽略两边都减去的 $V$，一个像 TD，一个像 MC。
+        </p>
+        <ul>
+            <li>$\hat A^{(1)}$：低方差、高偏差。一个学生说早早自举，用的是估计值而不是真实的后续奖励，所以不准。Emma 说对，这些 $V$ 都只是估计（她说明年也许该给它们都加上帽子），基于有限数据和有限次备份，一般是有偏的；这里只用了真实策略的一个奖励就立刻自举，所以偏差较高。但它只有一个随机量（一个采样的奖励），加上一个固定的量（可能错，但是固定的），方差低。</li>
+            <li>$\hat A^{(\infty)}$：高方差、低偏差（或零偏差）。它把很多随机采样的奖励加在一起。比如机器人在房间里按策略可以走向各个方向，执行一次只得到其中一条轨迹，方差可能极大，即使平均而言轨迹差不多。它是正在执行的策略的真实回报，期望等于策略价值，所以偏差低或为零。</li>
+        </ul>
+        <p>
+            低偏差和低方差一般不可兼得。想最小化均方误差时，常常是走几步再自举，在偏差和方差之间取一个好的折中。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 策略梯度的问题一：样本效率</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=1877s" target="_blank">0:31:17</a>–0:36:19</em></p>
+        <p>
+            上面这些基本方法是现在所有算法的骨架。进阶方法关心怎样扩展、怎样做得更好。Emma 说要先把算法讲完，让大家能开始写作业，理论下周再多讲。策略梯度要解决的优化问题和梯度是：
+        </p>
+        $$\max_\theta J(\pi_\theta) = \mathbb{E}_{\tau\sim\pi_\theta}\Big[\sum_{t=0}^\infty\gamma^t r_t\Big],\qquad g = \nabla_\theta J(\pi_\theta) = \mathbb{E}_{\tau\sim\pi_\theta}\Big[\sum_{t=0}^\infty\gamma^t\nabla_\theta\log\pi_\theta(a_t\mid s_t)A^{\pi_\theta}(s_t,a_t)\Big]$$
+        <p>
+            两个局限：样本效率差；参数空间里的距离不等于策略空间里的距离。
+        </p>
+        <p>
+            样本效率：一般要用同一策略做很多次推演才能得到好的梯度估计，否则走一步可能走到不好的地方。目前的做法是推演一次或多次、走一个梯度步、再推演。这是在线（on-policy）期望，和 SARSA 类似。在 $\theta$ 处用 $\theta$ 生成的轨迹估计梯度，走一步到了 $\theta'$；想在收集新数据之前再走一步，可是手上只有 $\theta$ 的数据，没有 $\theta'$ 的数据，先验上并不清楚能不能再走一步。
+        </p>
+        <p>
+            获得策略梯度无偏估计的两种途径：从当前策略采样轨迹再估计（比较稳定）；用其他策略的轨迹（离策略估计，不太稳定）。机会在于：用旧数据走多个梯度步，再用新策略收集数据，这样收集数据的总次数会少得多，数据效率更高。挑战是：即使能用旧数据估计多个梯度，应该走几步？
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 策略梯度的问题二：步长和参数化</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=2179s" target="_blank">0:36:19</a>–0:43:09</em></p>
+        <h3>步长</h3>
+        <p>
+            策略梯度是随机梯度上升，$\theta_{k+1} = \theta_k + \alpha_k\hat g_k$。之前在表格型情况下，学习率条件很宽松就能保证收敛；策略梯度不一样，步长影响很大，步子太大性能可能崩溃。为什么？有学生说可能越过最优目标。Emma 解释：数据来自策略本身。学习率大，可能一步跨到策略空间里很差的区域，那里的策略价值很低，轨迹访问的状态和行动奖励都很差，很难估计出好的梯度方向；可能处在一大片平台上，梯度近乎为零，很难回到原来的局部最优（不是不可能，除非完全平坦）。步长太小也不好，进展慢得无法接受，因为步长决定了在获取新数据之前策略变多少。理想是步子尽量大、但不越过头。“合适”的步长还随 $\theta$ 变化。优势归一化、Adam 这类自动调整学习率的方法有帮助，但不能解决问题；而且只能得到当前策略访问到的状态和行动的信息，可能到了信息很少、难以估计梯度的区域。
+        </p>
+        <h3>参数空间的距离不等于策略的距离</h3>
+        <p>
+            例子：一个逻辑函数（logistic）参数化，有点像 softmax：
+        </p>
+        $$\pi_\theta(a) = \begin{cases}\sigma(\theta) &amp; a = 1\\ 1 - \sigma(\theta) &amp; a = 2\end{cases},\qquad \sigma(\theta) = \frac{1}{1+e^{-\theta}}$$
+        <p>
+            $\theta = 0$ 时两个行动各 50%；$\theta = 2$ 时选 $a_2$ 的概率小得多；$\theta = 4$ 时几乎从不选 $a_2$。$\theta$ 只从 0 变到 2 再到 4，并不大，概率质量却剧烈地移到了 $a_1$。看似小的参数变化可能让策略几乎确定，而确定性策略学不到其他行动的信息。她打比方说，机器人原来用一种方式拿东西，$\theta$ 稍微一变，它可能就开下了悬崖（她说没那么极端，但梯度在 $\theta$ 上平滑地走，不代表策略的决策也平滑地变）。课件上把表格型情况的策略空间写成矩阵集合 $\Pi = \{\pi: \pi\in\mathbb{R}^{|S|\times|A|}, \sum_a\pi_{sa} = 1, \pi_{sa}\ge 0\}$，而策略梯度是在参数空间里走步。
+        </p>
+        <p>
+            所以想要一个更新规则：不会让策略变得比我们本意更多，同时进展要快，理想情况下直接提高策略价值，而且最好是单调的。表格型、已知模型时的策略改进每次都会更好或者停止；现在有连续参数化，不保证到全局最优，但如果能保证在到达局部最优之前单调改进就很好。目前的方法没有这个性质：可能一直在改进，然后越过头、崩溃，来回折腾。在医疗等现实领域，单调改进很重要，不希望性能突然崩溃。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 性能差异引理和重要性采样</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=2589s" target="_blank">0:43:09</a>–0:55:23</em></p>
+        <p>
+            想要的更新步：尽量高效地用最近策略的推演数据；在策略空间（决策）里而不是参数空间里控制步子。为此要知道两个策略的表现之间有什么关系：手上有策略一的数据，它能告诉我们策略二有多好吗？
+        </p>
+        <h3>性能差异引理</h3>
+        <p>
+            作业 2 要证明性能差异引理（performance difference lemma）：对任意策略 $\pi$、$\pi'$，
+        </p>
+        $$J(\pi') - J(\pi) = \mathbb{E}_{\tau\sim\pi'}\Big[\sum_{t=0}^{\infty}\gamma^t A^\pi(s_t,a_t)\Big] = \frac{1}{1-\gamma}\mathbb{E}_{s\sim d^{\pi'},\,a\sim\pi'}\big[A^\pi(s,a)\big]$$
+        <p>
+            其中折扣未来状态分布（discounted future state distribution）
+        </p>
+        $$d^\pi(s) = (1-\gamma)\sum_{t=0}^{\infty}\gamma^t P(s_t = s\mid\pi)$$
+        <p>
+            $J$ 就是价值 $V$；有限视界可以用 $\gamma = 1$。期望是对按 $\pi'$ 采样的轨迹，求和的是旧策略 $\pi$ 的优势。以确定性策略为例：在某个状态先按 $\pi'$ 选行动、之后一直按 $\pi$，减去一直按 $\pi$，这就是那一步的优势。它把两个策略的价值差拆成一串小差别：如果在这个状态采取 $\pi'$ 的行动而不是原来的行动，能多得多少，然后加起来。Emma 的例子：每天都因为去了 Stanford 而不是 Harvard 更开心一点，把这些加起来，就是整个职业生涯里（假设性地）多出来的开心。
+        </p>
+        <p>
+            第二个等号把对轨迹和时间步的加权，换成对状态和行动的加权：把和同一个状态有关的优势归到一起，按 $\pi'$ 访问各状态的频率加权，比如一半时间在状态 1，只有万分之一的时间在状态 7。$d^\pi(s)$ 就是在第 1 步处于 $s$ 的概率、第 2 步处于 $s$ 的概率……加起来；无限视界时这个和可能发散，所以用折扣并乘以 $(1-\gamma)$ 让它成为一个归一化的分布。
+        </p>
+        <h3>它有什么用</h3>
+        <p>
+            能不能用它做策略改进，$\pi'$ 是新策略、$\pi$ 是旧策略？
+        </p>
+        $$\max_{\pi'}J(\pi') = \max_{\pi'}J(\pi') - J(\pi) = \max_{\pi'}\mathbb{E}_{\tau\sim\pi'}\Big[\sum_{t=0}^\infty\gamma^t A^\pi(s_t,a_t)\Big]$$
+        <p>
+            好的一面：它用旧策略 $\pi$ 的优势定义了新策略 $\pi'$ 的表现，而 $\pi$ 的 Q 函数和优势我们能估计。问题是仍然需要从 $\pi'$ 采样的轨迹，而我们只有旧策略的数据。目标是只用 $\pi$ 的数据估计 $J(\pi')$。
+        </p>
+        <h3>重要性采样</h3>
+        <p>
+            写成状态-行动形式后，对行动的期望乘以再除以 $\pi(a\mid s)$：
+        </p>
+        $$J(\pi') - J(\pi) = \frac{1}{1-\gamma}\mathbb{E}_{s\sim d^{\pi'},\,a\sim\pi'}\big[A^\pi(s,a)\big] = \frac{1}{1-\gamma}\mathbb{E}_{s\sim d^{\pi'},\,a\sim\pi}\Big[\frac{\pi'(a\mid s)}{\pi(a\mid s)}A^\pi(s,a)\Big]$$
+        <p>
+            这样对行动的期望变成按旧策略 $\pi$ 采样，这些样本我们有；用新旧策略选这个行动的概率之比给优势重新加权。这没问题，因为我们能访问新策略的参数化：给定在某状态采取的行动，就能算出新策略采取它的概率。这是重要性采样（importance sampling）的一个例子，后面会讲更多。于是不需要新策略采取的行动的样本，只需对已有数据重新加权。剩下的问题是状态仍然按 $d^{\pi'}$ 分布，而我们没有新策略下的状态数据。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 忽略状态分布差异：近似和 KL 界</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=3323s" target="_blank">0:55:23</a>–1:02:04</em></p>
+        <h3>近似</h3>
+        <p>
+            怎么处理 $s\sim d^{\pi'}$？Emma 说：直接忽略，假装两个分布相同，这总是一个选项。
+        </p>
+        $$J(\pi') - J(\pi) \approx \frac{1}{1-\gamma}\mathbb{E}_{s\sim d^\pi,\,a\sim\pi}\Big[\frac{\pi'(a\mid s)}{\pi(a\mid s)}A^\pi(s,a)\Big] \doteq \mathcal{L}_\pi(\pi')$$
+        <p>
+            这会带来误差。什么时候很糟？两个策略访问状态空间里完全不同的区域时。如果访问的区域差不多，比如旧策略让机器人大多在这一片，新策略也在这一片、只稍微多走到旁边一点，有相当大的重叠，误差就不大；完全没有重叠时就很糟。
+        </p>
+        <h3>KL 散度控制误差</h3>
+        <p>
+            论文（Achiam, Held, Tamar, Abbeel, 2017）证明了相对策略表现界：
+        </p>
+        $$\Big|J(\pi') - \big(J(\pi) + \mathcal{L}_\pi(\pi')\big)\Big| \le C\sqrt{\mathbb{E}_{s\sim d^\pi}\big[D_{KL}(\pi'\,\|\,\pi)[s]\big]}$$
+        <p>
+            如果近似完美，左边应为 0。误差取决于两个策略在 $d^\pi$（当前策略实际访问的折扣状态分布）下的 KL 散度。Emma 说她实验室总是尽量把理论界实际算出来，看它是 $10^{10}$ 还是 0.5；很多界依赖未知常数，无法检验。这个界（至少根号里那部分）可以检验：看当前策略的实际轨迹，给定一个新策略 $\pi'$，就能算出 KL 散度。有学生问常数 $C$ 是多少，她说现在不需要，论文里有。两个策略相同时界为 0，这符合预期。
+        </p>
+        <h3>KL 散度</h3>
+        <p>
+            对离散随机变量上的概率分布 $P$ 和 $Q$，
+        </p>
+        $$D_{KL}(P\,\|\,Q) = \sum_x P(x)\log\frac{P(x)}{Q(x)}$$
+        <p>
+            性质：$D_{KL}(P\|P) = 0$；$D_{KL}(P\|Q)\ge 0$，分布不同时严格为正；不对称，$D_{KL}(P\|Q)\ne D_{KL}(Q\|P)$。策略之间在某个状态的 KL 散度：
+        </p>
+        $$D_{KL}(\pi'\,\|\,\pi)[s] = \sum_{a\in A}\pi'(a\mid s)\log\frac{\pi'(a\mid s)}{\pi(a\mid s)}$$
+        <p>
+            它衡量在这个状态两个策略的行动有多不同。这个界说明两个策略的价值差不只取决于参数空间里离得多近，更取决于在当前会到达的状态里做的决策有多不同。决策都一样，价值就很接近；决策很不同，就可能走到状态空间很不同的地方，价值差别也可能很大。
+        </p>
+        <h3>得到了什么</h3>
+        $$\mathcal{L}_\pi(\pi') = \frac{1}{1-\gamma}\mathbb{E}_{s\sim d^\pi,\,a\sim\pi}\Big[\frac{\pi'(a\mid s)}{\pi(a\mid s)}A^\pi(s,a)\Big] = \mathbb{E}_{\tau\sim\pi}\Big[\sum_{t=0}^\infty\gamma^t\frac{\pi'(a_t\mid s_t)}{\pi(a_t\mid s_t)}A^\pi(s_t,a_t)\Big]$$
+        <p>
+            这可以只用旧策略的轨迹来优化。课件注明：它和重要性采样类似，但权重只依赖当前时间步、不依赖之前的历史，所以不会消失或爆炸。Emma 说这很优雅：可以用旧数据估计换到某个新策略会有多大改进，并用来在很多候选 $\pi'$ 之间搜索，不限于一个梯度步得到的 $\pi'$，甚至可以用在策略梯度以外的方法里；新策略在当前会到达的状态里决策差得越多，估计越不准。这也和过去 20 年关于策略梯度和策略搜索中单调策略改进的文献有关，还和信赖域（trust region）的概念有关：改变策略时能走多远，仍然能信任它的表现、相信会改进。推荐阅读：Kakade and Langford 2002，Schulman et al. 2015（TRPO），Achiam et al. 2017。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. PPO 一：自适应 KL 惩罚</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=3724s" target="_blank">1:02:04</a>–1:06:27</em></p>
+        <p>
+            PPO 受上面这些想法启发：想用旧数据走多个梯度步，又不越过头，并且关注策略实际做出的决策。它是一族方法，大致惩罚策略在两步之间变化太多，有两个版本。第一个版本解一个无约束优化问题：
+        </p>
+        $$\theta_{k+1} = \arg\max_\theta\ \mathcal{L}_{\theta_k}(\theta) - \beta_k\bar D_{KL}(\theta\,\|\,\theta_k),\qquad \bar D_{KL}(\theta\,\|\,\theta_k) = \mathbb{E}_{s\sim d^{\pi_k}}D_{KL}\big(\pi_{\theta_k}(\cdot\mid s),\pi_\theta(\cdot\mid s)\big)$$
+        <p>
+            它直接把上面的界放进目标：KL 越大，$\mathcal{L}$ 近似越差，估计可能偏差到根号 KL 那么多，所以要在改进和这个误差之间权衡。KL 是对单个状态定义的，所以对访问到的所有状态取期望，这也是理论界的一部分。惩罚系数 $\beta_k$ 在迭代之间调整，以大致满足 KL 约束。Emma 说这不是大多数人用的 PPO，但它是一个值得知道的基线。
+        </p>
+        <pre><code>Algorithm: PPO with Adaptive KL Penalty
+Input: initial policy parameters theta_0, initial KL penalty beta_0, target KL-divergence delta
+for k = 0, 1, 2, ...:
+    Collect set of partial trajectories D_k on policy pi_k = pi(theta_k)
+    Estimate advantages A_hat^{pi_k} using any advantage estimation algorithm
+    Compute policy update
+        theta_{k+1} = argmax_theta L_{theta_k}(theta) - beta_k * D_KL_bar(theta || theta_k)
+        by taking K steps of minibatch SGD (via Adam)
+    if D_KL_bar(theta_{k+1} || theta_k) &gt;= 1.5 * delta:
+        beta_{k+1} = 2 * beta_k
+    else if D_KL_bar(theta_{k+1} || theta_k) &lt;= delta / 1.5:
+        beta_{k+1} = beta_k / 2</code></pre>
+        <p>
+            要点：可以用旧数据走 $K$ 个梯度步，不只是一步。之后检查新策略的 KL 散度：大了就加大惩罚，小了就减小惩罚。初始惩罚不太重要，很快会自适应。它不保证满足 KL 约束，也不保证单调改进，有些迭代会违反约束，但经验上大多数不会。Emma 提到另一种控制步子的方法是自然梯度（natural gradients），这次不讲。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. PPO 二：裁剪目标和投票</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=3987s" target="_blank">1:06:27</a>–1:16:23</em></p>
+        <p>
+            更常用的是裁剪目标（clipped objective）。给优势加权的概率比 $r_t(\theta) = \pi_\theta(a_t\mid s_t)/\pi_{\theta_k}(a_t\mid s_t)$，在两个策略差别很大时可能极小或极大：新策略给一个旧策略常选的行动很低的概率，比值趋近 0；反过来，旧策略概率很低、新策略是 1，比值可能达到 $10^6$。优势会被压到 0 或放大 $10^6$ 倍。策略梯度里不希望有爆炸或消失的项，KL 约束的目的就是让策略保持接近。裁剪受同样的想法启发：比值太极端就截断，不让它小于 $1-\epsilon$ 或大于 $1+\epsilon$。
+        </p>
+        $$\mathcal{L}^{CLIP}_{\theta_k}(\theta) = \mathbb{E}_{\tau\sim\pi_k}\Big[\sum_{t=0}^{T}\min\Big(r_t(\theta)\hat A^{\pi_k}_t,\ \text{clip}\big(r_t(\theta), 1-\epsilon, 1+\epsilon\big)\hat A^{\pi_k}_t\Big)\Big],\qquad \theta_{k+1} = \arg\max_\theta\mathcal{L}^{CLIP}_{\theta_k}(\theta)$$
+        <p>
+            $\epsilon$ 是超参数（课件写“maybe $\epsilon = 0.2$”）。策略可以变得比这更远，但那样不会让目标函数更好，所以策略被限制在决策相近的区域里。关注点仍然是实际采取的行动：不管 $\theta$ 变多少，在这些状态里采取的行动是否和原来相似。
+        </p>
+        <h3>投票：两张图分别对应哪种优势</h3>
+        <p>
+            论文里有两张图，横轴是 $r$，纵轴是单个项的 $\mathcal{L}^{CLIP}$。问：哪张对应优势 $A &gt; 0$，哪张对应 $A &lt; 0$（$\epsilon\in(0,1)$）？Emma 说这是目标函数，不是损失，要对新的 $\theta$ 取最大，可以看成在界定新策略能带来多少好处。没有人认为答案取决于 $\epsilon$ 的具体值，这是对的。讨论后大多数人选对：左图是 $A &gt; 0$，右图是 $A &lt; 0$。
+        </p>
+        <ul>
+            <li>$A &gt; 0$：$r$ 越大，目标线性上升（$r$ 不可能为负），直到 $1+\epsilon$ 处被裁剪，之后不再上升。</li>
+            <li>$A &lt; 0$：这个行动的优势为负，应该减少它的概率，最好把 $r$ 一路推到 0，“再也不做这个行动”。但那可能剧烈改变策略，所以到 $1-\epsilon$ 就截住，不能继续往 0 压。</li>
+        </ul>
+        <p>
+            论文的另一张图也说明：离 $\theta_k$ 越远，目标变得越悲观。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. PPO 的实验结果和实现细节</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=8PwvNQ5WS-o&t=4583s" target="_blank">1:16:23</a>–1:19:23</em></p>
+        <p>
+            带裁剪的 PPO 算法和前面一样，只是换成裁剪目标。优势估计也有选择，可以用 n 步估计，或者叫广义优势估计（Generalized Advantage Estimation，GAE）的方法，下一讲讲，作业暂时不需要。
+        </p>
+        <p>
+            结果：论文在多个 MuJoCo 环境（和作业里的环境类似）上比较，当时已有 TRPO 等算法。TRPO（Trust Region Policy Optimization）也用信赖域的想法，在某些方面和 PPO 相似，但复杂得多。图里浅紫色的 PPO（横轴是步数）一般比其他算法好得多。他们没有说能到达更好的最优解，他们说的是用少得多的数据更快到达；有些环境里，同样数据量下性能提升很大。这是 PPO 流行的原因之一：实现很简单，很多情况下表现极好。参考原论文《Proximal Policy Optimization Algorithms》和 2017 年的博客。
+        </p>
+        <p>
+            Emma 建议关注实现细节（可选阅读）：PPO 影响很大，MIT 的同事后来写了一篇论文，研究这些因素里哪些最重要。这类算法里除了算法本身，还有超参数、网络结构等选择，往往对实际表现影响很大。要分清是算法上的改进，还是那些没被算作算法一部分、但对实际表现很重要的东西。
+        </p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 2026 版更新</h2>
+        <p>
+            2026 年冬季第 6 讲课件（“Policy Gradient II”，48 页）和录像基本一致，本页公式取自它。能看出的差别：
+        </p>
+        <ul>
+            <li>新增两页“为什么基线能降低方差”的论证。方差近似为各项方差之和，只看一项；因为基线不影响期望，最小化方差等价于
+                $$\arg\min_b\ \mathbb{E}_{s\sim d^\pi}\Big[\mathbb{E}_{a\sim\pi(\cdot\mid s),G\mid s,a}\big[(\nabla_\theta\log\pi(a_t\mid s;\theta))^2(G_t(s) - b(s))^2\big]\Big]$$
+                这是一个加权最小二乘问题，求导令其为零得到
+                $$b(s) = \frac{\mathbb{E}_{a\sim\pi(\cdot\mid s),G\mid s,a}\big[(\nabla_\theta\log\pi(a_t\mid s;\theta))^2 G_t(s)\big]}{\mathbb{E}_{a\sim\pi(\cdot\mid s),G\mid s,a}\big[(\nabla_\theta\log\pi(a_t\mid s;\theta))^2\big]}\approx\mathbb{E}_{a\sim\pi(\cdot\mid s),G\mid s,a}[G_t(s)]$$
+                也就是说最优基线近似为期望回报。</li>
+            <li>2026 年课件里没有 2024 年这一讲中 n 步估计的偏差/方差投票页；“Choosing the Target”一页只写到用自举和函数近似引入偏差来降低方差，和 TD 对比 MC 一样。</li>
+            <li>“Outline”页把“单调改进理论”标为下一讲内容，和 2024 年一样，PPO 放在这一讲讲完。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>只依赖状态的基线 $b(s_t)$ 满足 $\mathbb{E}[\nabla_\theta\log\pi(a_t\mid s_t;\theta)b(s_t)] = 0$，不引入偏差；关键是 $\sum_a\pi(a\mid s) = 1$ 的导数为 0。</li>
+            <li>Vanilla 策略梯度：优势估计 $\hat A_t = G_t - b(s_t)$，每轮重新拟合基线，用 $\sum_t\nabla_\theta\log\pi(a_t\mid s_t)\hat A_t$ 更新。</li>
+            <li>Actor-critic：actor 是策略 $\pi_\theta$，critic 是 $Q_w$ 或 $V_w$；用优势函数 $A^\pi = Q^\pi - V^\pi$ 写梯度。</li>
+            <li>n 步估计：$\hat A^{(1)}$ 低方差高偏差，$\hat A^{(\infty)}$（MC）高方差低偏差，实际常取几步再自举。</li>
+            <li>普通策略梯度样本效率差（每批数据只走一步），步长难选，参数空间的小变化可能让策略剧变。</li>
+            <li>性能差异引理 $J(\pi') - J(\pi) = \frac{1}{1-\gamma}\mathbb{E}_{s\sim d^{\pi'},a\sim\pi'}[A^\pi(s,a)]$；用重要性采样换掉行动分布，再近似 $d^{\pi'}\approx d^\pi$ 得到 $\mathcal{L}_\pi(\pi')$，误差受 $C\sqrt{\mathbb{E}_{s\sim d^\pi}[D_{KL}(\pi'\|\pi)[s]]}$ 控制。</li>
+            <li>PPO 用旧数据走多步：自适应 KL 惩罚版本按 KL 大小加倍或减半 $\beta$；裁剪版本 $\min(r_t\hat A_t, \text{clip}(r_t,1-\epsilon,1+\epsilon)\hat A_t)$ 不让概率比的好处超出 $[1-\epsilon,1+\epsilon]$。</li>
+            <li>PPO 在 MuJoCo 上用更少数据更快达到好表现，实现简单；实现细节和超参数对实际表现影响很大。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS234 Reinforcement Learning · Lecture 6: Policy Search 2 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

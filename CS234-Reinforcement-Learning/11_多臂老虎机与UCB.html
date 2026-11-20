@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 11 讲：多臂老虎机与 UCB | Stanford CS234 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="10_离线强化学习与重要性采样.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS234 目录</a> · Lecture 11</span>
+    <span><a href="12_贝叶斯老虎机与Thompson采样.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 11 讲：多臂老虎机与 UCB</h1>
+        <p class="subtitle">数据高效的强化学习从多臂老虎机开始：断趾治疗的玩具例子，遗憾（regret）和差距（gap），贪心与 ε-greedy 为什么是线性遗憾，Lai–Robbins 下界，乐观面对不确定性，Hoeffding 不等式推出 UCB1，联合界，UCB 的对数遗憾证明概要，以及悲观算法为什么会失败</p>
+        <div class="author-meta">
+            主讲：Emma Brunskill · 时长：1 小时 15 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=sqYii3nd78w" target="_blank">课堂录像</a>（Stanford Online 公开，2024 年春季，本文依据录像字幕整理）；补充：<a href="https://web.stanford.edu/class/cs234/modules.html" target="_blank">2026 年冬季课件</a>（2026 年的录像只对选课学生开放；文中标“2026 版更新”的内容来自 2026 年课件）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            前几讲讨论的是怎样从已有数据学习：人类反馈、过去的示范、历史记录。从这一讲开始换一个问题：如果数据可以由智能体自己去收集，应该怎样收集，才能用尽量少的数据学会做好的决策？课程开头讲过 ε-greedy，但一直没有仔细想过“数据怎么来”这件事对学习的影响。接下来几讲（第 11 到 13 讲）都围绕这个问题，统称快速或数据高效的强化学习（data-efficient RL）。
+        </p>
+        <p>
+            Emma 先从最简单的设定讲起：多臂老虎机（multi-armed bandit），也就是只有一个状态的 RL 问题。这一讲先定义怎样衡量一个算法好不好（遗憾），说明贪心和固定 ε 的 ε-greedy 都会有线性遗憾，然后引出她说是本课最喜欢的思想之一：乐观面对不确定性（optimism under uncertainty），用 Hoeffding 不等式构造上置信界，得到 UCB1 算法，并给出它是对数遗憾的证明概要。下一讲讲贝叶斯老虎机和 Thompson 采样，再下一讲把这些想法推广到 MDP。
+        </p>
+        <ol>
+            <li><a href="#t01">开场复习：重要性采样与策略性能差</a> · <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=6s" target="_blank">0:00:06</a></li>
+            <li><a href="#t02">为什么要关心数据效率</a> · <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=301s" target="_blank">0:05:01</a></li>
+            <li><a href="#t03">多臂老虎机和断趾例子</a> · <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=652s" target="_blank">0:10:52</a></li>
+            <li><a href="#t04">贪心算法会锁死在次优臂上</a> · <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=965s" target="_blank">0:16:05</a></li>
+            <li><a href="#t05">遗憾、差距和遗憾的增长速度</a> · <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=1170s" target="_blank">0:19:30</a></li>
+            <li><a href="#t06">ε-greedy 的遗憾</a> · <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=1571s" target="_blank">0:26:11</a></li>
+            <li><a href="#t07">两类遗憾界、下界和乐观原则</a> · <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=1999s" target="_blank">0:33:19</a></li>
+            <li><a href="#t08">Hoeffding 不等式和 UCB1</a> · <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=2354s" target="_blank">0:39:14</a></li>
+            <li><a href="#t09">UCB1 在断趾例子上运行，联合界</a> · <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=2766s" target="_blank">0:46:06</a></li>
+            <li><a href="#t10">UCB 遗憾的证明概要</a> · <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=3085s" target="_blank">0:51:25</a></li>
+            <li><a href="#t11">实际表现，以及悲观为什么不行</a> · <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=3928s" target="_blank">1:05:28</a></li>
+            <li><a href="#t12">2026 版更新</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场复习：重要性采样与策略性能差</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=6s" target="_blank">0:00:06</a>–0:05:01</em></p>
+        <p>
+            Emma 说学习研究里有相当好的证据表明间隔重复（spaced repetition）有帮助，所以她会时不时在复习题里放之前讲过的内容。这次复习的是上一讲的离线策略评估。
+        </p>
+        <p>
+            第一题问重要性采样（importance sampling）是否依赖马尔可夫假设。答案是不依赖，所以说它需要马尔可夫假设的那一句是错的。重要性采样对数据生成过程的假设很少，可以用在非马尔可夫系统上，这是它的优点之一；在这一点上它和用推演（rollout）估计策略价值的蒙特卡洛方法一样通用。
+        </p>
+        <p>
+            第二题用到马尔可夫假设，第一个说法是对的：可以用一个策略的优势函数（advantage function，某个行动比按策略平均行动好多少）和另一个策略的样本来估计两个策略的性能差，并在两个策略之间做重要性加权，只用策略 1 的样本。这个估计并不精确，原因是用的是策略 1 访问到的状态，而策略 2 实际可能访问别的状态。之前的工作给出的漂亮结论是：这个近似误差可以被界住，界由“在策略 1 访问的状态上，两个策略的平均差异”决定。PPO 用的就是这类思想。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 为什么要关心数据效率</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=301s" target="_blank">0:05:01</a>–0:10:52</em></p>
+        <h3>计算效率和样本效率</h3>
+        <p>
+            很多 RL 工作关注的是计算效率，尤其是有模拟器的场景，比如 Atari 或 MuJoCo。在这些场景里，计算时间和数据几乎是一回事：多出来的计算既可以拿去从模拟器采样，也可以拿去算 Q 函数或策略（做 Bellman backup 之类），最后只需要统计总共用了多少计算资源。模拟器在某种程度上模糊了计算效率和数据效率的区别。
+        </p>
+        <p>
+            另有很多领域，计算和样本是分开的。Emma 和很多人关心的应用就是这样：用手机做健康干预、消费者营销（给人看哪个广告）、教育技术、气候和环境政策（比如鼓励野生动物保护的政策）。这些场景里有真实的学生、真实的病人，计算机可以用来算策略，但真实世界的数据（她称为样本，对应样本效率 sample efficiency）很珍贵，要尽量榨干它的信息。有 50 万个病人的数据已经很多了，但和 Atari 比差得远，Atari 的模拟器可以一直跑；AlphaGo 也可以让模拟的智能体互相下棋，永远下下去。接下来几讲默认我们处在数据有限的情况，要更小心地收集数据。
+        </p>
+        <h3>评价算法的几个角度</h3>
+        <ul>
+            <li>到底收不收敛。之前讲致命三元组时看到，有些设定不保证收敛（或者还没被证明），算法可能来回震荡（chatter、oscillate），不收敛到任何稳定的东西。</li>
+            <li>是否保证收敛到最优策略。</li>
+            <li>收敛得多快，在这里就是需要多少数据。</li>
+        </ul>
+        <p>
+            Emma 在白板上画了奖励随时间变化的几种曲线：有的算法曲线起伏很大，有的很平滑；有的大多数时候表现很好，但偶尔犯严重错误；有的从不出色但一直还不错。这些行为差别很大。她举的例子是 AI 医生：一种是平均来说帮你达成 80% 的目标（比如以 80% 的精度控制血压）；另一种是对 80% 的人完全控制住血压，对另外 20% 的人完全失败。这是两种很不一样的性能保证，后面会讨论不同算法保证的是哪一种。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 多臂老虎机和断趾例子</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=652s" target="_blank">0:10:52</a>–0:16:05</em></p>
+        <h3>定义</h3>
+        <p>
+            之前在 ChatGPT 和偏好学习的部分简单提过老虎机，这里系统地讲，之后再回到 MDP。老虎机里的很多想法可以原样或很容易地搬到 RL 设定里。老虎机是一个很简单的 RL 问题，至少从 1920 年代起就有人研究，应用领域很多。
+        </p>
+        <p>
+            多臂老虎机是一个二元组 $(\mathcal{A}, \mathcal{R})$：
+        </p>
+        <ul>
+            <li>没有状态，只有一个有限的臂（arm）集合 $\mathcal{A}$，臂就是之前说的行动（action），共 $m$ 个。例如有 20 个广告可以展示给顾客。</li>
+            <li>每个臂有一个未知的奖励分布 $\mathcal{R}^a(r) = P[r\mid a]$。比如某个广告的平均点击率是 90%，另一个是 20%，但这些都观测不到。</li>
+            <li>每个时间步 $t$ 智能体选一个行动 $a_t\in\mathcal{A}$，环境从这个随机变量里采样一个奖励 $r_t\sim\mathcal{R}^{a_t}$。点击率 90% 的臂大多数时候给 1，有时候人们不点，给 0。</li>
+            <li>目标是最大化累积奖励 $\sum_{\tau=1}^{t} r_\tau$，比如总点击数。</li>
+        </ul>
+        <p>
+            这个设定很简单，但用得很广：临床试验里决定下一个人分到治疗组还是对照组、广告投放等等。
+        </p>
+        <h3>贯穿例子：断趾怎么治</h3>
+        <p>
+            接下来这部分课程用一个故意有点傻的例子（Emma 强调这和医学无关，不是医疗建议）：治疗脚趾骨折有三种选择，做手术（surgery）、把伤趾和旁边的脚趾绑在一起（buddy taping）、什么都不做。结果是一个二元变量：六周后脚趾是否痊愈。这里不做临床试验，而是每当有人带着断趾来，就决定怎么治，随着时间弄清哪种最好。
+        </p>
+        <p>
+            把它建模成三臂老虎机，每个臂是参数 $\theta_i$ 未知的伯努利变量（Bernoulli variable，结果只有 0 或 1，取 1 的概率为 $\theta_i$）。课件里设定的真实参数是手术 $\theta_1 = 0.95$、绑趾 $\theta_2 = 0.9$、不处理 $\theta_3 = 0.1$（编造的数字）。
+        </p>
+        <h3>投票：理解老虎机框架</h3>
+        <ul>
+            <li>拉一个臂就是执行一个行动。对。</li>
+            <li>这个问题用老虎机比用 MDP 更合适。对：每个病人只做一次决策，而且一个人的脚趾能不能好，和下一个人（Emma 举的名字是 Sophie）来时我们做什么无关。虽然在做一连串决策，但决策之间没有序列上的依赖，每个时间点来的是一个新的人。</li>
+            <li>$\theta_i$ 在 0 和 1 之间，意味着结果不确定，有时痊愈有时不痊愈。对。</li>
+        </ul>
+        <p>
+            有学生问：没有时间上的依赖，是否要求每一步的概率分布都相同？Emma 说是，现在假设一切是平稳的（stationary），每一步的奖励分布相同，也包括不会突然来一批对不同疗法反应不同的人。非平稳问题有很多有意思的研究，比如变点检测（change point detection），但这里先不讨论。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 贪心算法会锁死在次优臂上</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=965s" target="_blank">0:16:05</a>–0:19:30</em></p>
+        <p>
+            这里 $Q(a)$ 的意思和之前不同：没有状态（或者说只有一个状态），也没有未来奖励，$Q(a)$ 只是臂 $a$ 的期望即时奖励。估计它只需计数取平均：
+        </p>
+        $$\hat Q_t(a) = \frac{1}{N_t(a)}\sum_{\tau=1}^{t} r_\tau\,\mathbb{1}(a_\tau = a)$$
+        <p>
+            比如把以前每次做手术的结果平均一下。贪心算法（greedy）每一步选 $a_t = \arg\max_a \hat Q_t(a)$，观察结果，重复。
+        </p>
+        <p>
+            在这个例子里，真实情况是手术最好，绑趾第二，不处理效果很差。行动集合小而有限时，很多老虎机算法会先把每个臂都试一次（行动空间很大时，比如所有可能推荐的广告，就得用更聪明的办法）。假设三个臂各试一次，观察到臂 1 得 0、臂 2 得 1、臂 3 得 0。贪心下一步选哪个？臂 2，而且是确定性地选，概率为 1。
+        </p>
+        <p>
+            这好不好？不好。它永远不会选到最优臂。$a_2$ 的平均值永远不会降到 0，因为它至少有一个 1；而另外两个臂的估计是 0，永远不会再被采样。所以贪心不会收敛到最优行动。这个例子说明不能只做贪心，它可能永远锁定（lock on）在次优行动上，做出无穷多个坏决策，所以需要某种形式的探索。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 遗憾、差距和遗憾的增长速度</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=1170s" target="_blank">0:19:30</a>–0:26:11</em></p>
+        <h3>定义</h3>
+        <p>
+            为了量化“做了多少坏决策”，引入序列决策里的遗憾（regret）：比较算法做出的决策和最优决策之间的差距，以这个差距给算法打分。
+        </p>
+        <ul>
+            <li>最优价值：$V^* = Q(a^*) = \max_{a\in\mathcal{A}} Q(a)$，即期望奖励最高的那个臂的值。</li>
+            <li>单步遗憾是机会损失（opportunity loss）：$l_t = \mathbb{E}[V^* - Q(a_t)]$。也可以看成最优行动相对于实际所选行动的优势。</li>
+            <li>总遗憾：$L_t = \mathbb{E}\left[\sum_{\tau=1}^{t} \big(V^* - Q(a_\tau)\big)\right]$。</li>
+        </ul>
+        <p>
+            这里看的都是期望。由于随机性，某一次次优臂拿到的奖励可能比最优臂高，但这里总是比较最优臂的期望奖励和所选臂的期望奖励。$V^*$ 未知但固定，所以最大化累积奖励等价于最小化总遗憾；老虎机文献里通常说最小化总遗憾。
+        </p>
+        <h3>用计数和差距写遗憾</h3>
+        <p>
+            设 $N_t(a)$ 是到第 $t$ 步为止选了行动 $a$ 的次数。差距（gap）$\Delta_a = V^* - Q(a)$，也就是 $a^*$ 相对于 $a$ 的优势。Emma 说老虎机文献和 RL 文献在一定程度上是各自发展的，所以老虎机里一般叫 gap 而不叫 advantage。总遗憾可以写成
+        </p>
+        $$L_t = \sum_{a\in\mathcal{A}} \mathbb{E}[N_t(a)]\,\Delta_a$$
+        <p>
+            差距之后会很重要：两个行动差距很大时，用很少的样本就能分出哪个好；差距很小时一般需要多得多的数据。从公式看，我们不希望经常选差距大的行动，差距接近 0 的行动多选一些问题不大。很多算法做的事情就是界住这个量。我们事先无法算出它，因为它需要知道最优行动和它的价值，但可以证明遗憾怎样增长。
+        </p>
+        <h3>例子：贪心的遗憾</h3>
+        <p>
+            真实世界里算不出遗憾，玩具例子里可以。贪心先依次试 $a_1, a_2, a_3$：真实最优行动始终是 $a_1$，三步的遗憾分别是 0、$0.95-0.9 = 0.05$、$0.95-0.1 = 0.85$，这些数就是各臂的差距。如果一直做坏决策，遗憾就是线性的。比如贪心之后一直选 $a_3$，总遗憾就是 $0.85\times t$，每一步都损失 0.85，再累加起来。
+        </p>
+        <h3>希望遗憾长成什么样</h3>
+        <ul>
+            <li>最好是零遗憾或常数遗憾。常数遗憾指只做有限次坏决策：比如做 10 个决策后找到最优臂，之后永远选它。这一般很难做到。</li>
+            <li>最坏情况是线性遗憾，每一步都犯错，一直犯下去。</li>
+            <li>通常希望得到次线性遗憾（sublinear regret）：遗憾仍可能随决策次数增长，但比线性慢。</li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. ε-greedy 的遗憾</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=1571s" target="_blank">0:26:11</a>–0:33:19</em></p>
+        <p>
+            回顾 ε-greedy：以 $1-\epsilon$ 的概率贪心地选 $\arg\max_a \hat Q_t(a)$，以 $\epsilon$ 的概率随机选一个行动。这意味着有 $\epsilon$ 比例的时间会做一些次优决策：除非所有臂差距都是 0（那选哪个都无所谓），否则随机选总会时不时选到坏的。
+        </p>
+        <p>
+            具体例子：先把三个臂各试一次，设 $\epsilon = 0.1$，此时 $a_1$ 和 $a_2$ 的估计并列最高。以 90% 的概率贪心，平分平局时 $a_1$、$a_2$ 各 45%；以 10% 的概率随机，三个臂各约 3.3%。
+        </p>
+        <h3>投票：ε-greedy 会不会有线性遗憾</h3>
+        <p>
+            假设至少有一个行动的差距非零（否则不算真正的决策问题）。问题：$\epsilon = 0.1$ 时 ε-greedy 能否有线性遗憾？$\epsilon = 0$ 时呢？（Ed 上的题目一开始缺了一题，Emma 现场补上。）
+        </p>
+        <p>
+            答案：两者都对。思路是看每个臂至少被采样多少次。$\epsilon \gt 0$ 时，每个臂被选的次数至少是 $\frac{\epsilon}{|\mathcal{A}|}\,t$，其中 $t$ 是总决策数。这里有一个大 $t$ 乘以常数，所以次优臂的被选次数随 $t$ 线性增长，遗憾至少是线性的：
+        </p>
+        $$L_t \ge \frac{\epsilon}{|\mathcal{A}|}\sum_{a\in\mathcal{A}}\Delta_a\cdot t$$
+        <p>
+            $\epsilon = 0$ 就是贪心，刚才看到它也可能是线性遗憾。
+        </p>
+        <h3>遗憾曲线</h3>
+        <p>
+            ε 有好有坏的设法，但固定的 ε 可能很差。课程很早以前提过让 ε 随时间衰减，这一点影响很大。看总遗憾随时间变化的常见图：理想是 0；贪心可能是线性；ε-greedy 通常好一点但仍是线性；衰减的 ε-greedy 可以接近得多。好的算法可以做到次线性。困难在于，好的 ε 衰减方式往往依赖于事先不知道的问题性质（比如差距）。所以需要一个算法，事先不知道问题的任何信息，也能保证次线性遗憾。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 两类遗憾界、下界和乐观原则</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=1999s" target="_blank">0:33:19</a>–0:39:14</em></p>
+        <h3>与问题无关的界和与问题相关的界</h3>
+        <ul>
+            <li>与问题无关的界（problem-independent bound）：对任何可能的问题，遗憾怎样随 $t$ 增长。例如“不管给我什么老虎机问题，这个算法都保证遗憾关于 $t$ 次线性”。</li>
+            <li>与实例相关或与问题相关的界（instance-dependent / problem-dependent bound）：把遗憾写成差距的函数。这类界的漂亮之处在于算法本身不需要知道差距；只是如果问题恰好容易（差距很大），遗憾就会小得多。Emma 的实验室和很多人对这类界很感兴趣，因为它意味着算法对问题是自适应的：问题容易时保证做得很好，问题难时本来也做不好，算法会尽力做到能做到的最好。</li>
+        </ul>
+        <p>
+            有学生问：差距通常是否小于价值？奖励通常是否在 0 到 1 之间？Emma 说完全看领域。伯努利变量天然在 0 和 1 之间，其他领域可能很不一样，但总可以归一化。差距大小也看领域：广告点击率很难优化，常常是 0.01 对 0.011，“没人喜欢广告”，差距很小，需要大量数据，聪明的数据高效算法就很重要。差距很大的问题很容易，做什么都差不多，因为很快就能估计出来。
+        </p>
+        <h3>Lai 和 Robbins 的下界</h3>
+        <p>
+            有一个漂亮的下界说明任何算法的遗憾至少有多大（Emma 课上说大约是 1950 年代的结果，她也记不太清；这篇论文是 Lai 和 Robbins 1985 年发表的）。渐近总遗憾至少是 $\log t$ 乘以一个与问题相关的量：
+        </p>
+        $$\lim_{t\to\infty} L_t \ge \log t \sum_{a\,:\,\Delta_a \gt 0}\frac{\Delta_a}{D_{KL}\!\left(\mathcal{R}^a\,\|\,\mathcal{R}^{a^*}\right)}$$
+        <p>
+            对每个次优臂，分子是差距，分母是这个臂的奖励分布和最优臂奖励分布之间的 KL 散度。这个结果让人有希望，因为它是 $\log t$，次线性。也就是说，下界并没有排除次线性遗憾的可能。它是与问题相关的界，依赖于未知的差距。
+        </p>
+        <h3>乐观面对不确定性</h3>
+        <p>
+            Emma 说这是本课她最喜欢的思想之一，因为它说明乐观可以被证明是最优的。乐观的意思是：选那些可能有高价值的行动。选了以后会发生什么？只有两种可能：
+        </p>
+        <ul>
+            <li>真的拿到高奖励。这很好，这就是目标。</li>
+            <li>拿到低奖励。这时（一个学生答出来）我们会更新估计，学到新东西，以后不会再犯同样的坏决策。</li>
+        </ul>
+        <p>
+            所以要么拿到高奖励，要么学到东西，对 RL 或老虎机算法来说两者都有价值。前提是算法要真正利用看到低奖励时得到的信息。为此需要把“可能”说清楚，也就是量化不确定性：构造置信区间或不确定性界，再用它做决策。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. Hoeffding 不等式和 UCB1</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=2354s" target="_blank">0:39:14</a>–0:46:06</em></p>
+        <h3>上置信界算法的思路</h3>
+        <p>
+            对每个行动的价值估计一个上置信界（upper confidence bound）$U_t(a)$，要求它以高概率成立，即 $Q(a)\le U_t(a)$ 以高概率成立，并且它依赖于这个臂被选过的次数 $N_t(a)$。量化不确定性的方法很多，这一讲采用频率派（frequentist）的观点，只用高概率界和计数；下一讲才讲贝叶斯。然后每步选上置信界最大的行动：
+        </p>
+        $$a_t = \arg\max_{a\in\mathcal{A}} U_t(a)$$
+        <p>
+            这一类算法统称 UCB 算法，有很多变体；也有一类叫乐观面对不确定性（Optimism in the Face of Uncertainty, OFU）。想法很简单，问题在于它表现如何，以及不确定性怎么量化。
+        </p>
+        <h3>Hoeffding 不等式</h3>
+        <p>
+            课上只有少数人以前见过 Hoeffding 不等式（作业 3 会用到）。它回答的问题是：观测到的平均值和真实均值能差多远。设 $X_1,\dots,X_n$ 是取值在 $[0,1]$ 的独立同分布随机变量，真实均值 $\mathbb{E}[X]$ 未知，样本均值 $\bar X_n = \frac{1}{n}\sum_{\tau=1}^{n}X_\tau$。对任意 $u \gt 0$：
+        </p>
+        $$P\big(\mathbb{E}[X] \gt \bar X_n + u\big) \le \exp(-2nu^2)$$
+        <p>
+            也就是说，经验估计和真实均值相差超过 $u$ 的概率随样本数指数下降。数据多了，经验平均是 30 而真值是 2000 这种事就不会发生，样本均值会收敛到真实均值。这本来就是我们期望的，Hoeffding 给出的是收敛速度。
+        </p>
+        <p>
+            为什么要用它？我们想知道 $u$ 要设多大，才能得到某个臂真实期望奖励的上界。Emma 在白板上用双边版本 $P(|\mathbb{E}[X]-\bar X_n| \gt u)\le 2\exp(-2nu^2)$，令右边等于 $\delta$，$\delta$ 是我们希望置信区间不成立的概率，也就是希望区间以至少 $1-\delta$ 的概率成立。解出
+        </p>
+        $$u = \sqrt{\frac{\log(2/\delta)}{2n}}$$
+        <p>
+            于是以至少 $1-\delta$ 的概率有 $\bar X_n - u \le \mathbb{E}[X] \le \bar X_n + u$。这就得到了上置信界：经验估计加上一个只依赖于样本数的量。用的时候只需要计数、求平均、再加上这个额外的项，这类项通常叫奖励项或加成项（bonus term）。（白板推导里的常数比较随意，不同教材常数不同，形状都是 $\sqrt{\log(1/\delta)/n}$。）
+        </p>
+        <h3>UCB1</h3>
+        <p>
+            由此得到 UCB1 算法：每一步计算经验平均加上加成项，选最大的那个：
+        </p>
+        $$a_t = \arg\max_{a\in\mathcal{A}}\left[\hat Q_t(a) + \sqrt{\frac{2\log\frac{1}{\delta}}{N_t(a)}}\right]$$
+        <p>
+            $\hat Q_t(a)$ 是经验平均，$N_t(a)$ 是 $t$ 步之后 $a$ 的样本数。这里还没有保证所有置信区间在所有时间步上同时成立，稍后要更仔细地设定 $\delta$。
+        </p>
+        <p>
+            有学生问为什么叫 UCB1。Emma 说 UCB 有很多变体，这大概是最早的一个，出自 Auer 等人 2002 年的论文，可能是他们在论文里第一个命名的算法。乐观面对不确定性的想法早在 2000 年以前就有，但这篇论文第一次给出了一些漂亮的证明。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. UCB1 在断趾例子上运行，联合界</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=2766s" target="_blank">0:46:06</a>–0:51:25</em></p>
+        <h3>手算几步</h3>
+        <p>
+            先把每个臂各试一次，假设观测到 $a_1$ 得 1、$a_2$ 得 1、$a_3$ 得 0。算上置信界：
+        </p>
+        $$\mathrm{UCB}(a_1) = 1 + \sqrt{\frac{2\log\frac1\delta}{1}},\quad \mathrm{UCB}(a_2) = 1 + \sqrt{\frac{2\log\frac1\delta}{1}},\quad \mathrm{UCB}(a_3) = 0 + \sqrt{\frac{2\log\frac1\delta}{1}}$$
+        <p>
+            $a_1$ 和 $a_2$ 的上界相同，以相等概率选其中一个，假设选了 $a_1$，又得到 1。重新计算：
+        </p>
+        $$\mathrm{UCB}(a_1) = 1 + \sqrt{\frac{2\log\frac1\delta}{2}},\quad \mathrm{UCB}(a_2) = 1 + \sqrt{\frac{2\log\frac1\delta}{1}},\quad \mathrm{UCB}(a_3) = 0 + \sqrt{\frac{2\log\frac1\delta}{1}}$$
+        <p>
+            $a_1$ 的上置信界缩小了，因为学到了新东西。这次碰巧也拿到了高奖励，但不管奖励高低，计数增加了，置信区间就能收窄。这就是它和贪心的不同：同样用经验平均，但置信区间会变化，各个臂会根据拿到的奖励轮流被选，有时也会选 $a_3$，因为数据这么少时，$a_3$ 仍有一定可能和 $a_1$、$a_2$ 一样好。
+        </p>
+        <h3>$\delta$ 怎么设：联合界</h3>
+        <p>
+            有学生问 $\delta$ 是不是我们自己选的。是的。要求是：所有置信界在所有时间步、对所有臂同时成立，因为每一步都要用它们做决策。这和机器学习里的错误发现（false discovery）问题有关。把“某个臂在某个时间步的置信区间包含真值”看成一个事件，所有这些事件同时成立的失败概率可以用联合界（union bound）控制：失败概率不超过每个事件失败概率之和，总共大约有 $|\mathcal{A}|\cdot T$ 个事件。
+        </p>
+        <p>
+            所以在已知总决策数 $T$ 的最简单情形下，把每个区间的 $\delta$ 换成 $\frac{\delta}{T|\mathcal{A}|}$ 一般就够了。代回加成项，原来的 $\log\frac1\delta$ 变成
+        </p>
+        $$\log\frac{T|\mathcal{A}|}{\delta}$$
+        <p>
+            联合界一般会让 log 项变大。有一些方法（比如重对数律 law of the iterated logarithm）可以让这一项更小，得到更紧的界。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. UCB 遗憾的证明概要</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=3085s" target="_blank">0:51:25</a>–1:05:28（最后的更正在 1:12:37）</em></p>
+        <p>
+            Emma 推荐 Tor Lattimore 和 Csaba Szepesvári 的书《Bandit Algorithms》（由他们写的一系列多臂老虎机博客文章整理而成），大约第 7 章有比课上严格得多的证明。课上只想让大家感受这类界要证明什么，以及次线性遗憾是怎么来的。
+        </p>
+        <h3>要证明的结论</h3>
+        <p>
+            回到 $L_t = \sum_a \mathbb{E}[N_t(a)]\Delta_a$。差距是问题本身决定的，我们影响不了；能影响的是选坏臂的次数。结论是：对次优臂 $a$，UCB 选它的期望次数满足
+        </p>
+        $$\mathbb{E}[N_T(a)] \le \frac{C'\log\frac1\delta}{\Delta_a^2} + \frac{\pi^2}{3} + 1$$
+        <p>
+            $C'$ 是一个常数，Emma 没有说具体值（算法论文里一般也藏在细则里），要点是它不能依赖问题的参数，比如臂数或差距，可以是 37 之类的数。这个结果有意思的地方在于：差距大的臂会被选得少得多，差距小的臂可能被选很多次。
+        </p>
+        <p>
+            把它代入遗憾公式，第一项乘以 $\Delta_a$ 后分母只剩一个 $\Delta_a$；如果奖励都在 0 到 1 之间，差距最多是 1，第二项最多是臂数乘以 $1+\pi^2/3$：
+        </p>
+        $$L_T \le \sum_{a\,:\,\Delta_a\gt 0}\frac{C'\log\frac1\delta}{\Delta_a} + |\mathcal{A}|\left(1+\frac{\pi^2}{3}\right)$$
+        <p>
+            正式证明还有不少细节，这里只是一个大致思路。课上的证明概要只针对第一部分：选某个臂的次数和差距平方的倒数成正比。
+        </p>
+        <h3>证明概要</h3>
+        <p>
+            只需要关心 $a\ne a^*$ 且 $\Delta_a \ne 0$ 的臂：选 $a^*$ 遗憾为 0；选 $\Delta_a = 0$ 的臂也没有遗憾，它和最优臂打平。要界住的是选次优臂的次数 $N_t(a)$。记 $b_t(a) = \sqrt{C\log\frac1\delta / N_t(a)}$（同样对 $\delta$ 不太严格）。
+        </p>
+        <ol>
+            <li>由 Hoeffding，真实值和经验平均的差超过 $b_t(a)$ 的概率不超过 $\delta/T$。如果置信区间成立（它“足够宽”，包含真值），就有
+                $$Q(a) - b_t(a) \le \hat Q_t(a) \le Q(a) + b_t(a) \qquad (1)$$</li>
+            <li>UCB 只有在 $a$ 的上置信界比 $a^*$ 的高时才会选 $a$，这是选错行动的唯一情形：
+                $$\hat Q_t(a) + b_t(a) \ge \hat Q_t(a^*) + b_t(a^*) \qquad (2)$$
+                而 $a^*$ 的置信区间也成立，所以它的上置信界不低于真值：$\hat Q_t(a^*) + b_t(a^*) \ge Q(a^*)$。</li>
+            <li>把 (1) 的右半边 $\hat Q_t(a)\le Q(a)+b_t(a)$ 代入 (2) 的左边，得到
+                $$Q(a) + 2\,b_t(a) \ge Q(a^*)$$
+                Emma 课上推到这里时卡住了，说常数好像差了一点，下课前（1:12:37）回来更正：就是这一步，把经验平均换成“真值加一个置信半径”，左边就多出一个置信半径，所以系数是 2。</li>
+            <li>移项：$2\sqrt{\frac{C\log(1/\delta)}{N_t(a)}} \ge Q(a^*) - Q(a) = \Delta_a$，两边平方：
+                $$\frac{4C\log\frac1\delta}{N_t(a)} \ge \Delta_a^2 \quad\Longrightarrow\quad N_t(a) \le \frac{4C\log\frac1\delta}{\Delta_a^2}$$</li>
+        </ol>
+        <p>
+            直观含义：置信界成立并用来做决策时，只有当置信区间大到足以盖过差距时，才会做错误的决策。差距非零，而 Hoeffding 保证置信区间随时间缩小，最终会小于差距，所以这种情形只能发生有限次。次优行动被选得越来越少，快慢取决于置信区间相对差距收缩得多快。
+        </p>
+        <p>
+            有学生问：前面假设条件成立，其余部分是不是来自条件不成立的情形？Emma 说对。如果 $\delta$ 设得合适，置信区间以高概率在所有时间步成立，还剩一个小概率它不成立，可以论证那些时间点上的遗憾也有界。做法是把期望拆成高概率事件和低概率事件两部分。
+        </p>
+        <p>
+            结果：因为 $\delta$ 里含有 $T$（联合界），选次优行动的次数里有 $\log T$，所以 UCB 达到关于 $\log T$ 的渐近对数遗憾。这是课上第一个可证明次线性遗憾的算法，而且很容易实现，至少在可以计数的情况下。所有这些都能推广到复杂得多的设定，包括函数近似和 RL，后面会看到怎样把乐观原则形式化。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 实际表现，以及悲观为什么不行</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=sqYii3nd78w&t=3928s" target="_blank">1:05:28</a>–1:14:53</em></p>
+        <h3>经验表现</h3>
+        <p>
+            Emma 放了一张以前的实验结果图：横轴是数据量，纵轴是到目前为止的表现。调好的 ε-greedy 可以明显变好，UCB 则有漂亮的对数形状，前提是常数设对。实际中常数影响很大：如果常数设错，或者直接用理论推出来的值，UCB 往往会探索很久，所以实践中通常可以比理论值更激进一些。
+        </p>
+        <h3>可选思考题：总选下置信界最高的臂</h3>
+        <p>
+            UCB 的另一种选法是总选下置信界（lower bound）最高的臂，也就是悲观。这可能导致线性遗憾。Emma 说如果这是考试题，她希望你构造一个多臂老虎机实例，使按这个准则选择会得到线性遗憾。可以参考前面贪心的例子：那里构造了一个拉臂序列，使算法永远无法恢复。
+        </p>
+        <p>
+            讨论后她在白板上画了两个臂（纵轴为奖励）：$a_1$ 的区间较窄，$a_2$ 的下界比 $a_1$ 低，按下界选会选 $a_1$。要让悲观真的失败，$a_2$ 的均值和上界该放在哪？学生答：$a_2$ 的均值要比 $a_1$ 高，上界也要很高。对，比如 $a_2$ 很不确定，均值更高、上界很高，但下界低于 $a_1$ 的均值。选了 $a_1$ 以后，$a_1$ 的下界只会越来越靠近它的均值；这些区间都是有效的，$a_2$ 的下界确实低于 $a_1$ 的均值，所以 $a_2$ 永远不会被选到。$a_2$ 的上置信界比 $a_1$ 高，UCB 会去试它并学到真相。乐观时，要么选对了，要么学到了东西；悲观的问题是可能什么也学不到，因为另一个臂的界从不更新。
+        </p>
+        <h3>下一讲</h3>
+        <p>
+            下一讲继续快速学习，但换一个很不同的视角：贝叶斯老虎机（Bayesian bandits）。不再用固定的上下“矩形”置信区间，而是对每个臂的奖励分布有一个先验，再引入一些在某些方面和乐观相似的算法，用先验信息决定怎样快速收集数据并开始做好的决策。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 2026 版更新</h2>
+        <p>
+            2026 年冬季的老虎机内容分在两讲。对应这一讲的“第 10 讲：Fast Reinforcement Learning”课件开头写着“Last time: Bandits and regret and UCB”，可见 2026 年把老虎机、遗憾和 UCB1 的入门放在了上一讲（本笔记没有拿到那一讲的课件文本）。第 10 讲课件里和本页相关的内容：
+        </p>
+        <ul>
+            <li>复习题：五个说法全部为真。最小化遗憾的算法也最大化奖励；忽略常数和 $\delta$，UCB 选 $\arg\max_a \hat Q_t(a) + f(\sqrt{1/N_t(a)})$；把加成项换成 $\sqrt{\frac{1}{\sqrt{N_t(a)}}\log(t/\delta)}$ 仍可能学会更多地拉最优臂；固定加成 $b = 5$ 对经验奖励是乐观的，但仍可能有线性遗憾；$k$ 臂老虎机像一个只有一个状态、$k$ 个行动的 MDP。2024 年这组题放在了第 12 讲开头，讲解见下一页。</li>
+            <li>希腊边境新冠检测的例子（Bastani 等人发表在 Nature 上的论文，“非平稳、上下文、批量、延迟反馈并带约束的老虎机问题”），2024 年在第 12 讲讲。</li>
+            <li>新增一份严格的 UCB 遗憾证明，按《Bandit Algorithms》定理 7.1 写，标为 New。定理：奖励在 $[0,1]$ 的 $K$ 臂随机老虎机，对任意时长 $n$，取 $\delta = 1/n^2$，则
+                $$\mathrm{Regret}_n \le 3\sum_{i=1}^{K}\Delta_i + \sum_{i\,:\,\Delta_i\gt 0}\frac{16\log n}{\Delta_i}$$
+                证明步骤：设 $a^* = a_1$，定义好事件 $G_i = \{Q(a_1) \lt \min_{t\le n}\mathrm{UCB}_1(t,\delta)\}\cap\{\hat Q_{u_i}(a_i) + \sqrt{\tfrac{2}{u_i}\log\tfrac1\delta} \lt Q(a_1)\}$，$u_i$ 是待定的拉臂次数。拆期望 $\mathbb{E}[N_n(a_i)] = \mathbb{E}[\mathbb{1}(G_i)N_n(a_i)] + \mathbb{E}[\mathbb{1}(G_i^c)N_n(a_i)] \le u_i + n\,P(G_i^c)$；第一项用反证法：若在好事件下 $a_i$ 被拉超过 $u_i$ 次，则某一步 $a_i$ 的 UCB 已低于 $Q(a_1)$，又低于 $a_1$ 的 UCB，不应选 $a_i$。第二项用联合界得 $P(Q(a_1)\ge\min_t \mathrm{UCB}_1)\le n\delta$，并选 $u_i$ 使 $\Delta_i - \sqrt{2\log(1/\delta)/u_i}\ge c\Delta_i$，由集中不等式得 $\exp(-u_i c^2\Delta_i^2/2)$。于是 $u_i \ge \frac{2\log(1/\delta)}{(1-c)^2\Delta_i^2}$，取 $c = 1/2$、$\delta = 1/n^2$，得到 $\mathbb{E}[N_n(a_i)] \le 3 + \frac{16\log n}{\Delta_i^2}$。课件上还标注了原版的笔误（下标 $i$ 应为 1）已更正。这和 2024 年课上的证明概要思路相同，但常数和“好事件/坏事件”的拆分都写全了。</li>
+            <li>同一份课件后半部分是客座讲座：Wanheng Hu 讲价值对齐（value alignment），内容与 2024 年第 15 讲 Dan Webber 的部分对应（课件注明基于 Dan Webber 的材料），课件里有两个案例：RLHF 训练的 LLM 中的谄媚（sycophancy），以及个人 AI agent 什么时候该自己行动、什么时候该询问或拒绝用户。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>在真实世界（健康、教育、广告、环境政策）里，样本和计算是分开的，数据有限，要关心样本效率；评价算法看是否收敛、是否收敛到最优、需要多少数据。</li>
+            <li>多臂老虎机 $(\mathcal{A},\mathcal{R})$ 是单状态 RL：每步选臂 $a_t$，得到 $r_t\sim\mathcal{R}^{a_t}$，目标最大化累积奖励；这里 $Q(a)$ 是期望即时奖励。</li>
+            <li>遗憾：$l_t = \mathbb{E}[V^*-Q(a_t)]$，$L_t = \sum_a \mathbb{E}[N_t(a)]\Delta_a$，差距 $\Delta_a = V^*-Q(a)$；最大化累积奖励等价于最小化总遗憾。</li>
+            <li>贪心可能永远锁定次优臂；固定 $\epsilon\gt 0$ 的 ε-greedy 每个臂至少被选 $\frac{\epsilon}{|\mathcal{A}|}t$ 次，也是线性遗憾。</li>
+            <li>Lai–Robbins 下界 $\lim_{t\to\infty}L_t \ge \log t\sum_{a:\Delta_a\gt0}\frac{\Delta_a}{D_{KL}(\mathcal{R}^a\|\mathcal{R}^{a^*})}$，说明次线性遗憾并非不可能。</li>
+            <li>乐观面对不确定性：选可能好的臂，要么拿到高奖励，要么学到东西。</li>
+            <li>Hoeffding：$P(\mathbb{E}[X]\gt\bar X_n+u)\le\exp(-2nu^2)$；由此得 UCB1：$a_t=\arg\max_a\big[\hat Q_t(a)+\sqrt{2\log(1/\delta)/N_t(a)}\big]$，用联合界把 $\delta$ 换成 $\delta/(T|\mathcal{A}|)$。</li>
+            <li>证明核心：区间成立时选次优臂意味着 $2b_t(a)\ge\Delta_a$，于是 $N_t(a)\le 4C\log(1/\delta)/\Delta_a^2$，总遗憾关于 $\log T$ 对数增长。</li>
+            <li>实践中按理论设常数会探索过久；总选下置信界最高的臂（悲观）可能永远不试被低估的臂，导致线性遗憾。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS234 Reinforcement Learning · Lecture 11: Exploration 1 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 2 讲：表格型 MDP 规划 | Stanford CS234 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="01_强化学习导论.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS234 目录</a> · Lecture 2</span>
+    <span><a href="03_无模型策略评估.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 2 讲：表格型 MDP 规划</h1>
+        <p class="subtitle">模型已知时怎样做决策：MRP 的 Bellman 方程和它的解析解、迭代解，MDP 加策略等于 MRP，策略迭代和它的单调改进证明，价值迭代，Bellman 算子是压缩映射，以及有限视界和用模拟来评估策略</p>
+        <div class="author-meta">
+            主讲：Emma Brunskill · 时长：1 小时 13 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=gHdsUUGcBC0" target="_blank">课堂录像</a>（Stanford Online 公开，2024 年春季，本文依据录像字幕整理；这一讲只有自动字幕，公式按 2026 年课件核对）；补充：<a href="https://web.stanford.edu/class/cs234/modules.html" target="_blank">2026 年冬季课件</a>（2026 年的录像只对选课学生开放；文中标“2026 版更新”的内容来自 2026 年课件）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            这一讲假设世界的模型已知：动态模型 $P(s'\mid s,a)$ 和奖励模型 $R(s,a)$ 都给定，状态和行动都是有限的，可以列成表格。要回答两个问题：一个给定策略有多好（策略评估），最好的策略是什么（控制）。这在 AI 里叫规划（planning）。
+        </p>
+        <p>
+            开场 Emma 提了一个贯穿全讲的问题：能不能设计一种算法，保证多算一些（多迭代几轮）决策策略就单调变好？是不是所有算法都有这个性质？答案在这一讲里：策略迭代有，价值迭代不一定有。讲完这两个算法，再证明 Bellman 备份是一个压缩映射，所以价值迭代一定收敛。
+        </p>
+        <ol>
+            <li><a href="#t01">开场投票：折扣因子</a> · <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">为什么从 7 个状态的火星车讲起</a> · <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=298s" target="_blank">0:04:58</a></li>
+            <li><a href="#t03">MRP 的价值：Bellman 方程、解析解和迭代解</a> · <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=445s" target="_blank">0:07:25</a></li>
+            <li><a href="#t04">MDP 和策略评估</a> · <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=812s" target="_blank">0:13:32</a></li>
+            <li><a href="#t05">有多少个策略，最优策略是否唯一</a> · <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=1108s" target="_blank">0:18:28</a></li>
+            <li><a href="#t06">策略迭代和 Q 函数</a> · <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=1327s" target="_blank">0:22:07</a></li>
+            <li><a href="#t07">策略改进为什么单调</a> · <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=1618s" target="_blank">0:26:58</a></li>
+            <li><a href="#t08">投票：策略不再变化以后还会变吗</a> · <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=2207s" target="_blank">0:36:47</a></li>
+            <li><a href="#t09">价值迭代</a> · <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=2765s" target="_blank">0:46:05</a></li>
+            <li><a href="#t10">Bellman 算子和压缩映射</a> · <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=3363s" target="_blank">0:56:03</a></li>
+            <li><a href="#t11">有限视界和用模拟评估策略</a> · <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=4102s" target="_blank">1:08:22</a></li>
+            <li><a href="#t12">术语和应该掌握的内容</a> · <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=4320s" target="_blank">1:12:00</a></li>
+            <li><a href="#t13">2026 版更新</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场投票：折扣因子</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=5s" target="_blank">0:00:05</a>–0:04:58</em></p>
+        <p>
+            投票题：在马尔可夫决策过程中，折扣因子 $\gamma$ 大，意味着短期奖励比长期奖励影响大得多。对还是错？大约三分之二对三分之一，正确答案是错。一个学生解释：长期奖励要乘上 $\gamma$ 的若干次方，$\gamma$ 大则长期奖励保留得多。Emma 补充：$\gamma = 1$ 时短期和长期奖励一样重要；$\gamma = 0$ 时完全不在乎长期奖励，是彻底短视（myopic）的；$\gamma$ 越接近 1，长期奖励的相对权重越大。
+        </p>
+        <p>
+            她还澄清了上一讲的一处说法：她区分 RL 和其他机器学习时用了“优化”这个词，但监督学习也在最小化损失，也可以叫优化，这个区分带来的困惑比帮助多，可以先忽略。她想强调的是，做决策时用什么指标很重要，不一定只是损失函数，可以是各种标量值，甚至是多个目标。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 为什么从 7 个状态的火星车讲起</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=298s" target="_blank">0:04:58</a>–0:07:25</em></p>
+        <p>
+            Emma 提醒，前一两周的内容会和 Stanford 其他决策类课程（比如 Mykel Kochenderfer 的 CS238）有些重叠，不同之处是这里会更多讲算法的理论性质和保证，之后的内容差别就大了。
+        </p>
+        <p>
+            大家可能想直接学 AlphaGo、机器人控制或者优化 LLM，为什么先讲 7 个状态的火星车？她说解决 AlphaGo、做 RLHF 的很多想法都建立在决策过程这个基本概念上，在表格型（tabular）世界里能把所有状态写下来，这些想法最容易看清楚。这一讲就会出现策略搜索，它是策略梯度的基础，而策略梯度用得极广。几周之内就会讲到最先进的算法。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. MRP 的价值：Bellman 方程、解析解和迭代解</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=445s" target="_blank">0:07:25</a>–0:13:32</em></p>
+        <h3>回顾：回报和价值</h3>
+        <p>
+            视界 $H$ 是每个回合的步数，可以是无限的。回报是从 $t$ 到视界结束的折扣奖励和，价值是期望回报：
+        </p>
+        $$G_t = r_t + \gamma r_{t+1} + \gamma^2 r_{t+2} + \cdots + \gamma^{H-1} r_{t+H-1},\qquad V(s) = \mathbb{E}[G_t\mid s_t = s]$$
+        <p>
+            今天大部分时间考虑无限视界，也就是“从这个状态出发、永远行动下去能拿多少奖励”。只要 $\gamma &lt; 1$，这个值就是有限的。回报是某一次实际拿到的奖励序列；$V$ 是平均意义上的。
+        </p>
+        <h3>Bellman 方程</h3>
+        <p>
+            计算无限视界 MRP 的价值要用马尔可夫性质：给定当前状态，不用再管历史。所以一个状态的期望未来奖励等于眼前的奖励，加上所有可能的下一个状态的价值按转移概率加权求和，再乘以 $\gamma$：
+        </p>
+        $$V(s) = \underbrace{R(s)}_{\text{即时奖励}} + \underbrace{\gamma \sum_{s'\in S} P(s'\mid s)\, V(s')}_{\text{折扣后的未来奖励}}$$
+        <p>
+            熟悉树搜索的话，可以想成：从起点出发，列出所有下一个状态，按到达概率给权重，把它们的价值加起来。这就是后面会一直用到的 Bellman 方程的基础。
+        </p>
+        <h3>解析解</h3>
+        <p>
+            在表格型世界里（每个状态单独存一个数，比如火星车），可以把方程写成矩阵形式 $V = R + \gamma P V$，移项得 $(I - \gamma P)V = R$，所以
+        </p>
+        $$V = (I - \gamma P)^{-1} R$$
+        <p>
+            Emma 提醒，不同教材里转移矩阵有时写成 $T$，有时写成 $P$。这个解析解要求矩阵求逆，一般复杂度约为 $N^3$（$N$ 是状态数，有更快的算法），状态多时很贵，而且要求 $I-\gamma P$ 可逆。有学生问实际中人们会不会直接求逆，她说实际问题的状态空间一般太大，做不了。
+        </p>
+        <h3>迭代解：动态规划</h3>
+        <p>
+            第二种方法是动态规划（dynamic programming），设计一个迭代算法，避开求逆：
+        </p>
+        <ol>
+            <li>对所有 $s$，初始化 $V_0(s) = 0$（可以想想初始值是否重要）。</li>
+            <li>对 $k = 1, 2, \ldots$ 直到收敛，对每个状态 $s$：$V_k(s) = R(s) + \gamma \sum_{s'\in S} P(s'\mid s)\, V_{k-1}(s')$。</li>
+        </ol>
+        <p>
+            反复做，直到价值函数不再变化（会不会停止变化后面再讲）。每轮迭代的代价是 $O(|S|^2)$，比求逆便宜。MDP 的做法和这个很接近。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. MDP 和策略评估</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=812s" target="_blank">0:13:32</a>–0:18:28</em></p>
+        <h3>马尔可夫决策过程</h3>
+        <p>
+            马尔可夫决策过程（Markov Decision Process，MDP）是 MRP 加上行动。动态模型现在依赖所采取的行动：给客户看不同的广告，客户反应不同；机器人控制不同，手的动作不同。这里先假设奖励是状态和行动的函数。一个 MDP 由元组 $(S, A, P, R, \gamma)$ 定义。火星车现在有两个动态模型，一个对应 $a_1$，一个对应 $a_2$（例子里是确定性的，一般可以是随机的），奖励比如 $s_1$ 为 +1、$s_7$ 为 +10、其余为 0。
+        </p>
+        <p>
+            策略指定每个状态下采取什么行动，可以是确定的或随机的。为了一般性，把它写成条件分布 $\pi(a\mid s) = P(a_t = a\mid s_t = s)$。
+        </p>
+        <h3>MDP 加策略等于 MRP</h3>
+        <p>
+            一旦确定了怎么行动，策略这部分就被“消掉”了，剩下的就是一个 MRP $(S, R^\pi, P^\pi, \gamma)$：
+        </p>
+        $$R^\pi(s) = \sum_{a\in A}\pi(a\mid s) R(s,a),\qquad P^\pi(s'\mid s) = \sum_{a\in A}\pi(a\mid s) P(s'\mid s,a)$$
+        <p>
+            奖励是按策略选每个行动的概率对 $R(s,a)$ 加权；动态模型稍微微妙一点，是按行动概率对各行动下的转移分布加权。这样做的好处是，评估 MRP 的所有方法都可以直接用来评估 MDP 中的一个策略，因为 MDP 的策略评估被归约回了 MRP。
+        </p>
+        <h3>迭代策略评估</h3>
+        <ol>
+            <li>对所有 $s$，初始化 $V_0(s) = 0$。</li>
+            <li>对 $k = 1, 2, \ldots$ 直到收敛，对所有 $s$：
+                $$V^\pi_k(s) = \sum_a \pi(a\mid s)\Big[R(s,a) + \gamma\sum_{s'\in S} p(s'\mid s,a)\, V^\pi_{k-1}(s')\Big]$$</li>
+        </ol>
+        <p>
+            这叫针对某个策略的 Bellman 备份（Bellman backup）：它给出从这个状态出发、按策略行动的期望折扣奖励和。如果策略是确定的，更新简化为
+        </p>
+        $$V^\pi_k(s) = R(s,\pi(s)) + \gamma \sum_{s'\in S} p(s'\mid s,\pi(s))\, V^\pi_{k-1}(s')$$
+        <p>
+            Emma 问谁见过这个，大约三分之二的人举手。她建议没见过的人自己在火星车上算一轮。课件上的练习：$p(s_6\mid s_6,a_1)=0.5$，$p(s_7\mid s_6,a_1)=0.5$；无论行动如何，$s_1$ 奖励 +1、$s_7$ 奖励 +10、其余为 0；$\pi(s)=a_1$；$V_k = [1, 0, 0, 0, 0, 0, 10]$，$\gamma = 0.5$。求 $V_{k+1}(s_6)$：
+        </p>
+        $$V_{k+1}(s_6) = 0 + 0.5\times(0.5\times 0 + 0.5\times 10) = 2.5$$
+    </section>
+
+    <section id="t05">
+        <h2>05. 有多少个策略，最优策略是否唯一</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=1108s" target="_blank">0:18:28</a>–0:22:07</em></p>
+        <p>
+            投票：火星车有 7 个状态、2 个行动，确定性策略有多少个？最优策略（价值最高的策略）是否唯一？大多数人答对了：$2^7$ 个。一般来说确定性策略有 $|A|^{|S|}$ 个，因为每个状态都可以选任意一个行动。最优策略不一定唯一：如果有不止一个行动的价值完全相同（打平），就不唯一。
+        </p>
+        <p>
+            有学生问无效行动怎么办，比如在 $s_1$ 往左。Emma 说一般来说每个状态可以有不同的行动空间，推荐系统里很常见，只能给某些人看一部分文章。这个例子里行动是“尝试向左”，左边没有东西就失败、留在原地。课程里大部分时候假设所有状态的行动空间相同。
+        </p>
+        <h3>MDP 控制</h3>
+        <p>
+            控制要算出最优策略：
+        </p>
+        $$\pi^*(s) = \arg\max_\pi V^\pi(s)$$
+        <p>
+            要记住两个性质：存在唯一的最优价值函数；在无限视界的表格型 MDP 中，最优策略是确定性的，并且是平稳的（stationary），也就是只依赖状态、不依赖时间步，因为无限视界下往后永远还有无限步。最优策略本身一般不唯一。有学生问最优性是不是相对初始状态而言，Emma 说是逐个状态的：要在每个状态都最大化从该状态出发的期望折扣奖励和。最优价值函数为什么唯一，这一讲后面会证明。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 策略迭代和 Q 函数</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=1327s" target="_blank">0:22:07</a>–0:26:58</em></p>
+        <p>
+            回到开场问题：希望算法有单调改进的能力，策略搜索就是这样一类方法。确定性策略有 $|A|^{|S|}$ 个，原则上可以全部枚举、全部评估，但通常能做得更好，也就是用更少计算找到最优策略。
+        </p>
+        <p>
+            策略迭代（Policy Iteration，PI）在两步之间交替：有一个候选策略，先评估它，再看能不能改进；能改进就改进，否则停止。
+        </p>
+        <ol>
+            <li>令 $i = 0$，对所有状态随机初始化 $\pi_0(s)$（每个状态随便挑一个行动）。</li>
+            <li>当 $i = 0$ 或 $\lVert\pi_i - \pi_{i-1}\rVert_1 &gt; 0$ 时（L1 范数，衡量是否有任何状态的策略变了）：
+                <ul>
+                    <li>$V^{\pi_i} \leftarrow$ 对 $\pi_i$ 做策略评估；</li>
+                    <li>$\pi_{i+1} \leftarrow$ 策略改进；</li>
+                    <li>$i = i + 1$。</li>
+                </ul>
+            </li>
+        </ol>
+        <h3>状态-行动价值 Q</h3>
+        <p>
+            为了做策略改进，定义一个策略的 Q 函数，也叫状态-行动价值函数（state-action value function）：在状态 $s$ 先执行行动 $a$，之后一直按 $\pi$ 行动，得到的期望折扣奖励和：
+        </p>
+        $$Q^\pi(s,a) = R(s,a) + \gamma\sum_{s'\in S} P(s'\mid s,a)\, V^\pi(s')$$
+        <p>
+            有了 Q 函数，策略改进就很简单：先算出当前策略 $\pi_i$ 的 $Q^{\pi_i}(s,a)$，然后对每个状态取使 Q 最大的行动，
+        </p>
+        $$\pi_{i+1}(s) = \arg\max_a Q^{\pi_i}(s,a)\quad \forall s\in S$$
+        <p>
+            有学生问 Q 函数和价值函数有什么关系，看起来很像。Emma 说 Q 就是状态-行动价值函数，见过 Q-learning 的人会很熟悉这个想法。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 策略改进为什么单调</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=1618s" target="_blank">0:26:58</a>–0:36:47</em></p>
+        <h3>第一步：只换一步</h3>
+        <p>
+            对任意状态 $s$，Q 函数对所有行动取最大值，至少不小于按旧策略选的那个行动的 Q 值，而按旧策略选行动的 Q 值就是旧策略的价值：
+        </p>
+        $$\max_a Q^{\pi_i}(s,a) \ge Q^{\pi_i}(s,\pi_i(s)) = R(s,\pi_i(s)) + \gamma\sum_{s'} P(s'\mid s,\pi_i(s))\, V^{\pi_i}(s') = V^{\pi_i}(s)$$
+        <p>
+            含义是：如果在第一步按新策略 $\pi_{i+1}$ 行动，之后一直按旧策略 $\pi_i$ 行动，期望奖励至少和一直按旧策略一样好。Emma 提醒，这还不够：我们构造的新策略每一步都用新策略的行动，并没有“第一步用新策略、之后用旧策略”这种混合。上面的式子还不能说明全程用新策略更好，需要再做一步。
+        </p>
+        <h3>第二步：递归展开</h3>
+        <p>
+            要证明的是 $V^{\pi_i}(s) \le V^{\pi_{i+1}}(s)$。推导如下：
+        </p>
+        $$\begin{aligned}
+        V^{\pi_i}(s) &amp;\le \max_a Q^{\pi_i}(s,a) = \max_a\Big[R(s,a) + \gamma\sum_{s'} P(s'\mid s,a)\, V^{\pi_i}(s')\Big]\\
+        &amp;= R(s,\pi_{i+1}(s)) + \gamma\sum_{s'} P(s'\mid s,\pi_{i+1}(s))\, V^{\pi_i}(s') \quad (\pi_{i+1}\text{ 的定义})\\
+        &amp;\le R(s,\pi_{i+1}(s)) + \gamma\sum_{s'} P(s'\mid s,\pi_{i+1}(s))\Big(\max_{a'} Q^{\pi_i}(s',a')\Big)\\
+        &amp;= R(s,\pi_{i+1}(s)) + \gamma\sum_{s'} P(s'\mid s,\pi_{i+1}(s))\Big(R(s',\pi_{i+1}(s')) + \gamma\sum_{s''} P(s''\mid s',\pi_{i+1}(s'))\, V^{\pi_i}(s'')\Big)\\
+        &amp;\;\;\vdots\\
+        &amp;= V^{\pi_{i+1}}(s)
+        \end{aligned}$$
+        <p>
+            第二行用的是：$\pi_{i+1}$ 就是那个 argmax，把它代进去正好等于最大值。第三行用的是：按某个策略行动的价值 $V^{\pi_i}(s')$ 总是不大于对它的 Q 函数取最大值，因为最大值要么就是 $\pi_i$ 的行动，要么是更好的行动。然后把 $\max_{a'}Q^{\pi_i}(s',a')$ 再展开一次，等于在 $s'$ 也用新策略的行动、两步之后才回到旧策略。反复嵌套下去（学生问省略号是什么意思，Emma 说就是一直这样展开下去），每一处小于等于都来自“允许对 Q 取最大值”，展开到底就正好是 $V^{\pi_{i+1}}(s)$。
+        </p>
+        <p>
+            结论：策略改进得到的新策略在每个状态上都不比旧策略差，除非两者相同，否则就是严格的单调改进。只有已经收敛时才不再改进。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 投票：策略不再变化以后还会变吗</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=2207s" target="_blank">0:36:47</a>–0:46:05</em></p>
+        <p>
+            投票两问：如果某一轮策略没有变化，它以后还可能变吗？策略迭代的迭代次数有没有上限？两题的票都很分散，Emma 让大家先和旁边的人讨论。有学生问：不等式都是“小于等于”，会不会一直等于、原地不动？她说除非已经是最优策略，只要有任何一个状态能改进，就会改进。
+        </p>
+        <p>
+            她澄清，这题按“没有打平、最优策略唯一”的简单情况来想。在这种情况下，答案是：策略一旦不变，就永远不会再变。理由：如果 $\pi_{i+1} = \pi_i$，那么 $Q^{\pi_{i+1}} = Q^{\pi_i}$，再从它提取出的策略还是同一个，于是一直停在这里。如果有打平，情况更复杂：确定性地打破平局，会停在原地；否则可能在所有最优策略（Q 值相同的那些策略）之间来回切换。
+        </p>
+        <p>
+            迭代次数有上限：确定性策略只有 $|A|^{|S|}$ 个，策略改进每一步要么提高价值、要么停止，所以每个策略最多经过一次，策略迭代最多 $|A|^{|S|}$ 轮就会停止。真走满 $|A|^{|S|}$ 轮意味着评估了每一个策略，一般不会这样。
+        </p>
+        <p>
+            有学生问：我们只证明了收敛到最优策略，但没保证比随机策略好？Emma 说如果所有行动奖励完全一样，随机行动和按策略行动价值相同；能不能比随机好取决于问题本身，一般希望好得多。
+        </p>
+        <p>
+            策略迭代的这种单调性很实用：状态空间很大时，你可能不想等到策略完全不变才停，比如有时间限制，可以迭代 100 或 1000 次后停下来用当时的策略，仍然能保证它越来越好。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 价值迭代</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=2765s" target="_blank">0:46:05</a>–0:56:03</em></p>
+        <h3>两种思路的区别</h3>
+        <p>
+            策略迭代在每个时刻都有一个明确的策略，以及这个策略“永远执行下去”的价值，只是早期的策略可能很差。价值迭代（Value Iteration，VI）不同：每一轮都维护“如果只能再做有限步决策”时的最优价值。先算只能走一步时的最优做法，再在它的基础上算能走两步时的最优做法，依此类推。Emma 的说法是：策略迭代总有无限视界下的价值，但策略可能不好；价值迭代总有最优的价值，但视界不对。价值迭代用动态规划，不断推到 $k+1$、$k+2$ 步。
+        </p>
+        <h3>Bellman 方程和 Bellman 备份算子</h3>
+        <p>
+            一个策略的价值函数满足 Bellman 方程。把它变成算法，就有 Bellman 备份算子（Bellman backup operator）$B$：给它一个价值函数（现在可以看成一个向量），它对每个状态返回“采取使眼前奖励加期望未来价值最大的行动”得到的值：
+        </p>
+        $$BV(s) = \max_a\Big[R(s,a) + \gamma\sum_{s'\in S} P(s'\mid s,a)\, V(s')\Big]$$
+        <h3>算法</h3>
+        <ol>
+            <li>令 $k = 1$，对所有状态初始化 $V_0(s) = 0$。</li>
+            <li>循环直到收敛（比如 $\lVert V_{k+1} - V_k\rVert_\infty \le \epsilon$）：对每个状态 $s$，
+                $$V_{k+1}(s) = \max_a\Big[R(s,a) + \gamma\sum_{s'\in S} P(s'\mid s,a)\, V_k(s')\Big]$$
+                用算子写就是 $V_{k+1} = BV_k$。</li>
+            <li>提取策略（如果还能行动 $k+1$ 步）：
+                $$\pi(s) = \arg\max_a\Big[R(s,a) + \gamma\sum_{s'\in S} P(s'\mid s,a)\, V_{k+1}(s')\Big]$$</li>
+        </ol>
+        <p>
+            L∞ 范数 $\lVert V_{k+1} - V_k\rVert_\infty = \max_s |V_{k+1}(s) - V_k(s)|$：比较两个向量的每一项，取差得最多的那一项。策略迭代一直做到策略不变，价值迭代一直做到价值函数不变（所有状态新旧值之差都很小）。通常中间不计算策略，迭代很多轮后再提取一次 argmax 就行。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>有学生问，怎么理解价值迭代对应有限视界？Emma 说一开始如果一步都不能走，从任何状态出发的期望奖励都是 0。第一轮 $V_0 = 0$，备份后 $V_1(s) = \max_a R(s,a)$，就是只能做一个决策时的最好结果。下一轮是“现在做一个决策，再加上之后一步的价值”，依此类推。</li>
+            <li>max 里面的那个式子是不是 $Q(s,a)$？是的，所以 $V_{k+1}(s) = \max_a Q_k(s,a)$。</li>
+            <li>有学生指出，策略迭代里也可以用价值函数不再变化作为停止条件。Emma 同意。</li>
+            <li>有学生问两种方法哪个更快、有没有理论比较。Emma 说她回去查一下，就她所知没有与具体问题无关的结论；实际中策略搜索很流行，部分原因可能是它有单调改进；价值迭代没有这个保证，它总是“视界不对的最优”，策略迭代则是“可能很久都不最优，但一直在单调变好”。</li>
+        </ul>
+    </section>
+
+    <section id="t10">
+        <h2>10. Bellman 算子和压缩映射</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=3363s" target="_blank">0:56:03</a>–1:08:22</em></p>
+        <h3>策略迭代也可以写成 Bellman 算子</h3>
+        <p>
+            针对特定策略 $\pi$ 的 Bellman 备份算子没有 max，只是按这个策略走：
+        </p>
+        $$B^\pi V(s) = R^\pi(s) + \gamma\sum_{s'\in S} P^\pi(s'\mid s)\, V(s')$$
+        <p>
+            策略评估就是求它的不动点（fixed point）：反复应用 $B^\pi$ 直到 $V$ 不变，这就是前面的迭代算法换了个写法。策略改进则是再做一次备份但取 argmax：
+        </p>
+        $$\pi_{k+1}(s) = \arg\max_a\Big[R(s,a) + \gamma\sum_{s'\in S} P(s'\mid s,a)\, V^{\pi_k}(s')\Big]$$
+        <p>
+            括号里就是 $Q^{\pi_k}(s,a)$。一般说“Bellman 备份”时，指的是带 max 的那个最优版本。
+        </p>
+        <h3>压缩算子</h3>
+        <p>
+            策略迭代一定收敛，因为策略只有有限个、不会重复。价值迭代为什么收敛还不明显。定义：设 $O$ 是一个算子，$|x|$ 表示某种范数（比如 L∞）。如果
+        </p>
+        $$|OV - OV'| \le |V - V'|$$
+        <p>
+            就称 $O$ 为压缩算子（contraction operator）。直观地说：两个价值函数在某些状态上差得很多，各自应用算子之后，它们会更接近，最大差距变小。
+        </p>
+        <p>
+            结论：在 $\gamma &lt; 1$，或者以概率 1 最终到达终止状态（两者都保证期望折扣奖励和有界）的条件下，Bellman 备份是压缩映射。
+        </p>
+        <h3>证明：$\gamma &lt; 1$ 时 Bellman 备份是压缩映射</h3>
+        <p>
+            令 $\lVert V - V'\rVert = \max_s |V(s) - V'(s)|$ 为无穷范数，$V_k$、$V_j$ 是任意两个价值函数：
+        </p>
+        $$\begin{aligned}
+        \lVert BV_k - BV_j\rVert &amp;= \Big\lVert \max_a\Big[R(s,a) + \gamma\sum_{s'} P(s'\mid s,a)V_k(s')\Big] - \max_{a'}\Big[R(s,a') + \gamma\sum_{s'} P(s'\mid s,a')V_j(s')\Big]\Big\rVert\\
+        &amp;\le \max_a\Big\lVert R(s,a) + \gamma\sum_{s'} P(s'\mid s,a)V_k(s') - R(s,a) - \gamma\sum_{s'} P(s'\mid s,a)V_j(s')\Big\rVert\\
+        &amp;= \max_a\Big\lVert \gamma\sum_{s'} P(s'\mid s,a)\big(V_k(s') - V_j(s')\big)\Big\rVert\\
+        &amp;\le \max_a\Big\lVert \gamma\sum_{s'} P(s'\mid s,a)\,\lVert V_k - V_j\rVert\Big\rVert\\
+        &amp;= \max_a\Big\lVert \gamma\,\lVert V_k - V_j\rVert \sum_{s'} P(s'\mid s,a)\Big\rVert\\
+        &amp;= \gamma\,\lVert V_k - V_j\rVert
+        \end{aligned}$$
+        <p>
+            逐步解释：
+        </p>
+        <ul>
+            <li>第一个不等式：原式两个 max 可以各选各的行动，现在把 max 提到外面、要求两边用同一个行动。课后有学生问为什么成立，Emma 的解释是：第一个 max 选出某个行动 $a_1$；第二个 max 要么也选 $a_1$，此时相等；要么选了别的行动，那只可能是因为它的值比 $a_1$ 处更大，减去一个更大的数，差反而更小。所以改成同一行动后，差只会更大或相等。</li>
+            <li>行动相同以后，两边的 $R(s,a)$ 抵消。</li>
+            <li>第二个不等式：任何一个状态上两个价值函数的差，都不超过所有状态上的最大差。</li>
+            <li>这个最大差是常数，可以提出求和号；转移概率对所有下一状态求和等于 1；然后对 $a$ 已经没有依赖，max 消失。</li>
+        </ul>
+        <p>
+            所以备份之后的最大差不超过原来最大差的 $\gamma$ 倍。$\gamma &lt; 1$ 时就是严格压缩，比如 $\gamma = 0.9$，距离每次至少缩成原来的 0.9 倍。Emma 补充：即使所有不等式都取等号，只要 $\gamma &lt; 1$ 仍然是压缩。于是价值迭代得到的序列 $V_0, V_1, V_2, \ldots$ 之间的距离不断缩小；又因为价值函数（不动点）唯一，最终会收敛到唯一的价值函数。可以想想：如果有两个不同的不动点，应用一次备份后它们的距离必须缩小，矛盾。
+        </p>
+        <h3>课后思考题</h3>
+        <ul>
+            <li>证明在离散状态和行动空间、$\gamma &lt; 1$ 时，价值迭代收敛到唯一解。</li>
+            <li>价值迭代的初始值有没有影响？</li>
+            <li>每一轮价值迭代提取出的策略，如果在真正的无限视界问题中执行，价值是否像策略迭代那样保证单调提高？有学生问这不是隐含在价值迭代里了吗，Emma 说还没有证明任何相关结论，策略迭代证明过，这里留给大家想。</li>
+        </ul>
+    </section>
+
+    <section id="t11">
+        <h2>11. 有限视界和用模拟评估策略</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=4102s" target="_blank">1:08:22</a>–1:12:00</em></p>
+        <h3>有限视界的价值迭代</h3>
+        <p>
+            作业会用到有限视界。这时价值迭代就是为每个视界算最优价值：$V_k$ 是还能做 $k$ 个决策时的最优价值，$\pi_k$ 是对应的最优策略。
+        </p>
+        <ol>
+            <li>对所有状态初始化 $V_0(s) = 0$。</li>
+            <li>对 $k = 1$ 到 $H$，对每个状态 $s$：
+                $$V_{k+1}(s) = \max_a\Big[R(s,a) + \gamma\sum_{s'} P(s'\mid s,a)V_k(s')\Big],\qquad \pi_{k+1}(s) = \arg\max_a\Big[R(s,a) + \gamma\sum_{s'} P(s'\mid s,a)V_k(s')\Big]$$</li>
+        </ol>
+        <p>
+            更新式和前面一样，但这里每一步都能得到一个策略，最后得到一串策略，每个时间步一个。课件上的思考题：有限视界任务的最优策略是否平稳（与时间步无关）？课件给出的答案是一般不是。
+        </p>
+        <h3>用模拟估计策略价值</h3>
+        <p>
+            另一种评估策略的办法是模拟，状态空间很大时很流行。已知动态模型和奖励，就从某个状态出发，模拟下一个状态、得到奖励，一直推演（roll out）下去，生成大量回合，然后对回报取平均。老板问这个策略有多好，你在 100 个人身上跑一遍，平均他们的奖励就行。当动态模型难以显式写出、或者对 $s'$ 求和很难，但采样很容易时，这种方法特别有用。
+        </p>
+        <p>
+            课件上的例子：火星车，$H = 4$，$\gamma = 1/2$，从 $s_4$ 出发采样几条 4 步轨迹：
+        </p>
+        <ul>
+            <li>$s_4, s_5, s_6, s_7$：$0 + \tfrac12\times 0 + \tfrac14\times 0 + \tfrac18\times 10 = 1.25$</li>
+            <li>$s_4, s_4, s_5, s_4$：$0 + \tfrac12\times 0 + \tfrac14\times 0 + \tfrac18\times 0 = 0$</li>
+            <li>$s_4, s_3, s_2, s_1$：$0 + \tfrac12\times 0 + \tfrac14\times 0 + \tfrac18\times 1 = 0.125$</li>
+        </ul>
+        <p>
+            需要多少样本，可以用 Hoeffding、Bernstein 这类集中不等式（concentration inequality）来界定，而且需要的数量不多：即使状态空间巨大（比如 Amazon 的规模，或者维度极高的病人数据），也不用做对 $s'$ 的大求和，只需采样，精度一般按 $1/\sqrt{n}$ 提高，$n$ 是样本数。这种方法也不需要马尔可夫假设，部分可观测的场景（医疗里很常见）也能用，直接推演策略看效果如何（当然医疗中不会随便推演任意策略）。有学生指出这只是策略评估阶段，Emma 说对，可以用来算一个策略的价值，也可以算 Q 值：从一个状态出发，对每个行动分别推演到结束。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 术语和应该掌握的内容</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=gHdsUUGcBC0&t=4320s" target="_blank">1:12:00</a>–1:13:27</em></p>
+        <p>
+            在 MDP 和 RL 的语境里：模型（model）一般指动态和奖励的数学模型；策略（policy）是从状态到行动的函数，可以是确定的或随机的；价值函数（value function）是从某状态出发、按某策略行动的期望折扣奖励和。
+        </p>
+        <p>
+            应该掌握的：马尔可夫过程、MRP、MDP、Bellman 算子、压缩、模型、Q 值和策略的定义；能实现价值迭代和策略迭代（作业会练）；理解它们的优缺点和计算复杂度；能证明压缩性质；分清哪些方法依赖马尔可夫假设、哪些不依赖。下一讲开始讲模型未知时怎样学习。
+        </p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 2026 版更新</h2>
+        <p>
+            2026 年冬季的第 2 讲课件（58 页）内容和 2024 年录像基本一致：同样的投票题、MRP 解析解和迭代解、策略迭代及单调改进证明、价值迭代、压缩证明、有限视界和模拟评估。本页的公式和火星车练习数字都按 2026 年课件核对。能看出的变化：
+        </p>
+        <ul>
+            <li>课件新增“Value vs Policy Iteration”对比页：价值迭代算视界为 $k$ 的最优价值（也可用来得到视界为 $k$ 的最优策略），然后增加 $k$；策略迭代算一个策略的无限视界价值，用它选出另一个更好的策略，并注明策略迭代和 RL 里很流行的策略梯度方法关系密切。</li>
+            <li>课程事务：2026 年提醒大家报名 tutorial（下一周开始），作业 1 在周五发布，下周五下午 6 点截止。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>MRP 价值满足 Bellman 方程 $V = R + \gamma PV$，解析解 $V = (I-\gamma P)^{-1}R$ 需要约 $O(N^3)$ 的求逆；迭代法每轮 $O(|S|^2)$。</li>
+            <li>MDP 由 $(S,A,P,R,\gamma)$ 定义；MDP 加上策略就是一个 MRP，$R^\pi(s)=\sum_a\pi(a\mid s)R(s,a)$，$P^\pi(s'\mid s)=\sum_a\pi(a\mid s)P(s'\mid s,a)$。</li>
+            <li>确定性策略有 $|A|^{|S|}$ 个；无限视界表格型 MDP 的最优价值函数唯一，存在确定、平稳的最优策略，但最优策略可能因打平而不唯一。</li>
+            <li>策略迭代：评估 $Q^{\pi_i}$，再取 $\pi_{i+1}(s)=\arg\max_a Q^{\pi_i}(s,a)$；可以证明 $V^{\pi_i}\le V^{\pi_{i+1}}$，单调改进，最多 $|A|^{|S|}$ 轮停止。</li>
+            <li>价值迭代：$V_{k+1}=BV_k$，$BV(s)=\max_a[R(s,a)+\gamma\sum_{s'}P(s'\mid s,a)V(s')]$；它始终是“视界为 $k$ 的最优”，提取的策略不保证单调改进。</li>
+            <li>$\gamma&lt;1$ 时 $\lVert BV_k-BV_j\rVert_\infty\le\gamma\lVert V_k-V_j\rVert_\infty$，Bellman 备份是压缩映射，价值迭代收敛到唯一不动点。</li>
+            <li>有限视界的最优策略一般不平稳；用模拟推演取平均也能评估策略，误差约按 $1/\sqrt{n}$ 下降，不需要马尔可夫假设。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS234 Reinforcement Learning · Lecture 2: Tabular MDP Planning · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

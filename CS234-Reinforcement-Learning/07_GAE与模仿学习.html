@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 7 讲：GAE、单调改进与模仿学习 | Stanford CS234 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="06_基线_Actor-Critic与PPO.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS234 目录</a> · Lecture 7</span>
+    <span><a href="08_最大熵逆强化学习与RLHF.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 7 讲：GAE、单调改进与模仿学习</h1>
+        <p class="subtitle">PPO 用的广义优势估计（TD 误差、裂项求和、λ 加权和截断），最大化下界为什么保证单调改进以及它在实践中为何太保守，然后进入模仿学习：行为克隆、误差累积、DAgger，逆强化学习的不可辨识性，以及线性奖励下的特征匹配</p>
+        <div class="author-meta">
+            主讲：Emma Brunskill · 时长：1 小时 18 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=4ngb0IZTg8I" target="_blank">课堂录像</a>（Stanford Online 公开，2024 年春季，本文依据录像字幕整理）；补充：<a href="https://web.stanford.edu/class/cs234/modules.html" target="_blank">2026 年冬季课件</a>（2026 年的录像只对选课学生开放；2026 年第 7 讲课件的存档副本不完整，无法核对，文中标“2026 版更新”的内容来自 2026 年第 8 讲课件）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            前半讲补完 PPO：上一讲留下的问题是优势函数用什么估计，PPO 用的是截断的广义优势估计（Generalized Advantage Estimation，GAE）。然后回到上一讲的性能下界，证明“每次选使下界最大的策略”一定单调改进，再解释为什么实践中不直接这样做，而是用 KL 惩罚或裁剪。
+        </p>
+        <p>
+            后半讲开始模仿学习（imitation learning）：不再在线收集数据，而是用专家示范。先讲最直接的行为克隆和它的误差累积问题，再讲 DAgger；然后转向从示范中学奖励函数（逆强化学习），指出奖励不可辨识，并把问题化成特征匹配。下一讲讲最大熵逆强化学习和 RLHF。
+        </p>
+        <ol>
+            <li><a href="#t01">开场投票：REINFORCE 的性质</a> · <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">回顾：PPO 要解决的问题</a> · <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=251s" target="_blank">0:04:11</a></li>
+            <li><a href="#t03">TD 误差和裂项求和</a> · <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=417s" target="_blank">0:06:57</a></li>
+            <li><a href="#t04">广义优势估计</a> · <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=842s" target="_blank">0:14:02</a></li>
+            <li><a href="#t05">投票：λ 的作用，以及 PPO 的截断 GAE</a> · <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=1145s" target="_blank">0:19:05</a></li>
+            <li><a href="#t06">最大化下界保证单调改进</a> · <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=1713s" target="_blank">0:28:33</a></li>
+            <li><a href="#t07">理论为什么太保守，PPO 的要点</a> · <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=2402s" target="_blank">0:40:02</a></li>
+            <li><a href="#t08">模仿学习的设定</a> · <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=2716s" target="_blank">0:45:16</a></li>
+            <li><a href="#t09">行为克隆</a> · <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=2974s" target="_blank">0:49:34</a></li>
+            <li><a href="#t10">误差累积</a> · <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=3237s" target="_blank">0:53:57</a></li>
+            <li><a href="#t11">DAgger</a> · <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=3602s" target="_blank">1:00:02</a></li>
+            <li><a href="#t12">学奖励：逆强化学习和不可辨识性</a> · <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=3800s" target="_blank">1:03:20</a></li>
+            <li><a href="#t13">线性奖励和特征匹配</a> · <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=4241s" target="_blank">1:10:41</a></li>
+            <li><a href="#t14">2026 版更新</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场投票：REINFORCE 的性质</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=5s" target="_blank">0:00:05</a>–0:04:11</em></p>
+        <p>
+            关于 REINFORCE（PG 指策略梯度），哪些对？（选项和答案按课件）
+        </p>
+        <ol type="a">
+            <li>加基线项能降低 PG 更新的方差。对，这是加基线的原因之一。</li>
+            <li>它会收敛到全局最优。错，大家都同意。</li>
+            <li>可以用一个次优的确定性策略初始化，给定合适的步长仍能收敛到局部最优。错。学生解释：确定性策略可能永远不采取某个行动，所以无法到达局部最优。Emma 补充：只按确定方式行动，就不会知道这个状态下其他行动怎样，当前策略如果次优，就到不了更好的地方。</li>
+            <li>走一步 PG 之后，得到的策略可能比初始策略更差（按回报算）。对。一般不保证单调改进；我们希望有，PPO 是在朝这个方向努力。</li>
+        </ol>
+    </section>
+
+    <section id="t02">
+        <h2>02. 回顾：PPO 要解决的问题</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=251s" target="_blank">0:04:11</a>–0:06:57</em></p>
+        <p>
+            作业要实现 PPO 和 REINFORCE。用 $\theta$ 参数化策略、做随机梯度下降。REINFORCE 的问题：样本效率差，用一个策略收集数据、只走一步梯度、再用新策略收集数据；参数空间的距离一般不等于行动空间（策略空间）的距离，参数的小变化可能大大改变行动。PPO 用两种办法让每次执行策略之间能走更大的步，同时鼓励单调改进。它依据的界是：只用当前数据近似新策略的表现（一种离策略估计），误差和新旧策略实际采取行动的 KL 散度有关。PPO 要么用自适应 KL 惩罚（别离上一个策略的行动太远），要么用裁剪目标（作用类似）。
+        </p>
+        <p>
+            上一讲大量用到优势函数，实现时会问：优势函数到底代入什么？选择很多，这一讲讲 PPO 用的那一种。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. TD 误差和裂项求和</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=417s" target="_blank">0:06:57</a>–0:14:02</em></p>
+        <p>
+            回到上一讲的 n 步估计。从第 3 讲起，课程一直在讨论两类方法的取舍：利用马尔可夫性质做自举的方法（比如 TD），和完全不利用马尔可夫性质的方法（蒙特卡洛）。$\hat A^{(1)}$ 是 TD 估计，立即自举；$\hat A^{(\infty)}$ 基本是蒙特卡洛估计（实际上不能真到无穷，需要回合式设定，课程目前主要也是回合式），都减去当前状态的价值估计 $V(s_t)$。
+        </p>
+        <p>
+            定义 $\delta^V_t$，就是 TD 备份：
+        </p>
+        $$\delta^V_t = r_t + \gamma V(s_{t+1}) - V(s_t)$$
+        <p>
+            注意下标 $t$ 很重要，可以代入不同的 $t$。上标 $V$ 表示代入的是哪个价值函数。于是
+        </p>
+        $$\begin{aligned}
+        \hat A^{(1)}_t &amp;= r_t + \gamma V(s_{t+1}) - V(s_t) = \delta^V_t\\
+        \hat A^{(2)}_t &amp;= r_t + \gamma r_{t+1} + \gamma^2 V(s_{t+2}) - V(s_t) = \delta^V_t + \gamma\delta^V_{t+1}\\
+        \hat A^{(k)}_t &amp;= \sum_{l=0}^{k-1}\gamma^l\delta^V_{t+l} = r_t + \gamma r_{t+1} + \cdots + \gamma^{k-1}r_{t+k-1} + \gamma^k V(s_{t+k}) - V(s_t)\\
+        \hat A^{(\infty)}_t &amp;= \sum_{l=0}^{\infty}\gamma^l\delta^V_{t+l} = r_t + \gamma r_{t+1} + \gamma^2 r_{t+2} + \cdots - V(s_t)
+        \end{aligned}$$
+        <p>
+            验证两步的情况：$\delta^V_t + \gamma\delta^V_{t+1} = [r_t + \gamma V(s_{t+1}) - V(s_t)] + \gamma[r_{t+1} + \gamma V(s_{t+2}) - V(s_{t+1})]$，其中 $\gamma V(s_{t+1})$ 和 $-\gamma V(s_{t+1})$ 抵消，剩下两个奖励、$\gamma^2 V(s_{t+2})$ 和 $-V(s_t)$。继续下去，中间所有自举项都会两两抵消，所以叫裂项求和（telescoping sum）：这一项加上的东西，下一项会减掉，最后只剩折扣奖励和加上最后一项。大约一半学生见过。Emma 说这个技巧在 RL 的证明里经常出现。
+        </p>
+        <p>
+            有学生问，这是不是说 $\gamma^2V(s_{t+2})$ 等于 $\gamma V(s_{t+1})$？她说不是，只是字面上的抵消：$\gamma\delta_{t+1}$ 里有一个 $-\gamma V(s_{t+1})$，正好消掉前一项里的 $+\gamma V(s_{t+1})$。另一位学生发现课件上一处下标写错了（应为 $t$，总是用最后一个时间步自举），她当场改正。这些只是用 $\delta$ 记号重写了各种 n 步估计，还没有引入新的估计量。第一个低方差、高偏差，最后一个低偏差、高方差。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 广义优势估计</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=842s" target="_blank">0:14:02</a>–0:19:05</em></p>
+        <p>
+            这么多估计，选哪个？GAE 的做法是全都用，取加权组合。引入参数 $\lambda$，按 $1, \lambda, \lambda^2, \ldots$ 加权，再乘以 $(1-\lambda)$ 归一化：
+        </p>
+        $$\begin{aligned}
+        \hat A^{GAE(\gamma,\lambda)}_t &amp;= (1-\lambda)\big(\hat A^{(1)}_t + \lambda\hat A^{(2)}_t + \lambda^2\hat A^{(3)}_t + \cdots\big)\\
+        &amp;= (1-\lambda)\big(\delta^V_t + \lambda(\delta^V_t + \gamma\delta^V_{t+1}) + \lambda^2(\delta^V_t + \gamma\delta^V_{t+1} + \gamma^2\delta^V_{t+2}) + \cdots\big)\\
+        &amp;= (1-\lambda)\big(\delta^V_t(1 + \lambda + \lambda^2 + \cdots) + \gamma\delta^V_{t+1}(\lambda + \lambda^2 + \cdots) + \gamma^2\delta^V_{t+2}(\lambda^2 + \lambda^3 + \cdots) + \cdots\big)\\
+        &amp;= (1-\lambda)\Big(\delta^V_t\frac{1}{1-\lambda} + \gamma\delta^V_{t+1}\frac{\lambda}{1-\lambda} + \gamma^2\delta^V_{t+2}\frac{\lambda^2}{1-\lambda} + \cdots\Big)\\
+        &amp;= \sum_{l=0}^{\infty}(\gamma\lambda)^l\delta^V_{t+l}
+        \end{aligned}$$
+        <p>
+            第三行是按 $\delta$ 归并同类项：$\delta_t$ 出现在每一个估计里，$\delta_{t+1}$ 从第二个估计开始出现，依此类推；然后用几何级数求和。这是 PPO 之前的一篇论文提出的，PPO 在它的基础上做。好处是不用分别算出并保存所有 n 步优势，只需记录 $\delta$。$\delta$ 很容易记录，就是每一步新的奖励加 $\gamma V(s_{t+1})$ 与旧估计的差，然后按 $(\gamma\lambda)^l$ 加权求和。
+        </p>
+        <p>
+            Emma 强调这些工作的意义：优势估计更好，梯度估计就更好，就能用更少数据达到很好的策略。所以人们花了很多精力研究，在用深度网络表示优势或策略时，怎样快速得到好的估计。GAE 有两个超参数：折扣因子 $\gamma$，和决定早的估计相对晚的估计权重多少的 $\lambda$。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 投票：λ 的作用，以及 PPO 的截断 GAE</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=1145s" target="_blank">0:19:05</a>–0:28:33</em></p>
+        <h3>投票</h3>
+        <p>
+            问题是不同的 $\lambda$ 对偏差和方差意味着什么、和 TD 有什么关系。有学生问 $\lambda = 0$ 时 $0^0$ 有没有定义。Emma 说看第一行就清楚：$\lambda = 0$ 时，所有两步及以上的估计权重都是 0，只剩第一项，也就是 TD 估计。她说明年会把记号写清楚。
+        </p>
+        <ul>
+            <li>$\lambda = 0$：GAE 等于 TD(0) 型的一步估计 $\delta^V_t$。对。</li>
+            <li>$\lambda = 1$ 时等于 TD(0)：错。那时会有一大串项，加权方式也很怪。有学生问 $\lambda = 1$ 时整个式子是不是变成 0：$(1-\lambda)$ 为 0，但同时是对无穷多项求和，Emma 说在这种分数形式的无限视界下写起来别扭，因为无限视界本来就做不了蒙特卡洛回报，她会把 $\lambda = 1$ 和 $\lambda = 0$ 的情况写清楚。</li>
+            <li>$\lambda = 0$ 时偏差较高、方差较低：大体对，因为那时是 TD 估计，TD 估计一般偏差高、方差低。</li>
+        </ul>
+        <p>
+            按理说 $\lambda$ 应该放在中间，在偏差和方差之间平衡。PPO 的做法有点不同，但相关。
+        </p>
+        <h3>PPO 的截断 GAE</h3>
+        <p>
+            GAE 是对很多优势估计做指数加权，又不需要在内存里存每个估计。PPO 只用有限个：截断到某一步，不一直加到无穷。原因之一是它们用在回合式领域。比如视界很长但不是无穷，可能有 2000 步（比如 Mountain Car 这类任务），就可以取 $T = 200$。
+        </p>
+        <p>
+            回想 TD 相对 MC 的好处之一是每一步都能更新；上面定义的 GAE 却要等到最后，因为要用到近乎无穷步的优势再加权，实践中不想这样。PPO 提出截断版本：每隔 $T$ 步（比如 200 步）算一次加权优势估计，然后更新。$T$ 决定了做一次更新要等多久。写成公式就是只加到 $T$ 之内：
+        </p>
+        $$\hat A_t = \delta_t + (\gamma\lambda)\delta_{t+1} + \cdots + (\gamma\lambda)^{T-t-1}\delta_{T-1}$$
+    </section>
+
+    <section id="t06">
+        <h2>06. 最大化下界保证单调改进</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=1713s" target="_blank">0:28:33</a>–0:40:02</em></p>
+        <p>
+            Emma 说这部分有点“倒回去”：上次为了让大家能开始写代码，先讲了算法；和很多论文一样，理论和实际做法有些脱节，但理论是动机。
+        </p>
+        <h3>回顾下界</h3>
+        <p>
+            作业 2 正在证明：PPO 的想法是用旧策略 $\pi$ 的数据估计新策略 $\pi'$ 的表现。新策略会带来不同的状态分布，于是近似地忽略状态分布的差别，得到只用旧数据就能算的 $\mathcal{L}_\pi(\pi')$（$\pi'$ 只出现在概率比里，其余都用 $\pi$）。已经证明：如果两个策略在实际行动上的 KL 散度小，就有表现的界。由此得到单调改进理论（$J$ 和 $V$ 是同一个东西，课上多用 $V$）：
+        </p>
+        $$J(\pi') - J(\pi) \ge \mathcal{L}_\pi(\pi') - C\sqrt{\mathbb{E}_{s\sim d^\pi}\big[D_{KL}(\pi'\,\|\,\pi)[s]\big]}$$
+        <p>
+            也就是新策略和旧策略的价值差，至少是 $\mathcal{L}$ 减去因为用错误的状态分布近似而产生的误差项。
+        </p>
+        <h3>Majorize-maximize</h3>
+        <p>
+            问题：如果每次选使右边下界最大的 $\pi'$，能保证比 $\pi$ 好吗？这不是显然的，但答案是能。这类算法叫 majorize-maximize（Emma 说不指望大家见过）。设
+        </p>
+        $$\pi_{k+1} = \arg\max_{\pi'}\ \underbrace{\mathcal{L}_{\pi_k}(\pi')}_{\text{项 1}} - \underbrace{C\sqrt{\mathbb{E}_{s\sim d^{\pi_k}}\big[D_{KL}(\pi'\,\|\,\pi_k)[s]\big]}}_{\text{项 2}}$$
+        <p>
+            要证明 $\pi_{k+1}$ 要么在局部最优，要么严格优于 $\pi_k$。假设 $\pi_k$ 是一个合法策略（概率和为 1，满足各种约束）。先算一个看似多余的量：把数据策略本身代进去，
+        </p>
+        $$\mathcal{L}_{\pi_k}(\pi_k) = \frac{1}{1-\gamma}\mathbb{E}_{s\sim d^{\pi_k},\,a\sim\pi_k}\Big[\frac{\pi_k(a\mid s)}{\pi_k(a\mid s)}A^{\pi_k}(s,a)\Big] = \frac{1}{1-\gamma}\mathbb{E}_{s\sim d^{\pi_k}}\Big[\sum_a\pi_k(a\mid s)\big(Q^{\pi_k}(s,a) - V^{\pi_k}(s)\big)\Big] = 0$$
+        <p>
+            概率比是 1。关键是一个策略相对自身的优势为 0：按当前策略选行动、之后一直按当前策略，与从现在起一直按当前策略，完全一样，$\sum_a\pi_k(a\mid s)Q^{\pi_k}(s,a) = V^{\pi_k}(s)$。同时 $D_{KL}(\pi_k\|\pi_k) = 0$。所以项 1 和项 2 在 $\pi_k$ 处都为 0，界在用自己评估时是紧的。
+        </p>
+        <p>
+            为什么“项 1 减项 2”在 $\pi_{k+1}$ 处一定 $\ge 0$？Emma 让学生想，提示和 argmax 有关。学生答：因为已经知道有一个策略能取到 0。对，$\pi_k$ 就是存在性证明，至少有一个策略使右边为 0；argmax 是在整个策略空间上取的，所以最大值至少是 0，希望更大。于是
+        </p>
+        $$J(\pi_{k+1}) - J(\pi_k) \ge \text{项 1} - \text{项 2} \ge 0$$
+        <p>
+            结论：对性能差距的下界做最大化，就足以保证单调改进，新策略至少和旧策略一样好。Emma 说这很漂亮。在教育、医疗（比如重症监护室）这类场景，人们可能担心随机探索或 ε-greedy，但如果能保证只在新策略至少和旧策略一样好时才改，就容易接受得多。而且可以限制在任意参数化策略类里（高斯、深度网络），只要初始策略在这个类里、每次在这个类上取 argmax，就能得到单调改进。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 理论为什么太保守，PPO 的要点</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=2402s" target="_blank">0:40:02</a>–0:45:16</em></p>
+        <p>
+            和很多漂亮的理论一样，这里有局限。常数 $C$ 的具体形式见论文。$\gamma$ 接近 1（几乎和眼前奖励一样在乎长远奖励）时，第二项会让你很保守：$C$ 很大，新策略的行动只要和旧策略差得多，惩罚就很大，相当于缩小了步长。除非只做很小的改变，否则惩罚很大，因为这一项在说：“我很不确定，换了策略后状态分布可能很不同，那里的奖励我不知道。”所以直接照着理论用这个式子，步长太小。太小并不代表有错，只是太慢，样本效率太低；它是对的，确实会单调改进，只是花的时间太长，很多情况下不可行。这就是为什么要调 KL 惩罚、用信赖域或者用裁剪。
+        </p>
+        <p>
+            关于策略梯度和 PPO 的要点：不必只走一步梯度，可以更省数据；可以用“假装状态分布不变”的技巧走几步，同时通过显式考虑下界、考虑表现和状态分布可能变多少，近似地追求单调改进（PPO 不保证单调改进，但可以很接近）。它还用了 GAE。它很流行，可以用在很多地方，部分原因是奖励函数不需要可微。策略梯度也可以和 actor-critic 结合：用深度网络近似价值函数，用于优势估计。大多数人就是这样做的，有一个 critic（价值函数估计）和一个策略。REINFORCE 和 PPO 不是仅有的策略梯度算法，但实践中仍大量使用，也是很多其他算法的骨架和常见基线。
+        </p>
+        <p>
+            有学生问：反过来，如果 $\gamma$ 接近 0、策略更短视，步长是不是就能更大、更实用？Emma 说她一时不记得 $\gamma$ 接近 0 时 $C$ 是什么样，没人在实践中直接用这个式子，大家总是用裁剪或 KL 信赖域，所以她猜还是不实用。这类常数往往是最大价值 $V_{max}$ 的函数，常常还要乘以 $\frac{1}{1-\gamma}$，可能很大。在回合式情况下，也没有什么理由让折扣因子不接近 1，因为你多半真的在乎所有奖励。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 模仿学习的设定</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=2716s" target="_blank">0:45:16</a>–0:49:34</em></p>
+        <p>
+            计算机科学喜欢把问题归约到已经会解的问题，模仿学习就是在某些方面把整个 RL 归约掉的尝试（部分幻灯片来自 Berkeley 和 CMU 的同事）。现在考虑不在线收集数据的情况。PPO 试着多重复利用数据、走更大的步；那能不能根本不要新数据，只用收集好的一批数据？一种合理的情形是有很好的示范：重症监护室里医生做出的好决策，飞行员开飞机，司机开车。能不能直接用这些例子学决策策略，比如每当有人开 Tesla 或开飞机，记录状态-行动对，直接学策略？让人在回路里持续标注很贵，直接用人们本来就在做的示范更合理，也不占用人的时间。
+        </p>
+        <p>
+            另一个原因是这些任务里很难写出奖励函数。例子是越野驾驶：一般要避开水，但如果很陡或碎石很多，卡车也许可以下水；一般要避开树，但如果很滑很泥泞，也许反而更好。人很难写下奖励，但可以开一遍，把隐含的奖励体现出来。操作重型机械、开车、停车等很多场景都是这样。
+        </p>
+        <p>
+            从示范中学习（learning from demonstrations）：专家示范一些事（开直升机、遥操作机械臂，Dorsa Sadigh 组做很多这类工作），给出一串状态和行动，没有奖励。轨迹是 $(s, a, s')$ 的序列，一切都是隐含的，假设人提供示范比较容易。设定：有状态空间、行动空间、某个转移模型；奖励函数存在，但我们不知道，没有显式奖励；有一组示范。
+        </p>
+        <ul>
+            <li>行为克隆（behavior cloning）：归约成监督学习，学从状态到行动的映射，直接克隆行为。</li>
+            <li>逆强化学习（inverse RL）：能不能恢复出人们产生这些行为时所用的奖励函数？</li>
+            <li>有了奖励，能不能再学出一个好的决策策略（学徒学习，apprenticeship learning）？</li>
+        </ul>
+    </section>
+
+    <section id="t09">
+        <h2>09. 行为克隆</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=2974s" target="_blank">0:49:34</a>–0:53:57</em></p>
+        <p>
+            行为克隆就是现成的监督学习：把专家轨迹看成一串（状态，行动），用任何监督学习工具学策略，严格地变成了监督学习问题。早期就有成功例子：很久以前的 ALVINN，以及 1993 年在飞行模拟器里学飞行，那是 RL 现代史的很早期。Emma 说 ALVINN 是 80 年代末的工作（她记得出自 CMU），那时已经在考虑汽车和（不那么深的）神经网络：输入是很小的 30×32 视频，加上测距仪，用神经网络做驾驶的行为克隆。
+        </p>
+        <p>
+            现在人们仍然经常这样做，数据好时它是很好的基线。如果数据极多（比如拥有所有飞行员的实际操作数据，某家航空公司的全部数据），再加上较复杂的监督学习方法，效果可以很好，尤其是用 RNN 等能跟踪历史的模型做行为克隆。上面写的是马尔可夫形式（状态到行动），但不必如此，可以用“状态、行动、状态”预测 $a_1$，或者用更长的历史，不需要马尔可夫表示，常常效果很好。她提到 CoRL（机器人学习会议）几年前有一篇不错的论文，研究机器人应用里离线学习的重要因素。
+        </p>
+        <p>
+            有学生问：开飞机或开车时真正重要的只是当前时刻，什么领域需要历史？Emma 不同意：取决于怎样定义状态。如果开车时状态只是即时位置，那不够，至少需要最近几个位置才能得到速度和加速度。如果状态里已经有一阶或二阶导数，有时就够了；如果只是即时传感器读数，就需要更长的历史。飞机也一样。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 误差累积</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=3237s" target="_blank">0:53:57</a>–1:00:02</em></p>
+        <p>
+            行为克隆通常容易做，是很自然的基线，离线 RL 论文里常报告它，用得很广，但不总是有效。现在策略梯度那部分反复出现的主题也在这里：用不同策略会到达不同的状态。定义上，两个策略如果从不到达不同状态、从不采取不同行动，它们就是同一个策略。
+        </p>
+        <p>
+            监督学习假设数据对 $(x, y)$ 是独立同分布（IID）的，忽略时间结构。但这里数据明显相关：在马尔可夫结构下，$s_0, a_0, s_1, \ldots$，这一步做的事决定了下一个状态。如果误差在时间上独立，每一步出错的概率不超过 $\epsilon$，共 $T$ 个决策，期望总错误数是 $\epsilon T$，这不算糟，也是大多数监督学习保证所针对的情形。
+        </p>
+        <p>
+            赛道例子：监督学习学到的策略不完美，犯了一个小错，开到了黑色区域；又犯一点错，就冲出了赛道。这很麻烦，因为人类示范者从来不会开出赛道，那里几乎没有数据，覆盖很少，更容易犯错。早期的小错误会累积，把你带到覆盖更少、准确度更低的状态。原因是数据分布不匹配：训练时状态来自专家策略 $\pi^*$，测试时状态来自学到的策略，两者分布不同，监督学习的保证就不再成立。PPO 里也看到过：策略变了，到达的状态和行动就变了；这里策略变化的原因是无法完美模仿专家。
+        </p>
+        <p>
+            如果在第 $t$ 步以概率 $\epsilon$ 出错，之后剩下的时间步都可能出错，进入一片会犯很多错、付出很多代价的状态-行动空间，一直到结束。Emma 没有讲完整证明：误差可以随时间步数按平方累积，而不是线性，期望错误数可以达到 $\epsilon T^2$，而监督学习只会预测 $\epsilon T$。这就是 DAgger 的动机。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. DAgger</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=3602s" target="_blank">1:00:02</a>–1:03:20</em></p>
+        <p>
+            DAgger（Dataset Aggregation，数据集聚合）是 2000 年代末的论文，Emma 记得是 2008 年前后。问题在于：一犯错就进入状态空间的其他区域，在那里几乎没有任何保证。所以要想办法应对那些不在原始训练集里的状态。它是迭代式的：
+        </p>
+        <ol>
+            <li>用当前策略在环境里执行，得到一个数据集。比如开着赛车绕赛道跑一圈，希望和专家差不多，但大概不完美。</li>
+            <li>拿给专家看：这是我绕赛道时做的，在这些地方我应该怎么做？专家像教练一样，在这条轨迹的每个状态上标注他会怎么做：比如“这里你该往这边开”，“到了这里你该往下打方向回到路上”。就像飞行教练对你上一次飞行里每个犯错的地方给反馈。</li>
+            <li>把旧数据和专家刚给的新数据聚合起来（所以叫 DAgger）。</li>
+            <li>在新数据集上再做行为克隆，新数据集包含了环境里更多的状态。然后重复。</li>
+        </ol>
+        <p>
+            这也是为什么数据足够多时行为克隆可以很好：问题在于我们没有覆盖整个领域里专家在任意位置会怎么做，DAgger 让我们更好地知道专家在整个空间里会怎么做，万一到了那些状态也能纠正。DAgger 有不错的理论保证，论文里在模拟驾驶（比如类似 Mario Kart 的游戏）等领域表明，能很快学到一个很好的策略，不受误差累积影响。
+        </p>
+        <p>
+            局限？学生答：很贵。Emma 说对，整个学习过程中都要有教练或专家陪着。行为克隆只需要一次数据，数据可能本来就有；DAgger 要持续监督，很依赖人在回路。所以机器人等领域确实有很多工作建立在 DAgger 上，但她认为它没有行为克隆流行，因为需要人做多得多的工作。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 学奖励：逆强化学习和不可辨识性</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=3800s" target="_blank">1:03:20</a>–1:10:41</em></p>
+        <p>
+            第二件事是学奖励。为什么想学奖励？一是想理解人类的决策：比如外科医生在复杂情况下怎样在时间、风险等之间权衡，他们的时间很宝贵，没法问很多问题，但我们想理解这种偏好结构。二是想用它再学一个策略：如果能从数据中提取奖励，就能据此学策略。作业 3 会做 RLHF，从偏好中学习。
+        </p>
+        <p>
+            设定相同：有状态空间、行动空间、转移模型，没有奖励函数，有一些专家示范。目标是推断专家做决策时隐含使用的奖励函数。暂时假设老师（专家）的策略是最优的。
+        </p>
+        <h3>投票</h3>
+        <p>
+            看到专家示范，且知道它是最优的：是否存在唯一的 $R$ 使老师的策略最优？有很多个？取决于 MDP？不确定？如果认为有很多，请举一个例子。讨论后几乎所有人选“有很多”，正确。有学生举例：乘以一个常数。Emma 说对，把奖励函数乘以一个正常数不会改变策略。0 也行：奖励全为 0 时，任何策略都是最优的。
+        </p>
+        <p>
+            她说举这个例子，用意在于强调这是一个严重的可辨识性（identifiability）问题：即使知道示范是专家给的，与之相容的奖励函数也不止一个。之后讲 RLHF 和 DPO 时要记住这一点：要么做别的假设来约束奖励函数，要么就得做额外的选择或约束，否则问题不可辨识。
+        </p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 线性奖励和特征匹配</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=4ngb0IZTg8I&t=4241s" target="_blank">1:10:41</a>–1:18:43</em></p>
+        <p>
+            Emma 说这里的幻灯片出了点问题（她同时在改两套幻灯片，另一套更新了，这套没有），就在板上写。这些工作早于深度 Q 学习。假设奖励是特征的线性函数：
+        </p>
+        $$R(s) = w^T x(s)$$
+        <p>
+            $w$ 是一个向量，$x(s)$ 是状态的特征表示。比如机器人在当前位置，到这面墙、那面墙、另外两面墙的距离就是一组特征，加权组合给出站在这里的奖励。目标是根据一组示范找出权重向量 $w$。这时策略的价值也可以写成加权特征的组合：
+        </p>
+        $$V^\pi = \mathbb{E}_{s\sim\pi}\Big[\sum_{t=0}^{\infty}\gamma^t w^T x(s_t)\,\Big|\, s_0\Big] = w^T\,\mathbb{E}_{s\sim\pi}\Big[\sum_{t=0}^{\infty}\gamma^t x(s_t)\,\Big|\, s_0\Big] = w^T\mu(\pi\mid s_0)$$
+        <p>
+            $w$ 是常数，可以提出期望。$\mu(\pi)$ 定义为从某个状态出发、策略 $\pi$ 下状态特征的折扣加权频率。之前也见过这种在“按时间步”和“按在各状态停留多久”之间来回转换的做法。这样做的好处是：价值等于未知权重和特征分布的线性组合，而特征分布我们能算，因为有专家示范的轨迹，可以提取这些状态的特征，算出类似 $\mu$ 的量。
+        </p>
+        <h3>最优性给出的约束</h3>
+        <p>
+            最优策略的价值不小于任何其他策略：$V^* \ge V^\pi$。所以对真实的 $w^*$，
+        </p>
+        $$w^{*T}\mu(\pi^*\mid s_0) \ge w^{*T}\mu(\pi\mid s_0)\quad\forall\pi\ne\pi^*$$
+        <p>
+            含义：任选另一个策略，在世界里执行它得到的状态特征分布，按真实奖励算，回报必须低于专家数据里实际观测到的特征。比如专家控制机器人时大部分时间待在房间的这一边，观测到的特征就都来自这里；任何不匹配专家特征的策略，加权后都要更低。所以专家示范来自最优策略这一点，足以用来找一个满足上式的 $w^*$，在搜索 $w$（也就是奖励函数）时这是一个约束。
+        </p>
+        <h3>化为特征匹配</h3>
+        <p>
+            要表现得最优，只需匹配专家的特征，也就是找一个诱导出与专家相同状态分布的策略。如果
+        </p>
+        $$\lVert\mu(\pi\mid s_0) - \mu(\pi^*\mid s_0)\rVert_1 \le \epsilon$$
+        <p>
+            那么对所有满足 $\lVert w\rVert_\infty\le 1$ 的 $w$，由 Hölder 不等式，
+        </p>
+        $$\big|w^T\mu(\pi\mid s_0) - w^T\mu(\pi^*\mid s_0)\big| \le \epsilon$$
+        <p>
+            也就是这个策略的奖励和最优（专家）策略很接近。高层的想法：观测不到奖励、但有最优专家示范时，奖励学习和策略学习可以归约为特征匹配，只要找到一个能匹配那些特征的策略和奖励函数，因为那些特征已知有高奖励。
+        </p>
+        <p>
+            但前面的问题没有解决：仍然有无穷多个奖励函数对应同一个最优策略，也有很多随机策略能匹配特征计数。怎样在这些选项里选？最有影响的两个想法是最大熵逆强化学习（maximum entropy inverse RL，2008 年）和 GAIL。下一讲讲最大熵逆强化学习。
+        </p>
+    </section>
+
+    <section id="t14">
+        <h2>14. 2026 版更新</h2>
+        <p>
+            2026 年第 7 讲的课件在网页存档里只有截断的副本，读不出内容。根据 2026 年第 8 讲课件的“Class Structure”页，第 7 讲讲的是“Policy search continued and Imitation Learning”，和 2024 年这一讲的范围一致。第 8 讲课件开头复用了这一讲的部分内容，可以看到：
+        </p>
+        <ul>
+            <li>开场投票题和 2024 年一样（REINFORCE 的四个选项），课件答案为 a、d 正确。</li>
+            <li>第 8 讲先放了一页“How Can RL Enable Transformative LLM?”，然后是模仿学习、DAgger、奖励学习，并写明 RLHF 部分（“From Backflips to ChatGPT”）的幻灯片取自 Tatsu Hashimoto 在 CS224N 第 11 讲的课件。</li>
+            <li>误差累积一页写法：监督学习假设 $(s,a)$ 对 IID、忽略时间结构；误差在时间上独立时，第 $t$ 步出错概率 $\le\epsilon$，期望总错误数 $\le\epsilon T$。</li>
+            <li>2026 年第 8 讲在 DAgger 之后是“Feature Based Reward Function”和“Imitation Learning Summary”，然后直接进入人类反馈和 RLHF；目录里没有最大熵逆强化学习的专门页面。2024 年第 8 讲用了大半节课讲最大熵逆强化学习，见下一篇。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>TD 误差 $\delta^V_t = r_t + \gamma V(s_{t+1}) - V(s_t)$；裂项求和给出 $\hat A^{(k)}_t = \sum_{l=0}^{k-1}\gamma^l\delta^V_{t+l}$。</li>
+            <li>GAE 对所有 n 步估计按 $(1-\lambda)\lambda^{n-1}$ 加权，化简为 $\hat A^{GAE(\gamma,\lambda)}_t = \sum_l(\gamma\lambda)^l\delta^V_{t+l}$；$\lambda = 0$ 时就是一步 TD 估计。PPO 用截断版本，每 $T$ 步更新一次。</li>
+            <li>选 $\pi_{k+1} = \arg\max_{\pi'}\mathcal{L}_{\pi_k}(\pi') - C\sqrt{\mathbb{E}[D_{KL}]}$ 保证 $J(\pi_{k+1})\ge J(\pi_k)$，因为 $\pi_k$ 本身让右边为 0。</li>
+            <li>理论中的 $C$ 在 $\gamma$ 接近 1 时很大，步长太小；所以实践中用可调的 KL 惩罚、信赖域或裁剪，PPO 不保证但接近单调改进。</li>
+            <li>行为克隆把模仿学习变成监督学习，简单、常用；但训练和测试的状态分布不匹配，误差可以从 $\epsilon T$ 累积到 $\epsilon T^2$。</li>
+            <li>DAgger 让专家在学到的策略访问的状态上标注，聚合数据再训练，解决误差累积，但要专家持续在回路里。</li>
+            <li>逆强化学习不可辨识：奖励乘以正常数或全为 0，示范都仍是最优的。</li>
+            <li>线性奖励 $R(s) = w^Tx(s)$ 下 $V^\pi = w^T\mu(\pi)$；匹配专家的折扣特征期望 $\mu$ 就能接近专家的回报，但仍有很多奖励和策略能匹配，需要最大熵 IRL 或 GAIL 来选。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS234 Reinforcement Learning · Lecture 7: Policy Search 3 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

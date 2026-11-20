@@ -60,6 +60,7 @@ Stanford、CMU、Harvard 和 MIT 2025-2026 学年 AI 课程的中文笔记，附
 | [Ultra-Scale Playbook](https://joyce9896.github.io/frontier-ai-courses/Ultra-Scale-Playbook/) | Hugging Face 的 GPU 集群训练手册，导读加 12 篇：显存账、数据并行与 ZeRO、张量/序列/上下文/流水线/专家并行、5D 组合与选配置、GPU kernel、FlashAttention、FP8 混合精度 |
 | [Lilian Weng 博客](https://joyce9896.github.io/frontier-ai-courses/Lilian-Weng-Blog/) | Lil'Log 15 篇长综述：2024 年以来全部 7 篇（harness 工程、scaling law、测试时思考、奖励作弊、幻觉、视频扩散、人类数据）加 agent、prompt、推理优化等 8 篇经典 |
 | [ETH 263-5911 Robot Learning](https://joyce9896.github.io/frontier-ai-courses/ETH-263-5911-Robot-Learning/) | 机器人学习，2026 年春季：模仿学习、强化学习、扩散策略、动作 tokenization、世界模型、VLA（π0、OpenVLA）与具身推理，11 讲加 10 场嘉宾讲座 |
+| [Stanford CS234](https://joyce9896.github.io/frontier-ai-courses/CS234-Reinforcement-Learning/) | 强化学习，2024 年春季录像 16 讲：MDP、TD、Q-learning、策略梯度、PPO、RLHF 与 DPO、离线 RL、老虎机与探索、MCTS 与 AlphaZero，附 2026 年冬季课件更新 |
 
 ### 产业与系统
 

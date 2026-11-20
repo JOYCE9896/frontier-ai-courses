@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 8 讲：最大熵逆强化学习与 RLHF | Stanford CS234 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="07_GAE与模仿学习.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS234 目录</a> · Lecture 8</span>
+    <span><a href="09_DPO客座讲座.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 8 讲：最大熵逆强化学习与 RLHF</h1>
+        <p class="subtitle">最大熵原理怎样在众多相容的奖励函数里选一个：约束优化、拉格朗日乘子推出指数族、最大似然学奖励、梯度化为状态访问频率匹配、完整算法和它对动力学模型的依赖；然后转向人类反馈：人在回路的几种形式，成对比较，Bradley-Terry 模型和几种“赢家”的定义，从偏好拟合奖励模型，后空翻实验，以及 ChatGPT 的 RLHF 流程</p>
+        <div class="author-meta">
+            主讲：Emma Brunskill · 时长：1 小时 14 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=IEbuJtjqtMU" target="_blank">课堂录像</a>（Stanford Online 公开，2024 年春季，本文依据录像字幕整理）；补充：<a href="https://web.stanford.edu/class/cs234/modules.html" target="_blank">2026 年冬季课件</a>（2026 年的录像只对选课学生开放；文中标“2026 版更新”的内容来自 2026 年课件）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            上一讲结束时留下一个问题：只看专家示范，与之相容的奖励函数有无穷多个，连全 0 奖励都相容。这一讲的前 50 分钟讲一种打破这种歧义的办法，最大熵逆强化学习（Maximum Entropy Inverse RL，Ziebart 等人 2008 年）。Emma 一步步在板上推：先把最大熵原理写成约束优化问题，用拉格朗日乘子看出最优分布是奖励的指数形式，再把学奖励变成最大似然问题，求梯度，最后把梯度改写成“专家的状态访问频率减去当前奖励下的状态访问频率”，得到一个可以迭代的算法。
+        </p>
+        <p>
+            后 20 多分钟开始讲人类反馈（human feedback）：人可以用哪些方式帮 RL 智能体学习，为什么成对比较是一个折中点，怎样用 Bradley-Terry 模型从成对偏好学出潜在的奖励，再用 PPO 优化它。最后用 2017 年的后空翻实验和 ChatGPT 的训练流程收尾。下一讲是 DPO 作者的客座讲座。
+        </p>
+        <ol>
+            <li><a href="#t01">开场投票与这一讲的方向</a> · <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=71s" target="_blank">0:01:11</a></li>
+            <li><a href="#t02">回顾：模仿学习与奖励的不可辨识性</a> · <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=340s" target="_blank">0:05:40</a></li>
+            <li><a href="#t03">最大熵原理与约束优化问题</a> · <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=745s" target="_blank">0:12:25</a></li>
+            <li><a href="#t04">拉格朗日乘子：为什么是指数形式</a> · <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=1323s" target="_blank">0:22:03</a></li>
+            <li><a href="#t05">最大似然与梯度推导</a> · <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=1640s" target="_blank">0:27:20</a></li>
+            <li><a href="#t06">从轨迹到状态访问频率</a> · <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=2234s" target="_blank">0:37:14</a></li>
+            <li><a href="#t07">完整算法，投票：哪些步骤要用动力学模型</a> · <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=2602s" target="_blank">0:43:22</a></li>
+            <li><a href="#t08">模仿学习小结</a> · <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=2968s" target="_blank">0:49:28</a></li>
+            <li><a href="#t09">人类反馈的几种形式与成对比较</a> · <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=3146s" target="_blank">0:52:26</a></li>
+            <li><a href="#t10">Bradley-Terry 模型与几种“赢家”</a> · <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=3636s" target="_blank">1:00:36</a></li>
+            <li><a href="#t11">从偏好学奖励模型，后空翻与 ChatGPT</a> · <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=3958s" target="_blank">1:05:58</a></li>
+            <li><a href="#t12">2026 版更新</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场投票与这一讲的方向</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=71s" target="_blank">0:01:11</a>–0:05:40</em></p>
+        <p>
+            开场是一道关于模仿学习的复习投票（题面在幻灯片上，字幕里没有读出来）。从 Emma 的讲解能看出要点：第一题大家都答对了。另外两个说法是错的，DAgger 需要专家一直在场，学到的策略每走一段，都要问专家“这一步是不是最优行动”；行为克隆不需要知道动力学模型，它把强化学习归约成监督学习，拿专家示范直接学状态到行动的映射。
+        </p>
+        <p>
+            然后她讲这一讲的方向。备课时她让一个大语言模型“写个程序演示 RLHF 怎么工作，解释简短，然后给代码”，大约 5 秒钟它就生成了一段能跑的代码，里面用了 Q-learning 等方法做了个 RLHF 的小例子。RLHF 是 Reinforcement Learning from Human Feedback（基于人类反馈的强化学习），ChatGPT 的训练就用了它。她 2017 年开始开这门课，那时这完全做不到，两年前也做不到，直到 ChatGPT 才成为可能。问题是怎样走到这一步，用了哪些 RL 技术。
+        </p>
+        <p>
+            计划：这一讲继续模仿学习，然后讲一点 RLHF；下一讲请 DPO（direct preference optimization，直接偏好优化）论文的作者之一来讲，这篇论文获得了 NeurIPS 的最佳论文亚军。Emma 说 DPO 在很多基准上开始接近或超过 RLHF，作者还有一篇下周就要上 arXiv 的新论文，她请他也讲一点。模仿学习放在前面有它的道理：它是用人类反馈训练 RL 智能体的一种形式，RLHF 则是用人类专长的另一种方式。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 回顾：模仿学习与奖励的不可辨识性</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=340s" target="_blank">0:05:40</a>–0:12:25</em></p>
+        <h3>设定</h3>
+        <p>
+            模仿学习（imitation learning）用的是人的示范。示范可以是专门做的，比如她演示机器人怎样拿起杯子，记录下所有动作；也可以是自然产生的轨迹，比如电子病历里医生做出的决策，拿来争取达到或超过医生的水平。数据只是状态和行动的序列，一般没有奖励。这样做的理由有两个：数据本来就在日常工作里产生；或者人很难写下一个能涵盖目标全部复杂性的奖励函数。
+        </p>
+        <p>
+            上一讲看过几种方法。行为克隆（behavior cloning）：映射回监督学习，直接学一个匹配专家的策略。DAgger：解决行为克隆的一个问题，监督学习出错后会进入专家数据没有覆盖的状态和行动（赛道例子，一旦偏出去就有分布不匹配，课程后面还会更多讲分布不匹配），所以 DAgger 让专家一直在场，告诉你本该怎么做，像教练回放你的冰球比赛，指出每个时刻本该怎么做。第三类是能不能从示范里恢复奖励：这本身就有用，可以理解人们在各个领域做决策时的目标；有了奖励也可以再学策略。
+        </p>
+        <h3>匹配轨迹分布等于匹配回报</h3>
+        <p>
+            要得到一个匹配专家的策略，等价于生成与专家相同的轨迹分布。策略、轨迹分布、状态-行动分布之间有很强的对应：一个策略诱导出一个状态-行动分布；如果奖励只是状态和行动的函数，两个诱导出相同状态-行动分布的策略回报相同。
+        </p>
+        <p>
+            上一讲用这一点学奖励特征：设策略的特征期望为 $\mu$，特征可以是客服人员回应来电有多快、用了多少次正面情绪的话；对机器人可以是撞墙次数、走了多远。假设奖励是这些特征的线性组合，权重向量 $w$ 未知。如果特征分布足够接近，再给 $w$ 的范数加上界，那么特征接近就等价于回报接近：策略能诱导出相同的特征，就能拿到相同的回报。
+        </p>
+        <p>
+            有学生问：这些特征是每个问题由人写下来的吗？Emma 说历史上是。深度学习带来的一个大变化是尽量靠近传感器，比如直接用图像而不是图像上手工设计的特征。但在线营销这类问题里，很多特征是预先定义的：购买记录、看过哪些网页、搜过什么。这时仍然要列举出定义奖励所用的特征，但越接近所收集数据的原始层面，通常越有优势。
+        </p>
+        <h3>不可辨识</h3>
+        <p>
+            最大的问题是：即使假设观测数据是最优的，与之相容的奖励函数也不唯一，全 0 奖励和任何策略都相容。看到这些轨迹、知道策略最优，并不能说“奖励就是这个”，相容的奖励太多。这一讲要讲打破歧义的一种选择：最大熵逆强化学习。另一个流行的方法是 GAIL，来自 Stanford 的 Stefano Ermon 组。她先讲最大熵，因为它有很多有用的后续工作。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 最大熵原理与约束优化问题</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=745s" target="_blank">0:12:25</a>–0:22:03</em></p>
+        <h3>熵和最大熵原理</h3>
+        <p>
+            最大熵逆强化学习发表于 2008 年，出发点是最大熵原理（principle of maximum entropy）。她问谁在概率分布的语境下听过这个原理，举手的人比她预想的多。离散情况下，分布 $p$ 的熵（entropy）是
+        </p>
+        $$H(p) = -\sum_s p(s)\log p(s)$$
+        <p>
+            熵衡量一个分布有多分散。最大熵原理说：在已知的、精确表述的先验数据约束下，最能代表当前知识状态的分布，是熵最大的那个。放到这里：有专家数据，就要写下一个在轨迹上的分布，它和观测到的轨迹相容，除此之外熵尽量大。所以会得到一个带约束的问题。
+        </p>
+        <p>
+            有学生问模仿学习的动机：如果是因为部署专家模型太贵，那我会去蒸馏它；已经能访问一个专家模型，为什么还要学另一个？Emma 说这里能访问的只是专家的轨迹，拿不到专家本人或者他的策略，只有观测。比如她是专家医生，你可以看她做手术的所有方式、所有动作，然后想让一个机器人模仿，于是需要把它提炼成一个显式的参数化策略。
+        </p>
+        <p>
+            这只是打破平局的一种方式：有很多奖励函数、很多方式都和数据相容，那就选熵最大的。另一个学生问“分布和数据相容”具体指什么，Emma 说下一页就给出形式化定义。
+        </p>
+        <h3>出租车司机的例子</h3>
+        <p>
+            这是 Brian Ziebart 和同事的工作，当时 Ziebart 是 Carnegie Mellon 的研究生。他们想理解出租车司机的行为：开车有很多约束，出租车司机要考虑距离、可能的拥堵、过路费等。他们拿司机在 Pittsburgh 街道上行驶的轨迹，去推断司机用的奖励函数，同时得到一个和好司机一样好的策略。他们同样面对“学不出唯一奖励”的问题，于是找熵最大的那个。
+        </p>
+        <h3>写成约束优化</h3>
+        <p>
+            在线性奖励的情形下，最大熵用在轨迹分布上：找一个轨迹分布，匹配专家的观测轨迹分布，其余尽量高熵。设 $\mu(\tau)$ 是把轨迹映射到特征的函数，$D$ 是专家数据集：
+        </p>
+        $$\max_{p}\ -\sum_{\tau}p(\tau)\log p(\tau)$$
+        $$\text{s.t.}\quad \sum_\tau p(\tau) = 1,\qquad \sum_\tau p(\tau)\,\mu(\tau) = \frac{1}{|D|}\sum_{\tau_i\in D}\mu(\tau_i)$$
+        <p>
+            第一个约束说它是一个真正的概率分布，第二个约束是特征匹配。前面说过，线性奖励下特征匹配等价于回报匹配。这一步还没说怎样学奖励函数，只是说最大熵用在哪里：轨迹分布要与专家数据相容，其余熵最大。
+        </p>
+        <p>
+            有学生问：轨迹上的分布，是指产生这些轨迹的策略上的分布吗？Emma 说两者基本同构。可以直接把它看成状态、行动、状态、行动……上的分布，也可以看成隐含地经过一个产生这些轨迹的策略；后面会更清楚策略从哪里进来。
+        </p>
+        <p>
+            如果不限于线性奖励，假设有某个奖励函数 $r_\phi$，我们想要轨迹分布的期望回报和专家相同（$\hat p$ 表示专家的经验分布）。因为专家是最优的，做到这一点就够了：
+        </p>
+        $$\max_{p}\ -\sum_{\tau}p(\tau)\log p(\tau)\quad\text{s.t.}\quad \sum_\tau p(\tau) = 1,\qquad \sum_\tau p(\tau)\,r_\phi(\tau) = \sum_\tau \hat p(\tau)\,r_\phi(\tau)$$
+        <p>
+            现在还不知道 $r_\phi$，所以没法直接解，但可以先看这个问题的解长什么样。最终的算法大致是：假设或计算一个奖励函数；据此学出最优策略；再根据状态或轨迹特征更新奖励函数；重复多次。整个过程反复用到几组关系：奖励函数到最优策略，最优策略到状态-行动分布，状态-行动分布到怎样更新奖励。原论文假设动力学模型已知。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 拉格朗日乘子：为什么是指数形式</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=1323s" target="_blank">0:22:03</a>–0:27:20</em></p>
+        <p>
+            Emma 说很多人讲最大熵时直接甩出指数族，不一定讲清楚它从哪里来，所以她把这一步推一遍。问题是：如果奖励已知，上面这个约束优化问题的解，也就是轨迹上的分布，会是什么形式？
+        </p>
+        <p>
+            用拉格朗日乘子（Lagrange multiplier，把约束乘上系数加进目标里，变成无约束问题）重写。把“最大化熵”写成“最小化负熵”：
+        </p>
+        $$\mathcal{L}(p,\lambda) = \sum_\tau p(\tau)\log p(\tau) + \lambda_1\Big(\sum_\tau p(\tau)\,r_\phi(\tau) - \sum_\tau \hat p(\tau)\,r_\phi(\tau)\Big) + \lambda_0\Big(\sum_\tau p(\tau) - 1\Big)$$
+        <p>
+            对某一条特定轨迹 $\tau$ 的概率 $p(\tau)$ 求导。第一项用乘积法则，得到 $\log p(\tau) + p(\tau)\cdot\frac{1}{p(\tau)}$；第二项得到 $\lambda_1 r_\phi(\tau)$；专家那一项只含 $\hat p$，与 $p(\tau)$ 无关，直接消失；最后一项得到 $\lambda_0$：
+        </p>
+        $$\frac{\partial\mathcal{L}}{\partial p(\tau)} = \log p(\tau) + 1 + \lambda_1 r_\phi(\tau) + \lambda_0$$
+        <p>
+            有学生问：其他轨迹的项消失，是因为对一条具体轨迹求导吗？Emma 说对，求的是对这一条轨迹 $\tau$ 的概率的导数，所以别的都没了。
+        </p>
+        <p>
+            令导数为 0（找极值），整理后取指数：
+        </p>
+        $$p(\tau) = e^{-1-\lambda_0}\,e^{-\lambda_1 r_\phi(\tau)}\ \propto\ \exp\big(r_\phi(\tau)\big)$$
+        <p>
+            最后一步把乘子的符号和大小吸收进奖励的尺度里（Emma 板书时有时写成 $e^{-r}$，对应用代价 cost 写的形式，这里统一写成奖励）。结论：在这些约束下熵最大的轨迹分布，正比于这条轨迹回报的指数。也就是说，回报越高的轨迹，权重按指数增大，同时受“它是一个概率分布”这一约束。这就是指数族（exponential family）的形式。
+        </p>
+        <p>
+            要记住这里是在 $r_\phi$ 固定的前提下推的，求的是对 $p(\tau)$ 的导数，没有对 $\phi$ 求导。知道了这个结构形式，下一步就能用它来学奖励函数。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 最大似然与梯度推导</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=1640s" target="_blank">0:27:20</a>–0:37:14</em></p>
+        <h3>把最大熵变成最大似然</h3>
+        <p>
+            在约束下最大化轨迹分布的熵，等价于在这个最大熵分布下最大化观测数据的似然。写出归一化的指数形式：
+        </p>
+        $$p(\tau_i\mid\phi) = \frac{1}{Z(\phi)}\exp\big(r_\phi(\tau_i)\big) = \frac{1}{Z(\phi)}\exp\Big(\sum_{s\in\tau_i} r_\phi(s)\Big),\qquad Z(\phi) = \sum_\tau \exp\big(r_\phi(\tau)\big)$$
+        <p>
+            $Z(\phi)$ 是归一化常数，保证这是一个合法的概率分布。这里 Emma 略微滥用记号，$r_\phi(\tau)$ 表示整条轨迹的回报，$r_\phi(s)$ 表示一个状态的奖励。
+        </p>
+        <p>
+            这样做的好处：奖励函数仍然未知，但既然知道最大熵原理下 $p(\tau)$ 的函数形式，就可以不再管分布本身，假设它就是这个结构，唯一的未知量变成 $\phi$。于是可以通过调整 $\phi$ 来最大化观测数据的概率，把问题当成最大似然问题。
+        </p>
+        <p>
+            Emma 说这个观察很优雅，可以一直追溯到 Jaynes 1957 年的工作：人们思考在约束下最大化熵意味着什么时，发现可以把它转成指数族，之后不确定性只剩下 $\phi$。她说在很高的层面上，这和下周的 DPO 有联系：有时可以重新参数化目标函数，去掉那些不直接关心的“讨厌参数”（nuisance parameters），只留下真正想学的那个参数。
+        </p>
+        <h3>目标函数</h3>
+        <p>
+            最大化专家数据在奖励函数下的对数概率。对数把乘积变成求和，代入最大熵形式，对数和指数相消，剩下归一化项的对数：
+        </p>
+        $$\max_\phi \log\prod_{\tau^*\in D}p(\tau^*\mid\phi) = \max_\phi\sum_{\tau^*\in D}\Big[r_\phi(\tau^*) - \log\sum_\tau \exp\big(r_\phi(\tau)\big)\Big]$$
+        <p>
+            第二项与 $\tau^*$ 无关，可以拿到求和外面，数据集里的轨迹条数是 $|D|$：
+        </p>
+        $$J(\phi) = \sum_{\tau^*\in D} r_\phi(\tau^*) - |D|\log\sum_\tau \exp\big(r_\phi(\tau)\big)$$
+        <h3>求梯度</h3>
+        <p>
+            照常用梯度方法优化，对 $\phi$ 求导。第二项是 log，导数是分母上放整个求和，分子是求和里每一项乘上奖励的导数：
+        </p>
+        $$\nabla_\phi J(\phi) = \sum_{\tau^*\in D}\frac{dr_\phi(\tau^*)}{d\phi} - |D|\,\frac{1}{\sum_{\tau'}\exp(r_\phi(\tau'))}\sum_\tau \exp\big(r_\phi(\tau)\big)\frac{dr_\phi(\tau)}{d\phi}$$
+        <p>
+            第二项里 $\exp(r_\phi(\tau))$ 除以归一化常数，正好就是前面的 $p(\tau\mid\phi)$。把分母移进求和，得到
+        </p>
+        $$\nabla_\phi J(\phi) = \sum_{\tau^*\in D}\frac{dr_\phi(\tau^*)}{d\phi} - |D|\sum_\tau p(\tau\mid\phi)\,\frac{dr_\phi(\tau)}{d\phi}$$
+        <p>
+            这就是梯度步：专家数据里每条轨迹上奖励的导数，减去轨迹条数乘以当前模型下所有轨迹按概率加权的奖励导数。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 从轨迹到状态访问频率</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=2234s" target="_blank">0:37:14</a>–0:43:22</em></p>
+        <h3>改写成状态</h3>
+        <p>
+            上面是对轨迹求和，想改写成对状态求和。轨迹的概率可以拆成各个部分：
+        </p>
+        $$p(\tau) = p(s_1)\prod_{t=1}^{|\tau|}\pi(a_t\mid s_t)\,p(s_{t+1}\mid s_t,a_t)$$
+        <p>
+            又因为 $p(\tau)\propto\exp(r_\phi(\tau)) = \exp\big(\sum_{s\in\tau}r_\phi(s)\big)$，代进导数，得到同一个梯度的状态形式：
+        </p>
+        $$\nabla_\phi J(\phi) = \sum_{s\in D}\frac{dr_\phi(s)}{d\phi} - |D|\sum_s p(s\mid\phi)\,\frac{dr_\phi(s)}{d\phi}$$
+        <p>
+            第一项对专家示范里出现的所有状态求和，第二项是当前奖励下每个状态的概率加权。Emma 说这个形式有意思的地方是：它看起来就是在努力匹配数据集里观测到的状态分布。
+        </p>
+        <h3>状态密度从哪里来</h3>
+        <p>
+            $p(s\mid\phi)$ 是什么？可以这样想：有一些观测到的状态和行动，再看换一个策略会诱导出什么样的状态和行动。如果是表格型（tabular，状态和行动有限、可以逐个列出）且动力学已知，策略 $\pi$ 给定，就能用动态规划直接算出状态访问分布（state visitation frequencies）。按时间下标：
+        </p>
+        $$\mu_1(s) = p(s_1 = s)$$
+        $$\mu_{t+1}(s) = \sum_{s'}\sum_{a}\mu_t(s')\,\pi(a\mid s')\,p(s\mid s',a),\qquad t = 1,\ldots,T$$
+        <p>
+            下一时间步的状态分布取决于上一时间步的状态分布、策略给出的行动概率、以及动力学模型。把各时间步加起来，就得到某个状态的平均密度 $p(s\mid\phi) = \sum_t\mu_t(s)$。
+        </p>
+        <p>
+            她再把高层思路说一遍：要匹配专家的状态-行动频率和当前奖励函数诱导的状态-行动频率。估计一个奖励函数，算出这个奖励下的最优策略，再数一数这个策略下状态-行动分布长什么样。如果和专家匹配，就结束；否则继续改奖励函数、策略、得到的状态-行动分布，直到匹配。她说这挺繁琐，但能算。
+        </p>
+        <h3>线性奖励</h3>
+        <p>
+            如果奖励是线性的，$r_\phi(s) = \phi^T f_s$，$f_s$ 是状态 $s$ 的特征，对 $\phi$ 求导就只剩特征：$\frac{dr_\phi(s)}{d\phi} = f_s$。于是改变奖励的方向，就是数据里所有特征之和，减去当前模型下按状态概率加权的特征：
+        </p>
+        $$\nabla_\phi J(\phi) = \sum_{\tau\in D} f_\tau - |D|\sum_s p(s\mid\phi)\,f_s$$
+        <p>
+            其中 $f_\tau = \sum_{s\in\tau}f_s$ 是一条轨迹的特征计数。两边同除以 $|D|$，就是“专家平均特征计数减去模型的期望特征计数”。Emma 最后板书时省略了 $|D|$ 这个系数。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 完整算法，投票：哪些步骤要用动力学模型</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=2602s" target="_blank">0:43:22</a>–0:49:28</em></p>
+        <h3>算法</h3>
+        <pre><code>Input: expert demonstrations D
+Initialize reward parameters phi
+Repeat:
+    1. Compute the optimal policy pi given r_phi (e.g., value iteration)
+    2. Compute state visitation frequencies p(s | phi, T) under pi
+    3. Compute the gradient on the reward model:
+         grad = sum_{tau in D} f_tau - sum_s p(s | phi, T) f_s
+    4. Update phi with one gradient step
+Until convergence</code></pre>
+        <p>
+            这是在线性奖励下推的，原论文就是这样做的，然后反复迭代。
+        </p>
+        <h3>投票</h3>
+        <p>
+            上面算法里哪些步骤依赖知道动力学模型？(1) 计算最优策略；(2) 计算状态访问频率；(3) 计算梯度；(4) 都不需要。Emma 提醒大家，原论文确实假设能访问动力学模型；可以回想价值迭代需要什么，以及前面写的那个动态规划：要算下一时间步的状态分布，需要上一时间步的分布、给定状态下的行动概率、以及动力学模型。
+        </p>
+        <p>
+            第一轮投票答案很分散，讨论后她给出答案：1 和 2。用价值迭代算最优策略，需要奖励模型和动力学模型；前面的动态规划也需要动力学模型，才能从“现在在这个状态”推出“下一时间步在各状态的分布”。这两步做完、所有频率都算好以后，算梯度就不再需要动力学模型。
+        </p>
+        <p>
+            但动力学模型被用得很重，而这是很强的假设。对人类医生或外科医生做决策这种情形，你真的知道动力学吗？不太可能。在 MuJoCo 这类模拟环境里也许知道，一般情况下大概不知道。
+        </p>
+        <h3>后续工作</h3>
+        <p>
+            这个方法影响很大。原始版本用线性奖励、假设动力学已知，之后有很多后续工作，包括 Chelsea Finn（现在是 Stanford 教员）读博期间的工作：可以用一般的奖励或代价函数，比如深度神经网络；可以用复杂得多的状态空间，那里无法用动态规划枚举状态分布；还去掉了对动力学模型的需要。那是 2016 年的一篇论文，同样影响很大。
+        </p>
+        <p>
+            高层上，挑战是很多奖励模型都和人的行为相容，一种做法是选熵最大的那个。这给出了解决这个问题的一套做法，在很多情况下很有效。Ziebart 他们用它建模出租车司机，之后还用在很多别的地方。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 模仿学习小结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=2968s" target="_blank">0:49:28</a>–0:52:26</em></p>
+        <p>
+            模仿学习的引入到这里结束。能拿到现有示范、又很难写下奖励函数时，可以从示范中学最优行为，去匹配能观察到的行为。有些情况下它能大大减少学到好策略所需的数据量。课上没有细讲这一点，但 RL 里有不少关于模仿学习理论的好工作，涉及课程后面会讲的样本复杂度（sample complexity，学到好策略需要多少数据）：从最优示范学习，是否可证明地比 RL 设定更容易。
+        </p>
+        <p>
+            Emma 说接下来需要掌握的：
+        </p>
+        <ul>
+            <li>要很熟悉行为克隆，它用得很频繁：有示范时，可以直接把 RL 归约成监督学习。</li>
+            <li>理解最大熵原理在做什么，它和轨迹分布的关系，以及它怎样变成一个学奖励模型的最大似然优化问题。</li>
+        </ul>
+        <p>
+            她特别提醒：这些方法并没有声称学到的就是人们实际使用的奖励模型。它是与人的示范相容、并使分布熵最大的那个奖励模型，不一定准确对应人的偏好。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 人类反馈的几种形式与成对比较</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=3146s" target="_blank">0:52:26</a>–1:00:36</em></p>
+        <h3>两类目标</h3>
+        <p>
+            模仿学习是用人的输入帮助在不确定性下做序列决策的一个例子，这样的方式还有很多。这一讲和下一讲讲人类反馈和基于人类偏好的强化学习。可以从不同层面看：人可以主动帮一个 RL 智能体学某件事，比如训练机器人按自己想要的方式收拾厨房台面；也可以是让大语言模型和我们的价值观、意图对齐（align），提供能在很多任务上塑造它行为的信息。人类反馈和这两类目标都有关。
+        </p>
+        <h3>早期工作：人在回路</h3>
+        <p>
+            人们想这个问题已经很久了。Emma 喜欢 MIT 的 Andrea Thomaz 和 Cynthia Breazeal 的工作（2008 年），叫 Sophie's Kitchen：教一个自主智能体做菜谱或厨房里的基本任务。现在看很原始，过去 20 年进步很大。它的思路是：有人在旁边，也许能学得快得多。智能体不必像 ε-greedy 那样自己在世界里探索，人大多数时候也不是这样学的，我们有学校、监护人、朋友，在学新任务时给我们很多反馈和帮助。所以他们让人在回路里给机器人反馈，提高机器人学习的效率。
+        </p>
+        <p>
+            这里机器人同时从两种输入学习：来自人的输入，和来自环境的输入。Emma 不记得那个领域里具体是不是这样，但可以想象：环境里有内在奖励，比如摔了东西代价很大；做对菜谱时人还会说“做得好”。两种信号一起用来训练。这更像 DAgger，人一直在回路里主动帮机器人。
+        </p>
+        <p>
+            另一个例子是 UT Austin 的 Brad Knox 和 Peter Stone 的 TAMER 框架，同样是看人愿意待在回路里时，能不能训练得更好更快。任务是 Tetris（俄罗斯方块，叠方块、消行）。当时有一些有竞争力的算法（比如某种策略迭代，具体是什么不重要），到第 3 局还一行都消不掉，过一段时间后才学得好很多。TAMER 用人类反馈学一个显式的奖励模型。可以想象另一种做法：类似无模型 RL，用人的信号更新智能体的策略，然后丢掉，不对奖励做参数化建模；TAMER 则从人类反馈显式地构建奖励模型，很快就拿到好得多的表现。问题和 DAgger 一样：人不会在旁边待几千局，所以如果让智能体训练得更久，至少在这个例子里不一定能超过别的方法。这已经开始像基于模型的方法了：从人类反馈显式训练一个奖励模型。
+        </p>
+        <h3>人的投入：一条谱</h3>
+        <p>
+            人愿意提供数据训练 RL 智能体时，可以按人的投入（human effort）排成一条谱（实际上大概是多维的，这里只看一维）。一端是只给示范：本来就在做的日常行为，或者只做一次。另一端是 DAgger 或持续教学：我愿意当智能体的教练，一直坐在那里。中间有什么？
+        </p>
+        <p>
+            过去 15 年很多人认为，成对比较（pairwise comparison）是那个折中点：不要求人持续教，但要求人做一点工作，比较两种行为，说喜欢哪个。
+        </p>
+        <h3>推荐排序系统</h3>
+        <p>
+            最早大量讨论这一点的地方之一是推荐和排序系统。现在在 Caltech 任教的 Yisong Yue，和他在 Cornell 的博士导师 Thorsten Joachims 等人，做了很好的早期工作。设想有两个检索函数，输入一个查询，A 给出一串结果，B 给出另一串。如果你是 Google 或 Bing，想知道哪个更好，就可以问人：比较第一个结果、第二个结果或者整个排序，哪个更好。这比让人给一个标量奖励容易得多：查询返回 CS159 这门课，好的程度是 17.3？2006？还是负 70 亿？很难让人回答，但人多半能比较，说“这个好像好一点”。
+        </p>
+        <h3>机器人和驾驶</h3>
+        <p>
+            机器人和驾驶是人们想得很多的另一类应用。Dorsa Sadigh（Emma 在 Stanford 的同事）的工作：训练一辆车在路上的各种行为时，怎样从人那里得到“哪些行为可以接受”的输入。比如大多数人会更喜欢左边那段（没有车祸）而不是右边那段。为驾驶时想做的所有事写出目标函数很难：下冰雹时怎么办，前车突然停下怎么办，这些都很微妙。Dorsa 和同事表明人能做这种偏好对比较；她的实验室还做了很多“该给人看哪些偏好对”的工作，以便尽快弄清人的偏好，尊重人付出的精力。
+        </p>
+        <p>
+            ChatGPT 是另一个例子，后面会讲。总的来说，成对比较常常比写奖励函数容易，又比 DAgger 那样持续标注省事得多。比如在推荐系统里，“哪些课程涉及这个主题”这个查询的完美回答是什么，人很难写出来，但比较两个回答很容易。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. Bradley-Terry 模型与几种“赢家”</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=3636s" target="_blank">1:00:36</a>–1:05:58</em></p>
+        <h3>潜在奖励与带噪声的偏好</h3>
+        <p>
+            怎样从数学上建模成对比较？一种方法是 Bradley-Terry 模型（1952 年）。和前面建模标量奖励一样，看人比较偏好时，我们通常仍然关心一个潜在的（latent）奖励模型：假设人脑中有某个奖励函数，可能很难说清楚，但人能给出与之相容的偏好对。人会犯错，所以不假设我说的偏好完全对应我的潜在奖励，只假设两者有带噪声的联系。Bradley-Terry 就是把内在偏好和外在比较联系起来的这类模型之一。
+        </p>
+        <p>
+            先看比 RL 简单的设定，K 臂老虎机（K-armed bandit）。课程后面会讲老虎机，现在只需要知道：没有状态，只有 $K$ 个行动 $b_1,\ldots,b_K$，各自奖励不同。假设人做带噪声的成对比较，偏好 $b_i$ 胜过 $b_j$ 的概率是前面见过的那种指数模型（Emma 说指数模型出现得很多）：
+        </p>
+        $$P(b_i\succ b_j) = \frac{\exp\big(r(b_i)\big)}{\exp\big(r(b_i)\big) + \exp\big(r(b_j)\big)} = p_{ij}$$
+        <p>
+            上下同除以 $\exp(r(b_i))$ 可以看出，它等于 $\sigma\big(r(b_i) - r(b_j)\big)$，$\sigma$ 是 logistic 函数，只取决于两个奖励的差。
+        </p>
+        <h3>小问题：奖励相同时</h3>
+        <p>
+            如果两个东西对我的奖励一样，我偏好 $b_i$ 的概率是多少？Emma 举的例子是芝加哥深盘披萨和薄底披萨（她说她其实有偏好，但假设没有），两个的内在奖励都是 +20，因为她很喜欢披萨。学生答 50%。对，这个模型自动归一化，相同时就是 0.5。如果她喜欢深盘披萨多得多，比如内在奖励 100 对 10，那概率就会高得多，她随口说“比如 0.9 或 0.95”。（按公式严格算，差 90 时概率几乎就是 1。）
+        </p>
+        <p>
+            这只是一个特定的模型，有噪声。RLHF 论文在这个模型之上还对人怎样给出偏好对加了一些额外假设，但这是近来很多人用来理解潜在奖励与外在偏好关系的基础模型。
+        </p>
+        <p>
+            它是传递的（transitive）：想知道 $i$ 和 $k$ 之间的概率，可以从 $p_{ij}$ 和 $p_{jk}$ 推出来，可以把比较串起来。这个模型大约 70 年前提出，很流行，早期在推荐系统等领域就用到了。
+        </p>
+        <h3>什么叫“最好的那个”</h3>
+        <p>
+            只有 $K$ 个行动、想知道哪个最好时，在偏好模型下“好”是什么意思？课程到现在一直说最大化价值函数、找好的策略；现在看 $K$ 个臂里哪个最好，有几种定义：
+        </p>
+        <ul>
+            <li>Condorcet 赢家（Condorcet winner）：对每一个其他选项 $b_j$，都有 $P(b_i\succ b_j) > 0.5$。比如所有披萨里她最喜欢深盘，那它就是 Condorcet 赢家。不要求这些概率是 1，只要大于 0.5，但必须赢过所有其他选项，这个门槛很高，要有一个东西胜过其他所有东西。</li>
+            <li>Copeland 赢家（Copeland winner）：两两比较中胜场最多的那个。不要求胜过所有其他选项，平均来说它胜过别的。课件上的计分是“胜过的数目减去输给的数目”。</li>
+            <li>Borda 赢家（Borda winner）：最大化期望得分的那个，对 $b_j$ 的得分是：$b_i\succ b_j$ 时为 1，相等时为 0.5，否则为 0。可以看成把胜负离散化。</li>
+        </ul>
+        <p>
+            她现在提这些，是因为后来有一些讨论：近期 RLHF 的工作和社会选择（social choice）、计算经济学里的想法有什么关系，我们到底在计算什么，底层目标是什么，怎样区分 LLM 可能给出的不同回答。K 臂老虎机或对决老虎机（dueling bandits）的算法通常不要求找一个总是胜过一切的选项（比如一个总是更好的排序系统），只要找一个平均胜过其他的，它们常常构造“哪个行动胜过哪个行动”的成对矩阵。课件写明，历史上这类算法关注找 Copeland 赢家。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 从偏好学奖励模型，后空翻与 ChatGPT</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=IEbuJtjqtMU&t=3958s" target="_blank">1:05:58</a>–1:13:59</em></p>
+        <h3>拟合 Bradley-Terry 模型</h3>
+        <p>
+            有了很多带噪声的成对比较，想从中提取潜在的奖励函数。为什么要它？有了奖励函数，就能找出哪个臂或哪个行动最好；在 RL 里，可以针对这个奖励优化策略。
+        </p>
+        <p>
+            假设有 $N$ 个元组 $(b_i, b_j, \mu)$：偏好第一个时 $\mu = 1$，偏好第二个时 $\mu = 0$，无所谓时 $\mu = 0.5$。这就是一个分类任务，和 logistic 回归很像，可以用交叉熵（cross-entropy）最大化似然：
+        </p>
+        $$\mathcal{L} = -\sum_{(b_i,b_j,\mu)\in D}\Big[\mu\log P(b_i\succ b_j) + (1-\mu)\log P(b_j\succ b_i)\Big]$$
+        <p>
+            奖励模型一般参数化成深度神经网络或别的复杂函数，也可以是线性的，看情况。然后找使似然最大的参数。这就是给定偏好对和观测到的偏好时拟合奖励模型的方法。
+        </p>
+        <h3>扩展到轨迹</h3>
+        <p>
+            RL 里有状态、有多个行动、有轨迹，怎么办？思路和最大熵那里类似：一条轨迹有一串奖励，轨迹的回报就是它们的和。如果按同一个模型一条轨迹能拿到更高的回报，我就更偏好它。设两条轨迹 $\tau^1 = (s_0, a_7, s_{14},\ldots)$、$\tau^2 = (s_0, a_6, s_{12},\ldots)$，$R^1 = \sum_{i=0}^{T-1}r^1_i$ 是 $\tau^1$ 潜在、观测不到的回报，$R^2$ 类似：
+        </p>
+        $$\hat P(\tau^1\succ\tau^2) = \frac{\exp\big(\sum_{i=0}^{T-1}r^1_i\big)}{\exp\big(\sum_{i=0}^{T-1}r^1_i\big) + \exp\big(\sum_{i=0}^{T-1}r^2_i\big)}$$
+        <p>
+            等于把它映射回老虎机，只不过比较的是两条轨迹。流程：让人比较轨迹，用它学奖励模型；有了学到的奖励模型，就可以用 PPO 之类的方法针对它优化策略。
+        </p>
+        <h3>例子：学后空翻</h3>
+        <p>
+            2017 年的论文 Deep RL from Human Preferences（Christiano 等人），也就是更准确叫法下的“基于人类偏好的深度 RL”。他们想训练一个 MuJoCo 类的小模型做后空翻，发现大约需要 900 比特的人类反馈就能学会。做法是给人看两段小视频，问：左边的更接近后空翻，还是右边的？人只需要一直点左、右、左、右。他们不用说出后空翻的奖励函数是什么，只要说“这个看起来更像后空翻”。有些片段已经相当接近。只需要大约 900 个例子，Emma 说这很好，尤其和深度 Q 学习学 Atari 时那种上百万的数据和训练量相比。
+        </p>
+        <p>
+            作业 3 要同时做 RLHF 和 DPO，这是这门课第一次布置这个作业，Emma 说她很期待。不用自己去标偏好，课程会给一个数据集，用它训练智能体，看看怎样从人类偏好学习。
+        </p>
+        <h3>ChatGPT 的 RLHF 流程</h3>
+        <p>
+            快下课了，她先给一点预览，下周一客座讲座之前大概还会再讲一点。2017 年那篇论文受到一定关注，但她觉得很长一段时间里相关工作不算多，直到最近。她借用 Tatsu Hashimoto 的 NLP 课的几页幻灯片（第一节课也放过）讲 ChatGPT 怎样用 RLHF：
+        </p>
+        <ol>
+            <li>收集示范数据，做监督学习。这基本就是我们说的行为克隆。</li>
+            <li>收集比较数据，训练奖励模型。他们不一定只比两个，可以让标注员给比如四个回答排序，这些模型可以扩展到排序。</li>
+            <li>用 PPO 更新大语言模型。</li>
+        </ol>
+        <p>
+            Emma 说要注意，这其实是一个元强化学习（meta reinforcement learning）的例子。前面训练的东西只做一件事，比如后空翻；这里想学的是一个覆盖人们想用大语言模型做的所有任务的通用奖励函数。所以它是多任务问题：给一个新提示，比如“写一个关于青蛙的故事”，希望智能体做得好，而这很可能是它在数据里从没见过的任务。现在训练的奖励模型，以前大概会被看作多任务设定，现在则把任务定义为“做人想用 ChatGPT 做的任何事，回答问题”，问题变成怎样训练一个对所有这些都好用的奖励模型。下周会继续讲具体怎么做，基本完全沿着刚才的框架。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 2026 版更新</h2>
+        <p>
+            2026 年冬季的对应课件是第 8 讲“Policy Gradients and Imitation learning”（44 页正文加附录）。它的“Class Structure”页写的是：上次讲策略搜索和模仿学习，这次讲“Imitation Learning and RLHF and maybe DPO”，下次是期中考试。和 2024 年相比的变化：
+        </p>
+        <h3>最大熵逆强化学习没有了专门的推导页</h3>
+        <ul>
+            <li>课件开头是 REINFORCE 的复习投票（a、d 正确，与 2024 年第 7 讲相同）和期中考试说明，然后是行为克隆的误差累积、DAgger（“Key limitation?”）、Feature Based Reward Function 和“有无穷多个 $R$”的投票。</li>
+            <li>DAgger 之后直接是“Imitation Learning Summary”，只有三行：Very powerful；A lot of extensions；Max entropy reward learning is an important idea。课件里没有本讲第 03 到 07 节那些约束优化、拉格朗日乘子、梯度和状态访问频率的页面，也没有那道“哪些步骤要用动力学模型”的投票。2026 年课上口头讲了多少，课件看不出来。</li>
+            <li>另外，我们手里的第 9 讲课件页脚印的是 Winter 2025，它的“Class Structure”写“Last time: Imitation Learning (Max Entropy IRL) and RLHF”，说明 2025 年还讲了最大熵 IRL；2026 年的第 8 讲课件则只剩上面那一行。</li>
+        </ul>
+        <h3>人类反馈和 Bradley-Terry 部分基本相同</h3>
+        <ul>
+            <li>Thomaz 和 Breazeal 2008、人类投入谱（Demonstrations Only 到 DAGGER/Constant Teaching，中间是 Pairwise Labels）、Yisong Yue 的排序系统、Sadigh 等人 RSS 2017 都保留；TAMER 那页挪到了附录。</li>
+            <li>新加一页“Pairwise Comparisons”：成对比较常常比手写奖励函数容易，也比给标量奖励（“你有多喜欢这条广告？”）容易。</li>
+            <li>Bradley-Terry 页标注 1952 年，并写明“前面已经看到，不加其他假设时潜在奖励模型不唯一，现在聚焦一个特定的结构模型”。Copeland 赢家的计分写成“胜过的数目减去输给的数目”，并写明历史上 K 臂或对决（$k=2$）老虎机算法关注找 Copeland 赢家。</li>
+            <li>交叉熵损失、轨迹版本的偏好概率、“Use learned reward model, and do PPO with this model”、后空翻 900 比特反馈，都与课上一致。</li>
+        </ul>
+        <h3>From Backflips to ChatGPT 展开了</h3>
+        <p>
+            2024 年课上只放了 Tatsu Hashimoto 课件的一页流程图，2026 年把那一段（CS224N 第 11 讲）的多页都放进来：
+        </p>
+        <ul>
+            <li>RLHF 流程：第一步指令微调，第二、三步最大化奖励。</li>
+            <li>为什么用成对比较：人的直接打分有噪声、校准不一，成对比较更可靠（Phelps 等 2015；Clark 等 2018）。例子是三句关于旧金山地震的摘要排序。奖励模型损失写成 $J_{RM}(\phi) = -\mathbb{E}_{(s^w,s^l)\sim D}\big[\log\sigma\big(RM_\phi(s^w) - RM_\phi(s^l)\big)\big]$，$s^w$ 是“赢的”样本，$s^l$ 是“输的”样本。</li>
+            <li>先确认奖励模型本身好用：在留出的人类判断上评估它的预测准确率；Stiennon 等 2020 的结果显示，足够大、数据足够多的奖励模型接近单个人类标注者的水平。</li>
+            <li>把一切放在一起：复制一份预训练（可能已指令微调）的模型 $p^{RL}_\theta$，用 RL 优化 $R(s) = RM_\phi(s) - \beta\log\frac{p^{RL}_\theta(s)}{p^{PT}(s)}$。第二项是惩罚，防止偏离预训练模型太远，取期望就是两者之间的 KL 散度。</li>
+            <li>RLHF 相对预训练加微调有提升（Stiennon 等 2020）；InstructGPT 把 RLHF 扩展到约 3 万个任务（Ouyang 等 2022）。</li>
+            <li>Dubois 等 2023 的对照比较（用 GPT-4 的反馈模拟人类反馈）：InstructGPT 用的 PPO 确实有效，但 Best-of-n、只在“好”输出上训练这些简单基线也效果不错。</li>
+            <li>还有一页引用 Zheng 等 2023 的“Secrets of RLHF in Large Language Models Part I: PPO”。</li>
+        </ul>
+        <h3>新增 DPO 简介</h3>
+        <p>
+            2024 年 DPO 留到第 9 讲由作者来讲，2026 年把它放进了第 8 讲末尾，用的是 Rafailov、Sharma、Mitchell 的课件：从带 KL 约束的 RLHF 目标出发，写出闭式最优策略（其中配分函数要对所有可能的回答求和，没法直接用），再反过来把奖励写成最优策略的函数，代入 Bradley-Terry 损失后 $\log Z$ 相消，因为损失只关心两个回答的奖励差。之后是 IMDb 情感实验里的奖励与 KL 权衡、用 DPO 训练的模型（Mistral、LLaMa3 等）的结果，以及一页 CPL。推导和实验见<a href="09_DPO客座讲座.html">第 9 讲</a>。最后一页推荐进一步学习：从人类偏好学习和决策是一个与社会选择、计算经济学、AI 交叉的方向，Stanford 有 Koyejo 开的新课 CS329H: Machine Learning from Human Preferences。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>从示范学奖励不可辨识，最大熵逆强化学习用最大熵原理打破歧义：在匹配专家特征（或回报）的约束下，选熵最大的轨迹分布。</li>
+            <li>用拉格朗日乘子对 $p(\tau)$ 求导，得到最大熵分布是指数族：$p(\tau\mid\phi) = \frac{1}{Z(\phi)}\exp\big(r_\phi(\tau)\big)$，$Z(\phi) = \sum_\tau\exp(r_\phi(\tau))$。</li>
+            <li>于是学奖励变成最大似然：$J(\phi) = \sum_{\tau^*\in D}r_\phi(\tau^*) - |D|\log\sum_\tau\exp(r_\phi(\tau))$。这种通过固定函数形式、只留下一个参数的做法可以追溯到 Jaynes 1957，和 DPO 的重新参数化在思路上相通。</li>
+            <li>梯度是专家数据上的奖励导数减去模型分布下的期望：$\nabla_\phi J = \sum_{s\in D}\frac{dr_\phi(s)}{d\phi} - |D|\sum_s p(s\mid\phi)\frac{dr_\phi(s)}{d\phi}$；线性奖励下就是专家特征计数减去模型的期望特征计数。</li>
+            <li>状态访问频率在表格型、动力学已知时用动态规划算：$\mu_{t+1}(s) = \sum_{s'}\sum_a\mu_t(s')\pi(a\mid s')p(s\mid s',a)$。</li>
+            <li>算法循环：价值迭代求最优策略，算状态访问频率，算梯度，更新 $\phi$。前两步需要动力学模型，算梯度不需要。Chelsea Finn 2016 年的工作把它扩展到神经网络奖励并去掉了对动力学模型的需要。</li>
+            <li>人类反馈可以按人的投入排成一条谱，从只给示范到 DAgger 式持续教学；成对比较处在中间，比写奖励函数或给标量分数容易。</li>
+            <li>Bradley-Terry：$P(b_i\succ b_j) = \frac{\exp(r(b_i))}{\exp(r(b_i))+\exp(r(b_j))}$，奖励相同时为 0.5，模型是传递的；“最好”的定义有 Condorcet、Copeland、Borda 赢家。</li>
+            <li>用交叉熵拟合奖励模型 $\mathcal{L} = -\sum[\mu\log P(b_i\succ b_j) + (1-\mu)\log P(b_j\succ b_i)]$；轨迹版本把回报换成奖励之和，然后用 PPO 优化学到的奖励。后空翻实验只用了约 900 比特人类反馈。</li>
+            <li>ChatGPT 的流程：监督微调（行为克隆）、比较数据训练奖励模型、PPO；它要学的是覆盖所有任务的奖励，可以看成多任务或元强化学习问题。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS234 Reinforcement Learning · Lecture 8: Offline RL 1 (Max-Ent IRL, RLHF) · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

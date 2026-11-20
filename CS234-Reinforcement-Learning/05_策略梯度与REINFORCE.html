@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 5 讲：策略梯度与 REINFORCE | Stanford CS234 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="04_Q学习与函数近似.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS234 目录</a> · Lecture 5</span>
+    <span><a href="06_基线_Actor-Critic与PPO.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 5 讲：策略梯度与 REINFORCE</h1>
+        <p class="subtitle">直接参数化策略并沿梯度改进它：为什么需要随机策略（石头剪刀布、混叠网格），无梯度的策略搜索（外骨骼、AIBO 机器狗），似然比推导、score function、softmax 和高斯策略，利用时间结构得到 REINFORCE，以及基线的想法</p>
+        <div class="author-meta">
+            主讲：Emma Brunskill · 时长：1 小时 8 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=L6OVEmV3NcE" target="_blank">课堂录像</a>（Stanford Online 公开，2024 年春季，本文依据录像字幕整理）；补充：<a href="https://web.stanford.edu/class/cs234/modules.html" target="_blank">2026 年冬季课件</a>（2026 年的录像只对选课学生开放；文中标“2026 版更新”的内容来自 2026 年课件）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            前几讲都是基于价值的方法：显式表示从一个状态（或状态-行动）出发的期望折扣奖励和，再从中提取策略。这一讲转向策略搜索（policy search）：直接用参数 $\theta$ 表示策略 $\pi_\theta(a\mid s)$，不一定需要价值函数，把“找好策略”当成一个优化问题。
+        </p>
+        <p>
+            Emma 先说明随机策略为什么有用，再介绍不用梯度的策略搜索，然后推导这一讲的核心：似然比（likelihood ratio）策略梯度。推导的结果不需要动态模型，也不需要奖励可微。再利用“未来的决策不影响过去的奖励”降低方差，就得到 REINFORCE 算法。最后引出基线（baseline），下一讲证明它不引入偏差，并开始讲作业 2 要实现的 PPO。
+        </p>
+        <ol>
+            <li><a href="#t01">开场投票：表格 Q-learning、批量 TD 和 DQN</a> · <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">从价值方法到策略搜索</a> · <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=212s" target="_blank">0:03:32</a></li>
+            <li><a href="#t03">为什么需要随机策略</a> · <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=644s" target="_blank">0:10:44</a></li>
+            <li><a href="#t04">策略优化和无梯度方法</a> · <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=1038s" target="_blank">0:17:18</a></li>
+            <li><a href="#t05">策略梯度的设定</a> · <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=1459s" target="_blank">0:24:19</a></li>
+            <li><a href="#t06">可微的策略类</a> · <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=1758s" target="_blank">0:29:18</a></li>
+            <li><a href="#t07">策略价值的两种写法和似然比技巧</a> · <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=1915s" target="_blank">0:31:55</a></li>
+            <li><a href="#t08">把轨迹概率拆开：动态模型消失</a> · <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=2464s" target="_blank">0:41:04</a></li>
+            <li><a href="#t09">Score function：softmax 和高斯策略</a> · <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=2911s" target="_blank">0:48:31</a></li>
+            <li><a href="#t10">投票、直觉和策略梯度定理</a> · <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=3207s" target="_blank">0:53:27</a></li>
+            <li><a href="#t11">利用时间结构：REINFORCE</a> · <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=3488s" target="_blank">0:58:08</a></li>
+            <li><a href="#t12">基线的想法</a> · <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=3901s" target="_blank">1:05:01</a></li>
+            <li><a href="#t13">2026 版更新</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场投票：表格 Q-learning、批量 TD 和 DQN</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=5s" target="_blank">0:00:05</a>–0:03:32</em></p>
+        <ul>
+            <li>表格型设定中，随机采样元组、做无限次 Q-learning 更新，只要学习率按正确的方式衰减，就会收敛到真实 Q 值。对，因为没有函数近似。</li>
+            <li>批量反复做 TD 更新，等价于先从已有数据估计动态和奖励模型（确定性等价），再做动态规划。对，第 3 讲讲过。</li>
+            <li>DQN 保证收敛到最优 Q 函数。错。有学生说迭代次数要够多；Emma 说迭代不够当然不行，但即使无限次迭代也不保证。她用可实现性（realizability）解释：我们不知道 Q 的函数形式。假设状态空间只有一维（实际是高维向量或图像），如果用直线去近似一个多项次的 Q 函数，数据再多也收敛不到最优 Q，因为根本表示不出来。此外还有各种不稳定因素。不过经验上 DQN 常常表现很好。</li>
+        </ul>
+    </section>
+
+    <section id="t02">
+        <h2>02. 从价值方法到策略搜索</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=212s" target="_blank">0:03:32</a>–0:10:44</em></p>
+        <p>
+            策略仍然是状态到行动的映射，或者是从（状态，行动）到 0 到 1 之间的数，对每个状态求和为 1（每个状态至少要执行一个行动）。只是不再必须有价值函数的显式表示。
+        </p>
+        <p>
+            Emma 提了一个问题：能不能用计算机科学常用的技巧，把 RL 归约成别的问题，比如在线优化，直接搜索一个好策略？策略梯度在高层上和这个想法相关，它不是归约方法，但思路是直接搜索好策略。策略梯度方法在过去五到十年影响很大：
+        </p>
+        <ul>
+            <li>NLP 里循环神经网络的序列级训练（sequence level training）就建立在今天要讲的 REINFORCE 上。</li>
+            <li>端到端训练深度视觉运动策略（End-to-End Training of Deep Visuomotor Policies），大约十年前在机器人界影响很大。Emma 放了视频，这是 Chelsea Finn 博士期间和 Sergey Levine 等人在 Berkeley 的工作：用一个大网络直接从像素学机器人该怎么做，是最早一批直接从图像学策略的例子，希望学到的任务能泛化。</li>
+            <li>作业 2 要实现 PPO（Proximal Policy Optimization），它建立在今天的方法之上，用在了 ChatGPT 的训练中。</li>
+        </ul>
+        <p>
+            这些算法影响大，部分原因是能很好地扩展到极其复杂的输入：图像、高维机器人任务，甚至自然语言。它们常和状态-行动价值一起使用，但不是必须。
+        </p>
+        <p>
+            上一讲用参数 $w$ 近似价值或 Q 函数，$V_w(s)\approx V^\pi(s)$，$Q_w(s,a)\approx Q^\pi(s,a)$，再从价值函数生成策略（比如 ε-greedy）。这一讲用 $\theta$ 直接参数化策略：
+        </p>
+        $$\pi_\theta(s,a) = P[a\mid s;\theta]$$
+        <p>
+            比如一个深度卷积网络，最后输出一个行动，或者输入行动、输出它的概率。目标是找到 $V^\pi$ 最高的策略。仍然不做基于模型的学习，直接从经验学。
+        </p>
+        <h3>三类方法</h3>
+        <p>
+            Emma 引用 David Silver（AlphaGo 的主要负责人之一）的图：
+        </p>
+        <ul>
+            <li>基于价值（value based）：学价值函数，策略是隐式的（比如 ε-greedy）。</li>
+            <li>基于策略（policy based）：没有价值函数，学策略。</li>
+            <li>两者交集是 Actor-Critic：既学价值函数，也学策略。这类方法很流行，结合了两者的优点。AlphaGo 就是 actor-critic 方法，它显式表示了策略和价值函数。</li>
+        </ul>
+        <p>
+            这一讲关注基于策略的方法，actor-critic 下一讲讲。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 为什么需要随机策略</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=644s" target="_blank">0:10:44</a>–0:17:18</em></p>
+        <p>
+            之前主要考虑确定性策略或 ε-greedy 策略，现在要一般地考虑随机策略。上一讲看到，确定性策略很难了解没试过的行动；随机策略能拿到很多不同行动的信息。两个例子说明策略梯度能处理哪些情况。
+        </p>
+        <h3>石头剪刀布</h3>
+        <p>
+            反复玩石头剪刀布时，确定性策略能是最优的吗？学生说这个游戏是循环克制的，没有哪个策略严格优于其他所有策略。Emma 补充：如果你是确定的，比如总出布，对手就总出剪刀。任何确定性策略在重复博弈中都会被对手利用，所以最优策略必须是随机的，所有确定性策略都被一个好的随机策略严格压制。这里均匀随机策略是最优的，是纳什均衡（Nash equilibrium）。
+        </p>
+        <p>
+            这和之前不同，原因之一是系统不是马尔可夫的：对手不是像抛硬币那样的随机环境，他会对你之前的行为做出反应。你可以有一个固定的随机策略并且它是最优的，但很难把它写成一个 Q 函数再取 argmax，因为这个环境没有最优的确定性策略。
+        </p>
+        <h3>混叠网格</h3>
+        <p>
+            第二个例子是混叠（aliasing）或部分可观测。一个机器人在网格里走，传感器只能告诉它四个方向有没有墙。特征形如 $\phi(s,a) = \mathbb{1}(\text{北边有墙}, a = \text{向东})$，对 N、E、S、W 都有。在这种特征下，两个灰色格子看起来完全一样，智能体分不清自己在哪个。
+        </p>
+        <ul>
+            <li>基于价值：用近似价值函数 $Q_\theta(s,a) = f(\phi(s,a);\theta)$。两个灰格看起来一样，只能在两处做同样的事：在混叠下，最优的确定性策略要么两个灰格都往西，要么都往东。无论哪种，都可能卡住，永远拿不到钱。基于价值的 RL 学到的是接近确定的策略（贪心或 ε-greedy），会在走廊里来回走很久。</li>
+            <li>基于策略：用参数化策略 $\pi_\theta(s,a) = g(\phi(s,a);\theta)$。学生答：以一定概率往东或往西。最优随机策略在灰格里随机向东或向西：$\pi_\theta(\text{南北有墙}, \text{向东}) = 0.5$，$\pi_\theta(\text{南北有墙}, \text{向西}) = 0.5$。一半时候是对的，所以大多数时候几步内就能到达目标。</li>
+        </ul>
+        <p>
+            这也不是马尔可夫系统，因为有混叠，系统是部分可观测的。一种办法是当作 POMDP 处理，另一种就是用随机策略，效果也很好。这两个例子是策略梯度或随机策略容易处理、之前的方法难处理的情况。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 策略优化和无梯度方法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=1038s" target="_blank">0:17:18</a>–0:24:19</em></p>
+        <p>
+            有了一个策略函数空间，怎样知道哪些策略好？在回合式环境中，可以用起始状态的策略价值：像蒙特卡洛方法那样，从这个状态出发执行策略，到回合结束的期望奖励是多少。今天主要讲回合式情况，也可以推广到无限视界。
+        </p>
+        <p>
+            这样一来就是优化问题：找使 $V(s_0,\theta)$ 最大的参数 $\theta$。她画了一维的 $\theta$ 和 $V$ 的曲线，实际中 $\theta$ 可能是深度网络的全部参数。难点是我们不知道这个函数，只能通过数据估计它：一开始完全不知道 $\theta$ 怎样映射到 $V$，要慢慢学。
+        </p>
+        <h3>无梯度优化</h3>
+        <p>
+            把它看成未知函数的优化问题，就有很多方法可用。这一讲关注利用序列决策结构的方法，但也有完全忽略这些结构、甚至不用梯度的方法：爬山法（hill climbing）、遗传算法、交叉熵方法（cross-entropy method）等，有时效果很好。
+        </p>
+        <p>
+            有学生问：策略输出一个行动的话，怎么是随机的？Emma 说可以输入行动、输出 0 到 1 之间的概率，对所有行动都算一遍，再抽一个随机数来选。
+        </p>
+        <p>
+            例子：Stanford 机械工程系的 Steven Collins 做外骨骼（exoskeleton），对有运动障碍的人可能很有帮助。难点是外骨骼要真的帮人走路，每个人的身体构造不同（Emma 说她个子很高），要为每个人找到最好的参数，但不能花两年去优化，没人愿意等。他们用策略搜索快速个性化外骨骼的参数，叫“人在回路中的外骨骼优化”（human-in-the-loop exoskeleton optimization）。目标是减少走路需要的力气。他们没有用梯度方法，用的是 CMA-ES（一种连续优化方法）：让人在几组不同控制参数下走路，看哪些最有效，再带一些随机性地朝那个方向调整要尝试的策略。Emma 记得大约两三个小时就找到明显更好的策略，代谢效率大概提高了 20% 或 30%，七八年前发表在 Science 上。这是另一个例子：做在线优化，但不一定要考虑策略的时间结构。
+        </p>
+        <p>
+            有学生问是不是从一个默认策略开始再改进？是的，所有这些方法都要先以某种方式初始化策略参数，就像以前把价值函数初始化为 0，或者 DQN 的网络初始参数。
+        </p>
+        <p>
+            这类方法常是很好的基线：可以用于任何策略参数化，即使不可微，因为不用梯度；通常也容易并行，CMA-ES 会同时试一组策略，再用结果更新到另一组。很多实际问题本来就有很多客户、很多机械臂，可以并行。缺点是常常不那么省数据，因为忽略了时间结构；有时间结构或梯度信息时，利用它们可能更有效。所以课程关注可微方法：对策略参数做随机梯度下降，比如策略由深度网络表示，就可以反向传播更新参数，同时利用“在做一串决策并想优化这串决策”的结构。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 策略梯度的设定</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=1459s" target="_blank">0:24:19</a>–0:29:18</em></p>
+        <p>
+            记 $V^{\pi_\theta} = V(s_0,\theta)$，明确价值依赖于策略参数。假设是回合式 MDP：跑一个回合，停，重置，继续。策略梯度算法沿梯度上升，寻找 $V(s_0,\theta)$ 的局部极大值：
+        </p>
+        $$\Delta\theta = \alpha\nabla_\theta V(s_0,\theta),\qquad \nabla_\theta V(s_0,\theta) = \begin{pmatrix}\frac{\partial V(s_0,\theta)}{\partial\theta_1}\\ \vdots\\ \frac{\partial V(s_0,\theta)}{\partial\theta_n}\end{pmatrix}$$
+        <p>
+            $\alpha$ 是步长。一般只能到达局部极大值；运气好的话在策略参数空间里是凸的，但一般不假设凸性。这和之前的表格型情况差别很大，那时保证得到最优 Q 函数和最优价值函数；现在只希望在给定的策略参数化下到达一个局部最优，是针对这个策略类的保证。
+        </p>
+        <h3>早期例子：AIBO 学快走</h3>
+        <p>
+            现在一看到求梯度，大家会想到自动微分和反向传播。但这类方法刚流行时还没有自动微分。Emma 讲了 Peter Stone 组 2004 年的论文（Kohl and Stone, ICRA 2004）：RoboCup 的目标是让机器人最终能和人类球员比赛（她记得目标年份是 2030 或 2050），起步是四足机器狗 AIBO，第一个难题是让它走得够快。他们把脚运动的曲线参数化，这组参数定义了控制关节的策略；让机器狗按某组参数来回走很多次，测速度，用有限差分（finite differences）估计梯度，稍微改参数，重复。大约四个小时（中间换了几次电池）就学到了快得多的步态。
+        </p>
+        <p>
+            为什么这个问题难：涉及大量接触力，要在特定地面上学；硬件是商用的，不知道设计者设的所有参数。这时直接用数据驱动，不需要物理模拟器。
+        </p>
+        <h3>基于策略的 RL：优缺点</h3>
+        <ul>
+            <li>优点：收敛性质常常更好，通常能保证到达局部最优，DQN 没有这个保证；在高维或连续行动空间里很有效；能学随机策略。</li>
+            <li>缺点：目前讲的方法可能效率低、方差高；通常只能到局部最优。</li>
+        </ul>
+    </section>
+
+    <section id="t06">
+        <h2>06. 可微的策略类</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=1758s" target="_blank">0:29:18</a>–0:31:55</em></p>
+        <p>
+            希望能解析地计算策略梯度，不用有限差分。假设策略在非零处可微，并且知道梯度 $\nabla_\theta\pi_\theta(s,a)$。策略类（policy class）指给出“给定状态时行动概率”的函数形式。常用的有 softmax、高斯和神经网络。
+        </p>
+        <p>
+            高斯的例子：机器人要决定施加多大速度，策略可以是“行动服从以 0.5 为中心、有一定标准差的高斯分布”。平均速度是 0.5，但有波动，有时很慢，有时很快，有时甚至往反方向。
+        </p>
+        <p>
+            知道策略可微还不够，要求的是价值函数对策略参数的导数。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 策略价值的两种写法和似然比技巧</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=1915s" target="_blank">0:31:55</a>–0:41:04</em></p>
+        <h3>两种写法</h3>
+        <p>
+            策略价值是起始状态在策略下的期望奖励和。回合有限，所以今天大部分时候不用折扣：
+        </p>
+        $$V(s_0,\theta) = \mathbb{E}_{\pi_\theta}\Big[\sum_{t=0}^{T} R(s_t,a_t);\ \pi_\theta, s_0\Big]$$
+        <p>
+            第一种写法：按策略选每个行动的概率，对 Q 值加权，$V(s_0,\theta) = \sum_a\pi_\theta(a\mid s_0)\,Q(s_0,a,\theta)$。
+        </p>
+        <p>
+            第二种写法：对轨迹求和。轨迹 $\tau = (s_0, a_0, r_0, \ldots, s_{T-1}, a_{T-1}, r_{T-1}, s_T)$ 由 $\pi_\theta$ 采样；$P(\tau;\theta)$ 是从 $s_0$ 出发执行 $\pi_\theta$ 时轨迹的概率；$R(\tau) = \sum_{t=0}^{T}R(s_t,a_t)$ 是轨迹的奖励和（以前叫 $G$）：
+        </p>
+        $$V(s_0,\theta) = \sum_\tau P(\tau;\theta)\,R(\tau)$$
+        <p>
+            轨迹很长、状态空间很大时，一般不可能枚举所有轨迹，但这在数学上定义良好，就是轨迹奖励的期望，而期望可以用有限样本近似，像蒙特卡洛那样采 $n$ 条。课程用第二种写法；Sutton 和 Barto 第 13.1 到 13.3 节从第一种写法出发，也讲得很好。
+        </p>
+        <p>
+            目标变成：
+        </p>
+        $$\arg\max_\theta V(\theta) = \arg\max_\theta\sum_\tau P(\tau;\theta)\,R(\tau)$$
+        <p>
+            也就是希望策略诱导出的状态-行动轨迹能带来高奖励。
+        </p>
+        <h3>似然比技巧</h3>
+        <p>
+            对右边求梯度。$R(\tau)$ 一旦给定轨迹就确定了，不依赖策略参数，所以梯度只作用在 $P(\tau;\theta)$ 上。然后乘以再除以 $P(\tau;\theta)$（等于乘以 1），再利用 $\nabla_\theta\log P = \frac{1}{P}\nabla_\theta P$：
+        </p>
+        $$\begin{aligned}
+        \nabla_\theta V(\theta) &amp;= \nabla_\theta\sum_\tau P(\tau;\theta)R(\tau) = \sum_\tau\nabla_\theta P(\tau;\theta)\,R(\tau)\\
+        &amp;= \sum_\tau\frac{P(\tau;\theta)}{P(\tau;\theta)}\nabla_\theta P(\tau;\theta)\,R(\tau) = \sum_\tau P(\tau;\theta)\,R(\tau)\,\underbrace{\frac{\nabla_\theta P(\tau;\theta)}{P(\tau;\theta)}}_{\text{likelihood ratio}}\\
+        &amp;= \sum_\tau P(\tau;\theta)\,R(\tau)\,\nabla_\theta\log P(\tau;\theta)
+        \end{aligned}$$
+        <p>
+            为什么要这样做？直接对一个期望求导，不容易传播导数；我们想要能用样本算的东西，因为采样很容易，在环境里跑策略就行。变换之后，它又是一个对轨迹的期望：轨迹奖励乘以轨迹对数概率的梯度。这个期望可以采样近似，比如采几百条轨迹。$\frac{\nabla_\theta P}{P}$ 这一项叫似然比。用 $m$ 条轨迹做经验估计：
+        </p>
+        $$\nabla_\theta V(\theta)\approx\hat g = \frac{1}{m}\sum_{i=1}^{m}R(\tau^{(i)})\,\nabla_\theta\log P(\tau^{(i)};\theta)$$
+        <p>
+            有学生问是不是把每条轨迹的概率近似成 $1/m$？Emma 说是的，这是蒙特卡洛估计，每条用 $1/m$；更可能的轨迹会在 $m$ 条样本里出现得更多。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 把轨迹概率拆开：动态模型消失</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=2464s" target="_blank">0:41:04</a>–0:48:31</em></p>
+        <p>
+            剩下的问题是 $\nabla_\theta\log P(\tau;\theta)$ 怎么算、依赖什么。把轨迹概率写成联合概率：初始状态分布 $\mu(s_0)$，每一步按策略选行动的概率，以及给定历史时到达下一状态的概率（这里先假设奖励是确定的，也可以加一个奖励项）：
+        </p>
+        $$\begin{aligned}
+        \nabla_\theta\log P(\tau^{(i)};\theta) &amp;= \nabla_\theta\log\Big[\underbrace{\mu(s_0)}_{\text{初始状态分布}}\prod_{t=0}^{T-1}\underbrace{\pi_\theta(a_t\mid s_t)}_{\text{策略}}\underbrace{P(s_{t+1}\mid s_t,a_t)}_{\text{动态模型}}\Big]\\
+        &amp;= \nabla_\theta\Big[\log\mu(s_0) + \sum_{t=0}^{T-1}\log\pi_\theta(a_t\mid s_t) + \log P(s_{t+1}\mid s_t,a_t)\Big]\\
+        &amp;= \sum_{t=0}^{T-1}\underbrace{\nabla_\theta\log\pi_\theta(a_t\mid s_t)}_{\text{不需要动态模型}}
+        \end{aligned}$$
+        <p>
+            用 $\log(ab) = \log a + \log b$ 拆开后：初始状态分布和策略无关，求导后消失；动态模型也和策略无关，求导后消失。只剩下每一步所选行动的对数概率的梯度之和。Emma 说这很漂亮：不需要知道动态模型。
+        </p>
+        <p>
+            有学生问，为什么动态模型写成依赖整个历史 $P(s_{t+1}\mid s_{0:t}, a_{0:t})$，而不是只依赖上一个状态和行动？Emma 说她故意写成最一般的形式，没有做马尔可夫假设，就是为了说明不需要：动态模型和策略无关，求导时完全消失，马尔可夫与否都无所谓。她确实在一个地方做了马尔可夫假设：假设策略只依赖当前状态。但策略也可以依赖历史，比如用循环神经网络，那样这一项就依赖历史。
+        </p>
+        <p>
+            记号：对策略取对数再求导的 $\nabla_\theta\log\pi_\theta$ 通常叫 score function。合起来，
+        </p>
+        $$\nabla_\theta V(\theta)\approx\hat g = \frac{1}{m}\sum_{i=1}^{m}R(\tau^{(i)})\sum_{t=0}^{T-1}\nabla_\theta\log\pi_\theta(a_t^{(i)}\mid s_t^{(i)})$$
+        <p>
+            不需要知道动态模型。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. Score function：softmax 和高斯策略</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=2911s" target="_blank">0:48:31</a>–0:53:27</em></p>
+        <p>
+            Score function 是参数化概率（似然）的对数的导数。比如 $\pi(s;\theta)$ 是参数 $\theta$ 下状态 $s$ 的概率，score function 就是 $\nabla_\theta\log\pi(s;\theta)$。对很多策略类，它不难算。
+        </p>
+        <h3>Softmax 策略</h3>
+        <p>
+            用特征的线性组合 $\phi(s,a)^T\theta$ 给行动打分，行动概率正比于分数的指数（也可以加一个温度参数）：
+        </p>
+        $$\pi_\theta(s,a) = \frac{e^{\phi(s,a)^T\theta}}{\sum_a e^{\phi(s,a)^T\theta}}$$
+        <p>
+            它的 score function：
+        </p>
+        $$\begin{aligned}
+        \nabla_\theta\log\pi_\theta(s,a) &amp;= \nabla_\theta\Big[\phi(s,a)^T\theta - \log\sum_a e^{\phi(s,a)^T\theta}\Big]\\
+        &amp;= \phi(s,a) - \frac{\sum_a\phi(s,a)\,e^{\phi(s,a)^T\theta}}{\sum_a e^{\phi(s,a)^T\theta}}\\
+        &amp;= \phi(s,a) - \mathbb{E}_{\pi_\theta}[\phi(s,\cdot)]
+        \end{aligned}$$
+        <p>
+            分式里的权重正好是 $\pi_\theta(s,a)$，所以第二项是策略下特征的期望。有学生问 $\phi$ 通常是什么？Emma 说比如一个大网络的倒数第二层表示，再和 $\theta$ 做线性点积；在客户场景里也可以是一堆客户特征。
+        </p>
+        <h3>高斯策略</h3>
+        <p>
+            连续行动空间（比如机器人的连续力矩或加速度）里，高斯策略很自然：均值是状态特征的线性组合 $\mu(s) = \phi(s)^T\theta$，方差可以固定为 $\sigma^2$，也可以参数化，策略是 $a\sim\mathcal{N}(\mu(s),\sigma^2)$。score function 有闭式解：
+        </p>
+        $$\nabla_\theta\log\pi_\theta(s,a) = \frac{(a - \mu(s))\,\phi(s)}{\sigma^2}$$
+        <p>
+            实际中多半用深度神经网络表示策略，那时用自动微分算就行。这些例子只是说明很多函数形式都能解析地求出 score function。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 投票、直觉和策略梯度定理</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=3207s" target="_blank">0:53:27</a>–0:58:08</em></p>
+        <h3>投票</h3>
+        <p>
+            似然比/score function 策略梯度（单选）：(a) 要求奖励函数可微；(b) 只能用于马尔可夫决策过程；(c) 主要用于无限视界任务；(a) 和 (b)；a、b、c；以上都不是；不确定。答案分散，讨论后公布：以上都不是。Emma 说她把题给助教看时忘了放“以上都不是”这个选项，助教当场傻眼。
+        </p>
+        <ul>
+            <li>(a) 错，这是策略梯度优雅的地方：需要策略可微，奖励函数不必可微，因为在这种写法里奖励不是策略的函数。这让很多奖励函数很复杂的领域都对 REINFORCE 感兴趣，只要策略参数化可微就行。</li>
+            <li>(b) 错，动态模型消失了，不需要马尔可夫。</li>
+            <li>(c) 错，这里假设有限视界（回合式），才能得到多于一条（$m &gt; 1$）的样本；无限视界只能有 $m = 1$。</li>
+        </ul>
+        <h3>直觉</h3>
+        <p>
+            一般形式是 $\hat g_i = f(x_i)\nabla_\theta\log p(x_i\mid\theta)$。$f(x)$ 衡量样本 $x$ 有多好；沿 $\hat g_i$ 移动，就是按样本好的程度提高它的对数概率。希望策略更多地访问能拿到高奖励的状态和行动区域。$f$ 可以不连续、未知，样本空间可以是离散集合，只要能从中采样，所以对奖励或目标函数的要求很宽。Emma 说这几页图她记得来自 John Schulman。
+        </p>
+        <h3>策略梯度定理</h3>
+        <p>
+            策略梯度定理（policy gradient theorem）推广了似然比方法：对任意可微策略 $\pi_\theta(s,a)$，对回合奖励 $J_1$、每步平均奖励 $J_{avR}$ 或平均价值 $\frac{1}{1-\gamma}J_{avV}$ 中任一种目标函数，策略梯度都是
+        </p>
+        $$\nabla_\theta J(\theta) = \mathbb{E}_{\pi_\theta}\big[\nabla_\theta\log\pi_\theta(s,a)\,Q^{\pi_\theta}(s,a)\big]$$
+        <p>
+            Sutton 和 Barto 第 13.2 节对回合式任务和离散状态有很好的推导。要点是可以不只用回报样本，也可以用 Q 函数。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 利用时间结构：REINFORCE</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=3488s" target="_blank">0:58:08</a>–1:05:01</em></p>
+        <p>
+            目前的梯度估计是正确的、无偏的，但噪声很大：它是 $m$ 个样本的蒙特卡洛估计，无偏但方差可能很高。要让它更实用（用更少数据得到更好的梯度估计，因为最终要用它更新权重找好策略），有两个办法：利用时间结构，加基线。
+        </p>
+        <h3>时间结构</h3>
+        <p>
+            之前的写法是整条轨迹的奖励和乘以整条轨迹 score function 之和：
+        </p>
+        $$\nabla_\theta\mathbb{E}_\tau[R] = \mathbb{E}_\tau\Big[\Big(\sum_{t=0}^{T-1}r_t\Big)\Big(\sum_{t=0}^{T-1}\nabla_\theta\log\pi_\theta(a_t\mid s_t)\Big)\Big]$$
+        <p>
+            同样的论证可以用于单个奖励项 $r_{t'}$：只需要到这个奖励为止的部分轨迹，
+        </p>
+        $$\nabla_\theta\mathbb{E}[r_{t'}] = \mathbb{E}\Big[r_{t'}\sum_{t=0}^{t'}\nabla_\theta\log\pi_\theta(a_t\mid s_t)\Big]$$
+        <p>
+            对所有 $t'$ 求和，再交换求和顺序：
+        </p>
+        $$\nabla_\theta V(\theta) = \nabla_\theta\mathbb{E}[R] = \mathbb{E}\Big[\sum_{t'=0}^{T-1}r_{t'}\sum_{t=0}^{t'}\nabla_\theta\log\pi_\theta(a_t\mid s_t)\Big] = \mathbb{E}\Big[\sum_{t=0}^{T-1}\nabla_\theta\log\pi_\theta(a_t\mid s_t)\sum_{t'=t}^{T-1}r_{t'}\Big]$$
+        <p>
+            Emma 的解释：第 0 步的 score function 会和 $r_0, r_1, r_2, r_3, \ldots$ 都相乘，因为那个决策做了之后，后面所有奖励都可能受它影响；第 1 步的 score function 能影响从第 1 步到回合结束的奖励，依此类推。第 3 步的奖励不可能被第 4 步的决策影响，时间只往一个方向走。所以每个 score function 只乘以它能影响的那些奖励，而不是全部奖励，乘的项一般少得多。这降低了估计的方差，而且不引入偏差。
+        </p>
+        <p>
+            从当前步到结束的奖励和就是回报 $G_t^{(i)} = \sum_{t'=t}^{T-1}r_{t'}^{(i)}$，于是
+        </p>
+        $$\nabla_\theta\mathbb{E}[R]\approx\frac{1}{m}\sum_{i=1}^{m}\sum_{t=0}^{T-1}\nabla_\theta\log\pi_\theta(a_t,s_t)\,G_t^{(i)}$$
+        <h3>REINFORCE</h3>
+        <p>
+            这就是蒙特卡洛策略梯度，也就是 REINFORCE，在 NLP、机器人等很多领域影响很大（Emma 记得是 1992 年左右提出的）。更新是学习率乘以 score function 乘以从这一步到回合结束的回报：
+        </p>
+        $$\Delta\theta_t = \alpha\nabla_\theta\log\pi_\theta(s_t,a_t)\,G_t$$
+        <pre><code>Initialize policy parameters theta arbitrarily
+for each episode {s_1, a_1, r_2, ..., s_{T-1}, a_{T-1}, r_T} ~ pi_theta:
+    for t = 1 to T-1:
+        theta = theta + alpha * grad_theta log pi_theta(s_t, a_t) * G_t
+return theta</code></pre>
+        <p>
+            仍然要等回合结束才能更新：用当前策略跑完一整个回合，然后对每个时间步，用学习率、该步的 score function 和该步起的回报稍微改一下策略参数，一个回合就有 $T$ 次更新，再重复。它保证最终落到策略参数化下价值函数的一个局部最优。很多策略梯度算法都建立在这个想法上。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 基线的想法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=L6OVEmV3NcE&t=3901s" target="_blank">1:05:01</a>–1:08:28</em></p>
+        <p>
+            回想蒙特卡洛方法，回报 $G$ 的方差可能很高。目标是尽快收敛到局部最优，所以要降低梯度估计的方差。接下来两个想法：引入基线，以及用别的东西代替蒙特卡洛回报（下一讲）。
+        </p>
+        <p>
+            基线就是减去一个只依赖状态 $b(s_t)$、不依赖策略的量：
+        </p>
+        $$\nabla_\theta\mathbb{E}_\tau[R] = \mathbb{E}_\tau\Big[\sum_{t=0}^{T-1}\nabla_\theta\log\pi(a_t\mid s_t;\theta)\Big(\sum_{t'=t}^{T-1}r_{t'} - b(s_t)\Big)\Big]$$
+        <p>
+            下一讲会证明：对任何只依赖状态的 $b$，梯度估计仍然无偏。Emma 说这有点不可思议。接近最优的选择是期望回报 $b(s_t)\approx\mathbb{E}[r_t + r_{t+1} + \cdots + r_{T-1}]$。
+        </p>
+        <p>
+            直觉：你关心的不只是回报好不好，还有它比别的选择好多少。策略 A 和 B 都给正回报，一个 100，一个 90，你想要 100 那个，所以要把参数往比其他选择更好的方向推。如果知道在这个状态通常能拿 90，就看这个策略比平均水平好多少。也就是按回报比预期好多少，成比例地提高行动 $a_t$ 的对数概率，基线给出的就是这个“预期”。下一讲还会开始讲作业 2 里的 PPO。
+        </p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 2026 版更新</h2>
+        <p>
+            2026 年冬季第 5 讲课件标题为“Policy Gradient I”（78 页），主要变化是章节边界：
+        </p>
+        <ul>
+            <li>DQN 挪到了第 5 讲开头。2024 年 DQN 是第 4 讲最后一部分；2026 年第 5 讲先回顾无模型控制的增量更新和致命三元组，再讲 DQN 的经验回放、固定目标、伪代码、Atari 结果和消融表格，然后才进入策略梯度。</li>
+            <li>开场投票换成了两道题：哪个式子是 TD 更新（答案 $V(s_t) = (1-\alpha)V(s_t) + \alpha(r(s_t,a_t) + \gamma V(s_{t+1}))$）；什么是自举（答案：用下一状态价值的估计代替真实值）。</li>
+            <li>引入策略梯度的那一页标题是“Do We Need ‘RL’ at All? Can we Just do Online Optimization?”，列出 NLP 中的序列级训练、端到端视觉运动策略、“ChatGPT and beyond!”，并用 Kohl and Stone (ICRA 2004) 的 AIBO 快走作为早期例子。</li>
+            <li>新增一页“Desired Properties of a Policy Gradient RL Algorithm”：目标是尽快收敛到局部最优；因为执行策略时会产生奖励或代价，希望尽量减少到达好策略所需的迭代次数或时间步数。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>策略搜索直接参数化策略 $\pi_\theta(a\mid s)$；基于价值、基于策略、两者结合的 actor-critic 是三类方法。</li>
+            <li>石头剪刀布（对手会反应）和混叠网格（部分可观测）里，最优策略必须是随机的，基于价值方法学出的近似确定性策略会被利用或卡住。</li>
+            <li>无梯度方法（爬山、遗传算法、交叉熵、CMA-ES）适用于任何参数化、易并行，但忽略时间结构，数据效率低；外骨骼个性化是成功例子。</li>
+            <li>策略梯度一般只保证局部最优：$\Delta\theta = \alpha\nabla_\theta V(s_0,\theta)$。</li>
+            <li>似然比技巧：$\nabla_\theta V = \mathbb{E}_\tau[R(\tau)\nabla_\theta\log P(\tau;\theta)]$，而 $\nabla_\theta\log P(\tau;\theta) = \sum_t\nabla_\theta\log\pi_\theta(a_t\mid s_t)$，动态模型消失，不需要马尔可夫，奖励不必可微。</li>
+            <li>Softmax 的 score function 是 $\phi(s,a) - \mathbb{E}_{\pi_\theta}[\phi(s,\cdot)]$；高斯策略是 $(a-\mu(s))\phi(s)/\sigma^2$。</li>
+            <li>利用“未来决策不影响过去奖励”，每个 score function 只乘以之后的回报 $G_t$，降方差不加偏差，得到 REINFORCE：$\theta\leftarrow\theta + \alpha\nabla_\theta\log\pi_\theta(s_t,a_t)G_t$。</li>
+            <li>减去只依赖状态的基线 $b(s_t)$ 不改变梯度期望，好的选择是期望回报。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS234 Reinforcement Learning · Lecture 5: Policy Search 1 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

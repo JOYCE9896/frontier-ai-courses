@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 4 讲：Q 学习与函数近似 | Stanford CS234 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="03_无模型策略评估.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS234 目录</a> · Lecture 4</span>
+    <span><a href="05_策略梯度与REINFORCE.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 4 讲：Q 学习与函数近似</h1>
+        <p class="subtitle">从评估走到控制：探索与利用、ε-greedy 和它的单调改进，蒙特卡洛控制与 GLIE，SARSA 和 Q-learning 的收敛条件，用随机梯度下降做价值函数近似，“致命三元组”，以及 DQN 的经验回放和固定目标网络</p>
+        <div class="author-meta">
+            主讲：Emma Brunskill · 时长：1 小时 18 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=b_wvosA70f8" target="_blank">课堂录像</a>（Stanford Online 公开，2024 年春季，本文依据录像字幕整理）；补充：<a href="https://web.stanford.edu/class/cs234/modules.html" target="_blank">2026 年冬季课件</a>（2026 年的录像只对选课学生开放；文中标“2026 版更新”的内容来自 2026 年课件）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            上一讲学会了在没有模型时评估一个固定策略。这一讲要用这些方法真正学到好策略（控制），仍然不建立动态或奖励模型，只直接估计 Q 函数，再从 Q 函数提取策略。先在表格型设定里讲蒙特卡洛控制、SARSA 和 Q-learning，然后加上函数近似，最后讲 DeepMind 2014 年左右在 Atari 上的 DQN。
+        </p>
+        <p>
+            Emma 在开头放了 DQN 玩 Atari 的视频：智能体直接从像素输入（和人看到的一样）学会控制游戏，学出的策略不一定和人类一样。她记得这个结果在 NeurIPS 上展示时轰动一时，是当时 RL 最亮眼的成功之一。她提醒这一讲内容很多，因为下周要开始讲策略梯度；课件末尾放了很多火星车的练习。
+        </p>
+        <ol>
+            <li><a href="#t01">开场投票：确定性策略拿不到其他行动的数据</a> · <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=60s" target="_blank">0:01:00</a></li>
+            <li><a href="#t02">无模型策略迭代和探索问题</a> · <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=479s" target="_blank">0:07:59</a></li>
+            <li><a href="#t03">ε-greedy 策略</a> · <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=633s" target="_blank">0:10:33</a></li>
+            <li><a href="#t04">蒙特卡洛在线控制</a> · <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=948s" target="_blank">0:15:48</a></li>
+            <li><a href="#t05">为什么这样也能行：GLIE</a> · <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=1809s" target="_blank">0:30:09</a></li>
+            <li><a href="#t06">SARSA</a> · <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=2174s" target="_blank">0:36:14</a></li>
+            <li><a href="#t07">Q-learning 和离策略学习</a> · <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=2799s" target="_blank">0:46:39</a></li>
+            <li><a href="#t08">价值函数近似</a> · <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=3121s" target="_blank">0:52:01</a></li>
+            <li><a href="#t09">致命三元组</a> · <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=3745s" target="_blank">1:02:25</a></li>
+            <li><a href="#t10">DQN：经验回放和固定 Q 目标</a> · <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=3924s" target="_blank">1:05:24</a></li>
+            <li><a href="#t11">DQN 在 Atari 上的结果</a> · <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=4411s" target="_blank">1:13:31</a></li>
+            <li><a href="#t12">应该掌握的内容</a> · <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=4652s" target="_blank">1:17:32</a></li>
+            <li><a href="#t13">2026 版更新</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场投票：确定性策略拿不到其他行动的数据</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=60s" target="_blank">0:01:00</a>–0:07:59</em></p>
+        <p>
+            投票问的是策略改进这一步。第一题大家几乎都答对：假设每个状态的 Q 值有唯一最大值，策略改进 $\pi_{i+1}(s) = \arg\max_a Q^{\pi_i}(s,a)$ 得到的新策略是确定性的。
+        </p>
+        <p>
+            第二题分歧较大：能不能用 $\pi_{i+1}$ 去生成新轨迹，从而算出新策略下每一个状态-行动对的 $Q^{\pi_{i+1}}(s,a)$？Emma 提示：一个确定性策略在同一个状态会执行几种行动？答案是错。确定性策略在状态 $s$ 永远只执行 $\pi_{i+1}(s)$，不会得到这个状态下其他行动的任何数据，也就算不出它们的 Q 值。如果有动态模型或奖励模型，也许还能用别的办法算；但只靠直接经验学习时，这就带来了要解决的重要问题。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 无模型策略迭代和探索问题</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=479s" target="_blank">0:07:59</a>–0:10:33</em></p>
+        <p>
+            先留在表格型世界。之前讲过策略评估和策略改进交替进行，现在把它推广到更一般的策略，叫广义策略改进（generalized policy improvement）。无模型策略迭代：
+        </p>
+        <ol>
+            <li>初始化策略 $\pi$。</li>
+            <li>重复：策略评估，算出 $Q^\pi$；策略改进，根据 $Q^\pi$ 更新 $\pi$。</li>
+        </ol>
+        <p>
+            需要修改的地方：如果 $\pi$ 是确定的，就算不出 $a \ne \pi(s)$ 时的 $Q(s,a)$，所以要用随机策略，在同一状态试多个行动，拿这些数据估计 Q 函数。还要想清楚评估和改进怎么交替；而且策略改进现在用的是从数据估计出的 Q。
+        </p>
+        <p>
+            这引出探索（exploration）问题：只能了解试过的东西，就像你无法知道此刻如果在 Coupa 喝咖啡，生活会更好还是更差。要了解行动就得去试；可是试新行动，就少花了时间用已有知识做好决策。一直随机行动能学到很多关于世界和 Q 函数的知识，但没有利用这些知识拿高奖励。这就是探索与利用（exploration vs. exploitation）的权衡：多少时间去收集可能更好的新数据，多少时间按目前的数据做好的决策。
+        </p>
+        <p>
+            Emma 说这里有很深的问题：怎样量化知识的不确定性，怎样把这种不确定性传到下游决策的价值上。这仍是活跃的研究方向，远没有解决，课程后面会讲更多。这一讲先看简单的方法。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. ε-greedy 策略</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=633s" target="_blank">0:10:33</a>–0:15:48</em></p>
+        <p>
+            最简单的方法之一是 ε-greedy：一部分时间随机行动，其余时间按已知最好的方式行动。行动个数为 $|A|$ 时，以 $1-\epsilon$ 的概率选 $\arg\max_a Q(s,a)$，以 $\epsilon$ 的概率均匀随机选一个行动（可能恰好也是 argmax）：
+        </p>
+        $$\pi(a\mid s) = \begin{cases} \arg\max_a Q(s,a) &amp; \text{概率 } 1-\epsilon \\ \text{均匀随机的 } a & \text{概率 } \epsilon\end{cases}$$
+        <p>
+            $\epsilon$ 比如取 0.1。她的例子：决定在常去的餐厅每周有一天随机点一道菜，其他六天点以前吃过、一直不错的。这个策略没有任何关于不确定性的深入建模，但相当有效。
+        </p>
+        <h3>ε-greedy 的单调改进</h3>
+        <p>
+            之前证明过：已知动态和奖励模型时，策略迭代保证单调改进。那个证明假设策略改进输出确定性策略。同样的性质对 ε-greedy 策略也成立。
+        </p>
+        <p>
+            定理：对任意 ε-greedy 策略 $\pi_i$，关于 $Q^{\pi_i}$ 的 ε-greedy 策略 $\pi_{i+1}$ 是单调改进，$V^{\pi_{i+1}} \ge V^{\pi_i}$。证明的起点是
+        </p>
+        $$Q^{\pi_i}(s,\pi_{i+1}(s)) = \sum_{a\in A}\pi_{i+1}(a\mid s)\,Q^{\pi_i}(s,a) = \frac{\epsilon}{|A|}\sum_{a\in A}Q^{\pi_i}(s,a) + (1-\epsilon)\max_a Q^{\pi_i}(s,a)$$
+        <p>
+            Emma 课上没有讲完整证明，放在课件末尾。要点是：策略是 ε-greedy 而非确定性时，也能做策略改进并保持单调。对火星车这种只有 7 个状态的问题，长时间运行会反复到达同一些状态；ε-greedy 让你在同一状态下有时执行不同行动，久而久之就有数据估计整个策略的 Q 值。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 蒙特卡洛在线控制</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=948s" target="_blank">0:15:48</a>–0:30:09</em></p>
+        <h3>算法</h3>
+        <p>
+            先回顾估计 Q 的蒙特卡洛策略评估：反复采样第 $k$ 个回合，计算每一步到回合结束的回报 $G_{k,t}$，对每个 $(s,a)$ 的首次访问，按 $\frac{1}{N(s,a)}$ 把旧估计和新目标做加权平均。目标 $G_{k,t}$ 是“从这个状态和行动出发、按策略走到回合结束”的期望奖励和的无偏样本。在此基础上加一行策略改进，就得到蒙特卡洛在线控制（on-policy improvement）：
+        </p>
+        <pre><code>Initialize Q(s,a) = 0, N(s,a) = 0 for all (s,a); epsilon = 1; k = 1
+pi_k = epsilon-greedy(Q)            # initial epsilon-greedy policy
+loop over episodes:
+    Sample k-th episode (s_k1, a_k1, r_k1, s_k2, ..., s_kT) given pi_k
+    G_kt = r_kt + gamma*r_k,t+1 + gamma^2*r_k,t+2 + ...
+    for t = 1..T:
+        if first visit to (s,a) in episode k:
+            N(s,a) += 1
+            Q(s_t,a_t) += (1/N(s,a)) * (G_kt - Q(s_t,a_t))
+    k = k + 1; epsilon = 1/k
+    pi_k = epsilon-greedy(Q)        # policy improvement</code></pre>
+        <p>
+            策略改进的意思是：对每个状态 $s$，以 $1-\epsilon$ 的概率取 $\arg\max_a Q(s,a)$，否则随机。最外层循环是回合：比如玩一局 Atari，更新一次策略评估，可能改变策略，再玩下一局，Breakout 可能要玩上百万局甚至更多。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>下一个回合是否就用更新后的 Q 采样？是的。一开始 Q 处处为 0，所有行动打平，相当于完全随机，像“胡乱按键”（motor babbling）：智能体随便按按钮直到赢或输，然后更新 Q；下一次策略就变了，乱按会少一点：“上次按这个好像加分了，再试试。”</li>
+            <li>这样做能保证什么吗？Emma 说还没讲任何性质。</li>
+            <li>必须在线（on-policy）吗，能不能先收集一批演示、之后再更新（off-policy）？可以，几页之后就会看到。</li>
+        </ul>
+        <h3>投票：Q 估计的是什么</h3>
+        <p>
+            问题：按上面的过程算出的 Q，是当前策略 $Q^{\pi_k}$ 的估计吗？它最终会变成 $Q^*$ 吗？$Q^{\pi_k}$ 指策略 $\pi_k$ 真正的状态-行动价值。Emma 让大家想一个极端情况：回合很短，走两步就因为做了蠢事而失败，只见过两个状态，这时 Q 是 $Q^{\pi_k}$ 的好估计吗？
+        </p>
+        <p>
+            她说想让大家体会到：RL 能起作用其实挺让人吃惊的。几件奇怪的事：
+        </p>
+        <ul>
+            <li>Q 不是 $Q^{\pi_k}$ 的估计。它对很多个每回合都可能在变的策略求了平均，因为 $\epsilon$ 在衰减，策略越来越确定，Q 本身也在变。它是之前所有数据、所有策略的一种奇怪的加权平均。</li>
+            <li>每个策略只做一次推演就去评估它。很多游戏里有掷骰子之类的随机性，同一策略结果不同。好比开车去旧金山只开过一次，那次没堵车，就以为总能 20 分钟到；常开的人知道经常堵，得平均很多次才知道一条路线有多好。</li>
+            <li>$\epsilon$ 在减小，最终策略会趋于确定，但收敛到的东西是不是 $Q^*$ 并不显然。</li>
+        </ul>
+        <p>
+            课件末尾有一道可选练习：火星车加了新行动，$r(\cdot,a_1) = [1,0,0,0,0,0,+10]$，$r(\cdot,a_2) = [0,0,0,0,0,0,+5]$，$\gamma = 1$，当前贪心策略对所有状态是 $a_1$，$\epsilon = 0.5$，Q 全为 0，采样到轨迹 $(s_3,a_1,0,s_2,a_2,0,s_3,a_1,0,s_2,a_2,0,s_1,a_1,1,\text{terminal})$。首次访问 MC 得到 $Q(\cdot,a_1) = [1,0,1,0,0,0,0]$，$Q(\cdot,a_2) = [0,0,0,0,0,0,0]$，再判断新的贪心策略和 ε-greedy 下的选择概率。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 为什么这样也能行：GLIE</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=1809s" target="_blank">0:30:09</a>–0:36:14</em></p>
+        <p>
+            有一些充分条件可以保证这类过程收敛到 $Q^*$。其中之一叫无限探索下的极限贪心（Greedy in the Limit of Infinite Exploration，GLIE）：
+        </p>
+        <ul>
+            <li>所有状态-行动对被访问无限次：$\lim_{i\to\infty} N_i(s,a) \to \infty$，对所有 $(s,a)$。</li>
+            <li>行为策略（behavior policy，实际用来在世界里做决策的策略；之后要和其他策略区分，所以起这个名字）收敛到贪心策略：$\lim_{i\to\infty}\pi(a\mid s) \to \arg\max_a Q(s,a)$，概率为 1。</li>
+        </ul>
+        <p>
+            也就是一直在所有状态尝试所有行动，同时越来越确定。一个简单的做法是 ε-greedy，并让 $\epsilon$ 按 $\epsilon_i = 1/i$ 的速度降到 0；只要是 ε-greedy，就能访问到所有状态和行动。
+        </p>
+        <p>
+            定理：GLIE 蒙特卡洛控制在表格表示下收敛到最优状态-行动价值函数，$Q(s,a)\to Q^*(s,a)$。Emma 说这很漂亮，也有点出人意料：只是在世界里行动、收集数据，就能证明得到最优策略。这也是大家喜欢 ε-greedy 算法的原因之一。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. SARSA</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=2174s" target="_blank">0:36:14</a>–0:46:39</em></p>
+        <p>
+            既然有蒙特卡洛版本，自然也有时序差分版本。TD 控制同样在评估和改进之间交替：用 TD 更新和 ε-greedy 策略算 $Q^\pi$，再像 MC 那样把 $\pi$ 设为关于 $Q^\pi$ 的 ε-greedy 策略。要想清楚评估和改进各花多少时间、评估的是什么、改进相对于什么。
+        </p>
+        <p>
+            第一个算法叫 SARSA，名字来自更新需要的元组：state, action, reward, next state, next action，即 $(s, a, r, s', a')$。它是在线（on-policy）算法：估计的是正在用来行动的那个策略的 Q 值。
+        </p>
+        <h3>算法</h3>
+        <ol>
+            <li>设初始 ε-greedy 策略 $\pi$，$t = 0$，初始状态 $s_t = s_0$。</li>
+            <li>按 $\pi(s_t)$ 采样 $a_t$，观测 $(r_t, s_{t+1})$。</li>
+            <li>循环：
+                <ul>
+                    <li>按 $\pi(s_{t+1})$ 采样下一个行动 $a_{t+1}$；</li>
+                    <li>更新：$Q(s_t,a_t) \leftarrow Q(s_t,a_t) + \alpha\big(r_t + \gamma Q(s_{t+1},a_{t+1}) - Q(s_t,a_t)\big)$；</li>
+                    <li>策略改进：对所有 $s$，以 $1-\epsilon$ 的概率 $\pi(s) = \arg\max_a Q(s,a)$，否则随机；</li>
+                    <li>$t = t + 1$，更新 $\epsilon$。</li>
+                </ul>
+            </li>
+        </ol>
+        <p>
+            目标是即时奖励加上 $\gamma$ 乘以“到达的状态、加上这个策略下一步会采取的行动”的 Q 值。代入的是实际会采取的下一个行动，所以叫在线。有学生问 $\pi$ 是确定性还是随机的，Emma 说是随机策略：一开始完全随机，之后按当前 Q 值要么贪心、要么随机。另一个学生问到达终止状态怎么办：重置回合，从世界里采样初始状态，就像游戏结束后重新开始，所以仍可以看作持续进行的过程。
+        </p>
+        <h3>性质</h3>
+        <p>
+            计算上，每个元组之后做一次更新，只改动对应的那个状态-行动的 Q 值，每次更新的代价与状态空间大小无关，只是要做很多次。和 MC 一样，Q 估计的是一个随时可能在变的策略的表现，这有点令人担心；实际中它常常表现不错，但 Q-learning 更流行。
+        </p>
+        <p>
+            收敛性和随机逼近（stochastic approximation）理论关系密切，那是一个有很多漂亮结果的深厚领域。定理：对有限状态和有限行动的 MDP，如果
+        </p>
+        <ol>
+            <li>策略序列 $\pi_t(a\mid s)$ 满足 GLIE；</li>
+            <li>步长 $\alpha_t$ 满足 Robbins-Munro 条件 $\sum_{t=1}^\infty\alpha_t = \infty$，$\sum_{t=1}^\infty\alpha_t^2 &lt; \infty$（比如 $\alpha_t = 1/t$），</li>
+        </ol>
+        <p>
+            SARSA 收敛到 $Q^*$。Emma 说这不显然：策略在变、估计在变，这些混合过程怎么能保证稳定到既不永远振荡、又是最优的？靠的是随机逼近的结果，以及 1990 年代把它推广到这些情形的几篇论文（她提到 1992 年和 1994 年的论文）。课件列出这些结果依赖：步长以正确的速度递减，Bellman 备份的压缩性质，以及奖励和价值函数有界。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. Q-learning 和离策略学习</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=2799s" target="_blank">0:46:39</a>–0:52:01</em></p>
+        <p>
+            在线学习（on-policy learning）：从执行某个策略得到的经验中，估计和评估这个策略。离策略学习（off-policy learning）：用执行另一个策略得到的经验，估计和评估一个策略。MC 控制和 SARSA 至少是在近似最近的那个策略（或者那些策略的平均）；Q-learning 则在每个时刻都明确地估计 $Q^*$，也就是用行为策略 $\pi_b$ 的数据，估计最优策略 $\pi^*$ 的价值（我们不知道 $\pi^*$，否则就不用学了）。
+        </p>
+        <p>
+            区别在于：不管下一步实际采取了什么行动，只看下一步最好的行动是什么。$Q^*$ 是“执行当前行动、之后一直最优行动”的期望奖励。Bellman 方程里本来应该是 $\sum_{s'}P(s'\mid s,a)V^*(s')$，Q-learning 用 $\max_{a'}Q(s_{t+1},a')$ 近似它：
+        </p>
+        $$Q(s_t,a_t) \leftarrow Q(s_t,a_t) + \alpha\Big(\big(r_t + \gamma\max_{a'}Q(s_{t+1},a')\big) - Q(s_t,a_t)\Big)$$
+        <h3>带 ε-greedy 探索的 Q-learning</h3>
+        <pre><code>Initialize Q(s,a) for all s, a; t = 0; initial state s_t = s_0
+Set pi_b to be epsilon-greedy w.r.t. Q
+loop:
+    Take a_t ~ pi_b(s_t)            # sample action from behavior policy
+    Observe (r_t, s_{t+1})
+    Q(s_t,a_t) += alpha * (r_t + gamma * max_a Q(s_{t+1},a) - Q(s_t,a_t))
+    pi(s_t) = argmax_a Q(s_t,a) with prob 1 - epsilon, else random
+    t = t + 1</code></pre>
+        <p>
+            不管是 MC、SARSA 还是 Q-learning，都在交替做两件事：用当前的 ε-greedy 策略收集数据，再用数据更新 Q 值；因为不知道真正的 Q，所以在当前估计和刚代入的目标之间做加权。
+        </p>
+        <h3>收敛条件</h3>
+        <p>
+            表格型 ε-greedy Q-learning 收敛到 $Q^*$ 的条件：所有状态-行动对被无限次访问，步长满足 Robbins-Munro 条件。和 SARSA 的重要区别是：估计 $Q^*$ 不需要 GLIE，因为目标里总是取 max。即使完全随机行动（无限探索但从不变贪心），也能学到 $Q^*$。但如果想用学到的东西在世界里做好决策，就要逐渐变贪心，通常让 $\epsilon$ 随时间衰减。
+        </p>
+        <p>
+            有学生问 SARSA 和 Q-learning 收敛到随机策略还是确定性策略？Emma 说如果 Q 函数没有打平（每个状态有唯一最好的行动），收敛到确定性策略；有打平就会在打平的行动间任意选，这时最优策略有无穷多个。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 价值函数近似</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=3121s" target="_blank">0:52:01</a>–1:02:25</em></p>
+        <h3>为什么需要</h3>
+        <p>
+            要处理 Atari 这样的问题，就不能为每个状态和行动单独存一个值。可能要存的东西有：动态或奖励模型、价值函数、状态-行动价值函数、策略。像素空间里不可能为每张可能的图像写一个值，所以需要紧凑的表示（比如神经网络），减少存储这些东西需要的内存和计算，理想情况下还能减少所需经验。Emma 说最后一点最有意思：玩 Breakout 时，几个像素略有不同，大多数时候还是做同样的决策；有了这种泛化，就不用在每个状态从零学起，能大幅减少数据需求。
+        </p>
+        <h3>先假设有 oracle</h3>
+        <p>
+            先不管怎样收集数据，只看怎样拟合一个函数来表示 Q。假设有一个 oracle，对任何状态和行动告诉你某个策略的真实 Q 值（比如“这是 3”“那是 7”），那就是一个监督学习问题：输入状态-行动对，输出 Q 值，学一个回归函数。比如状态连续、只有一个行动，就是用一个参数化函数或深度网络去拟合一堆点。目标是给定权重或网络结构，找到对 Q 最好的近似表示 $\hat Q^\pi(s,a;w)\approx Q^\pi$。
+        </p>
+        <p>
+            课程里一般用随机梯度下降（SGD）拟合，损失用均方误差：
+        </p>
+        $$J(w) = \mathbb{E}_\pi\big[(Q^\pi(s,a) - \hat Q(s,a;w))^2\big]$$
+        $$\nabla_w J(w) = -2\,\mathbb{E}_\pi\big[(Q^\pi(s,a) - \hat Q(s,a;w))\nabla_w\hat Q(s,a;w)\big],\qquad \Delta w = -\tfrac12\alpha\nabla_w J(w)$$
+        <p>
+            梯度下降找局部极小值；SGD 用有限个（常常只有一个）样本估计梯度，期望意义上和完整梯度更新一样。对深度网络，就是用自动微分（autodiff）对 Q 函数表示求导，再更新权重。
+        </p>
+        <h3>没有 oracle：代入目标</h3>
+        <p>
+            实际上没有 oracle，否则就不用学了。所以和之前一样做无模型的状态-行动价值估计，只是把表格换成参数化函数；在“更新估计”这一步里加上拟合函数近似器。真实 $Q(s_t,a_t)$ 未知，就代入一个目标值：
+        </p>
+        $$\Delta w = \alpha\big(\text{target} - \hat Q(s_t,a_t;w)\big)\nabla_w\hat Q(s_t,a_t;w)$$
+        <ul>
+            <li>蒙特卡洛：回报 $G_t$ 是期望回报的无偏但有噪声的样本，用它代替 $Q^\pi$：$\Delta w = \alpha(G_t - \hat Q(s_t,a_t;w))\nabla_w\hat Q(s_t,a_t;w)$。数据是一串（状态，行动，回报）对，相当于监督学习。</li>
+            <li>TD(0) 策略评估：目标是 $r + \gamma\hat V^\pi(s';w)$，它是对真实 $V^\pi(s)$ 有偏且近似的估计。可以归约成在数据对 $\langle s_1, r_1 + \gamma\hat V^\pi(s_2;w)\rangle, \langle s_2, r_2 + \gamma\hat V(s_3;w)\rangle,\ldots$ 上的监督学习，最小化 $J(w) = \mathbb{E}_\pi[(r_j + \gamma\hat V^\pi(s_{j+1};w) - \hat V(s_j;w))^2]$，梯度 $\nabla_w J(w) = -2[r + \gamma\hat V(s';w) - \hat V(s;w)]\nabla_w\hat V(s;w)$。这里同时有三种近似：采样近似对下一状态的期望，自举代入下一状态的价值，函数近似表示价值。</li>
+            <li>SARSA：目标用当前函数近似的值 $r + \gamma\hat Q(s',a';w)$。</li>
+            <li>Q-learning：目标 $r + \gamma\max_{a'}\hat Q(s',a';w)$，
+                $$\Delta w = \alpha\big(r + \gamma\max_{a'}\hat Q(s',a';w) - \hat Q(s,a;w)\big)\nabla_w\hat Q(s,a;w)$$</li>
+        </ul>
+        <p>
+            Emma 说这些算法的结构几乎一样：采样一个回合或一个元组，做一步类似策略评估的更新（可能加上函数拟合），再用它决定接下来怎么行动。控制时用 Q 函数而不是 V，并且常常像 Q-learning 那样离策略学习。她问谁实现过深度 Q 学习，只有一个人举手。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 致命三元组</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=3745s" target="_blank">1:02:25</a>–1:05:24</em></p>
+        <p>
+            这里有很多近似，尤其是 Q-learning。Sutton 和 Barto 把下面三者同时出现称为致命三元组（Deadly Triad）：
+        </p>
+        <ul>
+            <li>自举（bootstrapping）：代入下一个状态价值的估计；</li>
+            <li>函数近似（function approximation）：用深度网络或线性函数表示价值；</li>
+            <li>离策略学习（off-policy learning）：行动方式和要学的策略不同。</li>
+        </ul>
+        <p>
+            三者同时存在时，可能根本不收敛，Q 函数可能振荡，更不保证收敛到 $Q^*$。直观原因：第 2 讲证明过 Bellman 算子是压缩映射，反复应用会走到不动点；可是价值函数近似的拟合可能是扩张（expansion），两个函数分别被拟合之后，距离可能比拟合前还大。Emma 推荐 Geoff Gordon 1995 年论文里的一个例子，能直观看到拟合后距离变大。于是算法在一个推向不动点的压缩算子和一个可能放大差异的步骤之间交替，不一定收敛。
+        </p>
+        <p>
+            她说这也是领域历史上重要的一段：1990 年代很多工作表明，即使是线性价值函数近似这样简单的设定，也会出现振荡或不收敛，人们因此很担心把函数近似和 RL 结合。后来 DeepMind 证明有办法应对，并做出了了不起的结果。她认为这个教训是：要区分“可能发生什么”和“实践中真正发生什么”，不要让一些反例限制我们去尝试别的场景。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. DQN：经验回放和固定 Q 目标</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=3924s" target="_blank">1:05:24</a>–1:13:31</em></p>
+        <p>
+            DQN 用这些想法玩 Atari：输入游戏图像，用卷积神经网络，用一个很大的深度网络表示 Q 函数并做 Q-learning。已知带函数近似的 Q-learning 可能发散，稳定性问题有两个来源：样本之间相关，数据不是函数近似通常需要的 IID；目标不平稳，代入的 $r + \gamma\hat V(s')$ 里下一状态的价值随数据不断变化。DQN 的两个对策是经验回放和固定 Q 目标，其中一个影响尤其大。
+        </p>
+        <h3>经验回放</h3>
+        <p>
+            相邻状态的 Q 值往往很接近，连续地对它们做大量更新会破坏函数近似想要的 IID 性质。经验回放（experience replay）：把过去见过的元组存进一个回放缓冲区（replay buffer）$D$，反复做：
+        </p>
+        <ul>
+            <li>从数据集中采样一个经验元组 $(s,a,r,s')\sim D$；</li>
+            <li>计算目标值 $r + \gamma\max_{a'}\hat Q(s',a';w)$；</li>
+            <li>用 SGD 更新权重：$\Delta w = \alpha(r + \gamma\max_{a'}\hat Q(s',a';w) - \hat Q(s,a;w))\nabla_w\hat Q(s,a;w)$。</li>
+        </ul>
+        <p>
+            这对数据效率也有帮助：数据不再用一次就扔，可以重复使用，和上一讲的批量学习类似；从过去历史的不同部分采样，又让更新之间更独立。缓冲区一般不会永久保存所有数据，比如只保留最近一百万条。
+        </p>
+        <h3>固定 Q 目标</h3>
+        <p>
+            目标值本身是权重的函数，因为下一状态的价值也用价值函数近似表示。每次更新权重，下一次的目标就变了。类比监督学习：同一个 $x$ 对应的 $y$ 在不断变化，这也会导致不稳定。固定 Q 目标（fixed Q-targets）：计算目标时用另一套权重 $w^-$，在多次更新里保持不变，被更新的是 $w$：
+        </p>
+        $$\Delta w = \alpha\big(r + \gamma\max_{a'}\hat Q(s',a';w^-) - \hat Q(s,a;w)\big)\nabla_w\hat Q(s,a;w)$$
+        <p>
+            这样更像监督学习：拟合直线时，那些 $y$ 点在一段时间内是固定的数，可以对 $w$ 做多次更新去拟合。
+        </p>
+        <h3>DQN 伪代码</h3>
+        <pre><code>Input C, alpha, D = {}, initialize w, w_minus = w, t = 0
+Get initial state s_0
+loop:
+    Sample action a_t given epsilon-greedy policy for current Q_hat(s_t, a; w)
+    Observe reward r_t and next state s_{t+1}
+    Store transition (s_t, a_t, r_t, s_{t+1}) in replay buffer D
+    Sample random minibatch of tuples (s_i, a_i, r_i, s_{i+1}) from D
+    for j in minibatch:
+        if episode terminated at step i+1:
+            y_i = r_i
+        else:
+            y_i = r_i + gamma * max_a' Q_hat(s_{i+1}, a'; w_minus)
+        Gradient step on (y_i - Q_hat(s_i, a_i; w))^2 w.r.t. w:
+            delta_w = alpha * (y_i - Q_hat(s_i, a_i; w)) * grad_w Q_hat(s_i, a_i; w)
+    t = t + 1
+    if t mod C == 0:
+        w_minus = w</code></pre>
+        <p>
+            有很多超参数和设计选择：用什么函数近似器，学习率多大，多久更新一次目标网络，回放缓冲区多大、怎样填充。
+        </p>
+        <h3>投票：目标网络的代价</h3>
+        <p>
+            用另一套目标权重计算目标值，会不会让计算时间加倍？内存加倍？几乎所有人很快答对：内存加倍，计算时间不变。要多存一份网络参数，旧权重一份、新权重一份，Q 更新的计算量一样。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. DQN 在 Atari 上的结果</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=4411s" target="_blank">1:13:31</a>–1:17:32</em></p>
+        <p>
+            DQN 的关键创新：深度网络以前就有人用过，但这大概是第一个用卷积网络的大型例子；维护很大的回放缓冲区；固定目标。课件上的设置：从像素端到端学习 $Q(s,a)$；输入状态是最近 4 帧的原始像素；输出是 18 个摇杆/按钮位置各自的 $Q(s,a)$；奖励是这一步得分的变化；网络结构和超参数在所有游戏中固定。（Mnih et al., 2015, Human-level control through deep reinforcement learning）
+        </p>
+        <p>
+            Emma 认为论文有几点了不起：在很广的一组游戏上表现很好，没有只挑几个基准任务；每个游戏学一个单独的策略，但网络结构相同，她相信超参数也都相同。她把这比作人做不同任务时不会换一个大脑：同一种学习算法能学会很多不同任务。
+        </p>
+        <h3>哪些部分重要</h3>
+        <p>
+            论文的消融实验（课件表格）：
+        </p>
+        <table>
+            <thead>
+                <tr><th>游戏</th><th>线性</th><th>深度网络</th><th>DQN + 固定 Q</th><th>DQN + 回放</th><th>DQN + 回放 + 固定 Q</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Breakout</td><td>3</td><td>3</td><td>10</td><td>241</td><td>317</td></tr>
+                <tr><td>Enduro</td><td>62</td><td>29</td><td>141</td><td>831</td><td>1006</td></tr>
+                <tr><td>River Raid</td><td>2345</td><td>1453</td><td>2868</td><td>4102</td><td>7447</td></tr>
+                <tr><td>Seaquest</td><td>656</td><td>275</td><td>1003</td><td>823</td><td>2894</td></tr>
+                <tr><td>Space Invaders</td><td>301</td><td>302</td><td>373</td><td>826</td><td>1089</td></tr>
+            </tbody>
+        </table>
+        <ul>
+            <li>只换成深度网络并不比线性函数近似好，有时更差（课件注：“just using a deep NN actually hurt performance sometimes!”）。所以成功不只是因为用了更强的函数近似器。</li>
+            <li>加上固定 Q 目标后超过了简单函数近似器，保持稳定有助于减少振荡。</li>
+            <li>经验回放的作用最大：比如 Breakout 从 3 或 10 涨到 241，有的提高约三倍，有的高出一两个数量级。Emma 说这也许不奇怪，因为它大量重复利用数据，这说明了为什么要重视样本效率和数据重用。</li>
+            <li>两者结合效果更好；但如果只能选一个，回放缓冲区的帮助大得多。</li>
+        </ul>
+        <p>
+            此后深度 RL 研究大量涌现。一两年内就有一些直接改进，比如 Double DQN：改动很小，大概一两行代码，会增加一些内存需求，用来处理最大化偏差（maximization bias）问题，Emma 说可以课后聊。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 应该掌握的内容</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=b_wvosA70f8&t=4652s" target="_blank">1:17:32</a>–1:18:34</em></p>
+        <ul>
+            <li>能实现 TD(0) 和蒙特卡洛在线策略评估。</li>
+            <li>能在表格型设定下实现 Q-learning、SARSA 和 MC 控制算法。</li>
+            <li>理解哪些因素会导致不稳定（函数近似、自举、离策略学习），并有直观理解为什么值得担心。</li>
+            <li>知道 DQN 里哪些设计对成功至关重要。</li>
+        </ul>
+        <p>
+            下周开始讲一种很不一样的方法：策略梯度，直接处理策略。它和策略迭代相似，某些方面也像蒙特卡洛版本的策略迭代。
+        </p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 2026 版更新</h2>
+        <p>
+            2026 年冬季第 4 讲课件（标题“Model Free Control and Function Approximation”，89 页）的主干和录像相同，本页的算法、定理和 DQN 表格都取自它。和 2024 年录像相比能看出的不同：
+        </p>
+        <ul>
+            <li>2026 年第 4 讲以“批量 MC 和 TD”开头，把 2024 年第 3 讲末尾的 AB 例子（Sutton &amp; Barto Ex. 6.4）移到了这里，接着是一张策略评估总结页：举例为评估新商品推荐系统每次访问的平均购买量；列出 MC（在线和离线样本）、TD、确定性等价，以及比较算法的指标（是否用马尔可夫假设、准确度/均方误差/偏差/方差、数据效率、计算效率）。</li>
+            <li>DQN 消融表格之后加了一个思考题：回放的作用很大，为什么？除了减少样本之间的相关性，重复回放还带来了什么？</li>
+            <li>课件末尾附有 SARSA 初始化概念题、火星车上的 SARSA 和 ε-greedy Q-learning 练习。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>确定性策略在一个状态只执行一个行动，拿不到其他行动的数据；无模型控制需要随机策略来探索。</li>
+            <li>ε-greedy：以 $1-\epsilon$ 选 $\arg\max_a Q(s,a)$，以 $\epsilon$ 随机；关于 $Q^{\pi_i}$ 的 ε-greedy 策略对 ε-greedy 策略 $\pi_i$ 是单调改进。</li>
+            <li>MC 控制里 Q 是很多策略的混合平均，并非 $Q^{\pi_k}$；但满足 GLIE（无限次访问所有 $(s,a)$，行为策略趋于贪心，比如 $\epsilon = 1/k$）时收敛到 $Q^*$。</li>
+            <li>SARSA（在线）：$Q(s,a)\leftarrow Q(s,a)+\alpha(r+\gamma Q(s',a')-Q(s,a))$，需要 GLIE 和 Robbins-Munro 步长。</li>
+            <li>Q-learning（离策略）：$Q(s,a)\leftarrow Q(s,a)+\alpha(r+\gamma\max_{a'}Q(s',a')-Q(s,a))$；估计 $Q^*$ 不需要 GLIE，只需无限次访问和合适步长。</li>
+            <li>价值函数近似用 SGD 最小化均方误差，目标可以是 $G_t$、$r+\gamma\hat Q(s',a';w)$ 或 $r+\gamma\max_{a'}\hat Q(s',a';w)$。</li>
+            <li>自举、函数近似、离策略三者同时出现（致命三元组）可能不收敛，因为函数拟合可能是扩张。</li>
+            <li>DQN = Q-learning + 卷积网络 + 经验回放 + 固定目标网络 $w^-$；消融实验中经验回放贡献最大，目标网络使内存加倍、计算不变。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS234 Reinforcement Learning · Lecture 4: Q-learning and Function Approximation · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

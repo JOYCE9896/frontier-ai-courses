@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 13 讲：MDP 中的高效探索 | Stanford CS234 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="12_贝叶斯老虎机与Thompson采样.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS234 目录</a> · Lecture 13</span>
+    <span><a href="14_MCTS与AlphaGo.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 13 讲：MDP 中的高效探索</h1>
+        <p class="subtitle">把老虎机里的乐观和 Thompson 采样搬到 MDP：MBIE-EB 和它的 PAC 保证，Simulation Lemma 的推导，贝叶斯 MDP 与 PSRL，为什么每个回合只采样一次 MDP，并发探索与 seed sampling，线性上下文老虎机，深度 RL 里的伪计数和近似后验，以及 DREAM 和 Decision-Pretrained Transformer 这类“学会探索”的方法</p>
+        <div class="author-meta">
+            主讲：Emma Brunskill · 时长：1 小时 10 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=pc7oayCSZmQ" target="_blank">课堂录像</a>（Stanford Online 公开，2024 年春季，本文依据录像字幕整理）；补充：<a href="https://web.stanford.edu/class/cs234/modules.html" target="_blank">2026 年冬季课件</a>（2026 年的录像只对选课学生开放；文中标“2026 版更新”的内容来自 2026 年课件）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            前两讲的探索都在多臂老虎机（multi-armed bandit）里讲：每次只做一个决策，决策不影响下一个状态。这一讲是“快速、高效 RL”这一单元的最后一讲，Emma 把两类主要思路搬到马尔可夫决策过程（MDP）上：一类是不确定性下的乐观（optimism under uncertainty），代表算法是 MBIE-EB；另一类是概率匹配，也就是 Thompson 采样，代表算法是 PSRL。先在表格型（tabular，状态和行动都有限、可以逐个记表）设定里讲，再讲怎样小心地推广到函数近似和深度 RL。
+        </p>
+        <p>
+            评价框架上，这一讲主要用 PAC（Probably Approximately Correct）。理论部分的核心工具是 Simulation Lemma：模型误差有界时，价值函数的误差也有界。最后她介绍了自己组里的两项工作，DREAM 和 Decision-Pretrained Transformer，它们在多个任务之间学习怎样探索。下一讲开始讲蒙特卡洛树搜索和 AlphaGo。
+        </p>
+        <ol>
+            <li><a href="#t01">开场复习：Beta 先验和 Thompson 采样</a> · <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">一个需要快速探索的应用：自动批改 Breakout 作业</a> · <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=240s" target="_blank">0:04:00</a></li>
+            <li><a href="#t03">从老虎机到 MDP</a> · <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=586s" target="_blank">0:09:46</a></li>
+            <li><a href="#t04">MBIE-EB：给 Bellman 备份加探索奖励</a> · <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=681s" target="_blank">0:11:21</a></li>
+            <li><a href="#t05">MDP 里的 PAC，以及把界算出来</a> · <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=1048s" target="_blank">0:17:28</a></li>
+            <li><a href="#t06">Simulation Lemma</a> · <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=1234s" target="_blank">0:20:34</a></li>
+            <li><a href="#t07">贝叶斯 MDP 与 PSRL</a> · <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=2046s" target="_blank">0:34:06</a></li>
+            <li><a href="#t08">知识检查：MDP 里的策略性探索</a> · <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=2609s" target="_blank">0:43:29</a></li>
+            <li><a href="#t09">为什么整个回合只用一个 MDP，并发探索与 seed sampling</a> · <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=2744s" target="_blank">0:45:44</a></li>
+            <li><a href="#t10">泛化：线性上下文老虎机</a> · <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=3320s" target="_blank">0:55:20</a></li>
+            <li><a href="#t11">深度 RL 中的乐观和 Thompson 采样</a> · <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=3645s" target="_blank">1:00:45</a></li>
+            <li><a href="#t12">多任务探索：DREAM 与 DPT，以及本单元要掌握的内容</a> · <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=3950s" target="_blank">1:05:50</a></li>
+            <li><a href="#t13">2026 版更新</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场复习：Beta 先验和 Thompson 采样</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=5s" target="_blank">0:00:05</a>–0:04:00</em></p>
+        <p>
+            开场的“复习你的理解”回到上一讲的贝叶斯老虎机。回顾一下：伯努利老虎机（Bernoulli bandit）每个臂的奖励是 0 或 1，成功概率为参数 $\theta$；Beta 分布是伯努利分布的共轭先验（conjugate prior，先验和后验属于同一分布族，更新后仍有闭式解）。
+        </p>
+        $$p(\theta\mid\alpha,\beta) = \theta^{\alpha-1}(1-\theta)^{\beta-1}\frac{\Gamma(\alpha+\beta)}{\Gamma(\alpha)\Gamma(\beta)}$$
+        <p>
+            观测到奖励 $r\in\{0,1\}$ 后，后验变为 $\mathrm{Beta}(\alpha+r,\ \beta+1-r)$，$\alpha$ 和 $\beta$ 可以理解成成功次数和失败次数。
+        </p>
+        <p>
+            题目设定：臂 1 的先验是 $\mathrm{Beta}(1,2)$，臂 2 的先验是 $\mathrm{Beta}(1,1)$。
+        </p>
+        <ul>
+            <li>采样到 0.1、0.5、0.3 这三个参数，它们更可能来自 $\mathrm{Beta}(1,2)$：<strong>对</strong>。$\mathrm{Beta}(1,2)$ 偏向更常出 0 的臂，所以这些偏小的值更可能出现。</li>
+            <li>采样到 0.2、0.5、0.8，它们更可能来自 $\mathrm{Beta}(1,1)$：对。$\mathrm{Beta}(1,1)$ 在所有参数上是平的。</li>
+            <li>先验是 $\mathrm{Beta}(1,1)$ 时，真实伯努利参数不可能是 0：错。$\mathrm{Beta}(1,1)$ 是 0 到 1 之间的均匀分布，真实参数可以是 0、1 或中间任何值。</li>
+        </ul>
+        <p>
+            第二题：真实参数是臂 1 $\theta_1 = 0.4$、臂 2 $\theta_2 = 0.6$。Thompson 采样可能采到臂 1 为 0.5、臂 2 为 0.55：对，在这两个先验下都可能采到。对于这组采样值，Thompson 采样对所有臂都是乐观的：错。Emma 借这一题强调，Thompson 采样不保证给出上置信界，它只是采一个和先验（后验）一致的参数；这里臂 2 采到 0.55，低于真实值 0.6。对这组采样值，Thompson 采样这一轮会选中真正的最优臂：对，0.55 大于 0.5，选臂 2。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 一个需要快速探索的应用：自动批改 Breakout 作业</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=240s" target="_blank">0:04:00</a>–0:09:46</em></p>
+        <p>
+            前面讲探索时用过在线广告、医疗这类例子。Emma 这次展示一个和 Chelsea Finn 及几位研究生合作的应用。Stanford 有一个编程作业，学生自己写出 Breakout 游戏，也就是写的是游戏环境本身，和课上“给定环境、训练智能体”的设定反过来。很多人喜欢电脑游戏，这类作业对学编程的人很有吸引力，除了 Stanford，code.org 等很多地方也在用。
+        </p>
+        <p>
+            问题在于反馈。要让学生从作业中学到东西，就得批改。批改有一份评分细则（rubric）：挡板画得对不对，球画得对不对，反弹是否符合期望的转移动态，等等。通常要有人真的去玩每份提交，检查球在这里反弹时是否正确；她放的例子里，球出现了抖动，就是错误。可以把它看成批改者在脑子里设计一个“怎么玩”的策略，用来发现游戏动态哪里写错了。现在每个批改者各自摸索，每份提交大约要 8 分钟。
+        </p>
+        <p>
+            普通单元测试不够用，因为要检查的场景可能要连续执行多个行动才能到达。一门课 300 份提交，每份 8 分钟，已经是很大的人力；code.org 上写过这个游戏的人还要多得多。结果一些提供这个作业的地方干脆不批改，学生做了有趣的作业却拿不到反馈，影响学习。难点还包括：环境是随机的，没有简单的启发式规则，一份提交可能同时有多个错误。
+        </p>
+        <p>
+            Emma 和另一位教授 Chris Piech 几年前开始考虑：能不能设计一个 RL 智能体来玩这个游戏，让它去探索游戏的各个部分，发现代码有没有写对。后来主要作者 Evan 把它扩展到按评分细则逐项检查，用元强化学习（meta reinforcement learning，在许多相关任务上学习，使智能体在新任务上能快速适应）加探索来做。这是一个探索问题：希望学到的策略在一个新环境里能很快用合适的行为完成批改，不用花 20 分钟。相关工作有一系列 NeurIPS 论文：第一篇说明这件事能做，第二篇是 Evan 的显式快速探索方法（后面会讲到的 DREAM），之后双方合作做这一场景下的快速探索。最近一篇论文显示，这能显著减少批改时间，和人结合时还能提高准确率。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 从老虎机到 MDP</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=586s" target="_blank">0:09:46</a>–0:11:21</em></p>
+        <p>
+            回顾一下这个单元的结构。设定（settings）有两种：老虎机（单个决策）和 MDP。框架（frameworks）是正式评价 RL 算法好坏的标准，目前见过经验评估、渐近收敛、遗憾（regret，累计少拿的奖励，相对于一直选最优行动）和 PAC。方法（approaches）是为了满足某种评价标准而设计的算法类别，探索方面见过贪心、ε-greedy、乐观、Thompson 采样。
+        </p>
+        <p>
+            到目前为止主要讲的是老虎机，包括标准老虎机和贝叶斯老虎机。这样安排是有意的：乐观和后验采样的很多想法可以直接提升到表格型 MDP，再经过一些小心处理，推广到函数近似。MDP 里相关的框架是遗憾、贝叶斯遗憾和 PAC，方法仍然是不确定性下的乐观，以及概率匹配 / Thompson 采样。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. MBIE-EB：给 Bellman 备份加探索奖励</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=681s" target="_blank">0:11:21</a>–0:17:28</em></p>
+        <p>
+            Emma 选的第一个算法是 MBIE-EB（Model-Based Interval Estimation with Exploration Bonus，Strehl and Littman 2008）。它不是表格型 MDP 里最早的可证明高效探索算法，但很有代表性，体现了很多好想法。和 UCB 一样，它要为 Q 函数构造一个上置信界，也就是在不确定时保持乐观。
+        </p>
+        <p>
+            它是基于模型（model-based）的方法：通过构造奖励函数和动态模型的乐观估计，得到乐观的 Q。对动态模型“乐观”是什么意思并不显然，下面会看到具体做法。
+        </p>
+        <h3>维护的统计量</h3>
+        <ul>
+            <li>$n_{sa}(s,a)$：在状态 $s$ 采取行动 $a$ 的次数。</li>
+            <li>$n_{sas}(s,a,s')$：从 $s$ 采取 $a$ 转移到 $s'$ 的次数。</li>
+            <li>经验平均奖励 $\hat R(s,a)$，以及经验动态模型 $\hat T(s'\mid s,a) = n_{sas}(s,a,s')/n_{sa}(s,a)$。</li>
+        </ul>
+        <p>
+            这些在课程前几周讲确定性等价（certainty equivalence，把估计出的模型当成真实模型去做规划）时用过。区别在于做 Bellman 备份时多加一项奖励（bonus）：
+        </p>
+        $$\tilde Q(s,a) = \hat R(s,a) + \gamma\sum_{s'}\hat T(s'\mid s,a)\max_{a'}\tilde Q(s',a') + \frac{\beta}{\sqrt{n_{sa}(s,a)}}$$
+        <p>
+            其中
+        </p>
+        $$\beta = \frac{1}{1-\gamma}\sqrt{0.5\ln\!\big(2|S||A|m/\delta\big)}$$
+        <h3>算法</h3>
+        <pre><code>Given epsilon, delta, m
+beta = (1/(1-gamma)) * sqrt(0.5 * ln(2*|S|*|A|*m / delta))
+n_sas(s,a,s') = 0;  rc(s,a) = 0;  n_sa(s,a) = 0;  Q~(s,a) = 1/(1-gamma)   for all s, a, s'
+t = 0; s_t = s_init
+loop:
+    a_t = argmax_a Q~(s_t, a)
+    observe reward r_t and next state s_{t+1}
+    n_sa(s_t,a_t) += 1;  n_sas(s_t,a_t,s_{t+1}) += 1
+    rc(s_t,a_t) = (rc(s_t,a_t) * (n_sa(s_t,a_t) - 1) + r_t) / n_sa(s_t,a_t)   # running mean
+    R^(s_t,a_t) = rc(s_t,a_t);  T^(s'|s_t,a_t) = n_sas(s_t,a_t,s') / n_sa(s_t,a_t)  for all s'
+    while not converged:                 # repeated Bellman backups over ALL (s,a)
+        Q~(s,a) = R^(s,a) + gamma * sum_s' T^(s'|s,a) * max_a' Q~(s',a') + beta / sqrt(n_sa(s,a))</code></pre>
+        <p>
+            Emma 说 MBIE 有好几种变体，这里选的是只用一个奖励项的版本（EB 指 exploration bonus）。这个奖励项的形状和 Hoeffding 不等式给出的置信区间一样：某个状态-行动被访问得越少，$n_{sa}$ 越小，奖励越大。
+        </p>
+        <p>
+            和老虎机的区别是，这里做的是 Bellman 备份，而且对所有状态和行动反复做到收敛。直观上，它假装在很少访问的状态-行动上能拿到高得多的期望折扣回报。反复备份会把这种乐观向后传播，于是得到的策略会主动开往那些很少去、可能有高奖励的地方，覆盖状态和行动空间。
+        </p>
+        <p>
+            关于 $\beta$ 的大小：如果奖励缩放到 0 到 1 之间，$\frac{1}{1-\gamma}$ 可以看作有效视界 $H$，所以奖励项大致是 $H$ 乘以一个对数项再除以 $\sqrt{n_{sa}(s,a)}$。这个算法适用于一系列回合或长期在同一个 MDP 里行动的场景。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. MDP 里的 PAC，以及把界算出来</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=1048s" target="_blank">0:17:28</a>–0:20:34</em></p>
+        <p>
+            PAC 是 Probably Approximately Correct（大概率近似正确）。上一讲在老虎机里讲过：一个算法如果大多数时候做出接近最优的决策，只在多项式次数的步上犯错，就是 PAC 的。这并不是所有算法都有的性质，比如一直随机行动的算法会永远犯错。
+        </p>
+        <p>
+            MDP 版本的定义：给定 $\epsilon$ 和 $\delta$，算法 $\mathcal{A}$ 是 PAC 的，如果以至少 $1-\delta$ 的概率，除了 $N$ 步以外，它在第 $t$ 步选的行动 $a_t$ 都是 $\epsilon$-最优的：
+        </p>
+        $$Q^*(s_t, a_t) \ge V^*(s_t) - \epsilon$$
+        <p>
+            其中 $N$ 是 $|S|$、$|A|$、$\frac{1}{1-\gamma}$、$\frac{1}{\epsilon}$、$\frac{1}{\delta}$ 的多项式。MBIE-EB 是 PAC 算法：记 $\mathcal{A}_t$ 为它在第 $t$ 步的策略，$s_t$ 为当时的状态，那么以高概率，除了有限且多项式数量的步以外，$V^{\mathcal{A}_t}(s_t) \ge V^*(s_t) - \epsilon$。
+        </p>
+        <h3>把数代进去</h3>
+        <p>
+            Emma 总是鼓励她的研究生把数代进理论界里看一看：理论界很漂亮，但最好知道它和实践有没有关系。她的例子是 $|S| = 10$、$|A| = 10$、$\epsilon = 0.1$、$\gamma = 0.9$，代入 MBIE-EB 的界，大约是 $10^3 \times 10^9 = 10^{12}$。
+        </p>
+        <p>
+            也就是说，对一个 10 个状态的 MDP，算法保证只在 $10^{12}$ 个时间步上犯错。她说自己希望一个 10 个状态的网格世界能学得快得多。这说明这些界虽然正式地证明了算法是 PAC 的，但可能相当保守。它只是错误次数的上界，并不是说一定会犯这么多错；在实践中，这类乐观算法常常效果很好。把数代进去，可以帮助判断界相对实际表现有多紧。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. Simulation Lemma</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=1234s" target="_blank">0:20:34</a>–0:34:06</em></p>
+        <p>
+            MBIE-EB 论文的 PAC 证明有好几个组成部分，其中一个核心想法是 Simulation Lemma。Emma 说它是高效探索理论里的基础工具之一：它把模型的准确度和学到的 Q 函数的准确度联系起来。只要预测模型足够好，就能把模型误差转化成价值函数误差的界。
+        </p>
+        <h3>设定</h3>
+        <p>
+            表格型设定，有限状态和行动，固定策略 $\pi$。有两个 MDP，MDP 1 和 MDP 2，奖励函数和动态模型可能略有不同。假设：
+        </p>
+        $$\|R_1(s,a) - R_2(s,a)\|_\infty \le \alpha,\qquad \|T_1(\cdot\mid s,a) - T_2(\cdot\mid s,a)\|_1 \le \beta$$
+        <p>
+            无穷范数（infinity norm）就是两个奖励函数在所有状态上相差最大的那个差值。Emma 的例子：一个 MDP 的奖励是 1、2、7、3，另一个是 2、6、1、7，就看哪个状态上两者差得最多，假设这个差不超过 $\alpha$。动态模型的差也有界，记为 $\beta$。
+        </p>
+        <p>
+            为什么要做这件事：通常 $R_1$ 是从数据得到的经验估计，$R_2$ 是未知的真实奖励。Hoeffding 不等式给出了经验估计和真实值之间相差多少的界，也就是 $\alpha$；动态模型的误差也能类似地给出界。于是问题变成：用经验模型代入去算 Q，和知道真实模型时的 Q 能差多远。
+        </p>
+        <h3>推导</h3>
+        <p>
+            对任意 $(s,a)$，用 Q 函数的定义写出差值：
+        </p>
+        $$|Q^\pi_1(s,a) - Q^\pi_2(s,a)| = \Big|R_1(s,a) - R_2(s,a) + \gamma\sum_{s'}\big(T_1(s'\mid s,a)V^\pi_1(s') - T_2(s'\mid s,a)V^\pi_2(s')\big)\Big|$$
+        <p>
+            第一步用三角不等式把两项拆开，奖励差不超过 $\alpha$。第二步用 RL 里常见的技巧：加一项再减一项（相当于加 0），引入中间项 $T_1(s'\mid s,a)V^\pi_2(s')$。这样就能把“动态模型相同、价值函数不同”和“价值函数相同、动态模型不同”的两部分分开：
+        </p>
+        $$\le \alpha + \gamma\Big|\sum_{s'}T_1(s'\mid s,a)\big(V^\pi_1(s') - V^\pi_2(s')\big) + \sum_{s'}\big(T_1(s'\mid s,a) - T_2(s'\mid s,a)\big)V^\pi_2(s')\Big|$$
+        <p>
+            第一部分是递归的形式。定义 $\Delta = \max_s|V^\pi_1(s) - V^\pi_2(s)|$，即价值函数在所有状态上的最大差，那么 $\sum_{s'}T_1(s'\mid s,a)|V^\pi_1(s') - V^\pi_2(s')| \le \Delta$。第二部分用价值函数有上界这一事实：每步都拿最大奖励时，$V_{\max} = \frac{R_{\max}}{1-\gamma}$，把它提出来，剩下动态模型的差，不超过 $\beta$。于是
+        </p>
+        $$|Q^\pi_1(s,a) - Q^\pi_2(s,a)| \le \alpha + \gamma\Delta + \gamma V_{\max}\beta$$
+        <p>
+            这对所有状态和行动都成立，取 $a = \pi(s)$ 就得到价值函数的同样的界：
+        </p>
+        $$\Delta \le \alpha + \gamma\Delta + \gamma V_{\max}\beta \;\Rightarrow\; (1-\gamma)\Delta \le \alpha + \gamma V_{\max}\beta \;\Rightarrow\; \Delta \le \frac{\alpha + \gamma V_{\max}\beta}{1-\gamma}$$
+        <p>
+            结论：对同一个策略，两个模型下价值函数的最坏误差，不超过 $\frac{1}{1-\gamma}$ 乘以（奖励模型误差 + $\gamma$ × 最大价值 × 动态模型误差）。这是 Simulation Lemma 的一个版本，在更复杂的设定里也被大量使用。
+        </p>
+        <p>
+            它的用处是：随着探索、预测模型越学越好，可以确定价值函数也同时越来越准。在 PAC 算法的证明里，它常被用来说明：不可能在某些状态-行动上无限地学下去，而价值函数却不变准。2026 年课件注明这个引理在 problem session 里有更完整的讲解。
+        </p>
+        <h3>课堂问答</h3>
+        <ul>
+            <li>有学生问：$\Delta$ 定义的是价值函数的差，为什么也能用它表示 Q 函数的差？Emma 说因为这个上界对所有可能遇到的状态和行动都成立，所以对任意状态也成立，取行动为 $\pi(s)$ 即可。</li>
+            <li>另一个学生问：动态模型的界是针对单个状态的，推导里却对很多状态求和，是不是应该多一个状态数的因子？Emma 说这里假设的是对每个 $(s,a)$ 都有 $\beta$ 这个界。状态数通常出现在另一处：要算需要多少数据才能让每个状态-行动对的置信区间都足够小，还要用 union bound 保证所有这些界同时成立，那时会出现对状态数的依赖。Simulation Lemma 这一部分本身不含状态空间大小，它也不告诉你需要多少样本才能达到这些界，那是证明的另一部分。用 Hoeffding 那样的思路可以算出需要多少样本，让奖励误差足够小，动态模型类似，高斯等其他参数模型也可以这样做。</li>
+        </ul>
+    </section>
+
+    <section id="t07">
+        <h2>07. 贝叶斯 MDP 与 PSRL</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=2046s" target="_blank">0:34:06</a>–0:43:29</em></p>
+        <p>
+            前面的方法都没有用先验。另一种常见的高效探索思路是：假设对不同状态和行动有多好、动态如何，有一些先验知识，然后用这些信息决定怎么行动。上一讲的 Thompson 采样就是在有先验和后验时高效做决策的方法。
+        </p>
+        <h3>回顾：贝叶斯老虎机和 Thompson 采样</h3>
+        <p>
+            贝叶斯老虎机利用奖励的先验 $p[R]$，计算给定历史 $h_t = (a_1, r_1, \dots, a_{t-1}, r_{t-1})$ 的后验 $p[R\mid h_t]$，再用后验指导探索（贝叶斯 UCB 或概率匹配）。先验准确时性能更好。
+        </p>
+        <ol>
+            <li>对每个臂 $a$ 初始化先验 $p(R_a)$。</li>
+            <li>循环：对每个臂从后验采样一个奖励分布 $R_a$；计算 $Q(a) = \mathbb{E}[R_a]$；选 $a_t = \arg\max_a Q(a)$；观测奖励 $r$；用贝叶斯公式更新后验 $p(R_a\mid r)$。</li>
+        </ol>
+        <h3>提升到 MDP</h3>
+        <p>
+            贝叶斯基于模型的 RL 维护 MDP 模型的后验 $p[P, R\mid h_t]$，历史 $h_t = (s_1, a_1, r_1, \dots, s_t)$，同时估计转移和奖励。Thompson 采样实现的是概率匹配：按“这个行动是最优行动”的后验概率来选它，
+        </p>
+        $$\pi(s,a\mid h_t) = P\big[Q(s,a) \ge Q(s,a'),\ \forall a'\ne a \mid h_t\big] = \mathbb{E}_{P,R\mid h_t}\Big[\mathbb{1}\big(a = \arg\max_{a\in A}Q(s,a)\big)\Big]$$
+        <p>
+            做法是：从后验采样一个 MDP $(P, R)$，用喜欢的规划算法解出它的 $Q^*(s,a)$，再选 $a_t = \arg\max_a Q^*(s_t,a)$。
+        </p>
+        <p>
+            Emma 指出和老虎机的一个区别。伯努利老虎机里，一旦采样出参数，决策很简单：知道哪个硬币出 1 的概率更高就知道选哪个。MDP 里，拿到一个动态模型和奖励模型还不知道怎么行动，必须先解一个规划问题，比如做价值迭代，得到 $Q^*$ 再选行动。所以计算量比老虎机大得多。
+        </p>
+        <h3>PSRL 算法</h3>
+        <p>
+            PSRL（Posterior Sampling for Reinforcement Learning）由 Ian Osband、Dan Russo 和 Ben Van Roy 提出（NeurIPS 2013），当时他们都在 Stanford。
+        </p>
+        <pre><code>Initialize prior over dynamics and reward models for each (s,a): p(R_as), p(T(s'|s,a))
+Initialize state s_0
+for k = 1..K (episodes):
+    # sample an MDP M
+    for each (s,a) pair:
+        sample a dynamics model T(s'|s,a)
+        sample a reward model R(s,a)
+    compute Q*_M, the optimal value for MDP M
+    for t = 1..H:
+        a_t = argmax_a Q*_M(s_t, a)
+        observe reward r_t and next state s_{t+1}
+    update posteriors p(R_{a_t s_t} | r_t), p(T(s'|s_t,a_t) | s_{t+1}) using Bayes rule</code></pre>
+        <p>
+            要点：有一系列有限长度 $H$ 的回合。每个回合开始时，根据当前后验，对每个状态-行动对采样一个动态模型和一个奖励模型，算出这个采样 MDP 的 $Q^*$，然后整个回合都按它行动。回合结束后用这一回合的全部数据更新后验。和之前相比，必须先采样整个 MDP、算出它的最优价值才能行动，所有这些计算都在回合开始前做完。
+        </p>
+        <h3>动态模型的先验：Dirichlet</h3>
+        <p>
+            奖励模型的后验更新和上一讲类似，更新计数即可。动态模型怎么办？常用 Dirichlet 分布，它是多项分布（multinomial）的共轭先验。表格型动态模型对每个 $(s,a)$ 用一个多项分布表示到各个下一状态的概率 $p(s'\mid s,a)$，对所有 $s'$ 求和为 1。贝叶斯的部分在于这些参数未知，所以给它们一个先验。
+        </p>
+        <p>
+            Emma 的例子：关心在 $s_1$ 采取 $a_1$ 会发生什么，观测到转移到 $s_3$ 七次、转移到 $s_7$ 两次。回合结束时就用这些数据更新这组多项分布参数上的 Dirichlet 分布，和 Beta 分布的更新很像。共轭意味着后验仍是 Dirichlet，可以直接从中采样多项分布，也就是采样动态模型。她说课上不要求大家手推这个，做项目时可能会用到。
+        </p>
+        <p>
+            有学生对“采样 MDP”和“采样动态和奖励模型”的关系感到困惑。Emma 解释：给定已知的状态空间、行动空间和折扣因子，只要为每个状态-行动对指定动态模型和奖励模型，就完全确定了一个 MDP。所以采样 MDP 就是对每个状态-行动对采样这两样东西，然后算最优行动。
+        </p>
+        <p>
+            她接着提出一个问题：在贝叶斯老虎机里，每次观测后都更新后验（比如试了给脚趾贴胶布，看到病人康复，就更新先验）。PSRL 只在每 $H$ 步更新一次。这是为了省计算，还是另有原因？先做一道题再讨论。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 知识检查：MDP 里的策略性探索</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=2609s" target="_blank">0:43:29</a>–0:45:44</em></p>
+        <p>
+            这段录像的声音中断了，课上的讲解没有录下来。下面的题目和答案取自 2026 年课件。
+        </p>
+        <p>
+            第一题，MDP 里的策略性探索（多选）：
+        </p>
+        <ul>
+            <li>无所谓，因为数据分布和所遵循的策略无关：错。</li>
+            <li>可以对可能的动态模型和奖励模型都保持乐观，从而算出乐观的 Q 函数：对（MBIE-EB 就是这样做的）。</li>
+            <li>如果做出非近似最优决策的步数保证少于问题参数（状态空间大小等）的某个指数函数，就叫 PAC：错，要求是多项式函数。</li>
+        </ul>
+        <p>
+            第二题，对上面展示的表格型 MDP Thompson 采样算法：
+        </p>
+        <ul>
+            <li>Thompson 采样只采样奖励模型参数，动态模型参数用经验平均，也能得到同样的性能：错。</li>
+            <li>可以在每次后验更新时都做一次 MDP 规划：在所展示的算法里是对的，但也可以想象其他做法。</li>
+            <li>每一步的计算代价总是和 Q-learning 一样：错，它要用采样模型做规划；同样也可以设想其他变体。</li>
+        </ul>
+    </section>
+
+    <section id="t09">
+        <h2>09. 为什么整个回合只用一个 MDP，并发探索与 seed sampling</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=2744s" target="_blank">0:45:44</a>–0:55:20</em></p>
+        <h3>频繁重采样会来回摇摆</h3>
+        <p>
+            声音恢复时，Emma 正在讲 Maria Dimakopoulou 关于并发强化学习（concurrent RL，多个智能体同时在同一个环境里学习）的工作，问题是多个智能体是否需要协调探索、多久更新一次。但即使只有一个智能体，也有一个问题：如果在一个任务内（比如一个回合里）频繁更新后验，就相当于在同一个回合里不断采样不同的 MDP，行为会被彻底改变，有时会来回摇摆（thrash）。
+        </p>
+        <p>
+            她举的是链状 MDP（chain），这是常用来说明难探索 MDP 的例子，有很多变体：高奖励可能在链的一端，也可能在另一端。假设先采样到一个 MDP，认为右端最好，规划后智能体开始往右走；走了几步看到奖励为 0，Thompson 采样更新后验，重新采样，现在认为左端最好，智能体掉头往左；途中又拿到一些数据、更新后验、再次采样，又觉得右边好。智能体就在对“自己处在哪个 MDP”的不同看法之间来回切换。所以常常希望在整个回合里坚持（commit）同一个采样 MDP。这不是必须的，但这是 PSRL 这样设计的原因之一。有学生确认，这种承诺就在 2013 年的 PSRL 里，Emma 说是的。
+        </p>
+        <h3>并发 RL 与 seed sampling</h3>
+        <p>
+            Maria 的工作（Dimakopoulou and Van Roy，ICML 2018）讨论了承诺的好处，并进一步考虑：许多智能体同时在同一个环境里时，怎样耦合和协调它们的探索。和承诺的想法相关，你可能希望让大家各自承诺去探索空间的不同部分：一个智能体认为最好的奖励在这里，另一个认为在那里，分头去探索，之后再把信息合并到后验里。她们后来也把它扩展到了深度学习的情形。
+        </p>
+        <p>
+            Emma 放了演示视频：很多只老鼠在迷宫里找奶酪。不做聪明协调的并发方法（比如简单的并发 UCRL）效果不好。seed sampling 让并发智能体在承诺各自采样 MDP 的同时互相协调，到第 324 步左右，所有智能体已经共享了奶酪位置的信息，全部解决了问题。这说明既需要承诺于一种探索策略，在并发智能体这种很现实的情形下，再加上协调也很有帮助。
+        </p>
+        <p>
+            她也指出理论和实验之间的一个落差：理论上并不需要协调探索。她们 2015 年有一篇论文表明，不做协调探索也完全足够，仍能得到几乎线性的加速。
+        </p>
+        <p>
+            有学生问 2013 年的 PSRL 和 2018 年的方法具体有什么不同。Emma 说两点：PSRL 不考虑并发，假设只有一个 MDP、一个智能体；后者假设有 $m$ 个智能体在同一个 MDP 里，像不止一只老鼠在找奶酪。seed sampling 还考虑怎样为每个智能体选择它认为自己所处的 MDP，以便把探索分散开。只有一个智能体时不需要任何协调。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 泛化：线性上下文老虎机</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=3320s" target="_blank">0:55:20</a>–1:00:45</em></p>
+        <p>
+            以上讲完了表格型 MDP 中的贝叶斯探索和乐观探索。真正想做的是更大的状态空间和更现实的问题，这仍是活跃的研究领域，最流行的思路还是乐观和 Thompson 采样。推广起来更难，原因有两个：乐观需要不确定性的概念，而用深度神经网络时很难表示不确定性；Thompson 采样需要复杂设定下的后验，计算上很难，也很难近似。
+        </p>
+        <h3>上下文老虎机</h3>
+        <p>
+            先看上下文老虎机（contextual bandit），它介于多臂老虎机和 MDP 之间：有状态（上下文），但采取的行动不影响下一个状态。奖励分布 $R_{a,s}(r) = P[r\mid a,s]$ 依赖于状态和行动。状态或行动空间很大时，通常用一个参数化函数表示状态、行动和奖励之间的关系。Emma 说有些同学的项目会用到这部分。
+        </p>
+        <p>
+            这样做的好处很大。她展示了 Lattimore and Szepesvári《Bandit Algorithms》的图 19.1：横轴是臂的数量 $k$，纵轴是固定步数后的遗憾。用普通 UCB 时，臂越多遗憾越大，因为它在臂之间不共享任何信息。如果用 LinUCB，假设每个臂由一组特征表示，就能利用结构。她举的例子是：今天给某人看一条某位候选人的竞选广告，明天看另一条，两条广告共享关于这位候选人的特征，效果可能相近。只要参数空间不变（比如 $\theta\in\mathbb{R}^d$，维度 $d$ 很低），即使臂的数量增加，遗憾也不会变差多少。总的原则是要利用结构。
+        </p>
+        <h3>线性奖励模型</h3>
+        <p>
+            常见做法是把奖励建模为输入特征 $\phi(s,a)$ 的线性函数加噪声：
+        </p>
+        $$r = \theta^\top\phi(s,a) + \varepsilon,\qquad \varepsilon\sim\mathcal{N}(0,\sigma^2)$$
+        <p>
+            特征可以来自深度神经网络或大语言模型这种复杂表示，最后一层再和参数 $\theta$ 做点积。如果特征可解释，奖励函数也就可解释，可以看出每个特征对奖励贡献多少。另一种形式是不相交线性模型（disjoint linear），每个臂有自己的参数：
+        </p>
+        $$r(s,a) = \theta_a^\top\phi(s) + \varepsilon$$
+        <p>
+            Emma 说即使奖励模型是线性的，策略也不必是线性的。她画了三个行动 $a_1, a_2, a_3$ 的奖励随状态变化的三条直线：取最大值时，状态空间的一段 $a_1$ 占优，另一段 $a_3$ 占优，再一段 $a_2$ 占优，所以策略的价值是分段线性的，相当灵活。
+        </p>
+        <h3>参数上的不确定性</h3>
+        <p>
+            之前用 Hoeffding 不等式表示标量奖励的不确定性。现在通过 $\theta$ 的不确定性来表示 $r$ 的不确定性，需要为向量 $\theta$ 构造一个不确定性集合。已有很多漂亮的工作来量化这种不确定性，比如椭圆势引理（elliptical potential lemma），得到向量上的不确定性集合，而且计算上可行。这样就有了在线性模型下给奖励函数构造上置信界的原则性方法。大约 14 年前，这被证明在新闻文章推荐上很有用（A Contextual-Bandit Approach to Personalized News Article Recommendation，WWW 2010），也可以参考 Lattimore and Szepesvári 第 19 章。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 深度 RL 中的乐观和 Thompson 采样</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=3645s" target="_blank">1:00:45</a>–1:05:50</em></p>
+        <h3>计数不够用了</h3>
+        <p>
+            回到 MBIE-EB：对有限状态和行动，它维护计数，为每个状态-行动单独建模型。Q 函数用深度网络表示已经讲过，大问题是基于计数的奖励项。状态有无穷多个时，比如 Atari，大多数画面一辈子只会看到一次，数 $(s,a)$ 和 $(s,a,s')$ 出现了几次没有意义。计数奖励的作用是量化对某个状态-行动的奖励模型和动态了解多少。深度 RL 兴起后，一个思路就是：能不能把这种不确定性量化提升到更高层的表示上。
+        </p>
+        <p>
+            如果有了这样的量，前面很多算法都能比较容易地扩展。比如带函数近似的 Q-learning，原来的更新是
+        </p>
+        $$\Delta w = \alpha\Big(r + \gamma\max_{a'}\hat Q(s',a';w) - \hat Q(s,a;w)\Big)\nabla_w\hat Q(s,a;w)$$
+        <p>
+            只需在目标里加一个奖励项：
+        </p>
+        $$\Delta w = \alpha\Big(r + r_{\text{bonus}}(s,a) + \gamma\max_{a'}\hat Q(s',a';w) - \hat Q(s,a;w)\Big)\nabla_w\hat Q(s,a;w)$$
+        <p>
+            MBIE-EB 做的就是这件事，只是它的奖励项由计数决定。$r_{\text{bonus}}(s,a)$ 应该反映从 $(s,a)$ 出发未来奖励的不确定性。已有很多方法去估计访问次数或访问密度，比如 Bellemare et al. NIPS 2016、Ostrovski et al. ICML 2017、Tang et al. NIPS 2017。
+        </p>
+        <h3>伪计数和 Montezuma's Revenge</h3>
+        <p>
+            Marc Bellemare 等人做得比较成功的是伪计数（pseudo-count）：在状态-行动空间的某些部分上构造类似计数的量，比如游戏里某些房间已经去过很多次，就降低对它们的不确定性。这里有很多细节。MBIE-EB 每一轮都更新所有计数；而深度 Q-learning 维护一个存放（状态、行动、奖励、下一状态）的回放缓冲区，现在缓冲区里还得存奖励项。奖励项是在访问时算的，回放时可能已经过时，那么要多频繁地更新缓冲区？
+        </p>
+        <p>
+            Emma 说高层的结论是：这很重要。Montezuma's Revenge 早期被认为是最难的 Atari 游戏之一，现在大概仍是。标准 DQN 用 ε-greedy 跑 5000 万帧（已经很多了），也从来没有走出第二个房间，因为 ε-greedy 的探索不是策略性的。Bellemare 等人把基于计数的思路推广到泛化设定后，表现好了很多很多。
+        </p>
+        <h3>把 Thompson 采样推广到深度 RL</h3>
+        <p>
+            Thompson 采样也有推广的方法。Emma 组里做过对表示和参数做 Thompson 采样的工作（Mandel, Liu, Brunskill, Popovic，IJCAI 2016）。扩展到很大的领域时，无模型方法更有用，但想从 $Q^*$ 的后验采样并不容易。
+        </p>
+        <ul>
+            <li>Bootstrapped DQN（Osband et al. NIPS 2016）：提出 PSRL 的 Ian Osband 把它推广到深度 Q-learning，用自助法（bootstrap，有放回重采样数据）训练多个 DQN 作为后验的近似。Emma 说这是对不确定性相当粗糙的近似。</li>
+            <li>只在最后一层做贝叶斯：神经网络最后一层用贝叶斯线性回归得到不确定性估计，再从中采样（Efficient Exploration through Bayesian Deep Q-Networks，Azizzadenesheli and Anandkumar 2017）。她说这个方法简单得出人意料，效果却挺好，可以试试。</li>
+        </ul>
+    </section>
+
+    <section id="t12">
+        <h2>12. 多任务探索：DREAM 与 DPT，以及本单元要掌握的内容</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=pc7oayCSZmQ&t=3950s" target="_blank">1:05:50</a>–1:10:20</em></p>
+        <h3>DREAM</h3>
+        <p>
+            最后是一些较新的方法，考虑需要泛化的许多任务，而非单个任务。开场的 Breakout 批改用的就是 DREAM（Liu et al. NeurIPS 2022）：有许多不同的任务，智能体要学会在这些任务里高效探索，利用任务之间的结构来形成高效的探索策略。
+        </p>
+        <h3>Decision-Pretrained Transformer</h3>
+        <p>
+            Emma 组里最近的另一项工作是 Decision-Pretrained Transformer（DPT，Lee, Xie, Pacchiano, Chandak, Finn, Nachum and Brunskill，NeurIPS 2023），也是元学习的设定：智能体要做一系列老虎机问题或一系列 RL 问题，希望学会在其中最优地探索。
+        </p>
+        <p>
+            做法是用一个预训练的 transformer，把强化学习映射成监督学习，和行为克隆（behavior cloning）类似。区别在于，它不是去模仿过去收集数据时实际采取的行动；如果能算出当时本该采取的正确行动，就训练模型去预测这个最优行动 $a^*$。他们发现，这样做可以精确地对应到 Thompson 采样。所以在 Thompson 采样有理论保证的所有设定里，DPT 能继承这些保证。课件上的说法是：训练去预测 $a^*$ 相当于在模仿 Thompson 采样，但能捕捉丰富得多的先验。
+        </p>
+        <p>
+            经验上，它能利用领域里存在、却没有人写进代码的结构。她展示的图：横轴是随时间积累的数据量，纵轴是累计遗憾，越低越好。如果领域里有线性结构，并把这个结构告诉算法（绿色曲线），效果很好；大多数传统算法都假设你把结构交给老虎机，比如写下新闻文章和用户的 300 个特征。如果不利用这个结构，遗憾会明显更高，图中对应的是一个不假设线性结构的 Thompson 采样算法。DPT 在所有任务都具有线性结构的多任务设定里训练后，即使没人告诉它，也会发现可以更紧凑地编码这个结构；部署到新任务时，表现几乎和直接给了它这个未知结构一样。
+        </p>
+        <p>
+            Emma 说这很有意思：机器学习里比较脆弱的一环是人工写下的表示；深度学习的一大成就是少写特定表示、更接近原始输入。这个结果说明，在序贯决策和多任务元探索里也可以做类似的事：归纳地学到更紧凑的领域表示，在新任务上探索得更高效。
+        </p>
+        <h3>这个单元应该掌握的内容</h3>
+        <ul>
+            <li>理解强化学习中探索与利用之间的张力。Emma 说她不太喜欢这两个词，课上用得不多：探索指花时间了解这个领域，利用指用已有信息做好的决策。</li>
+            <li>能定义并比较“好”的不同标准：经验表现、收敛、遗憾、PAC。</li>
+            <li>知道讲过的算法各满足哪些标准，比如贪心算法是否有次线性遗憾（没有）。</li>
+            <li>理解 UCB 有次线性遗憾的证明思路。</li>
+        </ul>
+        <p>
+            下周讲 AlphaGo，以及在很大的博弈里怎样做聪明的自适应树搜索。
+        </p>
+    </section>
+
+    <section id="t13">
+        <h2>13. 2026 版更新</h2>
+        <p>
+            对应的 2026 年冬季课件是第 12 讲“Fast RL Continued”（52 页），主干和录像相同，本页的 MBIE-EB 伪代码、Simulation Lemma 推导、PSRL 伪代码和知识检查答案都取自它。能看出的不同：
+        </p>
+        <ul>
+            <li>PAC 框架放在这一讲的开头作为第一节：先说遗憾界只描述遗憾随 $T$ 如何增长，可能是很多小错，也可能是少数大错，有时更关心“不小的错误”的次数；再给出 PAC 的正式定义。课件还补充：大多数 PAC 算法基于乐观或 Thompson 采样，有些基于乐观的 PAC 算法只是把所有价值初始化成一个（和问题相关的）高值。</li>
+            <li>线性上下文老虎机部分加了两道思考题：$r = \theta^\top\phi(s,a) + \varepsilon$ 能否表示不相交线性模型？为什么 $\theta$ 上的不确定性足以刻画 $r$ 上的不确定性？课件没有给答案。（整理者注：第一题可以，把 $\phi(s)$ 放进对应行动 $a$ 的那一段特征、其余位置填 0 即可。）</li>
+            <li>深度 Thompson 采样方法写得更具体。Bootstrapped DQN：用自助样本训练 $C$ 个 DQN，行动时选 $C$ 个智能体中 Q 值最高的行动；有一些性能提升，但不如奖励项方法。Bayesian DQN：最后一层做贝叶斯线性回归，并相对得到的后验保持乐观；很简单，经验上比最后一层只做线性回归或 Bootstrapped DQN 好很多，某些情况下不如奖励项方法。</li>
+            <li>新增两页“理论结果”。表格型 MDP 现在已有（主导项上）紧的 minimax 遗憾和 PAC 结果：Azar, Osband and Munos ICML 2017（遗憾），Dann, Li, Wei and Brunskill ICML 2019 Policy Certificates（PAC）；还有实例相关的界：Zanette and Brunskill ICML 2019，Simchowitz and Jamieson NeurIPS 2019。函数近似下的理论是活跃领域：Jin, Yang, Wang and Jordan COLT 2020 的线性函数近似可证明高效 RL，Andrea Zanette 主导的工作和 Mengdi Wang 实验室的工作；以及刻画问题难度的量，如 Eluder dimension（Russo and Van Roy）和 Bellman rank（Jiang et al.）。</li>
+            <li>总结页多了一条：做默认项目的同学要能为线性上下文老虎机实现 UCB 和 Thompson 采样。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>Thompson 采样不保证乐观，只采样一个与后验一致的参数；Beta 先验 $\mathrm{Beta}(\alpha,\beta)$ 观测 $r$ 后变为 $\mathrm{Beta}(\alpha+r,\beta+1-r)$。</li>
+            <li>MBIE-EB：基于经验模型做反复的 Bellman 备份并加计数奖励，$\tilde Q(s,a) = \hat R(s,a) + \gamma\sum_{s'}\hat T(s'\mid s,a)\max_{a'}\tilde Q(s',a') + \beta/\sqrt{n_{sa}(s,a)}$，乐观被向后传播，驱动智能体去少访问的地方。</li>
+            <li>PAC：以概率 $1-\delta$，除多项式（$|S|,|A|,\frac{1}{1-\gamma},\frac1\epsilon,\frac1\delta$）步外都选 $\epsilon$-最优行动；MBIE-EB 是 PAC 的，但代入 $|S|=|A|=10$ 得到约 $10^{12}$ 步，界很保守。</li>
+            <li>Simulation Lemma：$\|R_1-R_2\|_\infty\le\alpha$、$\|T_1-T_2\|_1\le\beta$ 时，$\max_s|V^\pi_1(s)-V^\pi_2(s)|\le\frac{\alpha+\gamma V_{\max}\beta}{1-\gamma}$；模型变准，价值就变准。</li>
+            <li>PSRL：每个回合开始时从后验（奖励用 Beta 等，动态用 Dirichlet）采样整个 MDP，解出 $Q^*_M$，整个回合按它行动，回合结束再更新后验；需要规划，计算比老虎机重。</li>
+            <li>在回合内频繁重采样 MDP 会让智能体在链状 MDP 两端来回摇摆，所以要承诺一个采样 MDP；多个智能体并发时，seed sampling 协调各自的采样以分散探索。</li>
+            <li>线性上下文老虎机 $r=\theta^\top\phi(s,a)+\varepsilon$ 在臂之间共享信息，臂数增加时遗憾不随之恶化；不确定性放在向量 $\theta$ 上（LinUCB）。</li>
+            <li>深度 RL：把计数换成伪计数或密度估计，在 Q-learning 目标里加 $r_{\text{bonus}}(s,a)$，Montezuma's Revenge 上远好于 ε-greedy DQN；Thompson 采样的近似有 Bootstrapped DQN 和最后一层贝叶斯线性回归。</li>
+            <li>DREAM 和 DPT 在多任务上学会探索；DPT 训练预测最优行动 $a^*$，等价于 Thompson 采样，并能自己学出任务里的线性结构。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS234 Reinforcement Learning · Lecture 13: Exploration 3 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

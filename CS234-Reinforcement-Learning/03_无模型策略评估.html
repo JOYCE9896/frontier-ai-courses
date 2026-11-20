@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第 3 讲：无模型策略评估 | Stanford CS234 课程笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="02_表格型MDP规划.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">CS234 目录</a> · Lecture 3</span>
+    <span><a href="04_Q学习与函数近似.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 3 讲：无模型策略评估</h1>
+        <p class="subtitle">不知道动态和奖励模型时，怎样从经验估计一个策略的价值：首次访问、每次访问和增量蒙特卡洛，估计器的偏差、方差和一致性，TD(0) 学习，确定性等价，以及在有限数据上反复训练时 MC 和 TD 会收敛到不同答案</p>
+        <div class="author-meta">
+            主讲：Emma Brunskill · 时长：1 小时 20 分 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=jjq51TRNVvk" target="_blank">课堂录像</a>（Stanford Online 公开，2024 年春季，本文依据录像字幕整理）；补充：<a href="https://web.stanford.edu/class/cs234/modules.html" target="_blank">2026 年冬季课件</a>（2026 年的录像只对选课学生开放；文中标“2026 版更新”的内容来自 2026 年课件）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲讲什么</h2>
+        <p>
+            上一讲假设模型已知。这一讲去掉这个假设：智能体拿不到动态模型和奖励模型，只能在世界里执行一个固定策略，从得到的数据里估计这个策略有多好。状态仍然少到可以给每个状态单独存一个值，所以叫表格型（tabular）。这叫无模型策略评估（model-free policy evaluation）。
+        </p>
+        <p>
+            Emma 说这类问题到处都有：老板问这种广告方式效果如何，医院想知道当前治疗方案的病人结局如何。它也是后面更复杂算法（深度 Q 学习、策略梯度）的组成部分，因为要改进策略，先得知道当前策略有多好。这一讲依次讲蒙特卡洛策略评估、时序差分学习、确定性等价和批量策略评估，并讨论用什么标准比较这些估计方法。
+        </p>
+        <ol>
+            <li><a href="#t01">开场投票：价值迭代和策略迭代</a> · <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=5s" target="_blank">0:00:05</a></li>
+            <li><a href="#t02">问题设定和回顾：自举</a> · <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=515s" target="_blank">0:08:35</a></li>
+            <li><a href="#t03">蒙特卡洛策略评估</a> · <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=868s" target="_blank">0:14:28</a></li>
+            <li><a href="#t04">增量蒙特卡洛和策略评估树</a> · <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=1419s" target="_blank">0:23:39</a></li>
+            <li><a href="#t05">怎样评价一个估计方法</a> · <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=1787s" target="_blank">0:29:47</a></li>
+            <li><a href="#t06">时序差分学习 TD(0)</a> · <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=2203s" target="_blank">0:36:43</a></li>
+            <li><a href="#t07">投票：学习率对 TD 的影响</a> · <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=2929s" target="_blank">0:48:49</a></li>
+            <li><a href="#t08">TD 小结和介于 TD 与 MC 之间的方法</a> · <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=3512s" target="_blank">0:58:32</a></li>
+            <li><a href="#t09">确定性等价</a> · <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=3713s" target="_blank">1:01:53</a></li>
+            <li><a href="#t10">批量策略评估：AB 例子</a> · <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=3912s" target="_blank">1:05:12</a></li>
+            <li><a href="#t11">2026 版更新</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场投票：价值迭代和策略迭代</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=5s" target="_blank">0:00:05</a>–0:08:35</em></p>
+        <p>
+            有学生先问“表格型 MDP”是什么意思。Emma 说就是能把每个状态的价值写成表里的一项，每个状态一个参数；神经网络之类的方法不是每个状态一个参数。
+        </p>
+        <p>
+            第一题：在表格型 MDP 中，价值迭代渐近地总会得到和策略迭代价值相同的策略。对。两者在离散表格型 MDP 中都保证渐近收敛到最优价值函数和一个最优策略。顺带复习：$|A|^{|S|}$ 是确定性策略的总数。
+        </p>
+        <p>
+            第二题：价值迭代算出最优价值函数，所需迭代次数能不能超过 $|A|^{|S|}$？票数差不多一半一半，讨论后公布答案：对。策略迭代每个策略最多经过一次，所以最多 $|A|^{|S|}$ 轮；价值迭代可以更多。Emma 教了一个思考这类题的办法：试着构造反例，而且用极小的 MDP。只有一个状态、一个行动的 MDP 只有一个策略，策略迭代一轮就结束。价值迭代则要一直做到价值函数几乎不变：设奖励为 1，$\gamma = 0.9$，初始化 $V_0 = 0$。真正的价值是几何级数 $1 + \gamma + \gamma^2 + \cdots = \frac{1}{1-\gamma} = 10$，但第一轮后 $V_1(s) = 1$，离 10 还很远，还要继续迭代很多轮。两个算法最终都收敛到正确结果，短期行为可以差别很大。有学生问是不是都只在极限意义下收敛，Emma 说是，都是渐近收敛。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 问题设定和回顾：自举</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=515s" target="_blank">0:08:35</a>–0:14:28</em></p>
+        <p>
+            这一讲仍不做函数近似，但没有世界模型：不给动态模型，也不给奖励模型，智能体只能在世界里试，才知道各种做法好不好。数据来自直接执行要评估的那个策略，之后几讲会放宽这一点。
+        </p>
+        <p>
+            Emma 顺带说了课程项目可以做什么：RL 的新想法、新应用、你已经在做的 RL 研究，或者复现一篇已有论文的一部分。她说复现对整个社区很有价值，因为大家在超参数、随机种子等方面做了各种不同选择，需要知道哪些结果能复现。
+        </p>
+        <p>
+            有几个人见过 TD 学习，更多人见过 Q-learning。Emma 说 Q-learning 基本就是 TD 学习的控制版本。回顾定义：$G_t$ 是一个回合里从当前状态起的折扣奖励和；状态价值 $V^\pi(s)$ 是它的平均；状态-行动价值 $Q^\pi(s,a)$ 是先在 $s$ 执行 $a$、之后按 $\pi$ 行动的期望折扣奖励和。
+        </p>
+        <p>
+            模型已知时，用动态规划做策略评估，确定性策略的更新是
+        </p>
+        $$V^\pi_k(s) = r(s,\pi(s)) + \gamma\sum_{s'\in S} p(s'\mid s,\pi(s))\, V^\pi_{k-1}(s')$$
+        <p>
+            这里没有 max，因为行动由策略决定。收敛之前，$V^\pi_k$ 只是策略价值的一个估计。式子右边用 $V^\pi_{k-1}(s')$ 作为“未来期望折扣奖励”的估计代进去，这种拿一个估计去帮助构造另一个估计的做法叫自举（bootstrapping）。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 蒙特卡洛策略评估</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=868s" target="_blank">0:14:28</a>–0:23:39</em></p>
+        <h3>想法：价值就是平均回报</h3>
+        <p>
+            蒙特卡洛（Monte Carlo，MC）策略评估的想法很简单：在模拟器或真实世界里执行策略。这一讲大部分时候假设策略是确定的，方便书写，所有想法都能推广到随机策略。价值函数是按策略生成的轨迹 $\tau$ 上回报的期望：
+        </p>
+        $$G_t = r_t + \gamma r_{t+1} + \gamma^2 r_{t+2} + \cdots + \gamma^{T_i - t} r_{T_i},\qquad V^\pi(s) = \mathbb{E}_{\tau\sim\pi}[G_t\mid s_t = s]$$
+        <p>
+            期望怎么估计？做很多次，取平均。例子：想知道一套为期一年的治疗方案平均效果如何，就让 100 个病人按这个方案治疗一年，平均他们的结局。轨迹长度可以不同：有人中途退出试验，有人提前治好、治疗结束；比如三条轨迹的回报分别是 $G = 10$、$5$、$10$，直接平均。
+        </p>
+        <p>
+            MC 的性质：
+        </p>
+        <ul>
+            <li>不需要 MDP 的动态和奖励模型。</li>
+            <li>不假设状态是马尔可夫的，它只是在取平均。实际中描述状态的特征总是有限的，比如病人的生命体征和静态人口学变量，肯定不包含决定一个人对治疗如何反应的全部因素，用这些特征系统未必是马尔可夫的；MC 不在乎这一点。</li>
+            <li>只能用于回合式（episodic）MDP：回合必须结束，才能看到总回报。回合长达一年可以，只是慢；如果要评估一个永远执行下去的策略，不加额外近似就做不了。</li>
+        </ul>
+        <p>
+            有学生问治疗时长因人而异，还算回合式吗？Emma 说算：策略可以是“病人对这种治疗没反应就加另一种治疗”，诊所里很常见；只要保证回合会结束（比如治疗最多一年），就能对结局求平均。另一个学生问每条轨迹必须从不同状态出发吗？她说想得到所有状态的价值，就需要轨迹里出现所有状态；可以估计的是策略能到达的那些状态。
+        </p>
+        <h3>首次访问 MC</h3>
+        <ol>
+            <li>对所有 $s$ 初始化计数 $N(s) = 0$，累计回报 $G(s) = 0$。</li>
+            <li>循环：
+                <ul>
+                    <li>采样第 $i$ 个回合 $s_{i,1}, a_{i,1}, r_{i,1}, s_{i,2}, a_{i,2}, r_{i,2}, \ldots, s_{i,T_i}, a_{i,T_i}, r_{i,T_i}$（$T_i$ 必须有限，不同回合可以不同）；</li>
+                    <li>定义 $G_{i,t} = r_{i,t} + \gamma r_{i,t+1} + \gamma^2 r_{i,t+2} + \cdots + \gamma^{T_i - 1} r_{i,T_i}$ 为从第 $t$ 步起的回报；</li>
+                    <li>对每个时间步 $t$ 直到 $T_i$：如果这是本回合第一次访问状态 $s$，则 $N(s) \leftarrow N(s) + 1$，$G(s) \leftarrow G(s) + G_{i,t}$，更新 $V^\pi(s) = G(s)/N(s)$。</li>
+                </ul>
+            </li>
+        </ol>
+        <p>
+            “首次访问”的意思是一个状态在一个回合里最多更新一次。比如轨迹 $s_1, s_2, s_3, s_2, s_3, \ldots$，$s_1$、$s_2$、$s_3$ 各更新一次，尽管 $s_2$、$s_3$ 出现了多次。
+        </p>
+        <p>
+            有学生问，如果某个状态很少出现，估计是不是会很差？Emma 说如果策略下根本到不了某个状态，那没关系，它的价值没有定义，因为永远不会到达。如果是很罕见的状态，就需要很多轨迹才能估准。比如治疗方案的罕见副作用，要很多轨迹才能观察到。她举 COVID 疫苗：试验人数很多但终究有限，有些副作用要在更多人身上才会出现（她强调疫苗的好处远大于副作用，这里只是说明需要的回合数取决于状态出现的频率）。
+        </p>
+        <h3>每次访问 MC</h3>
+        <p>
+            另一种做法是每次访问（every-visit）MC：回合里每次遇到状态 $s$ 都更新，算法和上面一样，只是去掉“第一次访问”的条件。一个回合很长、$s_2$ 出现很多次，就更新很多次。课件上有一道练习：火星车 $R = [1, 0, 0, 0, 0, 0, +10]$，轨迹 $(s_3, a_1, 0, s_2, a_1, 0, s_2, a_1, 0, s_1, a_1, 1, \text{terminal})$，$\gamma &lt; 1$。$s_2$ 的首次访问 MC 估计是 $\gamma^2$，每次访问 MC 估计是 $\gamma^2 + \gamma$（课件答案原样）。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 增量蒙特卡洛和策略评估树</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=1419s" target="_blank">0:23:39</a>–0:29:47</em></p>
+        <h3>增量更新</h3>
+        <p>
+            更常见的是增量蒙特卡洛（incremental MC）：为每个状态维护一个运行中的估计，随数据到来平滑地更新：
+        </p>
+        $$V^\pi(s) = V^\pi(s)\,\frac{N(s) - 1}{N(s)} + \frac{G_{i,t}}{N(s)} = V^\pi(s) + \frac{1}{N(s)}\big(G_{i,t} - V^\pi(s)\big)$$
+        <p>
+            学过机器学习的人会觉得眼熟：$\frac{1}{N(s)}$ 像学习率，一边是旧值，一边是新的观测。一般地，可以换成任意学习率 $\alpha$：
+        </p>
+        $$V^\pi(s_{it}) = V^\pi(s_{it}) + \alpha\big(G_{i,t} - V^\pi(s_{it})\big)$$
+        <p>
+            这里 $G_{i,t}$ 常被称为目标（target），是从这个状态到回合结束的一个回报样本。之后会看到大量这种形式的算法。课件上的可选练习（答案也在课件里）：$\alpha = 1$ 的增量 MC 等同于首次访问 MC，错；$\alpha = \frac{1}{N(s_{it})}$ 的增量 MC 等同于每次访问 MC，对；$\alpha &gt; \frac{1}{N(s_{it})}$ 在非平稳（non-stationary）领域可能有帮助，对。
+        </p>
+        <h3>策略评估树</h3>
+        <p>
+            Emma 画了一张树状图，说它和后面讲的 AlphaGo 有关，见过 minimax 树或 expectimax 树的人会熟悉（课上大概只有一个人见过 expectimax 树）。从状态 $s$ 出发，策略固定了行动 $a = \pi(s)$；世界可能是随机的，所以有多个下一状态，概率为 $p(s'\mid s,a)$；从每个 $s'$ 再执行策略给的行动，再分叉到 $s''$……因为行动由策略固定，所以行动上不分叉，只在状态上分叉。策略评估要的是对所有可能未来求期望：有时病人结局很好（希望大多数时候如此），有时没那么好。
+        </p>
+        <p>
+            把树一直展开到底，对每层状态取期望，再把值往根上传，就是一种昂贵的动态规划。各种算法都可以看成对这棵树的不同近似。MC 用一条采样的回报去近似整个期望，多采几次取平均；采样越多，对这棵树的近似越好。它没有自举，没有动态规划，只是一路推演到底。Emma 说这类想法 2000 年代中期 Michael Kearns 等人有很好的工作，后来成了蒙特卡洛树搜索的基础，又用进了 AlphaGo。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 怎样评价一个估计方法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=1787s" target="_blank">0:29:47</a>–0:36:43</em></p>
+        <h3>几个标准</h3>
+        <ul>
+            <li>一致性（consistency）：数据越来越多时，估计是否收敛到所有状态的真实价值。否则即使有无限数据，估计仍然是错的。表格型设定下应该能做到一致；更复杂的设定里，有时只能接受更弱的目标。</li>
+            <li>计算效率：数据增加时更新估计的计算代价，以及内存需求。</li>
+            <li>统计效率（statistical efficiency）：估计的准确度怎样随数据量变化，也就是随数据增加收敛得多快。</li>
+            <li>实际精度，通常用均方误差衡量。</li>
+        </ul>
+        <h3>偏差、方差、均方误差和一致性</h3>
+        <p>
+            设统计模型由参数 $\theta$ 决定观测数据的分布 $P(x\mid\theta)$，$\hat\theta$ 是根据观测数据 $x$ 算出的估计量（这里就是我们的价值函数估计）。
+        </p>
+        $$\text{Bias}_\theta(\hat\theta) = \mathbb{E}_{x\mid\theta}[\hat\theta] - \theta,\qquad \text{Var}(\hat\theta) = \mathbb{E}_{x\mid\theta}\big[(\hat\theta - \mathbb{E}[\hat\theta])^2\big],\qquad \text{MSE}(\hat\theta) = \text{Var}(\hat\theta) + \text{Bias}_\theta(\hat\theta)^2$$
+        <p>
+            一般希望均方误差小，也就是偏差小或为零、方差也小。用 $n$ 个数据点得到估计 $\hat\theta_n$，如果对所有 $\epsilon &gt; 0$ 都有
+        </p>
+        $$\lim_{n\to\infty}\Pr\big(|\hat\theta_n - \theta| &gt; \epsilon\big) = 0$$
+        <p>
+            则称它是一致的。Emma 提了个问题：无偏估计一定一致吗？不一定。
+        </p>
+        <h3>MC 的性质</h3>
+        <ul>
+            <li>首次访问 MC：$V^\pi$ 是 $\mathbb{E}_\pi[G_t\mid s_t = s]$ 的无偏估计；由大数定律，$N(s)\to\infty$ 时收敛到真值，所以一致且无偏。罕见状态仍然需要足够多的样本。</li>
+            <li>每次访问 MC：有偏。直观理解：首次访问时数据是独立同分布（IID）的；每次访问时，同一条轨迹里先访问 $s_2$、四步后又访问 $s_2$，两次的回报相关，不再 IID。但它仍然一致，而且常常有更小的均方误差，因为一条轨迹里能用更多数据做更多次更新。</li>
+            <li>增量 MC：性质取决于学习率。学习率可以随更新次数变化（就像一般会衰减学习率）。设 $k$ 是对状态 $s_j$ 已做的更新次数，如果
+                $$\sum_{n=1}^{\infty}\alpha_n(s_j) = \infty,\qquad \sum_{n=1}^{\infty}\alpha_n^2(s_j) &lt; \infty$$
+                增量 MC 估计就会收敛到真实价值 $V^\pi(s_j)$。</li>
+        </ul>
+        <p>
+            有学生问不满足这些条件是不是就一定没有保证。Emma 说这是充分条件，不一定必要；很多时候取决于具体问题的动态和奖励。她不确定有没有其他很一般的条件，特定问题类可能有。
+        </p>
+        <h3>MC 的局限</h3>
+        <ul>
+            <li>方差一般很高。首次访问 MC 每个回合对一个状态最多更新一次，会很慢。如果同一起点大多数时候结局一般、一百次里有一次很差，估计要很久才能收敛。数据很难获取或代价很高、风险很高时，MC 可能不实用。</li>
+            <li>要求回合式设定，必须等回合结束才能更新。到了控制问题，你可能想用一个回合里已有的数据马上改变行为：比如自动驾驶，在一个很长的回合中已经看到车没按预期工作，就该用这个信息调整转向。</li>
+        </ul>
+        <p>
+            小结：MC 用回报样本近似期望来更新价值估计，不假设马尔可夫过程，在比较温和的条件下收敛到真值。Emma 补充，有时即使知道真实的动态和奖励模型，也可能宁愿用 MC 而不用动态规划，特别是在你认为所用特征下马尔可夫性质可能不成立的系统里。
+        </p>
+        <p>
+            有学生问，不知道奖励模型怎么算轨迹的奖励？Emma 说假设是你处在真实环境中，或者能从某个“oracle”采样，现实世界会给你奖励，比如客户买了或没买、出现了副作用。你没有参数化的奖励模型，但能拿到真实的奖励。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 时序差分学习 TD(0)</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=2203s" target="_blank">0:36:43</a>–0:48:49</em></p>
+        <h3>想法</h3>
+        <p>
+            Sutton 和 Barto 的书里说：“if one had to identify one idea as central and novel to RL, it would undoubtedly be temporal difference learning.”（如果要挑出一个对 RL 来说既核心又新颖的想法，那无疑是时序差分学习。）这一讲主要讲 TD(0)，0 的含义后面解释。
+        </p>
+        <p>
+            时序差分（Temporal Difference，TD）学习把两件事结合起来：用采样近似期望，用自举近似未来回报。它是无模型的，不需要奖励函数或动态模型的参数化表示；既可以用于回合式设定，也可以用于无限视界的折扣设定，比如放出一个机器人让它永远学下去。它在每个 $(s, a, r, s')$ 元组之后立刻更新状态价值。
+        </p>
+        <p>
+            推导思路：模型已知时，策略的 Bellman 算子是 $B^\pi V(s) = r(s,\pi(s)) + \gamma\sum_{s'} p(s'\mid s,\pi(s))V(s')$。增量 MC 用一条回报样本 $G$ 做更新。既然手里有一个价值函数，为什么不把“从这里到回合结束的奖励”换成“观测到的即时奖励，加上到达的下一个状态的估计价值”？于是用 $r_t + \gamma V^\pi(s_{t+1})$ 替换 $G_t$。好处是不用等：一看到下一个状态，就能立刻更新当前状态的价值，也能用于无限视界问题。
+        </p>
+        $$V^\pi(s_t) = V^\pi(s_t) + \alpha\big(\underbrace{[r_t + \gamma V^\pi(s_{t+1})]}_{\text{TD target}} - V^\pi(s_t)\big)$$
+        <p>
+            $r_t + \gamma V^\pi(s_{t+1})$ 叫 TD 目标（TD target）。估计变化的幅度叫 TD(0) 误差：
+        </p>
+        $$\delta_t = r_t + \gamma V^\pi(s_{t+1}) - V^\pi(s_t)$$
+        <p>
+            它衡量当前估计和代入的新估计相差多少。见过 Q-learning 的人会觉得很像，只是这里没有 max。
+        </p>
+        <h3>算法</h3>
+        <pre><code>Input: alpha
+Initialize V_pi(s) = 0 for all s
+Loop:
+    Sample tuple (s_t, a_t, r_t, s_{t+1})
+    V_pi(s_t) = V_pi(s_t) + alpha * ([r_t + gamma * V_pi(s_{t+1})] - V_pi(s_t))
+    t = t + 1</code></pre>
+        <h3>火星车例子</h3>
+        <p>
+            策略总是执行 $a_1$，$\gamma = 1$（算起来方便），从 $s_1$ 或 $s_7$ 执行任何行动都结束回合，$R = [1, 0, 0, 0, 0, 0, +10]$。轨迹：$s_3$ 执行 $a_1$ 得 0 转到 $s_2$，$s_2$ 得 0 转到 $s_2$，再得 0 转到 $s_1$，$s_1$ 得 1 然后终止。所有值初始化为 0。
+        </p>
+        <p>
+            第一次更新是 $V(s_3) = (1-\alpha)V(s_3) + \alpha\,(r + \gamma V(s_2)) = 0$。Emma 问：这个回合里哪个状态的值会变成非零？要变成非零，要么即时奖励非零，要么转移到一个值非零的状态。学生答：$s_1$，因为在 $s_1$ 得到奖励 1。此时 $V(s_1) = (1-\alpha)V(s_1) + \alpha(1 + \gamma V(s_{\text{terminal}}))$，终止状态价值总是 0，于是 $V(s_1) = \alpha$。
+        </p>
+        <p>
+            回合结束时（取 $\alpha = 1$），TD 的估计是 $V = [1, 0, 0, 0, 0, 0, 0]$，只有 $s_1$ 非零。首次访问 MC 的估计却是 $[1, 1, 1, 0, 0, 0, 0]$（$\gamma = 1$；课件写的是 $\gamma &lt; 1$ 时的 $[1, \gamma, \gamma^2, 0, 0, 0, 0]$），因为 MC 等到回合结束，用回报更新回合里出现过的每个状态，$s_2$ 和 $s_3$ 的回报也都是 1。Emma 说这说明不同方法在数据少的早期表现不同，样本效率不同，样本效率之后会反复出现。
+        </p>
+        <h3>在树上看 TD</h3>
+        <p>
+            动态规划要对所有下一状态按到达概率加权求期望；TD 只采样其中一个 $s_{t+1}$，用这个样本近似期望。同时它像动态规划一样做自举，直接代入 $V(s_{t+1})$，而不像 MC 那样一路走到底拿一条完整回报。所以 TD 既采样又自举。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 投票：学习率对 TD 的影响</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=2929s" target="_blank">0:48:49</a>–0:58:32</em></p>
+        <p>
+            多选题，判断哪些对（投票系统当天不能多选，Emma 让大家心里记下再和邻座讨论）。确定性 MDP 指对每个 $(s,a)$，恰好有一个 $s'$ 使 $p(s'\mid s,a) = 1$，没有随机性。
+        </p>
+        <ol>
+            <li>$\alpha = 0$ 时，TD 给 TD 目标的权重比过去的 V 估计大。错。$\alpha = 0$ 时 TD 目标完全消失，永远不更新。</li>
+            <li>$\alpha = 1$ 时，TD 把 V 估计直接更新为 TD 目标。对。两项 $V(s_t)$ 抵消，只剩目标，每次都可能彻底改变估计。</li>
+            <li>$\alpha = 1$ 时，如果策略经过有多个可能下一状态的状态，V 可能永远振荡。对，这一题比较微妙。有学生举例：两个状态互相指向，并且以一定概率去其中一个。Emma 的例子像抛硬币：从一个状态出发得 0 奖励，转到下一个状态，50% 得 +1、50% 得 −1，然后问题重置。每轮要么 +1 要么 −1，估计就在 +1 和 −1 之间来回跳。系统有随机性时，目标里只用一个随机样本去近似期望，可能出问题。</li>
+            <li>存在确定性 MDP，使 $\alpha = 1$ 的 TD 收敛。对。Emma 说她常用很小的 MDP 找直觉：比如总是到达一个奖励为 +10 的终止状态，之后没有转移，那就是 +10，没有期望要算。一般来说，没有随机性、并且接近回合结束时，就可能收敛。</li>
+        </ol>
+    </section>
+
+    <section id="t08">
+        <h2>08. TD 小结和介于 TD 与 MC 之间的方法</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=3512s" target="_blank">0:58:32</a>–1:01:53</em></p>
+        <ul>
+            <li>TD 是 MC 和动态规划的结合，无模型，既自举又采样：采样近似对随机性的期望，自举是不用完整回报，改用 $V$ 来近似。</li>
+            <li>可用于回合式或无限视界设定，每个 $(s,a,r,s')$ 之后立即更新。</li>
+            <li>是有偏估计（课件注明：早期会受初始化影响）；一般方差比 MC 低，因为做了大量的更新。</li>
+            <li>如果学习率 $\alpha$ 满足和增量 MC 相同的条件，TD 是一致估计。</li>
+        </ul>
+        <p>
+            TD(0) 的意思是：拿到即时奖励后，马上自举，代入下一个状态的价值，也就是 $r_t + \gamma V(s_{t+1})$；MC 则把整个回合的折扣奖励都加起来。两者之间可以有各种折中，比如 $r_t + \gamma r_{t+1} + \gamma^2 V(s_{t+2})$：先用一段部分回报，再自举。很多 TD 方法在“走一步再代入价值”和“完全不用价值估计”之间插值。
+        </p>
+        <p>
+            有学生问，计算复杂度和性能之间有没有经验上的最佳折中？Emma 说很多时候取决于领域。她提示一个思路：部分回报那一段不需要马尔可夫假设。如果你不确定系统是不是马尔可夫的，但愿意最终代入一个马尔可夫假设来降低方差，又想保留“它可能不是马尔可夫的”这一可能，就可以用较短的部分回报。人们确实常用介于两者之间的方法，这样更灵活，通常偏差也更低。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 确定性等价</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=3713s" target="_blank">1:01:53</a>–1:05:12</em></p>
+        <p>
+            有人可能已经想到：既然执行策略时拿到了数据，为什么不用数据估计奖励模型和动态模型？这就是确定性等价（certainty equivalence）方法，一种基于模型的策略评估。在表格型设定中，每个状态-行动对都可以有自己的参数，直接计数就行。每拿到一个 $(s_i, a_i, r_i, s_{i+1})$，就重新计算最大似然（maximum likelihood）MDP 模型：
+        </p>
+        $$\hat P(s'\mid s,a) = \frac{1}{N(s,a)}\sum_{k}\mathbb{1}(s_k = s, a_k = a, s_{k+1} = s'),\qquad \hat r(s,a) = \frac{1}{N(s,a)}\sum_{k}\mathbb{1}(s_k = s, a_k = a)\, r_k$$
+        <p>
+            $N(s,a)$ 是处于状态 $s$ 并执行行动 $a$ 的次数（有学生问，Emma 解释这就是计数）。也可以用深度神经网络等更复杂的函数近似来学模型。然后用第 2 讲的任何动态规划方法，在这个估计出的 MDP 上计算 $V^\pi$。之所以叫“确定性等价”，是因为忽略模型的误差：数据有限，模型一定有错，但先不管。
+        </p>
+        <ul>
+            <li>很省数据（data efficient）。前面火星车例子里，TD 只更新了一个状态，MC 更新了三个；确定性等价为所有状态和行动算出模型，再更新所有状态的价值。一旦在某个状态拿到正奖励，就能传播到所有能到达那里的状态。</li>
+            <li>计算很贵：每次更新都要更新模型并做 MDP 规划，解析解约 $O(|S|^3)$，迭代法约 $O(|S|^2|A|)$。</li>
+            <li>一致：对马尔可夫模型会收敛到正确估计。</li>
+            <li>很容易用于离策略评估（off-policy evaluation，用别的策略产生的数据评估当前策略），之后会讲。</li>
+        </ul>
+        <p>
+            有学生问这和 MC 是不是很像，只是生成概率而不是算 $G$？Emma 说其实差别很大，下一节就会看到。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 批量策略评估：AB 例子</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=jjq51TRNVvk&t=3912s" target="_blank">1:05:12</a>–1:20:07</em></p>
+        <h3>设定</h3>
+        <p>
+            Emma 说她实验室常处理病人、学生、法律等数据，获取很贵、有代价，甚至可能造成伤害，所以要从已有数据里榨出尽可能多的信息。批量（batch）策略评估：手上有 $K$ 个回合，只用这些数据做策略评估。做法是反复从这 $K$ 个回合中采一个，对它应用 MC 或 TD(0)，一遍又一遍。问题是：在有限数据上这样做，MC 和 TD(0) 分别收敛到什么？
+        </p>
+        <p>
+            Sutton 和 Barto 书里的例子（Ex. 6.4）：两个状态 A、B，$\gamma = 1$，8 个回合：
+        </p>
+        <ul>
+            <li>1 个回合：从 A 出发，奖励 0，转到 B，奖励 0，结束。</li>
+            <li>6 个回合：从 B 出发，奖励 1，结束。</li>
+            <li>1 个回合：从 B 出发，奖励 0，结束。</li>
+        </ul>
+        <h3>$V(B)$</h3>
+        <p>
+            TD 的更新是 $V(B) \leftarrow (1-\alpha)V(B) + \alpha(r + \gamma V(\text{terminal}))$，B 之后总是结束，未来价值为 0，所以就是对 B 处的即时奖励求平均。学生答 0.75：8 次在 B 的经历中 6 次得 1、2 次得 0。MC 对从 B 出发的所有回报求平均，也是 $6/8 = 0.75$。（有学生先说 6/7，后改正为 6/8。）
+        </p>
+        <h3>$V(A)$：投票</h3>
+        <p>
+            这是难的一问，答案五花八门，Emma 让大家讨论。她强调这和“两者都一致”不矛盾：一致性说的是数据无限时；这里是数据有限、在同一批数据上反复训练（学习率按正确的方式衰减，$\gamma = 1$，有学生问 $\gamma$ 和 $\alpha$ 是不是一回事，她说不是）。
+        </p>
+        <ul>
+            <li>TD：$V(A) = 0.75$。学生解释：唯一出现 A 的回合里，即时奖励是 0，再加上 $\gamma$ 乘以 B 的价值 0.75。</li>
+            <li>MC：$V(A) = 0$。只有一条轨迹出现了 A，MC 对出现 A 的所有回报求平均，那条回报是 0。</li>
+        </ul>
+        <h3>它们分别收敛到什么</h3>
+        <ul>
+            <li>批量 MC 收敛到相对观测回报的最小均方误差解：让价值和看到的回报之间的误差最小，这里就是 $V(A) = 0$。</li>
+            <li>批量 TD(0) 收敛到用最大似然模型估计得到的 MDP 上的动态规划解，也就是和确定性等价的结果完全一样：先用数据算出最大似然 MDP，再做动态规划。</li>
+        </ul>
+        <p>
+            TD 利用了马尔可夫假设，所以能把状态串起来：它明确要求 A 的价值等于 A 的即时奖励加上 $\gamma$ 乘以下一状态（总是 B）的价值。MC 不知道 A 的价值应该通过这种自举关系和 B 联系起来，只是让观测回报的均方误差最小。两者可能给出很不同的答案；马尔可夫性质是否真的成立，决定了你该用哪一个。TD 利用马尔可夫结构，在想得到更早状态（比如这里的 A）的更好估计时很有帮助。
+        </p>
+        <p>
+            Emma 说，虽然在温和假设下这些方法渐近都收敛到正确答案，但现实中我们几乎总是只有有限数据，即使反复使用，它们也可能收敛到完全不同的结果。下一讲讲控制和函数近似。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 2026 版更新</h2>
+        <p>
+            2026 年冬季第 3 讲课件（标题为“Model-Free Policy Evaluation: Policy Evaluation Without Knowing How the World Works”）的内容和录像一致，本页公式和练习答案按它核对。课件里列出的补充材料和变化：
+        </p>
+        <ul>
+            <li>课件把很多例题移到末尾作为可选练习：首次/每次访问 MC 的火星车练习、增量 MC 的判断题、确定性等价的火星车例题及解答。</li>
+            <li>2026 年把批量 MC 和 TD 的 AB 例子（Sutton &amp; Barto Ex. 6.4）放到了第 4 讲开头，作为第 4 讲“Batch MC and TD”的一部分，并在第 4 讲加了一张“评价无模型策略评估方法的重要性质”总结页；第 3 讲末尾则附了一张无模型策略评估算法的偏差/方差对比图。</li>
+            <li>TD 小结页明确写出 TD 是有偏估计，因为早期会受初始化影响。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一讲的要点</h2>
+        <ul>
+            <li>无模型策略评估只用执行策略得到的数据估计 $V^\pi$；用一个估计帮助构造另一个估计叫自举。</li>
+            <li>MC：$V^\pi(s)$ 取观测回报的平均。首次访问 MC 无偏且一致；每次访问 MC 有偏但一致，均方误差常更小；增量 MC 在 $\sum\alpha_n = \infty$、$\sum\alpha_n^2 &lt; \infty$ 时收敛。MC 不需要马尔可夫假设，但方差高，而且必须等回合结束。</li>
+            <li>评价估计方法看一致性、计算和内存代价、统计效率和实际均方误差，$\text{MSE} = \text{Var} + \text{Bias}^2$。</li>
+            <li>TD(0)：$V(s_t) \leftarrow V(s_t) + \alpha(r_t + \gamma V(s_{t+1}) - V(s_t))$，既采样又自举，每步都能更新，可用于无限视界，有偏但方差较低。</li>
+            <li>$\alpha = 1$ 的 TD 在有随机转移时可能永远振荡，在某些确定性 MDP 中会收敛。</li>
+            <li>确定性等价：用计数得到最大似然 $\hat P$、$\hat r$，再做动态规划；最省数据，计算最贵。</li>
+            <li>在有限数据上反复训练：MC 收敛到最小化观测回报均方误差的解，TD(0) 收敛到最大似然 MDP 上的动态规划解（等同于确定性等价）。AB 例子里 MC 给 $V(A)=0$，TD 给 $V(A)=0.75$。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>Stanford CS234 Reinforcement Learning · Lecture 3: Policy Evaluation · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>
