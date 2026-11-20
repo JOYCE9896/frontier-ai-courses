@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>数据配方 | Smol Training Playbook 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="03_设计模型架构.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Smol Training Playbook 目录</a> · 04</span>
+    <span><a href="05_训练马拉松.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 4 章 · 数据配方</h1>
+        <p class="subtitle">手里有一堆好数据集之后，怎样定各自的比例、何时换配方，才能让模型在英语、多语言、代码和数学上都够用</p>
+        <div class="author-meta">
+            作者：Loubna Ben Allal、Lewis Tunstall、Nouamane Tazi、Elie Bakouch 等（Hugging Face）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://huggingfacetb-smol-training-playbook.hf.space/" target="_blank">The Smol Training Playbook</a> · The Art of Data Curation（2025 年 10 月发布；本文依据原书英文源文件整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            原书开头设想了一个场景：架构调了好几周，超参数扫过了，基础设施也搭得很稳，模型的 loss 收敛得很漂亮，结果它写不出连贯的代码，基础数学做不好，说着说着还会换语言。问题通常出在数据上。大家花很多精力琢磨架构创新和超参数搜索，可模型最后有没有用，往往由数据整理（data curation）决定。
+        </p>
+        <p>
+            作者的说法是：架构决定模型<em>怎么</em>学，数据决定它<em>学什么</em>。训练内容选错了，再多算力、再好的优化器也补不回来。光有好数据集也不够，还要把它们拼成合适的<em>配比（mixture）</em>：在互相冲突的目标之间取舍（比如英语要强，多语言也要稳），再按性能目标调各部分比例。这件事没有放之四海皆准的“最佳配方”，要靠提对问题、再设计具体实验去回答：
+        </p>
+        <ul>
+            <li>我们希望模型擅长什么？</li>
+            <li>每个领域用哪些数据集最好，怎么混？</li>
+            <li>按目标训练规模，高质量数据够不够？</li>
+        </ul>
+        <p>
+            这一章用原则性方法、消融实验，再加一点“炼金术”，讲怎样把一堆好数据集变成一份好的训练配比。它承接第 2 章的消融方法和第 3 章的架构选择，最后的三阶段配比要到第 5 章（训练马拉松）才完整列出。读完你应该能判断：数据消融该在多大模型上跑、新数据集怎么低成本地测、代码和数学该占多少、多语言能加到多少。
+        </p>
+        <ol>
+            <li><a href="#t01">什么是好的数据配比，为什么它这么重要</a></li>
+            <li><a href="#t02">消融实验设置：怎样系统地测试数据配方</a></li>
+            <li><a href="#t03">SmolLM3 的数据配比是怎么定出来的</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 什么是好的数据配比，为什么它这么重要</h2>
+        <p><em>原书小节：What's a Good Data Mixture, and Why Does It Matter So Much?</em></p>
+        <p>
+            我们对语言模型期望很多：帮忙写代码、给建议、回答几乎任何问题、用工具完成任务。网页这类量大的预训练数据，覆盖不了这些任务需要的全部知识和能力。所以近来的模型还会额外用针对特定领域（比如数学、代码）的专门预训练数据集。Hugging Face 团队以前做过很多数据集整理工作，但 SmolLM3 主要用的是现成数据集。想了解怎样构建数据集，可以看他们关于 FineWeb 和 FineWeb-Edu、FineWeb2、Stack-Edu 和 FineMath 的报告。
+        </p>
+
+        <h3>数据配比反直觉的地方</h3>
+        <p><em>原书小节：The Unintuitive Nature of Data Mixtures</em></p>
+        <p>
+            刚接触训练的人可能觉得配比很简单：列出目标能力，每个领域找高质量数据集，合在一起就行。实际更复杂，因为不同领域会争抢同一份训练预算。比如想加强代码能力，很容易想到给源代码加权（upweight）。可是给一个来源加权，就等于隐含地给其他所有来源降权，模型在其他场景的能力可能因此变差。所以用多种来源训练，总要在各项下游能力之间找某种平衡。
+        </p>
+        <p>
+            另外，在所有来源和领域里，往往有一部分“高质量”数据对提升能力特别有帮助。那为什么不把低质量数据全扔掉，只用最好的？对训练预算很大的模型（SmolLM3 训了 11T token），这么狠地过滤会导致同一份数据要重复很多遍。已有研究（《Scaling Data-Constrained Language Models》）表明这种重复有害，所以理想情况是高质量和低质量数据都能用上，同时让性能最大化。
+        </p>
+        <p>
+            为了在不同来源间平衡、又保证高质量数据够用，需要仔细设计<em>配比</em>：也就是训练文档里每个来源占的相对比例。模型在某个任务或领域上的表现，很大程度取决于它见过多少相关数据，所以调整混合权重（mixing weights）是平衡各领域能力最直接的手段。这些取舍依赖具体模型，很难预测，因此消融实验（Ablation，固定其他条件、只改一处，跑小规模训练看效果）必不可少。
+        </p>
+        <p>
+            配比也不必从头到尾固定。在训练过程中调整配比，叫<em>多阶段训练（multi-stage training）</em>或<em>课程式训练（curriculum training）</em>，能把高质量和低质量数据都用得更好。
+        </p>
+
+        <h3>训练课程的演变</h3>
+        <p><em>原书小节：The Evolution of Training Curricula</em></p>
+        <p>
+            大模型训练早期的标准做法是整个训练只用一份固定配比。GPT-3 和早期的 Llama 都是从头到尾用静态配比。后来领域转向多阶段做法（SmolLM2 论文），让配比在训练过程中变化。主要动机是：模型最终的行为受训练末尾见到的数据影响很大（《Scaling Laws for Predicting Downstream Performance in LLMs》）。由此得出一个实用策略：训练前期多用量大的来源，临近结束时混入量小但质量高的来源。
+        </p>
+        <p>
+            常有人问：什么时候换配方？没有通用规则，作者一般遵循两条原则：
+        </p>
+        <ol>
+            <li><strong>按表现干预：</strong>盯着关键 benchmark 的评测指标，针对具体的能力瓶颈调整配比。比如其他能力都在涨、数学却停滞了，这就是该引入更高质量数学数据的信号。</li>
+            <li>把高质量数据留到后期：小而精的数学和代码数据集，在退火阶段（annealing phase，训练最后、学习率衰减的那一段）引入时效果最大。</li>
+        </ol>
+    </section>
+
+    <section id="t02">
+        <h2>02. 消融实验设置：怎样系统地测试数据配方</h2>
+        <p><em>原书小节：Ablation Setup: How to Systematically Test Data Recipes</em></p>
+        <p>
+            测试数据配比的做法和架构消融类似，只有一处不同：<strong>尽量在目标模型规模上跑</strong>。大小模型容量不同。比如很小的模型可能吃不下很多种语言，大一些的模型能吸收它们而不牺牲别的能力。所以在太小的规模上做数据消融，可能对最优配比得出错误结论。
+        </p>
+        <p>
+            SmolLM3 的主要数据消融直接在 3B 模型上跑，训练长度缩短到 50B 和 100B token。另外还用了一种消融方式：<em>退火实验（annealing experiments）</em>。做法是从主训练里拿一个中间检查点（比如 7T token 处的 checkpoint），换上修改过的数据组合继续训练，而不是用不同配比从零开始训。SmolLM2、Llama 3、OLMo 2 等近期工作都用过这种方法，它适合测试多阶段训练中的配比变化。评测方面，benchmark 套件在原有英语评测之外加入了多语言任务，这样才能评估不同语言比例之间的取舍。
+        </p>
+        <p>
+            原文这里有一张交互图，画了两种消融的学习率曲线（据原文交互图数据）：从零开始的消融训练 100B token，学习率前 5B token 从 0 升到 2e-4，保持到 85B，最后 15B 衰减到 0；退火消融则从主训练（学习率 2e-4 一直保持到 8T，再在 11T 时衰减到 0）的平台期分出一支，在较短的 token 区间里把学习率衰减到 0，图中示意为 6.4T 到 7.1T。
+        </p>
+        <p>
+            近来也有人提出自动寻找最优数据比例的方法，例如：
+        </p>
+        <ul>
+            <li>DoReMi：用一个小的代理模型（proxy model）学出能让验证 loss 最小的领域权重。</li>
+            <li>RHO-LOSS：根据一个留出集（holdout）上的 loss 挑选单个训练样本，优先选那些可学、与任务相关、模型还没学会的样本。</li>
+            <li>RegMix：用带正则的回归来确定最优配比，在多个评测目标和数据领域之间平衡。</li>
+        </ul>
+        <p>
+            团队在以前的项目里试过 DoReMi 和 RHO-LOSS，发现它们往往收敛到大致贴合各数据集自然大小的分布，也就是建议“哪种数据多就多用哪种”。理论上很有吸引力，但在他们的场景里没有胜过细致的手工消融。近期的 SOTA 模型也仍靠系统性消融和退火实验手工调配比，SmolLM3 用的也是这个方法。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. SmolLM3 的数据配比是怎么定出来的</h2>
+        <p><em>原书小节：SmolLM3: Curating the Data Mixture</em></p>
+        <p>
+            SmolLM3 的目标是能处理英语和多语言内容，并且擅长数学和代码。大多数 LLM 都包含这几类内容，但下面的流程同样适用于训练低资源语言模型，或金融、医疗这类特定领域模型。方法一样：找出好的候选数据集，跑消融，设计一个兼顾所有目标领域的配比。
+        </p>
+        <p>
+            怎样构建高质量数据集，团队之前的工作里已经详细写过，这里不再讲。这一节只讲怎样把这些数据集<em>组合</em>成有效的预训练配比。
+        </p>
+
+        <h3>站在已验证的基础上</h3>
+        <p><em>原书小节：Building on Proven Foundations</em></p>
+        <p>
+            预训练数据的好消息是，很少需要从零开始。开源社区已经为大多数常见领域做好了强数据集。有时也需要新建，像他们做 Fine 系列（FineWeb、FineMath 等）那样，但更常见的难点是挑选和组合已有来源，不必重新发明。
+        </p>
+        <p>
+            SmolLM3 就是这种情况。SmolLM2 已经在 1.7B 参数规模上建立了一套很强的英语网页数据配方，也找出了当时能用的最好的数学和代码数据集。这次的目标是把这套成功经验放大到 3B 参数，同时加上更稳的多语言能力、更强的数学推理和更好的代码生成。
+        </p>
+
+        <h3>英语网页数据：基础层</h3>
+        <p><em>原书小节：English Web Data: The Foundation Layer</em></p>
+        <p>
+            网页文本是任何通用 LLM 的主干，但质量和数量同样重要。
+        </p>
+        <p>
+            从 SmolLM2 的经验知道，训练时最强的开源英语网页数据集是 FineWeb-Edu 和 DCLM，两者合起来有 5.1T token 的高质量英语网页数据。难点是定混合比例：FineWeb-Edu 对教育类和 STEM benchmark 有帮助，DCLM 能提升常识推理。
+        </p>
+        <p>
+            沿用 SmolLM2 的方法，团队在 3B 模型上用 100B token 做了一组扫描（sweep），测试 FineWeb-Edu/DCLM 的比例：20/80、40/60、50/50、60/40、80/20。结果是 60/40 或 50/50 在各 benchmark 之间平衡最好，和 SmolLM2 的发现一致。第一阶段（stage 1）最后用了 50/50。他们还加了几个别的数据集：pes2o、Wikipedia 和 Wikibooks、StackExchange。这些对性能没有影响，加进来是为了提高多样性。
+        </p>
+        <table>
+            <thead>
+                <tr><th>FineWeb-Edu / DCLM 比例</th><th>结论</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>20/80、40/60、80/20</td><td>不如下面两组平衡</td></tr>
+                <tr><td>50/50、60/40</td><td>各 benchmark 平衡最好；stage 1 选 50/50</td></tr>
+            </tbody>
+        </table>
+
+        <h3>多语言网页数据</h3>
+        <p><em>原书小节：Multilingual Web Data</em></p>
+        <p>
+            多语言方面，主要目标是另外五种语言：法语、西班牙语、德语、意大利语、葡萄牙语。这些语言的数据取自 FineWeb2-HQ，一共 628B token。另外还以较小比例加入了 10 种其他语言，比如中文、阿拉伯语、俄语。加它们的目的不在于让这些语言达到 state-of-the-art，主要是方便别人以后在这些语言上对 SmolLM3 做继续预训练（continual pretraining，在已训好的模型上用新数据接着做预训练）。FineWeb2-HQ 不支持的语言用 FineWeb2。
+        </p>
+        <p>
+            要回答的问题是：网页数据里非英语该占多少？模型在某种语言或领域见到的数据越多，那方面就越好。可算力预算固定，给一种语言加数据，就得从其他语言（包括英语）里减。
+        </p>
+        <p>
+            在 3B 模型上做消融后，他们发现 <strong>12% 的多语言内容（约占整个网页数据的 14%）</strong>平衡得最好：多语言性能提升，英语 benchmark 没有下降。这也符合 SmolLM3 的预期用法，英语仍是主要语言。另外，非英语数据只有 628B token，英语有 5.1T，比例再往上提，多语言数据就得重复更多遍。
+        </p>
+
+        <h3>代码数据</h3>
+        <p><em>原书小节：Code Data</em></p>
+        <p>
+            第一阶段的代码来源取自 StarCoder2 和 The Stack v2 的训练语料，包括：
+        </p>
+        <ul>
+            <li>The Stack v2（16 种编程语言）作为基础，按 StarCoder2Data 的方式过滤；</li>
+            <li>StarCoder2 的 GitHub pull request，用来学真实世界里的代码评审推理；</li>
+            <li>Jupyter 和 Kaggle notebook，提供可执行、一步步推进的工作流程；</li>
+            <li>GitHub issues 和 Stack Exchange 讨论串，提供围绕代码的上下文讨论。</li>
+        </ul>
+        <p>
+            Aryabumi 等人的论文《To Code, or Not To Code? Exploring Impact of Code in Pre-training》指出，代码对模型的帮助超出写代码本身，比如能提升自然语言推理和世界知识，他们建议训练配比里放 25% 代码。受此启发，消融一开始用了 25% 代码，结果英语 benchmark（HellaSwag、ARC-C、MMLU）明显下降。降到 10% 代码后，英语 benchmark 和 0% 代码相比没有提升，但因为代码生成是模型必须具备的能力，还是保留了 10%。
+        </p>
+        <p>
+            Stack-Edu（StarCoder2Data 中按教育价值过滤出的子集）被推迟到后面的阶段才加入，依据就是前面那条原则：高质量数据放在训练后期，作用最大。
+        </p>
+
+        <h3>数学数据</h3>
+        <p><em>原书小节：Math Data</em></p>
+        <p>
+            数学的思路和代码类似。早期用更大、更通用的 FineMath3+ 和 InfiWebMath3+（数字表示质量分类器打分的门槛，3+ 即 3 分及以上）。后期给 FineMath4+ 和 InfiWebMath4+ 上采样（upsample，提高它们在配比中的出现频率），并引入几个新的高质量数据集：
+        </p>
+        <ul>
+            <li>MegaMath；</li>
+            <li>指令和推理类数据集，比如 OpenMathInstruct 和 OpenMathReasoning。</li>
+        </ul>
+        <p>
+            第一阶段数学数据占 3%，FineMath3+ 和 InfiWebMath3+ 各一半。可用的只有 54B token，而第一阶段估计要训 8T 到 9T token，比例再高就得在这份数据上训超过 5 个 epoch（把整份数据完整过一遍叫一个 epoch）。
+        </p>
+
+        <h3>为新阶段找配比</h3>
+        <p><em>原书小节：Finding the Right Mixture for New Stages</em></p>
+        <p>
+            第一阶段的最佳配比是从零开始跑消融定下来的。后面的阶段（SmolLM3 有两个）要测新数据集，用的是退火消融。他们在第一阶段后段约 7T token 处取一个 checkpoint，跑 50B token 的退火实验，配置如下：
+        </p>
+        <ul>
+            <li>40% 基线配比：就是正在训练的第一阶段配比原样；</li>
+            <li>60% 新数据集：想评估的候选数据集。</li>
+        </ul>
+        <p>
+            比如要测 MegaMath 能不能提升数学性能，就跑一个 40% 第一阶段数据（保持 75/12/10/3 的领域划分）加 60% MegaMath 的退火配比。
+        </p>
+        <p>
+            三个阶段的完整构成在下一章给出。数据整理完、配比经过消融验证之后，就可以开始真正的训练了。下一章讲 SmolLM3 为期一个月的训练过程：准备工作、意外问题和从中得到的教训。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>架构决定模型怎么学，数据决定它学什么；配比要在互相冲突的目标之间取舍，没有通用最佳答案。</li>
+            <li>给一个来源加权等于给其他来源降权。只用最高质量数据会导致大量重复，而重复有害，所以高低质量数据都要用。</li>
+            <li>模型最终行为受训练末尾的数据影响大：前期多用量大的数据，后期混入小而精的数据；按评测瓶颈干预，高质量数学和代码留到退火阶段。</li>
+            <li>数据消融尽量在目标规模上做。SmolLM3 在 3B 模型上跑 50B/100B token 的从零消融，用 7T checkpoint 上 50B token 的退火实验（40% 基线 + 60% 候选）测新数据集。</li>
+            <li>DoReMi、RHO-LOSS 等自动方法往往收敛到“哪种数据多就多用哪种”，在团队的场景里没有胜过手工消融。</li>
+            <li>英语网页：FineWeb-Edu + DCLM 共 5.1T token，50/50 或 60/40 最好，stage 1 用 50/50。</li>
+            <li>多语言：5 种主要语言来自 FineWeb2-HQ（628B token），另有 10 种小比例语言；12% 多语言内容（约占网页数据 14%）不伤英语。</li>
+            <li>代码：25% 会拖累英语 benchmark，10% 对英语没帮助但为了代码能力保留；Stack-Edu 推迟到后期。</li>
+            <li>数学：stage 1 占 3%（54B token 可用，再多就超过 5 个 epoch）；后期上采样 4+ 子集并加入 MegaMath、OpenMathInstruct、OpenMathReasoning。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>The Smol Training Playbook · The Art of Data Curation · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

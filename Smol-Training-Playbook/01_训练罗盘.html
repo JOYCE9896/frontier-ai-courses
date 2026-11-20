@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>训练罗盘 | Smol Training Playbook 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="00_导读.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Smol Training Playbook 目录</a> · 01</span>
+    <span><a href="02_从小规模消融实验开始.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 1 章 · 训练罗盘：为什么训 → 训什么 → 怎么训</h1>
+        <p class="subtitle">动手训练之前，先回答两个问题：这个模型真的需要从头训吗？如果需要，应该训一个什么样的模型？</p>
+        <div class="author-meta">
+            作者：Loubna Ben Allal、Lewis Tunstall、Nouamane Tazi、Elie Bakouch 等（Hugging Face）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://huggingfacetb-smol-training-playbook.hf.space/" target="_blank">The Smol Training Playbook</a> · Training Compass: Why → What → How（2025 年 10 月发布；本文依据原书英文源文件整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            机器学习这个领域对“优化”有一种执念：盯着 loss 曲线、模型架构、吞吐量。说到底，机器学习就是在优化模型的损失函数。可是在钻进这些技术细节之前，有一个更基础、却常常没人问的问题：<em>这个模型我们到底该不该训？</em>
+        </p>
+        <p>
+            原书在这里放了一张开源模型发布热力图（一个外嵌的 Hugging Face Space，按日期显示各家发布模型的频率）。开源 AI 生态几乎每天都在发布世界级模型：Qwen、Gemma、DeepSeek、Kimi、Llama（作者在 Llama 后面放了一个墓碑表情）、OLMo，名单每个月都在变长。这些模型已经超出研究原型或玩具示例的范畴，属于生产级模型，覆盖多语言理解、代码生成、推理等大量用途。大部分采用宽松许可证，背后有活跃的社区可以帮你用起来。
+        </p>
+        <p>
+            由此引出一个让人不太舒服的结论：也许<em>你根本不需要训练自己的模型</em>。作为一本“LLM 训练指南”，这样开头有点怪。但很多失败的训练项目并没有败在超参数不好或代码有 bug 上，它们失败是因为有人决定去训一个其实不需要的模型。所以在投入训练、研究<em>怎么</em>执行之前，要先回答两个问题：<em>为什么</em>要训这个模型？<em>应该训</em>什么样的模型？答不清楚，你可能会花掉几个月的算力和工程时间，造出一个世界上已经有的东西，或者更糟，一个没人需要的东西。
+        </p>
+        <p>
+            书里用一个“训练罗盘”图概括全书的三层结构（据原书交互图）：
+        </p>
+        <table>
+            <thead>
+                <tr><th>阶段</th><th>包含的决定</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Why train?（为什么训）</td><td>Research（研究）、Production（生产）、Strategic（战略性开源）</td></tr>
+                <tr><td>What to train?（训什么）</td><td>Architecture（架构）、Model size（模型大小）、Data mix（数据配比）、Assistant type（助手类型）、Running ablations（跑消融实验）</td></tr>
+                <tr><td>How to train?（怎么训）</td><td>Infrastructure setup（基础设施搭建）、Training framework（训练框架）、Handling loss spikes（处理 loss 尖峰）、Midtraining（中期训练）、SFT vs RL</td></tr>
+            </tbody>
+        </table>
+        <p>
+            原书特别说明，这一章和全书其他部分不同：它讲的是战略规划，实验和技术细节很少，带你判断<strong>是否需要从头训练、要造什么模型</strong>。如果你已经把 why 和 what 想得很清楚，可以直接跳到下一章“从小规模消融实验开始”看技术内容；如果还不确定，在这里花点时间，后面能省很多力气。读完这一章，你应该能用一张流程图判断自己的项目该不该从头预训练，并知道怎样把用途翻译成模型规格。
+        </p>
+        <ol>
+            <li><a href="#t01">Why：没人愿意回答的问题</a></li>
+            <li><a href="#t02">What：把目标翻译成决定</a></li>
+            <li><a href="#t03">超能力：速度和数据</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. Why：没人愿意回答的问题</h2>
+        <p><em>原书小节：Why: The Question Nobody Wants to Answer</em></p>
+        <p>
+            作者直说了实际中常见的情形。某个人（运气好的话）拿到了一个 GPU 集群的使用权，可能来自研究经费，也可能是公司闲置的算力，然后思路大致是：“我们有 100 张 H100，能用三个月。训个模型吧！”模型大小随手定一个，数据集用手头能凑到的拼起来，训练开始。六个月后，算力预算和团队士气都烧完了，训出来的模型却没人用，因为从头到尾没人问过<em>为什么</em>。
+        </p>
+        <p>原书列出四个不该成为训练理由的说法（据原书交互卡片）：</p>
+        <table>
+            <thead>
+                <tr><th>常见说法</th><th>原书的回应</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>“我们手上有算力”</td><td>那是资源，算不上目标</td></tr>
+                <tr><td>“别人都在训”</td><td>那是同伴压力，算不上战略</td></tr>
+                <tr><td>“AI 是未来”</td><td>那是一句套话，算不上计划</td></tr>
+                <tr><td>“我们想要最好的模型”</td><td>太笼统，没法指导任何具体决定</td></tr>
+            </tbody>
+        </table>
+        <p>
+            “我们训了自己的模型”这句话很有吸引力，但在投入大量时间和资源之前，应该先问：<strong>我们为什么需要训这个模型？</strong>
+        </p>
+        <p>
+            原书给了一张决策流程图，描述启动大型预训练项目之前应该走的思考过程。从技术角度看，第一步是弄清楚有没有现成的模型，靠提示（prompting）或微调（fine-tuning）就能完成任务。流程图的分支如下（据原书交互图）：
+        </p>
+        <ol>
+            <li>你应该训练自己的模型吗？先问：现有模型能处理你的用例吗？</li>
+            <li>能，而且只靠 prompting 就做得很好 → ❌ 不要训，直接用现有模型。</li>
+            <li>只靠 prompting 不够 → 再问：微调能解决你的问题吗？</li>
+            <li>微调可以（后训练 post-training，或继续预训练 continual pretraining）→ ❌ 不要从头训。</li>
+            <li>微调也解决不了 → 在下面三类中的某一类里训练一个模型：🔬 研究（Research）、🏭 生产（Production）、🌐 战略性开源（Strategic Open Source）。</li>
+        </ol>
+        <p>
+            （原书旁注：这里讨论的“why”只针对从头训练。蒸馏（distillation，用大模型的输出去教一个小模型）和剪枝（pruning，删掉模型中不重要的参数）也是得到高效模型的正当途径，但工作流和从头训练不同，本书不涉及。想了解可以看 NVIDIA 的 <a href="https://arxiv.org/abs/2408.11796" target="_blank">Minitron 论文</a>。）
+        </p>
+        <p>
+            自己做预训练（custom pretraining）有意义的场景基本有三类：你想做新的研究；你的生产用例有很特殊的需求；你想填补开源模型生态里的空白。下面逐个看。
+        </p>
+
+        <h3>研究：你想弄明白什么？</h3>
+        <p>
+            LLM 领域能做的研究很多。这些研究项目的共同点是，通常从一个定义清楚的问题出发，例如：
+        </p>
+        <ul>
+            <li>能不能把训练扩展到 10B 以上参数的模型时使用某个新优化器？（见 <a href="https://huggingface.co/papers/2502.16982" target="_blank">“Muon is Scalable for LLM Training”</a>）</li>
+            <li>只用强化学习（reinforcement learning），不做监督微调（SFT，Supervised Fine-Tuning，用人工整理好的问答对直接教模型回答），能不能让模型获得推理能力？（见 <a href="https://huggingface.co/papers/2501.12948" target="_blank">“DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning”</a>）</li>
+            <li>只用合成的教科书式数据，能不能训出好的小模型？（见 <a href="https://huggingface.co/papers/2306.11644" target="_blank">“Textbooks Are All You Need”</a>）</li>
+            <li>只用公开许可的数据训练，能不能达到有竞争力的性能？（见 <a href="https://huggingface.co/papers/2506.05209" target="_blank">“The Common Pile v0.1: An 8TB Dataset of Public Domain and Openly Licensed Text”</a>）</li>
+        </ul>
+        <p>
+            把假设定得越具体，并提前想清楚实验需要多大规模，成功的几率就越高。
+        </p>
+
+        <h3>生产：为什么不能用现成的模型？</h3>
+        <p>
+            公司没法直接用现成模型，主要有三个原因，两个是技术上的，一个是治理上的。
+        </p>
+        <p>
+            第一个原因是领域特殊性（domain specificity）：你的数据或任务涉及高度专门的词汇或结构，现有模型处理不好。例如你可能想训：
+        </p>
+        <ul>
+            <li>一个 DNA 模型，它有独特的词表，还要处理很长距离的依赖关系；</li>
+            <li>一个法律或金融模型，需要熟悉领域内的行话和推理逻辑。</li>
+        </ul>
+        <p>
+            第二个相关原因是部署约束（deployment constraints）：你需要一个针对自己的硬件、延迟或隐私要求定制的模型。例子包括跑在无人机上的 LLM，或者跑在带定制硬件（比如 FPGA）的本地部署（on-prem）系统里的模型。
+        </p>
+        <p>
+            原书给了一个简单的检验办法：花几天时间，在 Qwen3、Gemma 3 或其他当前最先进（SOTA，state-of-the-art）的模型上搭一搭。通过 prompting、工具调用（tool use）或后训练，能达到你的性能目标吗？如果不能，大概就是该自己训的时候了。
+        </p>
+        <p>
+            就算满足需求所需的后训练预算很大，也可能比从头开始便宜。用 1T token 微调一个模型，比从头训练 10T 以上 token 要划算。（原书旁注调侃：到了这个量级，LLM 训练者就会“神奇地”改口，把它叫作中期训练 mid-training，而不叫后训练了。）
+        </p>
+        <p>
+            第三个原因是安全与治理（safety and governance）：你身处受监管的行业或高风险应用，需要完全掌控训练数据、模型行为和更新周期。你需要<em>确切</em>知道模型里放进了什么，并且能向监管方证明。有些情况下，自建模型是唯一的选择。
+        </p>
+        <p>
+            以上是公司训练内部模型的主要原因。那些发布开源模型的公司或机构又是出于什么考虑？
+        </p>
+
+        <h3>战略性开源：你看到了可以填补的空白吗？</h3>
+        <p>
+            有经验的 AI 实验室发布新开源模型，最常见的原因之一是发现了开源生态里某个具体的空白或新的 AI 用途。
+        </p>
+        <p>
+            典型的模式是这样的：你注意到某个还没被充分探索的方向。也许没有能在端侧（on-device）运行、又支持超长上下文的强模型；也许多语言模型已经有了，但在低资源语言上很弱；也许领域正在走向像 <a href="https://deepmind.google/discover/blog/genie-3-a-new-frontier-for-world-models/" target="_blank">Genie 3</a> 那样的交互式世界模型，却还没有好的开放权重模型。
+        </p>
+        <p>
+            你有理由相信自己能做得更好：可能你整理出了更好的训练数据，摸索出了更好的训练配方，或者有算力去做别人做不到的过度训练（overtrain，用远超“算力最优”比例的 token 数训练一个较小的模型，换取更好的推理性价比）。你的目标是具体的，比如“最适合端侧使用的 3B 模型”或“第一个有 1M token 上下文窗口的小模型”，而“史上最好的模型”这种目标不算。
+        </p>
+        <p>
+            这是一个真实的目标，成功之后会产生价值：开发者采用你的模型，它变成别人的基础设施，或者为你建立起技术信誉。但成功需要经验。你得知道什么是真正可行的，以及怎样在竞争激烈的领域里可靠地执行。为了说得更具体，作者介绍了 Hugging Face 自己怎样看这个问题。
+        </p>
+
+        <h3>Hugging Face 的历程</h3>
+        <p>
+            Hugging Face 为什么训开源模型？答案很简单：他们做对开源生态有用的东西，填补很少有人在填的空白。（原书旁注：开放权重的模型有几百万个，但训练完全开放（fully open，连数据和训练代码一起公开）模型的机构很少。除了 Hugging Face，还有 <a href="https://allenai.org/" target="_blank">Ai2</a> 和 <a href="https://marin.community/" target="_blank">斯坦福的 Marin 社区</a>。）
+        </p>
+        <p>
+            这包括数据集、工具和训练模型。他们启动的每一个 LLM 训练项目，都始于发现一个空白，并相信自己能贡献点有意义的东西。下面按时间顺序整理：
+        </p>
+        <ul>
+            <li>BLOOM。GPT-3（论文 “Language Models are Few-Shot Learners”）发布后，HF 启动了第一个 LLM 项目。当时感觉没有别人在做开源替代品，他们担心相关知识最终会被锁在少数几家业界实验室里。于是发起了 <a href="https://bigscience.huggingface.co/" target="_blank">BigScience workshop</a>，训练一个开放版本的 GPT-3。成果是 <a href="https://huggingface.co/bigscience/bloom" target="_blank">BLOOM</a>：几十位贡献者花了一年时间，搭建训练栈、tokenizer 和预训练语料，预训练出一个 175B 参数的模型。</li>
+            <li>StarCoder（2022 年）。OpenAI 为 GitHub Copilot 开发了 Codex（论文 “Evaluating Large Language Models Trained on Code”），但它是闭源的。做一个开源替代显然对生态有价值。于是 HF 和 ServiceNow 合作，在 <a href="https://huggingface.co/bigcode" target="_blank">BigCode</a> 项目下构建了 <a href="https://huggingface.co/datasets/bigcode/the-stack" target="_blank">The Stack</a> 数据集，训练了 <a href="https://huggingface.co/bigcode/starcoder" target="_blank">StarCoder 15B</a> 来复现 Codex。</li>
+            <li>StarCoder2。来自两点教训：上一版本可以训得更久；比起一个大模型，训练更久的小模型可能更有价值。他们训了一个模型家族（3B/7B/15B），每个用了数万亿 token，远超当时任何开源代码模型的训练量。</li>
+            <li>SmolLM 家族。模式类似：他们注意到很少有强的小模型，而自己刚做出 <a href="https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu" target="_blank">FineWeb-Edu</a>（论文 “The FineWeb Datasets”），一个很强的预训练数据集。第一版 SmolLM 有 135M/360M/1.7B 三个尺寸；SmolLM2 专注于更好的数据和更长的训练，在多个方面达到 SOTA；<a href="https://huggingface.co/HuggingFaceTB/SmolLM3-3B" target="_blank">SmolLM3</a> 扩展到 3B 参数，并加入了混合推理（hybrid reasoning，同一个模型既能直接回答，也能先输出思考过程再回答）、多语言和长上下文，这些是社区在 2026 年看重的特性。</li>
+            <li>预训练之外。他们训了 <a href="https://huggingface.co/HuggingFaceH4/zephyr-7b-alpha" target="_blank">Zephyr</a>，证明直接偏好优化（DPO，Direct Preference Optimization，用“好回答 vs 差回答”的成对数据直接调整模型）在大规模下有效；发起 <a href="https://github.com/huggingface/open-r1" target="_blank">Open-R1</a> 复现 DeepSeek-R1 的蒸馏流程；发布了面向竞赛编程的 <a href="https://huggingface.co/open-r1/OlympicCoder-7B" target="_blank">OlympicCoder</a>，在国际信息学奥林匹克（IOI）上达到 SOTA。他们还探索了其他模态：视觉方向的 SmolVLM，机器人方向的 SmolVLA。</li>
+        </ul>
+        <p>
+            （HF 的科研项目总览见 <a href="https://huggingface.co/science" target="_blank">https://huggingface.co/science</a>。）
+        </p>
+        <p>
+            作者希望这一节能让读者相信，认真想清楚为什么要训模型是有价值的。全书接下来的部分都假设你已经做过这番自省，并且有正当的训练理由。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. What：把目标翻译成决定</h2>
+        <p><em>原书小节：What: Translating Goals into Decisions</em></p>
+        <p>
+            知道了<em>为什么</em>训，接下来是训<em>什么</em>。这里的“什么”指模型类型（稠密 dense、混合专家 MoE、混合架构 hybrid，或者某种新东西）、模型大小、架构细节和数据配比。稠密模型指每个 token 都经过全部参数；MoE（Mixture of Experts）把前馈层拆成多个“专家”，每个 token 只激活其中几个；hybrid 指把注意力层和其他类型的层（例如状态空间模型）混在一起的架构。
+        </p>
+        <p>why 定下来，what 就能推出来。例如：</p>
+        <ul>
+            <li>要在端侧跑得快 → 小而高效的模型</li>
+            <li>多语言模型 → 大词表的 tokenizer</li>
+            <li>超长上下文 → 混合架构</li>
+        </ul>
+        <p>
+            除了由用途决定的选择，还有一些选择是为了优化训练本身：让训练更稳定、更省样本（sample efficient），或者更快。这些决定不总是那么一目了然，但决策过程大致可以分成两个阶段：
+        </p>
+        <ul>
+            <li><strong>规划（Planning）：</strong>跑实验之前，把你的用途对应到需要决定的组件上。部署环境决定模型大小的约束；时间线决定你能承担哪些架构上的风险；目标能力决定数据集的要求。这个阶段要做的，是把 “why” 里的每条约束连到 “what” 里的具体规格。</li>
+            <li>验证（Validation）：有了起点和一张候选修改清单之后，系统地测试。测试很贵，所以要集中在那些可能对你的用途有实质提升、或者能优化训练的改动上。这就是消融实验（ablation，每次只改一个设置、其他全部保持不变，看这个设置单独带来多大影响的对照实验）登场的地方，下一章“从小规模消融实验开始”专门讲。</li>
+        </ul>
+        <p>
+            原书在这里放了一个提示框，标题是“学会判断什么值得测，光会跑测试不够”：在无关紧要的选项上做完美的消融，和在重要选项上做粗糙的消融，浪费的算力一样多。
+        </p>
+        <p>
+            后面几章会讲定义模型时有哪些选项，以及怎样用系统的实验缩小范围。在进入那些内容之前，作者先分享几条关于怎样组建团队、安排项目的经验，来自他们自己训练模型，以及观察其他优秀团队打造 LLM 的过程。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 超能力：速度和数据</h2>
+        <p><em>原书小节：Superpower: Speed and Data</em></p>
+        <p>
+            条条大路通罗马，但作者发现，成功的 LLM 训练团队之间一个稳定的共同点是<strong>迭代速度</strong>。训练 LLM 是一门在实践中学习的手艺：训得越频繁，团队就越强。所以一年训一个模型的团队和一个季度训一个的团队相比，后者进步快得多。Qwen 和 DeepSeek 的团队就是例子，如今它们家喻户晓，长期以来一直以很快的节奏稳定发布新模型。
+        </p>
+        <p>
+            除了迭代速度，LLM 训练里影响最大的一环是数据整理（data curation）。人们天然倾向于钻研架构选择来改进模型，但在 LLM 训练上做得出色的团队，对高质量数据的执着超过其他一切。
+        </p>
+        <p>
+            和迭代速度相关的还有团队规模。主要的预训练任务只需要少数几个人，再配上足够的算力就能执行。今天要预训练一个像 Llama 3 这样的模型，大概只需要两三个人。等你开始做更多样的训练和下游任务（多模态、多语言、后训练等），就要为每个方向再加几个人，才能在各个领域都做好。
+        </p>
+        <p>
+            所以，从一个小而装备齐全的团队开始，每两三个月造一个新模型，用不了多久就能爬到顶端。本书剩下的部分，讲的就是这样一个团队日常的技术工作。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>很多训练项目失败的原因是训了一个不需要的模型。开源生态几乎每天都有生产级模型发布，先确认现有模型做不到。</li>
+            <li>“有算力”“别人都在训”“AI 是未来”“想要最好的模型”都不构成训练理由。</li>
+            <li>决策顺序：现有模型 + prompting 能做到就别训；prompting 不够就试微调（后训练或继续预训练）；微调也不行，才考虑从头训。</li>
+            <li>从头预训练有意义的三类场景：研究（问题要具体，规模要想清楚）、生产（领域特殊性、部署约束、安全与治理）、战略性开源（找到生态里的具体空白）。</li>
+            <li>检验办法：花几天在 Qwen3、Gemma 3 等 SOTA 模型上用 prompting、工具调用或后训练试一试；即使后训练预算很大，1T token 的微调也比 10T+ token 的从头训练便宜。</li>
+            <li>why 决定 what：端侧 → 小模型；多语言 → 大词表；超长上下文 → 混合架构。决策分规划和验证两个阶段。</li>
+            <li>在无关紧要的选项上做完美消融，和在重要选项上做粗糙消融，浪费的算力一样多。</li>
+            <li>成功团队的共同点：迭代速度快、执着于数据质量、团队小。主预训练两三个人加足够算力即可；建议每两三个月训一个新模型。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>The Smol Training Playbook · Training Compass: Why → What → How · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

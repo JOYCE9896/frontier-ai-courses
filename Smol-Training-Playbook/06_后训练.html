@@ -1,0 +1,1224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>后训练 | Smol Training Playbook 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="05_训练马拉松.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Smol Training Playbook 目录</a> · 06</span>
+    <span><a href="07_基础设施.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 6 章 · 后训练</h1>
+        <p class="subtitle">基座模型训完以后，怎样用评测、SFT、中期训练、偏好优化和强化学习，把 SmolLM3 做成一个能切换思考模式的混合推理模型</p>
+        <div class="author-meta">
+            作者：Loubna Ben Allal、Lewis Tunstall、Nouamane Tazi、Elie Bakouch 等（Hugging Face）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://huggingfacetb-smol-training-playbook.hf.space/" target="_blank">The Smol Training Playbook</a> · Beyond Base Models: Post-Training in 2025（2025 年 10 月发布；本文依据原书英文源文件整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            章首引了 Lewis Tunstall 的一句话，作者自嘲他是“乐观的 LLM 专家”：“预训练一结束，我们一天之内就该有一个 SFT 基线。”这一章要讲的，就是这句话在现实里有多难兑现。
+        </p>
+        <p>
+            预训练给了 SmolLM3 原始能力。GPU 还没凉下来，就要进入下一步：后训练（Post-training）。它包括监督微调、强化学习、模型合并等一系列方法，目的是把“一个会预测下一个词的模型”变成“一个人真的能用的模型”。原书的说法是：预训练靠蛮力把知识灌进权重，后训练把这份原始能力雕琢成可靠、可控的东西。论文里看不到的是深夜的意外：GPU 过热、数据配比很难调、一个看起来很小的聊天模板决定会一路影响下游评测。这一章讲 HF 团队怎样把 SmolLM3 从一个强基座模型做成一个顶尖的混合推理模型。
+        </p>
+        <p>
+            <strong>混合推理模型</strong>（Hybrid Reasoning Model）有两种工作模式：一种给简短直接的回答，另一种先做较长的逐步推理再作答。通常由用户在 system 消息里选模式。SmolLM3 沿用 Qwen3 的做法，用两个轻量指令显式切换：<code>/think</code> 打开长推理，<code>/no_think</code> 要求简短回答。这样用户可以自己决定要深度还是要速度。
+        </p>
+        <p>
+            原书在这里放了一个“选你自己的后训练冒险”的交互流程图（从 Base model 出发，分支到 SFT、ORPO、KTO、“DPO and friends”和标着“RL (here be dragons)”的强化学习），只是导览，没有数据。
+        </p>
+        <p>
+            这一章接在预训练马拉松（第 5 章）之后，读完你应该能判断：后训练该先搭哪些评测；为什么几乎总从 SFT 开始；SFT 里哪几个超参数真正要紧；什么时候值得做中期训练；DPO、APO 这类偏好优化怎么调；把 GRPO 这类强化学习用到混合推理模型上会遇到什么坑；以及在线 DPO、在线蒸馏这些更轻的替代方案各适合什么场景。下一章（第 7 章）讲支撑训练的 GPU 基础设施。
+        </p>
+        <ol>
+            <li><a href="#t01">后训练罗盘：为什么、做什么、怎么做</a></li>
+            <li><a href="#t02">先搭评测</a></li>
+            <li><a href="#t03">后训练框架</a></li>
+            <li><a href="#t04">为什么几乎所有后训练流程都从 SFT 开始</a></li>
+            <li><a href="#t05">从 SFT 到偏好优化</a></li>
+            <li><a href="#t06">走向 on-policy：超越监督标签</a></li>
+            <li><a href="#t07">后训练收尾</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 后训练罗盘：为什么、做什么、怎么做</h2>
+        <p><em>原书小节：Post-Training Compass: Why → What → How</em></p>
+        <p>
+            和预训练一样，后训练也需要一个清楚的方向，免得浪费研究和工程周期。原书按三个问题来框定。
+        </p>
+        <h3>为什么要后训练</h3>
+        <p>
+            第 1 章预训练罗盘里讲的三类训练动机（研究、生产、战略性开源）在后训练同样适用。比如：你想研究强化学习能不能在一个现有模型上解锁新的推理能力（研究）；你需要出于延迟原因把大模型蒸馏成小模型（生产）；你发现某个具体场景没有强的开源模型（战略性开源）。区别在于，后训练是在已有能力上继续建，而不是从零造能力。在动用 GPU 之前，先问自己：
+        </p>
+        <ul>
+            <li>你真的需要后训练吗？很多开放权重模型在大量任务上已经能和闭源模型比肩，有些量化之后用不多的算力就能本地运行。如果你只要一个通用助手，Hugging Face Hub 上现成的模型可能已经够用。</li>
+            <li>你有高质量的领域数据吗？后训练最有意义的场景，是通用模型在某个具体任务或领域上表现不好。有了合适的数据，就能把模型调到在你最关心的应用上输出更准确。</li>
+            <li>你能衡量成功吗？没有清楚的评测标准，你不会知道后训练到底有没有帮上忙。</li>
+        </ul>
+        <h3>后训练要达成什么</h3>
+        <p>这取决于优先级。你想要的是：</p>
+        <ul>
+            <li>一个干脆利落、很少跑题的指令跟随者？</li>
+            <li>一个能按需切换语气和角色的多面助手？</li>
+            <li>一个能做数学、代码或智能体任务的推理引擎？</li>
+            <li>一个能用多种语言对话的模型？</li>
+        </ul>
+        <h3>怎么做到</h3>
+        <p>这就要看配方。本章会讲：</p>
+        <ul>
+            <li>监督微调（Supervised Fine-Tuning，SFT）：用“输入 + 标准回答”的示范数据继续训练，灌进核心能力；</li>
+            <li>偏好优化（Preference Optimization，PO）：直接从人类或 AI 给出的“哪个回答更好”里学习；</li>
+            <li>强化学习（Reinforcement Learning，RL）：让模型自己生成、按结果拿奖励，把可靠性和推理能力推到监督数据之外；</li>
+            <li>数据整理：在多样性和质量之间找平衡；</li>
+            <li>评测：跟踪进展，尽早发现退化。</li>
+        </ul>
+        <p>
+            这个罗盘让后训练的混乱有个落脚点：why 给方向，what 定优先级，how 把目标变成可执行的训练循环。
+        </p>
+        <h3>SmolLM3 的回答</h3>
+        <ul>
+            <li>Why：理由很直接，手上有一个基座模型，发布前必须后训练。同时，Qwen3 这类混合推理模型越来越流行，可公开的训练配方却很少。SmolLM3 正好能同时做两件事：把模型准备好给真实场景用，并贡献一份完全公开的配方，让它和 Qwen3 的 1.7B、4B 模型一起站在帕累托前沿（Pareto front，即在“尺寸/成本”和“性能”两个维度上没有被别人同时超过的那条边界）上。</li>
+            <li>What：训练一个贴合 SmolLM3 长处的混合推理模型，主要是推理质量在英语之外的语言里也要保持住。真实使用越来越多涉及工具调用和长上下文工作流，所以这两项也成了后训练配方的核心要求。</li>
+            <li>How：就是本章剩下的内容。</li>
+        </ul>
+        <p>
+            后训练也从基础做起，先评测和基线，因为“每个大模型都从一个小消融实验开始”。但消融的方式不一样。预训练里“小”通常指更小的模型和数据集；后训练里“小”指更小的数据集和更简单的算法。作者几乎从不换一个基座模型来做后训练消融，因为模型行为太依赖具体模型，而后训练的单次运行又短，直接在目标模型上迭代就行。（旁注：主要的例外是你用的是 Hub 上现成的基座模型。这时比较不同基座是有意义的，同样尺寸的模型，训了 1T token 和训了 10T token 差别很大。）
+        </p>
+        <p>接下来先讲很多训练者拖到项目后期才想起来的事：评测。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 先搭评测</h2>
+        <p><em>原书小节：First Things First: Evals Before Everything Else</em></p>
+        <p>
+            后训练的第一步和预训练一样：定下合适的评测集。今天大多数 LLM 都被当成助手使用，所以作者认为，与其追逐 ARC-AGI 这类抽象的“智能”基准，不如把目标定为一个“好用”的模型。一个好助手至少要能：
+        </p>
+        <ul>
+            <li>处理含糊的指令；</li>
+            <li>一步步做规划；</li>
+            <li>写代码；</li>
+            <li>在合适的时候调用工具。</li>
+        </ul>
+        <p>
+            这些行为综合用到推理、长上下文处理，以及数学、代码和工具使用的技能。3B 甚至更小的模型就能当好助手，但低于 1B 时性能通常掉得很陡。（旁注：小模型能不能靠工具调用弥补容量不足、从而当个合格的助手，仍是个有意思的开放问题，LiquidAI 的 LFM2-1.2B-Tool 等模型是这个方向的近期工作。）
+        </p>
+        <p>
+            HF 用的是分层的评测套件，沿用第 2 章消融实验里讲过的预训练评测原则：单调性、低噪声、高于随机的信号、排名一致性。原书提醒，要考虑的评测清单会随着模型进步不断变化，这里列的是 2025 年中他们关注的那些；更全面的后训练评测综述见 HF 的 LLM Evaluation Guidebook。
+        </p>
+        <p>后训练模型的评测可以分成几类：</p>
+        <h3>1. 能力评测（Capability evals）</h3>
+        <p>针对基础技能：</p>
+        <ul>
+            <li>知识：目前用 GPQA Diamond 作为科学知识的主评测，它由研究生水平的多选题组成。对小模型来说它远没饱和，比 MMLU 一类给的信号更好，而且跑得快得多。另一个测事实性的好评测是 SimpleQA，不过小模型知识有限，在它上面普遍很吃力。</li>
+            <li>数学：今天大多数模型都在最新一版 AIME 上评（当时是 2025 版）。MATH-500 对小模型仍是有用的健全性检查，但推理模型基本已经把它做饱和了。想要更全面的数学评测，推荐 MathArena 上的那些。</li>
+            <li>代码：用最新版 LiveCodeBench 跟踪编程能力。它偏竞赛编程题，但作者发现它上面的提升确实能转化成更好的编程模型，只是局限于 Python。SWE-bench Verified 是更复杂的编程能力测试，但对小模型往往太难，所以一般不用。</li>
+            <li>多语言：可选的不多。目前用 Global MMLU 覆盖模型要做好的几种主要语言，再加 MGSM 测多语言数学能力。</li>
+        </ul>
+        <h3>2. 综合任务评测（Integrated task evals）</h3>
+        <p>测的是和要交付的能力相近的东西：</p>
+        <ul>
+            <li>长上下文使用：最常用的是大海捞针（Needle in a Haystack，NIAH）：把一条随机事实（“针”）放进一篇长文档（“草堆”）某处，让模型找出来。但它太浅，分不出模型对长上下文理解的差别，所以社区做了更全面的 RULER 和 HELMET。最近 OpenAI 发布了 MRCR 和 GraphWalks，把长上下文评测的难度又往上推了。（旁注里推荐了一篇讨论长上下文评测局限、以及怎样设计更真实评测的博客。）</li>
+            <li>指令跟随：IFEval 是目前最流行的指令跟随评测，用“可验证指令”自动打分（比如“少于 50 个词”这种能用程序检查的约束）。IFBench 是 Ai2 的扩展版，约束种类比 IFEval 更多样，也缓解了近期一些模型发布中出现的 benchmaxxing（刷榜：把模型训练得在一小批公开基准上表现好，代价是真实任务表现变差）。多轮指令跟随推荐 Multi-IF 或 MultiChallenge。</li>
+            <li>对齐：模型和用户意图对得有多齐，通常靠人工标注员或 LMArena 这类公开排行榜来测，因为自由生成、风格、整体有用性这些很难用自动指标量化。但这类评测很贵，于是社区改用 LLM 充当人类偏好的代理。最流行的这类基准有 AlpacaEval、ArenaHard 和 MixEval，其中 MixEval 和 LMArena 上人类 Elo 评分的相关性最强。</li>
+            <li>工具调用：伯克利函数调用排行榜（Berkeley Function Calling Leaderboard，BFCL）提供了全面的工具调用测试，不过常常很快就被做饱和。TAU-Bench 在模拟的客服场景里测模型用工具解决用户问题的能力，也成了常被报告的基准。</li>
+        </ul>
+        <h3>3. 防过拟合评测（Overfitting prevention evals）</h3>
+        <p>
+            为了检查模型是否过拟合到某项技能，评测集里放一些鲁棒性或适应性评测，比如 GSMPlus：它扰动 GSM8k 的题目，看模型还能不能解出难度相近的题。
+        </p>
+        <h3>4. 内部评测（Internal evals）</h3>
+        <p>
+            公开基准在开发中能提供一些信号，但替代不了你自己实现的、针对特定能力的内部评测，也替代不了请内部专家直接和模型互动。比如 SmolLM3 需要一个评测来判断模型能不能做多轮推理，团队就实现了一个 Multi-IF 的变体。（旁注：做 AI 产品时尤其如此，推荐 Hamel Husain 关于评测的博客。）
+        </p>
+        <h3>5. 手感评测和竞技场（Vibe evals and arenas）</h3>
+        <p>
+            作者发现，对中间检查点做“vibe test”（就是直接和模型聊）对发现评测分数抓不到的细微行为怪癖必不可少。后面会讲到，vibe test 就发现了数据处理代码里的一个 bug：语料里所有 system 消息都被删掉了。这件事也可以规模化地做，用来衡量人类偏好，比如 LMArena。但众包的人类评测比较脆弱，偏爱谄媚和花哨的措辞而不是真正有用，所以要把它当作低信号反馈。
+        </p>
+        <p>
+            原书在这里有一个红色警示框：给训练数据去污染（Decontamination）。依赖公开基准的风险是模型很容易过拟合它们，尤其当你用合成数据生成和目标基准相似的 prompt 和回答时。所以必须拿你要用来指导开发的评测，对训练数据做去污染，也就是把和评测题重合的训练样本删掉。可以用 $n$-gram 匹配来做，Open-R1 仓库里的 decontaminate 脚本就是这么实现的。
+        </p>
+        <h3>SmolLM3 的评测集</h3>
+        <p>
+            SmolLM3 想要一个能可靠跟随指令、在数学和代码这些常见领域推理好的混合推理模型，同时保住基座模型的多语言和长上下文检索能力。由此定下了下面这套评测：
+        </p>
+        <table>
+            <thead>
+                <tr><th>基准</th><th>类别</th><th>题目数</th><th>指标</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>AIME25</td><td>竞赛数学</td><td>30</td><td><code>avg@64</code></td></tr>
+                <tr><td>LiveCodeBench v4（正式发布用 v5）</td><td>竞赛编程</td><td>100（268）</td><td><code>avg@16</code></td></tr>
+                <tr><td>GPQA Diamond</td><td>研究生水平推理</td><td>198</td><td><code>avg@8</code></td></tr>
+                <tr><td>IFEval</td><td>指令跟随</td><td>541</td><td>准确率</td></tr>
+                <tr><td>MixEval Hard</td><td>对齐</td><td>1000</td><td>准确率</td></tr>
+                <tr><td>BFCL v3</td><td>工具使用</td><td>4441</td><td>混合</td></tr>
+                <tr><td>Global MMLU（验证时用 lite 版）</td><td>多语言问答</td><td>590,000（6,400）</td><td>准确率</td></tr>
+                <tr><td>GSMPlus（验证时用 mini 版）</td><td>鲁棒性</td><td>10,000（2,400）</td><td>准确率</td></tr>
+                <tr><td>RULER</td><td>长上下文</td><td>6,500</td><td>准确率</td></tr>
+            </tbody>
+        </table>
+        <p>
+            <code>avg@k</code> 的意思是对每道题采样 $k$ 次、取平均正确率。原书在这里嵌了一个 Hugging Face 数据集查看器（post-training-benchmarks-viewer），可以翻看每个基准的样题，领域多样，保证消融时测的是模型能力的不同侧面。
+        </p>
+        <p>
+            对他们所在的 3B 规模，这些评测跑得比训练本身还快，能给出可操作的信号，也让团队有信心判断某个提升是真的，而不是采样噪声。他们同时跟踪预训练评测（完整清单见第 2 章），确保基座模型的能力没有退化太多。
+        </p>
+        <p>
+            另一个红色警示框讲的是评测要排在最前面。上面的叙述像是团队先坐下来定好评测、全部就绪再开训。现实乱得多：截止日期很紧，很多评测还没实现就匆忙开训了（比如 RULER 直到模型发布前几天才可用）。事后看这是个错误：他们本该和预训练团队商量好哪些核心评测要贯穿后训练保留，并在基座模型训完之前很早就把它们实现好。
+        </p>
+
+        <h3>经验守则（Rules of Engagement）</h3>
+        <p>作者评测过几千个模型，总结了几条吃过亏才学到的经验：</p>
+        <ul>
+            <li>开发期间用小子集加速评测。比如 LiveCodeBench v4 和 v5 高度相关，但只要一半时间。也可以用 tinyBenchmarks 这类方法，找出能可靠复现完整评测结果的最小 prompt 子集。</li>
+            <li>对推理模型，打分前从输出里去掉思维链（Chain of Thought，CoT，模型在给答案前写出的推理过程）。这能消除误判，也直接影响 IFEval 这类基准：它会惩罚违反“写一首少于 50 个词的诗”这种约束的回答，如果把思考过程算进去就会超字数。</li>
+            <li>如果评测用 LLM 当裁判，要固定裁判模型和版本，才能做前后可比的比较。更好的是用开放权重模型当裁判，这样即使某家服务商下线了这个模型，评测也能复现。</li>
+            <li>当心基座模型里的污染。比如 AIME 2025 之前发布的大多数模型，在 AIME 2025 上的成绩明显比在 AIME 2024 上差，说明有刷榜的成分。</li>
+            <li>可能的话，把消融时用过的一切都当作验证集（validation），而不是测试集（test）。也就是留一组没碰过的基准给最终模型报告用，类似 Tulu 3 的评测框架。</li>
+            <li>始终在自己的数据和任务上保留一小组 vibe evals，防止过拟合公开评测套件。</li>
+            <li>对题目少的评测（通常少于约 2k 题），采样 $k$ 次并报告 <code>avg@k</code> 准确率。这对降低噪声很重要，噪声会让你在开发中做出错误决定。</li>
+            <li>实现一个新评测时，先确认能在一定误差内复现几个模型公开报告的结果。做不到的话，之后修评测实现再重跑大量检查点，会浪费很多时间。</li>
+            <li>拿不准的时候，回去看评测数据本身，检查你到底给模型喂了什么 prompt。</li>
+        </ul>
+        <p>评测到手，就可以训模型了。不过在那之前，要先选一个后训练框架。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 后训练框架</h2>
+        <p><em>原书小节：Tools of the Trade</em></p>
+        <p>
+            每个后训练配方背后，都有一套支撑大规模实验的框架和库。每个框架支持的算法、微调方法和扩展能力各不相同。下表按支持范围汇总了主流框架，从监督微调到偏好优化再到强化学习：
+        </p>
+        <table>
+            <thead>
+                <tr><th>框架</th><th>SFT</th><th>PO</th><th>RL</th><th>多模态</th><th>FullFT</th><th>LoRA</th><th>分布式</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>TRL</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+                <tr><td>Axolotl</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+                <tr><td>OpenInstruct</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td></tr>
+                <tr><td>Unsloth</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+                <tr><td>vERL</td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+                <tr><td>Prime RL</td><td>✅</td><td>❌</td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td></tr>
+                <tr><td>PipelineRL</td><td>❌</td><td>❌</td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td></tr>
+                <tr><td>ART</td><td>❌</td><td>❌</td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>❌</td></tr>
+                <tr><td>TorchForge</td><td>✅</td><td>❌</td><td>✅</td><td>❌</td><td>✅</td><td>❌</td><td>✅</td></tr>
+                <tr><td>NemoRL</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>✅</td><td>❌</td><td>✅</td></tr>
+                <tr><td>OpenRLHF</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td></tr>
+            </tbody>
+        </table>
+        <p>
+            FullFT 指全参数微调（Full Fine-Tuning），训练时更新模型的全部参数。LoRA 是低秩适配（Low-Rank Adaptation），一种参数高效的方法：冻结基座模型，只训练插在旁边的小型低秩矩阵。多模态指是否支持文本以外的模态（比如图像），分布式指能否在多张 GPU 上训练。
+        </p>
+        <p>
+            TRL 是 HF 自己开发和维护的，所以是他们的首选，SmolLM3 的后训练也用它。原书的提示框“Fork 你的框架”提到：这个领域变化很快，他们发现在 TRL 的内部 fork 上跑实验很有效，可以很快加新功能，之后再合并回主库。如果你熟悉框架内部，这种工作流很适合快速迭代。
+        </p>
+
+        <h3>为什么要用框架</h3>
+        <p><em>原书小节：Why Bother with Frameworks at All?</em></p>
+        <p>
+            有一类研究者喜欢抱怨训练框架，主张任何东西都应该从零自己实现。背后的潜台词是：只有亲手重写每个 RL 算法、手写每个分布式训练原语、拼一个一次性的评测脚本，才算“真”理解。
+        </p>
+        <p>
+            作者认为这种立场无视了现代研究和生产的现实。以 RL 为例，PPO 和 GRPO 这类算法出了名地难写对（原书引了《The N+ Implementation Details of RLHF with PPO》一文），归一化或 KL 惩罚（Kullback–Leibler penalty，用来约束新模型别离参考模型太远的一项）里的一个小错，就可能浪费好几天的算力和精力。同样，一个单文件实现写起来诱人，可同一个脚本能从 1B 扩展到 100B+ 参数吗？
+        </p>
+        <p>
+            框架之所以存在，就是因为基础部分已经被理解透了，一遍遍重造是在浪费时间。这不等于底层折腾没有价值：从零实现一次 PPO 是很好的学习练习，不用框架写一个玩具 Transformer 能让你真正弄懂 attention。但多数情况下，挑一个你喜欢的框架，按需改它，效果更好。
+        </p>
+        <p>吐槽完毕，下面看他们通常从哪里开始训练。</p>
+    </section>
+    <section id="t04">
+        <h2>04. 为什么几乎所有后训练流程都从 SFT 开始</h2>
+        <p><em>原书小节：Why (Almost) Every Post-Training Pipeline Starts with SFT</em></p>
+        <p>
+            如果你最近常刷 X，大概会以为强化学习是唯一的出路：每天都有新缩写、新的算法小改动，还有关于 RL 到底能不能引出新能力的激烈争论（原书引了两篇观点相反的论文：一篇认为 SFT 偏记忆、RL 更能泛化，另一篇质疑 RL 是否真能让推理能力超出基座模型）。（旁注：本章后面会看到，RL 确实有效，但有实际的代价。）
+        </p>
+        <p>
+            RL 当然不新。OpenAI 等实验室早期就大量依靠基于人类反馈的强化学习（Reinforcement Learning from Human Feedback，RLHF）来对齐模型。但直到 DeepSeek-R1 发布，基于 RL 的后训练才在开源生态里真正火起来。
+        </p>
+        <p>有一点没变：几乎每个有效的后训练流程仍然从监督微调开始。理由很直接：</p>
+        <ul>
+            <li>便宜：SFT 需要的算力比 RL 少得多，通常不用烧大量算力就能拿到明显收益，耗时也只是 RL 的一小部分。</li>
+            <li>稳定：RL 对奖励设计和超参数出了名地敏感，SFT 基本“直接能用”。</li>
+            <li>是合适的基线：一个好的 SFT 检查点通常已经拿到你想要的大部分收益，还会让后面的 DPO 或 RLHF 有效得多。</li>
+        </ul>
+        <p>
+            所以 SFT 排在第一步，不光因为它简单，还因为它稳定地提升性能，在尝试更复杂的东西之前最说得通。从基座模型出发时尤其如此：除了少数例外，基座模型太粗糙，直接上高级后训练方法得不到好处。
+        </p>
+        <p>
+            原书的提示框专门回答了“那 DeepSeek-R1-Zero 呢？”在最前沿，从 SFT 开始的常见理由不一定成立：没有更强的模型可供蒸馏，而对长思维链推理这类复杂行为，人工标注噪声太大。所以 DeepSeek 在 R1-Zero 上跳过 SFT，直接上 RL，去“发现”标准监督教不出来的推理行为。如果你处在那个位置，从 RL 开始说得通；作者补了一句，但真在那个位置，你大概也不会读这本书。
+        </p>
+        <p>既然多数流程从 SFT 开始，下一个问题就是：拿什么来微调？这要从选基座模型说起。</p>
+
+        <h3>选基座模型</h3>
+        <p><em>原书小节：Picking a Base Model</em></p>
+        <p>选后训练用的基座模型，最要紧的是几个实际维度：</p>
+        <ul>
+            <li>模型尺寸：小模型这些年进步很大，但今天仍然是大模型泛化更好，而且往往需要的样本更少。挑一个能代表你训完后打算怎么用、怎么部署的尺寸。Hub 上可以按模态和参数量筛选候选模型。</li>
+        </ul>
+        <figure><img src="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook/resolve/main/app/src/content/assets/image/Screenshot_2025-10-24_at_09_37_24_2961384e-bcac-8055-9e8e-ffbd3a1aa368.png" alt="Hugging Face Hub 按模态和参数量筛选模型的界面截图"><figcaption>图：在 Hugging Face Hub 上按任务类型和参数量范围筛选文本生成模型（引自原书）</figcaption></figure>
+        <ul>
+            <li>架构（MoE 还是稠密）：MoE（Mixture of Experts，混合专家）模型每个 token 只激活一部分参数，单位算力下容量更大。它很适合大规模推理服务，但按作者的经验更难微调。稠密模型训练更简单，在较小规模上往往还比 MoE 强。</li>
+            <li>后训练口碑：基准分数有用，但更好的是这个基座已经催生了一批社区认可的强后训练模型，这说明它“好训”。（旁注：想了解新模型的大致口碑，LocalLLaMA 子版块是个好地方；Artificial Analysis 和 LMArena 也提供独立评测，不过这些平台有时会被模型提供方刷榜。）</li>
+        </ul>
+        <p>
+            按作者的经验，Qwen、Mistral 和 DeepSeek 的基座最适合后训练，其中 Qwen 是明显的首选，因为每个系列通常覆盖很宽的参数范围（Qwen3 从 0.6B 到 235B），扩展起来简单得多。
+        </p>
+        <p>选好符合部署需求的基座后，下一步是建一个简单、快速的 SFT 基线，摸一摸它的核心能力。</p>
+
+        <h3>训练简单基线</h3>
+        <p><em>原书小节：Training Simple Baselines</em></p>
+        <p>
+            对 SFT 来说，好的基线要训得快、聚焦模型的核心技能，并且当某项能力不够时容易加数据扩展。挑选初始数据集需要一些品味，以及对哪些数据集大概率高质量的熟悉程度。总的原则是：别过分看重那些在学术基准上报出高分的公开数据集，要看哪些数据集训出过好模型，比如 OpenHermes。
+        </p>
+        <p>
+            一个例子：开发 SmolLM 时，他们最初用 WebInstruct 做 SFT，纸面上这是个很好的数据集。可 vibe test 时发现它太偏科学了，模型会对“How are you?”这种简单问候回一堆方程。（旁注：用 vibe test 发现训练数据里的怪癖，是这一章反复出现的主题，别小看直接和模型聊天的作用。）这促使他们做了 Everyday Conversations 数据集，它后来对给小模型灌输基本聊天能力起了关键作用。
+        </p>
+        <p>
+            SmolLM3 要训一个混合推理模型，起初只挑了一小组数据集，覆盖推理、指令跟随和可控性（steerability）。各数据集的统计如下（统计这些指标的做法来自 Llama 3 技术报告）：
+        </p>
+        <table>
+            <caption>表：混合推理基线的数据配比</caption>
+            <thead>
+                <tr><th>数据集</th><th>推理模式</th><th>样本数</th><th>样本占比 %</th><th>Token 数（M）</th><th>Token 占比 %</th><th>平均每样本 token</th><th>平均上下文 token</th><th>平均回答 token</th><th>平均轮数</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Everyday Conversations</td><td><code>/no_think</code></td><td>2,260</td><td>2.3</td><td>0.6</td><td>0.8</td><td>260.2</td><td>222.3</td><td>94.0</td><td>7.8</td></tr>
+                <tr><td>SystemChats 30k</td><td><code>/no_think</code></td><td>33,997</td><td>35.2</td><td>21.5</td><td>28.2</td><td>631.9</td><td>422.8</td><td>267.7</td><td>6.3</td></tr>
+                <tr><td>Tulu 3 SFT Personas IF</td><td><code>/no_think</code></td><td>29,970</td><td>31.0</td><td>13.3</td><td>17.5</td><td>444.5</td><td>119.8</td><td>380.7</td><td>2</td></tr>
+                <tr><td>Everyday Conversations (Qwen3-32B)</td><td><code>/think</code></td><td>2,057</td><td>2.1</td><td>3.1</td><td>4.1</td><td>1,522.4</td><td>376.8</td><td>1,385.6</td><td>4</td></tr>
+                <tr><td>SystemChats 30k (Qwen3-32B)</td><td><code>/think</code></td><td>27,436</td><td>28.4</td><td>29.4</td><td>38.6</td><td>1070.8</td><td>84.6</td><td>1,042.7</td><td>2</td></tr>
+                <tr><td>s1k-1.1</td><td><code>/think</code></td><td>835</td><td>0.9</td><td>8.2</td><td>10.8</td><td>8,859.3</td><td>370.9</td><td>9,728.5</td><td>2</td></tr>
+                <tr><td>合计</td><td>-</td><td>96,555</td><td>100.0</td><td>76.1</td><td>100.0</td><td>2,131.5</td><td>266.2</td><td>2,149.9</td><td>4.0</td></tr>
+            </tbody>
+        </table>
+        <p>
+            开发 SmolLM3 的过程中他们体会到，训练混合推理模型比普通 SFT 更棘手，因为不能把数据集简单混在一起，要让两种模式的数据“配对”。每个样本都要清楚标明模型该展开推理还是简短回答，最好还有平行的样本，教会模型什么时候切换模式。表里还有一点要注意：数据配比要按 token 平衡，不要按样本数平衡。比如 s1k-1.1 只占样本数的约 1%，但因为推理回答很长，占了约 11% 的 token。
+        </p>
+        <p>
+            这给了他们关心的几项技能一个基本覆盖，但也带来新问题：每个数据集要按是否开启长思考用不同格式组织。要统一这些格式，就需要一个一致的聊天模板。
+        </p>
+
+        <h3>选一个好的聊天模板</h3>
+        <p><em>原书小节：Picking a Good Chat Template</em></p>
+        <p>
+            聊天模板（Chat Template）是把一段多角色对话（system、user、assistant、工具调用等）拼成一串模型输入文本的规则，规定了用哪些特殊 token 标出每个角色的开头和结尾。选或者设计聊天模板没有放之四海皆准的方案。实践中，作者发现有几个问题值得一开始就问：
+        </p>
+        <ul>
+            <li>用户能自定义 system 角色吗？如果用户应该能写自己的 system prompt（比如“扮成海盗”），模板就要干净地处理这一点。</li>
+            <li>模型需要工具吗？如果要调用 API，模板就得能容纳工具调用和工具返回的结构化输出。</li>
+            <li>是推理模型吗？推理模型用 <code>&lt;think&gt; ... &lt;/think&gt;</code> 这类标记把模型的“思考”和最终答案分开。有些模型在多轮对话里会丢掉之前轮次的推理 token，模板要处理这段逻辑。</li>
+            <li>能和推理引擎配合吗？vLLM、SGLang 这类推理引擎有专门解析推理内容和工具调用的 parser。和这些 parser 兼容能省掉后面很多麻烦，在复杂的智能体基准里尤其如此，那里工具调用格式一致是基本要求。（脚注：Transformers 团队最近也加了解析工具调用和推理输出的 parser，如果 vLLM 等引擎采用，兼容性这一条将来可能没那么重要。）</li>
+        </ul>
+        <p>下表比较了几个流行的聊天模板：</p>
+        <table>
+            <thead>
+                <tr><th>聊天模板</th><th>自定义 system 角色</th><th>工具</th><th>推理</th><th>推理引擎兼容</th><th>备注</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>ChatML</td><td>✅</td><td>✅</td><td>❌</td><td>✅</td><td>简单，适合大多数场景</td></tr>
+                <tr><td>Qwen3</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>混合推理模板</td></tr>
+                <tr><td>DeepSeek-R1</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>用 <code>&lt;think&gt;</code> 预填推理内容</td></tr>
+                <tr><td>Llama 3</td><td>✅</td><td>✅</td><td>❌</td><td>✅</td><td>内置 Python 代码解释器等工具</td></tr>
+                <tr><td>Gemma 3</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>自定义 system 角色放在第一个 user 轮里</td></tr>
+                <tr><td>Command A Reasoning</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>一个模型有多个聊天模板</td></tr>
+                <tr><td>gpt-oss</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>基于 Harmony 响应格式，复杂但灵活</td></tr>
+            </tbody>
+        </table>
+        <p>
+            多数情况下，ChatML 或 Qwen 的聊天模板是很好的起点。SmolLM3 需要混合推理模板，他们发现 Qwen3 是少数在几个维度上平衡得好的。但它有一个让人不太满意的地方：除了最后一轮，对话里其余轮次的推理内容都会被丢掉。这和 OpenAI 推理模型的做法类似。原书用一张流程图示意：第 1、2 轮的输入和输出都进入第 3 轮的输入，第 3 轮里模型先输出、再推理、再输出，超出上下文窗口的部分被截断。
+        </p>
+        <p>
+            这对推理（inference）说得通，可以防止上下文膨胀。但他们的结论是：对训练来说，要在所有轮次保留推理 token，才能正确地给模型提供条件。
+        </p>
+        <p>于是他们自己设计了聊天模板，具备以下特性：</p>
+        <ul>
+            <li>结构化的 system prompt，类似 Llama 3 的，以及那些被“越狱”泄露出来的闭源模型 system prompt；同时也允许完全覆盖 system prompt。</li>
+            <li>支持代码智能体（code agents）：它们直接执行任意 Python 代码，而不是发 JSON 格式的工具调用。</li>
+            <li>通过 system 消息显式控制推理模式。</li>
+        </ul>
+        <p>
+            迭代模板设计时，他们用了同事开发的 Chat Template Playground，可以方便地预览消息被渲染成什么样、调试格式问题。原书嵌了这个应用（加载的是 SmolLM3-3B 的模板）。你可以在下拉框里选不同示例，看模板怎样处理多轮对话、推理和工具调用；也可以手动改 JSON 输入，比如试试传 <code>enable_thinking: false</code>，或在 system 消息后面加 <code>/no_think</code>。
+        </p>
+        <p>选好初始数据集和聊天模板，就可以训基线了。</p>
+
+        <h3>小基线（Baby Baselines）</h3>
+        <p><em>原书小节：Baby Baselines</em></p>
+        <p>
+            在优化、榨取每一分性能之前，先要建立几个“小基线”。它们不追求最优，目的是验证聊天模板确实按预期工作，以及初始超参数能让训练稳定。有了这个基础，才开始大力调超参数和数据配比。
+        </p>
+        <p>训 SFT 基线时要考虑的主要事项：</p>
+        <ul>
+            <li>用全参数微调，还是 LoRA、QLoRA（Quantized LoRA，在量化后的基座上做 LoRA）这类参数高效方法？按 Thinking Machines 那篇博客的结论，LoRA 在一定条件下（通常由数据集大小决定）能追平 FullFT。</li>
+            <li>需要哪种并行？小模型或用 LoRA 训的模型，一般数据并行就够。大模型需要 FSDP2 或 DeepSpeed ZeRO-3 把模型权重和优化器状态切分到多卡上。长上下文训练要用上下文并行（context parallelism）等方法。</li>
+            <li>硬件支持的话，用 FlashAttention 和 Liger 这类 kernel。很多 kernel 托管在 Hub 上，TRL 里一个参数就能启用，能大幅降低显存占用。</li>
+            <li>对 loss 做掩码，只在 assistant token 上训练。后面会讲到，做法是在聊天模板里用特殊的 <code>{% generation %}</code> 关键字包住 assistant 轮。</li>
+            <li>调学习率。除了数据，这是决定模型“一般般”还是“很好”的最重要因素。</li>
+            <li>打包（pack）训练样本，并按数据分布调序列长度，能大幅加速训练。TRL 有一个现成的工具帮你选这个长度。</li>
+        </ul>
+        <p>
+            看看这些选择在 SmolLM3 上的结果。第一批基线实验要做一个简单的健全性检查：这个聊天模板真能引出混合推理吗？为此他们比较了上面数据表里的三种配比：
+        </p>
+        <ul>
+            <li>Instruct：只用非推理样本训练；</li>
+            <li>Thinking：只用推理样本训练；</li>
+            <li>Hybrid：用全部样本训练。</li>
+        </ul>
+        <p>
+            每种配比都在 SmolLM3-3B-Base 上做 SFT：全参数微调，学习率 1e-5，有效批大小 128，训 1 个 epoch。（旁注：作者发现这组超参数对大多数模型和数据集都是不错的基线。）数据集小，所以没开打包；Instruct 子集序列上限 8,192 token，其余 32,768 token。在一个 8×H100 节点上，这些实验跑得很快，视子集不同 30 到 90 分钟。各子集在对应推理模式下的结果如下（据原文交互图数据）：
+        </p>
+        <table>
+            <thead>
+                <tr><th>子集</th><th>推理模式</th><th>AIME25</th><th>GPQA-D</th><th>LiveCodeBench v4</th><th>IFEval</th><th>Global MMLU Lite</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Instruct</td><td><code>/no_think</code></td><td>1.87</td><td>26.83</td><td>8.91</td><td>65.42</td><td>45.1</td></tr>
+                <tr><td>Hybrid</td><td><code>/no_think</code></td><td>1.72</td><td>28.47</td><td>12.87</td><td>67.11</td><td>39.2</td></tr>
+                <tr><td>Thinking</td><td><code>/think</code></td><td>12.19</td><td>29.1</td><td>8.91</td><td>40.68</td><td>53.55</td></tr>
+                <tr><td>Hybrid</td><td><code>/think</code></td><td>12.45</td><td>29.55</td><td>12.87</td><td>47.88</td><td>53.35</td></tr>
+            </tbody>
+        </table>
+        <p>
+            结果很快表明，混合模型有一种“分裂大脑”（split brain）现象：一种推理模式的数据配比对另一种模式影响很小。多数评测在 Instruct、Thinking、Hybrid 之间分数相近；例外是 LiveCodeBench v4 和 IFEval，混合数据提升了整体表现。
+        </p>
+
+        <h3>对基线做 vibe test</h3>
+        <p><em>原书小节：Vibe-Test Your Baselines</em></p>
+        <p>
+            评测看着还行，但当他们让混合模型扮演不同角色（比如海盗）时，它总是无视 system 消息里写的任何东西。挖了一下才发现，原因出在数据的格式上：
+        </p>
+        <figure><img src="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook/resolve/main/app/src/content/assets/image/Screenshot_2025-09-26_at_22_36_40_27a1384e-bcac-8063-94e0-f1c689e7d9b9.png" alt="和模型对话时它忽略 system 消息中角色设定的截图"><figcaption>图：vibe test 时模型无视 system 消息里的角色设定（引自原书）</figcaption></figure>
+        <p>
+            他们设计聊天模板时，暴露了一个 <code>custom_instructions</code> 参数来存放 system prompt。比如这样给一段对话设定角色：
+        </p>
+<pre><code>from transformers import AutoTokenizer
+
+tok = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM3-3B")
+
+messages = [
+    {
+        "content": "I'm trying to set up my iPhone, can you help?",
+        "role": "user",
+    },
+    {
+        "content": "Of course, even as a vampire, technology can be a bit of a challenge sometimes [TRUNCATED]",
+        "role": "assistant",
+    },
+]
+chat_template_kwargs = {
+    "custom_instructions": "You are a vampire technologist",
+    "enable_thinking": False,
+}
+rendered_input = tok.apply_chat_template(
+    messages, tokenize=False, **chat_template_kwargs
+)
+print(rendered_input)
+## &lt;|im_start|&gt;system
+### Metadata
+
+## Knowledge Cutoff Date: June 2025
+## Today Date: 28 October 2025
+## Reasoning Mode: /no_think
+
+### Custom Instructions
+
+## You are a vampire technologist
+
+## &lt;|im_start|&gt;user
+## I'm trying to set up my iPhone, can you help?&lt;|im_end|&gt;
+## &lt;|im_start|&gt;assistant
+## &lt;think&gt;
+
+## &lt;/think&gt;
+## Of course, even as a vampire, technology can be a bit of a challenge sometimes # [TRUNCATED]&lt;|im_end|&gt;</code></pre>
+        <p>问题是，他们的数据样本长这样：</p>
+<pre><code>{
+    "messages": [
+        {
+            "content": "I'm trying to set up my iPhone, can you help?",
+            "role": "user",
+        },
+        {
+            "content": "Of course, even as a vampire, technology can be a bit of a challenge sometimes [TRUNCATED]",
+            "role": "assistant",
+        },
+    ],
+    "chat_template_kwargs": {
+        "custom_instructions": None,
+        "enable_thinking": False,
+        "python_tools": None,
+        "xml_tools": None,
+    },
+}</code></pre>
+        <p>
+            数据处理代码里的一个 bug 把 <code>custom_instructions</code> 设成了 <code>None</code>，等于把每一条训练样本的 system 消息都删了。这些样本本来该带着各自的角色设定，结果全变成了 SmolLM3 的默认 system prompt：
+        </p>
+<pre><code>chat_template_kwargs = {"custom_instructions": None, "enable_thinking": False}
+rendered_input = tok.apply_chat_template(messages, tokenize=False, **chat_template_kwargs)
+print(rendered_input)
+## &lt;|im_start|&gt;system
+#### Metadata
+
+## Knowledge Cutoff Date: June 2025
+## Today Date: 28 October 2025
+## Reasoning Mode: /no_think
+
+#### Custom Instructions
+
+## You are a helpful AI assistant named SmolLM, trained by Hugging Face.
+
+## &lt;|im_start|&gt;user
+## I'm trying to set up my iPhone, can you help?&lt;|im_end|&gt;
+## &lt;|im_start|&gt;assistant
+## &lt;think&gt;
+
+## &lt;/think&gt;
+## Of course, even as a vampire, technology can be a bit of a challenge sometimes [TRUNCATED]&lt;|im_end|&gt;</code></pre>
+        <p>
+            这对 SystemChats 子集问题尤其大，因为它的所有角色都是通过 <code>custom_instructions</code> 定义的，于是模型倾向于在对话中途随机换角色。由此得出一条规则：<strong>即使评测看起来没问题，也一定要对模型做 vibe test</strong>，多数时候你会挖出训练数据里的细微 bug。
+        </p>
+        <p>
+            修掉这个 bug 对评测分数没有影响，但他们终于确信聊天模板和数据格式都对了。环境稳定、数据管线检查无误之后，下一步就是针对具体能力下功夫。
+        </p>
+        <h3>针对具体能力</h3>
+        <p><em>原书小节：Targeting Specific Capabilities</em></p>
+        <p>
+            开发 Open-R1 时他们注意到，完全用单轮推理数据训练基座模型，无法泛化到多轮推理。这不意外：没有这类样本，模型在多轮场景下就是在训练分布之外被测试。
+        </p>
+        <p>
+            为了在 SmolLM3 上定量衡量这一点，他们借鉴了 Qwen3 团队的内部评测 ThinkFollow：随机插入 <code>/think</code> 或 <code>/no_think</code> 标记，测模型能否稳定地在两种推理模式间切换。他们的实现是拿 Multi-IF 的 prompt，检查模型生成的 <code>&lt;think&gt;</code> 和 <code>&lt;/think&gt;</code> 之间是空的还是非空的。不出所料，混合基线从第二轮开始就几乎无法打开推理模式（据原文交互图数据，数值为模式切换正确率 %）：
+        </p>
+        <table>
+            <thead>
+                <tr><th>模型</th><th>第 1 轮</th><th>第 2 轮</th><th>第 3 轮</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Qwen3-1.7B</td><td>97.14</td><td>96.48</td><td>95.42</td></tr>
+                <tr><td>混合基线</td><td>69.75</td><td>26.95</td><td>6.25</td></tr>
+                <tr><td>混合基线 + IFThink</td><td>89</td><td>91.09</td><td>91.18</td></tr>
+            </tbody>
+        </table>
+        <p>
+            为了补上这个能力，他们构造了一个新数据集 IFThink。做法基于 Multi-IF 的流程：取 Tulu 3 指令跟随子集里的单轮指令，用 Qwen3-32B 把它们扩展成多轮对话，同时生成可验证的指令和推理轨迹。具体流程是：从 Tulu 3 IF 数据集里拿出单轮 prompt 作为第 1 轮，并整理出一组指令类型；用 Qwen3-32B 根据指令类型生成第 2、3 轮的新指令；再用 Qwen3-32B 为这三轮生成推理轨迹，得到 IFThink。（旁注：他们考虑过过滤掉互相冲突的指令，但初步结果已经够好，就跳过了这一步。）
+        </p>
+        <p>
+            把这份数据加进基线配比后提升很大，见上表最后一行：三轮都在 90% 左右。修好多轮推理问题以后，基线终于按预期工作了：跨轮次保持一致、跟随指令、正确使用聊天模板。有了这个基础，他们回头去调训练设置本身。
+        </p>
+
+        <h3>哪些超参数真正要紧</h3>
+        <p><em>原书小节：Which Hyperparameters Actually Matter?</em></p>
+        <p>
+            SFT 里真正要紧的超参数只有几个。学习率、批大小和是否打包，几乎决定了模型训练效率如何、泛化如何。小基线阶段他们只是挑了合理的默认值来验证数据和模板；现在环境稳定了，就回头看这些选择对基线的影响有多大。
+        </p>
+
+        <h4>掩码 user 轮次</h4>
+        <p>
+            聊天模板有一个细微的设计选择：训练时要不要把 user 轮次掩掉。多数对话式数据集里，每个样本由交替的 user 和 assistant 消息组成（中间可能夹着工具调用）。如果训练模型去预测所有 token，它实际上在学怎样自动补全用户的提问，而不是专注生成高质量的 assistant 回答。
+        </p>
+        <p>
+            掩码 user 轮次就是只在 assistant 输出上计算 loss，不在 user 消息上算。原书用一张示意图说明：输入里 user 部分的标签被置为忽略，只有 assistant 部分的 token 参与训练。
+        </p>
+        <p>
+            在 TRL 里，只要聊天模板能返回 assistant token 掩码，就会应用掩码。做法是在模板里加 <code>{% generation %}</code> 关键字：
+        </p>
+<pre><code>{%- for message in messages -%}
+  {%- if message.role == "user" -%}
+    {{ "&lt;|im_start|&gt;" + message.role + "\n" + message.content + "&lt;|im_end|&gt;\n" }}
+  {%- elif message.role == "assistant" -%}
+{% generation %}
+{{ "&lt;|im_start|&gt;assistant" + "\n" + message.content + "&lt;|im_end|&gt;\n" }}
+{% endgeneration %}
+  {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+  {{ "&lt;|im_start|&gt;assistant\n" }}
+{%- endif %}</code></pre>
+        <p>
+            然后用 <code>apply_chat_template()</code> 并传入 <code>return_assistant_tokens_mask=True</code>，模板就会标出对话里哪些部分要被掩掉。下面的简单例子里，assistant token 标为 1，user token 被掩成 0：
+        </p>
+<pre><code>chat_template = '''
+{%- for message in messages -%}
+  {%- if message.role == "user" -%}
+    {{ "&lt;|im_start|&gt;" + message.role + "\n" + message.content + "&lt;|im_end|&gt;\n" }}
+  {%- elif message.role == "assistant" %}
+    {% generation %}
+    {{ "&lt;|im_start|&gt;assistant" + "\n" + message.content + "&lt;|im_end|&gt;\n" }}
+    {% endgeneration %}
+  {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+  {{ "&lt;|im_start|&gt;assistant\n" }}
+{%- endif %}
+'''
+rendered_input = tok.apply_chat_template(messages, chat_template=chat_template, return_assistant_tokens_mask=True, return_dict=True)
+print(rendered_input)
+## {'input_ids': [128011, 882, 198, 40, 2846, ...  # ...
+##  'attention_mask': [1, 1, 1, 1, 1, ...         # all 1s
+##  'assistant_masks': [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, ... 1]}</code></pre>
+        <p>
+            实践中，掩码在多数情况下对下游评测影响不大，只提升几个点。在 SmolLM3 上它对 IFEval 影响最大，可能因为模型不那么倾向于复述 prompt，能更严格地遵守各种约束。各评测、各推理模式的对比如下（据原文交互图数据）：
+        </p>
+        <table>
+            <thead>
+                <tr><th>掩码 user 轮次</th><th>推理模式</th><th>AIME25</th><th>GPQA-D</th><th>LiveCodeBench v4</th><th>IFEval</th><th>Global MMLU Lite</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>是</td><td><code>/think</code></td><td>12.6</td><td>28.16</td><td>9.9</td><td>71.64</td><td>55.6</td></tr>
+                <tr><td>否</td><td><code>/think</code></td><td>12.4</td><td>29.48</td><td>12.87</td><td>67.12</td><td>55.1</td></tr>
+                <tr><td>是</td><td><code>/no_think</code></td><td>2.03</td><td>26.89</td><td>7.92</td><td>69.62</td><td>43.55</td></tr>
+                <tr><td>否</td><td><code>/no_think</code></td><td>1.67</td><td>27.53</td><td>7.92</td><td>65.41</td><td>44.45</td></tr>
+            </tbody>
+        </table>
+
+        <h4>打包还是不打包</h4>
+        <p>
+            序列打包（Sequence Packing）是对训练效率影响很大的细节之一。SFT 的数据集里样本长短不一，一个批次里会有大量填充（padding）token，既浪费算力又拖慢收敛。
+        </p>
+        <p>
+            打包的做法是把多条序列首尾拼接，直到达到设定的最大 token 长度。拼接方式有好几种，TRL 采用“最佳适配递减”（best-fit decreasing）策略：按序列长度决定装箱顺序。原书用一张示意图说明，这种策略既尽量减少文档在批次边界处被截断，也减少了填充 token。
+        </p>
+        <p>
+            原书的提示框比较了后训练和预训练里的打包：预训练里这根本不是问题，训几万亿 token 时必须打包，否则大量算力浪费在填充上，Megatron-LM 和 Nanotron 这类预训练框架默认就打包。后训练不同，运行更短，权衡也变了。
+        </p>
+        <p>
+            先看效率。下面是在基线数据集上训一个 epoch，打包和不打包的耗时对比，以及每个批次平均包含的非填充 token 数（据原文交互图数据）：
+        </p>
+        <table>
+            <thead>
+                <tr><th>打包</th><th>有效批大小</th><th>耗时（分钟）</th><th>每批平均 token 数</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>否</td><td>128</td><td>117.7</td><td>171,814</td></tr>
+                <tr><td>是</td><td>8</td><td>30.8</td><td>255,657</td></tr>
+                <tr><td>是</td><td>16</td><td>26</td><td>510,547</td></tr>
+                <tr><td>是</td><td>32</td><td>23</td><td>1,028,787</td></tr>
+                <tr><td>是</td><td>64</td><td>22.1</td><td>2,045,356</td></tr>
+                <tr><td>是</td><td>128</td><td>22.1</td><td>4,047,906</td></tr>
+            </tbody>
+        </table>
+        <p>
+            （旁注：有效批大小超过 32 后耗时不再下降，是因为 32 是不启用梯度累积时能达到的最大批大小。）视批大小不同，打包把吞吐提高了 3 到 5 倍。那是不是总该打包？某种程度上要看数据集多大，因为打包把更多 token 塞进每一步，每个 epoch 的优化步数就少了。打包后每批 token 数随批大小线性增长，和不打包相比，每个优化步最多能多装 33 倍的 token。
+        </p>
+        <p>
+            但打包会轻微改变训练动态：总共处理的数据更多，梯度更新次数却更少，这会影响最终性能。小数据集上尤其明显，因为每个样本更要紧。比如在相同的有效批大小 128 下比较打包与不打包，IFEval 等评测掉得明显；更一般地看，有效批大小超过 32 以后，这个模型和数据集上平均性能会下降（据原文交互图数据）：
+        </p>
+        <table>
+            <thead>
+                <tr><th>设置</th><th>推理模式</th><th>AIME25</th><th>GPQA-D</th><th>LiveCodeBench v4</th><th>IFEval</th><th>Global MMLU Lite</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>不打包，批 128</td><td><code>/think</code></td><td>12.6</td><td>28.16</td><td>9.9</td><td>71.64</td><td>55.6</td></tr>
+                <tr><td>打包，批 8</td><td><code>/think</code></td><td>13.23</td><td>29.55</td><td>8.91</td><td>69.75</td><td>57.3</td></tr>
+                <tr><td>打包，批 16</td><td><code>/think</code></td><td>13.33</td><td>27.84</td><td>8.91</td><td>68.9</td><td>55.45</td></tr>
+                <tr><td>打包，批 32</td><td><code>/think</code></td><td>13.28</td><td>28.98</td><td>13.86</td><td>64.83</td><td>54.9</td></tr>
+                <tr><td>打包，批 64</td><td><code>/think</code></td><td>12.19</td><td>28.85</td><td>6.93</td><td>61.73</td><td>54.55</td></tr>
+                <tr><td>打包，批 128</td><td><code>/think</code></td><td>12.92</td><td>28.54</td><td>6.93</td><td>59.94</td><td>57.7</td></tr>
+                <tr><td>不打包，批 128</td><td><code>/no_think</code></td><td>2.03</td><td>26.89</td><td>7.92</td><td>69.62</td><td>43.55</td></tr>
+                <tr><td>打包，批 8</td><td><code>/no_think</code></td><td>1.93</td><td>26.64</td><td>8.91</td><td>65.97</td><td>44.3</td></tr>
+                <tr><td>打包，批 16</td><td><code>/no_think</code></td><td>1.61</td><td>27.4</td><td>10.89</td><td>67.84</td><td>44.75</td></tr>
+                <tr><td>打包，批 32</td><td><code>/no_think</code></td><td>2.08</td><td>26.01</td><td>10.89</td><td>65.29</td><td>44.15</td></tr>
+                <tr><td>打包，批 64</td><td><code>/no_think</code></td><td>1.51</td><td>23.74</td><td>10.89</td><td>59.22</td><td>40.8</td></tr>
+                <tr><td>打包，批 128</td><td><code>/no_think</code></td><td>1.3</td><td>24.18</td><td>8.91</td><td>57.14</td><td>37</td></tr>
+            </tbody>
+        </table>
+        <p>
+            同为批 128，打包让 IFEval 从约 71.6 / 69.6 掉到约 59.9 / 57.1。实践中，数据集很大的大规模 SFT 几乎总该打包，省下的算力远超梯度更新频率上的小差别。但对较小或较多样的数据集，比如领域微调、用有限的人工整理数据做指令微调，可能值得关掉打包，保留样本粒度，让每个样本都干净地参与优化。
+        </p>
+        <p>
+            最终的策略要靠实验：先开着打包，同时监控吞吐和下游评测，再看速度上的收益有没有换来同等或更好的模型质量，据此调整。
+        </p>
+
+        <h4>调学习率</h4>
+        <p>
+            最后一个重要超参数是学习率。太高训练可能发散，太低收敛慢得痛苦。SFT 的最优学习率通常比预训练小一个数量级甚至更多。原因是我们从一个已经有丰富表示的模型初始化，激进的更新可能导致灾难性遗忘（Catastrophic Forgetting，新训练把模型原有的能力冲掉）。
+        </p>
+        <p>
+            原书提示框指出：预训练里，在完整运行上扫超参数贵得做不起；后训练运行很短，可以真的做完整的学习率扫描。
+        </p>
+        <p>
+            他们的实验发现，“最好”的学习率随模型家族、尺寸和是否打包而变。高学习率可能导致梯度爆炸，所以开打包时把学习率稍微调低往往更安全。结果显示，3e-6 或 1e-5 这样的小学习率整体表现比大值好（据原文交互图数据）：
+        </p>
+        <table>
+            <thead>
+                <tr><th>学习率</th><th>推理模式</th><th>AIME25</th><th>GPQA-D</th><th>LiveCodeBench v4</th><th>IFEval</th><th>Global MMLU Lite</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>1e-6</td><td><code>/think</code></td><td>13.44</td><td>29.86</td><td>6.93</td><td>59.46</td><td>49.95</td></tr>
+                <tr><td>3e-6</td><td><code>/think</code></td><td>13.7</td><td>30.43</td><td>13.86</td><td>68.14</td><td>52</td></tr>
+                <tr><td>1e-5</td><td><code>/think</code></td><td>12.6</td><td>28.16</td><td>9.9</td><td>71.64</td><td>55.6</td></tr>
+                <tr><td>3e-5</td><td><code>/think</code></td><td>9.69</td><td>29.73</td><td>7.92</td><td>72.24</td><td>53.8</td></tr>
+                <tr><td>1e-4</td><td><code>/think</code></td><td>1.2</td><td>29.17</td><td>4.95</td><td>71.12</td><td>46.95</td></tr>
+                <tr><td>1e-6</td><td><code>/no_think</code></td><td>1.46</td><td>25.13</td><td>9.9</td><td>58.1</td><td>38.85</td></tr>
+                <tr><td>3e-6</td><td><code>/no_think</code></td><td>1.51</td><td>25.19</td><td>10.89</td><td>64.24</td><td>41.9</td></tr>
+                <tr><td>1e-5</td><td><code>/no_think</code></td><td>2.03</td><td>26.89</td><td>7.92</td><td>69.62</td><td>43.55</td></tr>
+                <tr><td>3e-5</td><td><code>/no_think</code></td><td>2.29</td><td>29.23</td><td>10.89</td><td>68.15</td><td>46.15</td></tr>
+                <tr><td>1e-4</td><td><code>/no_think</code></td><td>0.68</td><td>26.26</td><td>3.96</td><td>69.99</td><td>38.65</td></tr>
+            </tbody>
+        </table>
+        <p>
+            （旁注：选扫描范围时，他们习惯先用 [1e-6, 3e-6, 1e-5, 3e-5, 1e-4]，覆盖两个数量级，先锁定一个区域，再在里面细调。）平均分差几个点看着不多，但看单项，比如 AIME25，学习率超过 1e-5 后成绩掉得很厉害：<code>/think</code> 模式下从 12.6 降到 3e-5 的 9.69，再到 1e-4 的 1.2。
+        </p>
+
+        <h4>增加 epoch 数</h4>
+        <p>
+            消融时他们通常只训 1 个 epoch，以便快速迭代。找到好的数据配比、调好学习率等关键参数之后，下一步就是在最终训练里增加 epoch 数。比如把基线配比训 5 个 epoch，平均能再挤出几个百分点（据原文交互图数据）：
+        </p>
+        <table>
+            <thead>
+                <tr><th>Epoch</th><th>推理模式</th><th>AIME25</th><th>GPQA-D</th><th>LiveCodeBench v4</th><th>IFEval</th><th>Global MMLU Lite</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>1</td><td><code>/think</code></td><td>11.98</td><td>28.72</td><td>11.88</td><td>70.5</td><td>53.6</td></tr>
+                <tr><td>2</td><td><code>/think</code></td><td>12.92</td><td>31.25</td><td>8.91</td><td>73.86</td><td>60.95</td></tr>
+                <tr><td>3</td><td><code>/think</code></td><td>14.32</td><td>32.89</td><td>18.81</td><td>74.67</td><td>62.05</td></tr>
+                <tr><td>4</td><td><code>/think</code></td><td>15.94</td><td>30.62</td><td>15.84</td><td>74.51</td><td>62.45</td></tr>
+                <tr><td>5</td><td><code>/think</code></td><td>14.79</td><td>31.94</td><td>16.83</td><td>77.98</td><td>63.6</td></tr>
+                <tr><td>1</td><td><code>/no_think</code></td><td>1.35</td><td>26.77</td><td>8.91</td><td>67.17</td><td>45.1</td></tr>
+                <tr><td>2</td><td><code>/no_think</code></td><td>1.67</td><td>28.72</td><td>7.92</td><td>67.77</td><td>51</td></tr>
+                <tr><td>3</td><td><code>/no_think</code></td><td>2.5</td><td>29.48</td><td>11.88</td><td>71.18</td><td>50.75</td></tr>
+                <tr><td>4</td><td><code>/no_think</code></td><td>1.87</td><td>29.1</td><td>8.91</td><td>73.45</td><td>50.95</td></tr>
+                <tr><td>5</td><td><code>/no_think</code></td><td>1.15</td><td>31.57</td><td>9.9</td><td>70.72</td><td>51.85</td></tr>
+            </tbody>
+        </table>
+        <p>
+            和学习率扫描一样，平均分掩盖了单项评测上的变化：开长思考时，LiveCodeBench v4 比 1 个 epoch 时几乎翻倍（11.88 到 3 个 epoch 的 18.81、5 个 epoch 的 16.83）。
+        </p>
+        <p>
+            SFT 数据配比迭代好、模型性能到了一个合理水平之后，下一步通常是探索偏好优化或强化学习这类更高级的方法。但在那之前，值得想一想：这部分额外算力是不是更该花在继续预训练、加强基座模型上？
+        </p>
+        <p>
+            原书还有一个关于优化器的提示框：预训练章节讲过优化器，后训练里 AdamW 仍是默认选择。一个开放问题是，用 Muon 等其他优化器预训练的模型，后训练是否该用同一个优化器。Kimi 团队在 Moonlight 模型上发现，预训练和后训练用同一个优化器效果最好。
+        </p>
+
+        <h3>用继续预训练增强推理</h3>
+        <p><em>原书小节：Boosting Reasoning Through Continued Pretraining</em></p>
+        <p>
+            继续预训练（Continued Pretraining），说得好听点叫中期训练（Mid-training），是指在做 SFT 之前，拿基座模型在大量领域 token 上继续训练。当 SFT 想要的几项目标能力共享一个核心技能（比如编程或推理）时，中期训练很有用。它把模型推向一个更利于推理、某种语言或其他目标能力的分布。从一个已经掌握核心技能的模型开始做 SFT，模型就能把精力放在 SFT 数据里的具体主题上，而不是从零学这项核心技能。
+        </p>
+        <p>
+            中期训练可以追溯到 ULMFiT，它开创了“通用预训练 → 中期训练 → 后训练”的三阶段流程，如今在 FAIR 的 Code World Model（CWM）等现代 LLM 里很常见。原书用 CWM 的流程图示意：通用预训练 8T token、8k 上下文；代码世界建模的中期训练 5T token、131k 上下文；后训练先做指令和推理 SFT（100B token、32k 上下文），再做面向智能体和推理的联合强化学习（172B token、131k 上下文）。
+        </p>
+        <p>
+            Phi-4-Mini-Reasoning 也用了这种做法，但有个变化：中期训练语料换成了从 DeepSeek-R1 蒸馏出来的推理 token，没用网页数据。结果很有说服力，多阶段训练带来了持续而大幅的提升：
+        </p>
+        <table>
+            <thead>
+                <tr><th>模型</th><th>AIME24</th><th>MATH-500</th><th>GPQA Diamond</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Phi-4-Mini</td><td>10.0</td><td>71.8</td><td>36.9</td></tr>
+                <tr><td>+ 蒸馏数据中期训练</td><td>30.0</td><td>82.9</td><td>42.6</td></tr>
+                <tr><td>+ 蒸馏数据微调</td><td>43.3</td><td>89.3</td><td>48.3</td></tr>
+                <tr><td>+ Roll-out DPO</td><td>50.0</td><td>93.6</td><td>49.0</td></tr>
+                <tr><td>+ RL（Phi-4-Mini-Reasoning）</td><td>57.5</td><td>94.6</td><td>52.0</td></tr>
+            </tbody>
+        </table>
+        <p>
+            这促使他们尝试类似的做法。根据之前在 Open-R1 里制作和评测推理数据集的经验，他们手上有三个主要候选：
+        </p>
+        <ul>
+            <li>Mixture of Thoughts：从 DeepSeek-R1 蒸馏的 35 万条推理样本，覆盖数学、代码和科学。</li>
+            <li>Llama-Nemotron-Post-Training-Dataset：NVIDIA 的大规模数据集，从 Llama 3、DeepSeek-R1 等多个模型蒸馏而来。他们只筛出 DeepSeek-R1 的输出，约 364 万条样本，187 亿（18.7B）token。</li>
+            <li>OpenThoughts3-1.2M：质量最高的推理数据集之一，120 万条样本，从 QwQ-32B 蒸馏，共 165 亿（16.5B）token。</li>
+        </ul>
+        <p>
+            他们计划在最终 SFT 配比里放推理数据，所以把 Mixture of Thoughts 留给 SFT 阶段，其余两个用于中期训练。聊天模板用 ChatML，避免太早把 SmolLM3 自己的模板“烧进”模型。训练 5 个 epoch，学习率 2e-5，用 8 个节点加速，有效批大小 128。
+        </p>
+        <p>
+            原书提示框“什么时候做中期训练？”解释了为什么在 SFT 实验之后才讲中期训练：时间顺序上，中期训练在 SFT 之前、作用于基座模型；但它是否有用，往往要先跑过 SFT 实验、找到性能短板才清楚。实践中你会反复迭代：跑 SFT 找弱项，做针对性的中期训练，再跑 SFT。可以把这一节看成“只靠 SFT 不够时该怎么办”。
+        </p>
+
+        <h4>GPU 熔化之谜</h4>
+        <p>
+            在他们的集群上跑这些实验出乎意料地难。老化的 GPU 会在不同时间点被降频，接着出硬件故障，每个运行都被迫重启。下面是其中一个运行的日志，每次颜色变化代表一次重启：
+        </p>
+        <figure><img src="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook/resolve/main/app/src/content/assets/image/GtU8DnoWsAAruEG_28e1384e-bcac-8051-8122-ed6cacf8f632.png" alt="中期训练运行的训练曲线，每次颜色变化代表一次重启"><figcaption>图：一次中期训练运行的日志，颜色每变一次代表一次重启（引自原书）</figcaption></figure>
+        <p>
+            他们起初怀疑是 DeepSpeed 的问题，因为这个加速库为吞吐做了大量优化。为了验证，他们改用数据并行，情况有所好转，但 loss 变得完全不一样了。（旁注：半夜在自己代码里找 bug 比你想的常见。事后看，这种规模的长时间运行，用 Nanotron 更合理，它久经考验，吞吐也更高。）
+        </p>
+        <figure><img src="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook/resolve/main/app/src/content/assets/image/Screenshot_2025-10-01_at_11_31_19_28e1384e-bcac-8005-8c5e-f0af3bf70372.png" alt="DeepSpeed 与数据并行两种设置下 loss 曲线差异很大的截图"><figcaption>图：换成数据并行后，loss 曲线和 DeepSpeed 下差别很大（引自原书）</figcaption></figure>
+        <p>
+            后来发现，Hugging Face Accelerate 的数据并行有一个 bug：权重和梯度以模型的原生精度（这里是 BF16）存储，导致数值不稳定，梯度在累积和优化时丢失精度。（旁注：为了避免这个问题，多数加速库用 FP32 保存“主权重”（master weights）和优化器状态，只在前向和反向传播时转回 BF16。）
+        </p>
+        <p>
+            于是他们换回 DeepSpeed，加上频繁的检查点保存，尽量减少 GPU 过热、“掉线”造成的损失。这个策略奏效了，作者也推荐给所有人。原书规则框写道：和预训练章节强调的一样，训练中要频繁保存检查点，并推到远程存储（比如 Hugging Face Hub），防止被意外覆盖；同时让训练框架能扛住故障、自动重启。这两条都能省时间，对中期训练这种长时间任务尤其如此。
+        </p>
+        <p>盯了大约一周之后，结果终于出来了（据原文交互图数据）：</p>
+        <table>
+            <thead>
+                <tr><th>中期训练数据</th><th>AIME25</th><th>GPQA-D</th><th>LiveCodeBench v4</th><th>IFEval</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Llama-Nemotron</td><td>30.6</td><td>38.3</td><td>31.0</td><td>36.5</td></tr>
+                <tr><td>OpenThoughts3</td><td>29.8</td><td>39.7</td><td>29.0</td><td>43.6</td></tr>
+                <tr><td>两者混合</td><td>35.3</td><td>42.4</td><td>35.5</td><td>42</td></tr>
+            </tbody>
+        </table>
+        <p>
+            总体上，NVIDIA 的后训练数据集比 OpenThoughts 表现更好，但两者混合最好。
+        </p>
+        <p>再看拿其中一个中期训练检查点、套用同样的基线 SFT 配比的效果（据原文交互图数据）：</p>
+        <table>
+            <thead>
+                <tr><th>起点模型</th><th>推理模式</th><th>AIME25</th><th>GPQA-D</th><th>LiveCodeBench v4</th><th>IFEval</th><th>Global MMLU Lite</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>预训练基座</td><td><code>/think</code></td><td>12.6</td><td>28.16</td><td>9.9</td><td>71.64</td><td>55.6</td></tr>
+                <tr><td>中期训练后</td><td><code>/think</code></td><td>32.19</td><td>39.77</td><td>30.69</td><td>72.37</td><td>59.2</td></tr>
+                <tr><td>预训练基座</td><td><code>/no_think</code></td><td>2.03</td><td>26.89</td><td>7.92</td><td>69.62</td><td>43.55</td></tr>
+                <tr><td>中期训练后</td><td><code>/no_think</code></td><td>8.23</td><td>31.63</td><td>12.87</td><td>68.48</td><td>50.55</td></tr>
+            </tbody>
+        </table>
+        <p>
+            用中期训练过的推理模型代替预训练基座，效果很大：开长思考时，AIME25 和 LiveCodeBench v4 的成绩接近翻了三倍，GPQA-D 涨了整整 10 分。有点意外的是，这个推理内核也部分迁移到了 <code>/no_think</code> 模式，推理类基准上涨了约 4 到 6 分。这些结果清楚地说明：对推理模型来说，如果基座在预训练时没见过大量推理数据，做一些中期训练几乎总是值得的。
+        </p>
+        <p>
+            原书提示框“什么时候别做中期训练”：中期训练在模型必须学会一项新的核心技能时最有用。如果基座已经有这项技能，或者你想引出的是风格、闲聊这类浅层能力，它的用处就小了。这时建议跳过中期训练，把算力留给偏好优化或强化学习等方法。
+        </p>
+        <p>
+            等你对 SFT 数据配比和模型的整体能力有了信心，重点自然会从“学技能”转到“打磨技能”。多数情况下，最有效的下一步是偏好优化。
+        </p>
+    </section>
+    <section id="t05">
+        <h2>05. 从 SFT 到偏好优化：教模型什么叫“更好”</h2>
+        <p><em>原书小节：From SFT to Preference Optimization: Teaching Models What Better Means</em></p>
+        <p>
+            你可以继续加数据扩大 SFT，但到某个点会看到收益递减，或者出现一些失败模式，比如模型修不好自己写的有 bug 的代码。原因在于 SFT 是一种模仿学习（Imitation Learning），模型只学会复现训练数据里的模式。如果数据里本来就没有好的修复，或者想要的行为很难通过蒸馏引出来，模型就没有清楚的信号知道什么算“更好”。
+        </p>
+        <p>
+            （旁注：即使数据集里两类轨迹各占一半，有的一上来就做对，有的先犯错再纠正，问题依然存在。模型可能只学到“先犯个错”是期望模式的一部分。而我们真正想要的，是一开始就给出正确解法的模型。）
+        </p>
+        <p>
+            偏好优化在这里登场。它不再只是照抄示范，而是给模型对比式反馈，比如“回答 A 比回答 B 好”。这种偏好为质量提供了更直接的训练信号，能让模型性能突破单靠 SFT 的上限。偏好优化的另一个好处是所需数据通常比 SFT 少得多，因为起点已经是一个能跟随指令、带着前面阶段知识的不错模型。
+        </p>
+        <p>先看这类数据集怎么造。</p>
+
+        <h3>构造偏好数据集</h3>
+        <p><em>原书小节：Creating Preference Datasets</em></p>
+        <p>
+            过去，偏好数据集是这样做的：给人工标注员一对模型回答，让他们判断哪个更好（可能还要打分）。LLM 提供商至今仍用这种方式收集人类偏好标签，但它很贵，扩展性差。近来 LLM 已经能低成本地产出高质量回答，于是在很多应用里，让 LLM 来生成偏好变得可行。实践中有两种常见做法。
+        </p>
+        <h4>强对弱（Strong vs. Weak）</h4>
+        <ol>
+            <li>取一组固定的 prompt $x$（通常为了覆盖面和难度专门挑过）。</li>
+            <li>用一个较弱的或基线模型生成一个回答，再用一个强模型生成另一个。</li>
+            <li>把强模型的输出标为被选中的回答 $y_c$（chosen），弱模型的标为被拒绝的回答 $y_r$（rejected）。</li>
+        </ol>
+        <p>
+            这样得到一个“强对弱”的比较数据集 $\lbrace (x, y_c, y_r) \rbrace$。它构造起来简单，前提是假设强模型的输出总是更好。一个流行的例子来自 Intel：他们拿一个同时有 GPT-3.5 和 GPT-4 回答的 SFT 数据集，把 GPT-4 的回答当 chosen、GPT-3.5 的当 rejected，转成了偏好数据集（orca_dpo_pairs，原书嵌了数据集查看器）。
+        </p>
+        <h4>在策略采样加打分（On-Policy with Grading）</h4>
+        <ol>
+            <li>用你要训练的同一个模型，对同一个 prompt 生成多个候选回答。这样的数据是“on-policy”（在策略）的，反映了模型自然会产出的输出分布。</li>
+            <li>不依赖更强的模型做参照，而是引入外部打分者：一个验证器（verifier），或者一个按一个或多个质量维度（有用性、事实准确性等）给回答打分的奖励模型（Reward Model）。</li>
+            <li>打分者在候选回答之间给出偏好标签，得到更细致、更灵活的偏好数据集。</li>
+        </ol>
+        <p>
+            这种方法能随着模型变强不断自举出新的偏好数据，但质量高度依赖评估者的可靠性和校准程度。SnorkelAI 提供了一个好例子：他们把流行的偏好数据集 UltraFeedback 的 prompt 分成三份，迭代地套用上面的配方来改进模型（原书嵌了 Snorkel-Mistral-PairRM-DPO-Dataset 的查看器）。
+        </p>
+        <p>
+            SmolLM3 开发时，还没有带推理轨迹的偏好数据，于是他们用“强对弱”的方法自己生成：拿 Ai2 的 Tulu 3 偏好混合数据里的 prompt，让 Qwen3-0.6B 和 Qwen3-32B 在 <code>/think</code> 模式下分别作答，得到一个 25 万条以上的 LLM 生成偏好数据集（收在 smoltalk2 里），可以用偏好优化算法从多个维度同时改进 SFT 检查点。
+        </p>
+
+        <h3>选哪个算法</h3>
+        <p><em>原书小节：Which Algorithm Should You Use?</em></p>
+        <p>
+            直接偏好优化（Direct Preference Optimization，DPO）是第一个在开源界广泛采用的偏好优化算法。它不训练单独的奖励模型，而是直接用“chosen 与 rejected 的对数概率之差”构造一个分类式 loss，并以一个冻结的参考模型为基准，约束新模型别偏离太远。（旁注：DPO 论文 2023 年中发表时，网上争论它能否比得上 RL 方法，也没有配方证明它在工业场景里有效。为此 HF 几个月后发布了 Zephyr 7B，整个模型用合成数据训练，展示了 DPO 带来的显著提升。）
+        </p>
+        <p>
+            DPO 的吸引力在于实现简单、实践中稳定，用不多的偏好数据也有效。于是它成了在动用 RL 这类更复杂技术之前改进 SFT 模型的默认方法。但研究者很快发现 DPO 有很多改进空间，如今有大量替代方案可以探索。作者觉得最有效的几个：
+        </p>
+        <ul>
+            <li>KTO（Kahneman–Tversky Optimization）：不依赖成对偏好，而是借用人类决策理论的思路，对单条回答建模它“可取”还是“不可取”。如果你没有成对偏好数据（比如只有终端用户点的 👍 或 👎），它是个好选择。</li>
+            <li>ORPO（Odds Ratio Preference Optimization）：把偏好优化直接并进 SFT，在交叉熵 loss 上加一项几率比（odds ratio）。这样既不需要参考模型，也不需要单独的 SFT 阶段，计算上更高效。</li>
+            <li>APO（Anchored Preference Optimization）：一个更可控的目标函数。除了优化 chosen 与 rejected 之间的差，它还显式约束模型对 chosen 和 rejected 输出的似然各自该怎样移动。有两个变体，APO-zero 和 APO-down；选哪个取决于模型和偏好数据的关系，也就是 chosen 输出比模型自己的输出好还是差。</li>
+        </ul>
+        <p>好在这些方法在 TRL 的 <code>DPOTrainer</code> 里多数只要改一行就能切换。初始基线他们这样做：</p>
+        <ol>
+            <li>用 Ai2 的 Tulu 3 Preference Personas IF 数据集里的 prompt 和回答，在 <code>/no_think</code> 模式下衡量 IFEval 上的指令跟随提升。</li>
+            <li>复用上面数据集的 prompt，但用 Qwen3-32B 和 Qwen3-0.6B 生成“强对弱”偏好对，作为 <code>/think</code> 模式的偏好数据。</li>
+            <li>训 1 个 epoch，衡量 IFEval 上的域内（in-domain）提升，以及对 AIME25 等其他评测的域外（out-of-domain）影响，这些评测和指令跟随直接相关。</li>
+        </ol>
+        <p>
+            两种推理模式的域内提升都很明显：在 IFEval 上，APO-zero 比 SFT 检查点提高了 15 到 20 个百分点（据原文交互图数据）：
+        </p>
+        <table>
+            <thead>
+                <tr><th>推理模式</th><th>方法</th><th>AIME25</th><th>GPQA-D</th><th>IFEval</th><th>LiveCodeBench v4</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>/think</code></td><td>SFT</td><td>32.55</td><td>36.36</td><td>51.24</td><td>36.57</td></tr>
+                <tr><td><code>/think</code></td><td>DPO</td><td>3.07</td><td>27.9</td><td>58.54</td><td>14.42</td></tr>
+                <tr><td><code>/think</code></td><td>IPO</td><td>26.35</td><td>26.89</td><td>35.6</td><td>3.84</td></tr>
+                <tr><td><code>/think</code></td><td>APO-zero</td><td>31.77</td><td>29.36</td><td>69.38</td><td>26.92</td></tr>
+                <tr><td><code>/think</code></td><td>APO-down</td><td>0.89</td><td>28.91</td><td>54.59</td><td>3.84</td></tr>
+                <tr><td><code>/think</code></td><td>DiscoPOP</td><td>3.23</td><td>26.89</td><td>45.39</td><td>4.58</td></tr>
+                <tr><td><code>/no_think</code></td><td>SFT</td><td>1.04</td><td>28.6</td><td>47.6</td><td>9.9</td></tr>
+                <tr><td><code>/no_think</code></td><td>DPO</td><td>4.79</td><td>26.96</td><td>59.69</td><td>9.9</td></tr>
+                <tr><td><code>/no_think</code></td><td>IPO</td><td>2.66</td><td>29.17</td><td>70.73</td><td>12.81</td></tr>
+                <tr><td><code>/no_think</code></td><td>APO-zero</td><td>2.29</td><td>26.89</td><td>71.57</td><td>11.7</td></tr>
+                <tr><td><code>/no_think</code></td><td>APO-down</td><td>0.78</td><td>26.58</td><td>53.34</td><td>4.39</td></tr>
+                <tr><td><code>/no_think</code></td><td>DiscoPOP</td><td>2.24</td><td>27.15</td><td>49.81</td><td>3.34</td></tr>
+            </tbody>
+        </table>
+        <p>
+            （交互图里还比较了 IPO 和 DiscoPOP 两种损失，正文没有展开。）APO-zero 的整体域外表现也最好，所以之后的消融都用它。原书提示框“偏好优化对推理也有用”：结果说明偏好优化除了让模型更有用、更对齐，也能教它推理得更好。如果你想快速改进一个推理模型，可以试着生成“强对弱”偏好，再消融不同的损失函数，可能比普通 DPO 好得多。
+        </p>
+
+        <h3>偏好优化里最要紧的超参数</h3>
+        <p><em>原书小节：Which Hyperparameters Matter Most for Preference Optimization?</em></p>
+        <p>偏好优化里，通常只有三个超参数影响训练动态：</p>
+        <ul>
+            <li>学习率，一般比 SFT 小 10 到 100 倍；</li>
+            <li>$\beta$ 参数，通常控制偏好对之间间隔（margin）的大小；</li>
+            <li>批大小。</li>
+        </ul>
+        <p>
+            下面看它们在 SmolLM3 上的表现。起点是在完整 smoltalk2 上训好的 SFT 检查点（这个检查点的成绩：<code>/think</code> 下 AIME25 36.56、GPQA Diamond 42.23、IFEval 70.03、LiveCodeBench v4 36.63；<code>/no_think</code> 下分别为 4.01、30.43、67.29、12.87，据原文交互图数据）。
+        </p>
+
+        <h4>用小学习率效果最好</h4>
+        <p>
+            第一组消融看学习率的影响。他们试了比 SFT 学习率（2e-5）小约 200 倍（1e-7）到小约 2 倍（1e-5）的范围。之前 Zephyr 7B 等项目的经验是，偏好优化的最佳学习率大约是 SFT 的 1/10，SmolLM3 的消融也印证了这条经验法则。原书写道：比 SFT 小约 10 倍的学习率在两种推理模式下都改进了 SFT 模型，而超出这个 10 倍界限的学习率都让长思考模式变差。
+        </p>
+        <table>
+            <thead>
+                <tr><th>学习率</th><th>推理模式</th><th>AIME25</th><th>GPQA Diamond</th><th>IFEval</th><th>LiveCodeBench v4</th><th>平均</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>1e-5</td><td><code>/think</code></td><td>29.9</td><td>34.28</td><td>69.72</td><td>13.86</td><td>36.94</td></tr>
+                <tr><td>5e-6</td><td><code>/think</code></td><td>36.46</td><td>36.93</td><td>70.97</td><td>21.78</td><td>41.54</td></tr>
+                <tr><td>1e-6</td><td><code>/think</code></td><td>45.47</td><td>42.49</td><td>69.88</td><td>23.76</td><td>45.4</td></tr>
+                <tr><td>5e-7</td><td><code>/think</code></td><td>48.7</td><td>44.7</td><td>72.61</td><td>25.74</td><td>47.94</td></tr>
+                <tr><td>1e-7</td><td><code>/think</code></td><td>48.59</td><td>44.44</td><td>73.86</td><td>31.68</td><td>49.64</td></tr>
+                <tr><td>1e-5</td><td><code>/no_think</code></td><td>4.9</td><td>26.64</td><td>70.86</td><td>11.88</td><td>28.57</td></tr>
+                <tr><td>5e-6</td><td><code>/no_think</code></td><td>-</td><td>29.04</td><td>75.46</td><td>16.83</td><td>40.44</td></tr>
+                <tr><td>1e-6</td><td><code>/no_think</code></td><td>7.92</td><td>32.58</td><td>74.46</td><td>13.86</td><td>32.21</td></tr>
+                <tr><td>5e-7</td><td><code>/no_think</code></td><td>7.5</td><td>32.77</td><td>77.13</td><td>12.87</td><td>32.57</td></tr>
+                <tr><td>1e-7</td><td><code>/no_think</code></td><td>9.27</td><td>32.2</td><td>77.0</td><td>11.88</td><td>32.59</td></tr>
+            </tbody>
+        </table>
+        <p>
+            （据原文交互图数据；5e-6 的 <code>/no_think</code> AIME25 在图数据里缺失，所以那一行平均分只是三项的平均。按交互图数据看，学习率继续往下调到 5e-7、1e-7 时 <code>/think</code> 分数并没有变差，这和正文的说法不完全一致，这里两者照录。）<code>/no_think</code> 模式的趋势更平稳，最佳学习率在 5e-6，但这主要由单个基准（LiveCodeBench v4）拉动，所以 SmolLM3 的运行选了 1e-6。
+        </p>
+        <p>
+            作者的建议：在比 SFT 学习率小 5 到 20 倍的范围内扫描，很可能就在这个范围里找到最佳表现。
+        </p>
+
+        <h4>调 $\beta$</h4>
+        <p>
+            他们在很宽的范围（0.01 到 0.99）里试了 $\beta$，探索不同程度地贴近参考模型。原书提醒：较低的值鼓励靠近参考模型，较高的值让模型更贴合偏好数据。不开长思考时，多个 $\beta$ 值下性能都很稳定。$\beta=0.1$ 在两种推理模式下表现最好，并且比 SFT 检查点有提升；更低的 $\beta$ 会伤性能，得到比 SFT 检查点还差的模型。
+        </p>
+        <table>
+            <thead>
+                <tr><th>$\beta$</th><th><code>/think</code> 平均</th><th><code>/no_think</code> 平均</th><th><code>/think</code> AIME25</th><th><code>/think</code> LiveCodeBench v4</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>0.01</td><td>41.24</td><td>31.91</td><td>43.28</td><td>12.87</td></tr>
+                <tr><td>0.05</td><td>45.4</td><td>32.21</td><td>45.47</td><td>23.76</td></tr>
+                <tr><td>0.1</td><td>48.09</td><td>33.37</td><td>46.82</td><td>29.7</td></tr>
+                <tr><td>0.2</td><td>46.32</td><td>32.83</td><td>44.95</td><td>26.73</td></tr>
+                <tr><td>0.5</td><td>47.82</td><td>31.68</td><td>47.45</td><td>28.71</td></tr>
+                <tr><td>0.75</td><td>47.82</td><td>31.68</td><td>47.45</td><td>28.71</td></tr>
+                <tr><td>0.99</td><td>47.88</td><td>33.61</td><td>45.36</td><td>34.65</td></tr>
+            </tbody>
+        </table>
+        <p>
+            （据原文交互图数据，SFT 检查点的平均分为 <code>/think</code> 46.36、<code>/no_think</code> 28.65。）这些结果说明大于 0.1 的值更好，让模型贴合偏好数据比让它靠近参考模型更有益。不过作者建议在 0.01 到 0.5 的范围里探索 $\beta$，更高的值可能抹掉 SFT 检查点里一些图中评测没测到的能力。
+        </p>
+
+        <h4>扩大偏好数据</h4>
+        <p>
+            他们还测了数据集大小的影响，从 2k 到 340k 个偏好对。在这个范围里性能都很稳定。超过 10 万对之后，长思考模式的性能有所下降，但没有学习率变化带来的下降那么明显。SmolLM3 正式训练用的是 169k 个偏好对，但结果显示更小的数据集也能比 SFT 检查点有提升。以后的项目里，他们知道可以在迭代阶段用小数据集实验，那时最要紧的是多试几个想法、快速找出最有希望的配置。
+        </p>
+        <table>
+            <thead>
+                <tr><th>偏好对数量</th><th><code>/think</code> 平均</th><th><code>/no_think</code> 平均</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>1,693</td><td>49.72</td><td>29.89</td></tr>
+                <tr><td>8,467</td><td>48.49</td><td>31.03</td></tr>
+                <tr><td>16,934</td><td>50.65</td><td>31.67</td></tr>
+                <tr><td>42,336</td><td>49.63</td><td>32.48</td></tr>
+                <tr><td>84,673</td><td>49.02</td><td>33.71</td></tr>
+                <tr><td>127,009</td><td>46.53</td><td>32.81</td></tr>
+                <tr><td>169,346</td><td>45.4</td><td>32.21</td></tr>
+                <tr><td>338,692</td><td>45.32</td><td>31.81</td></tr>
+            </tbody>
+        </table>
+        <p>（据原文交互图数据，平均分为 AIME25、GPQA Diamond、IFEval、LiveCodeBench v4 四项的平均。）</p>
+
+        <h4>合在一起</h4>
+        <p>
+            把这些线索合起来，就得到了最终的 SmolLM3-3B：同尺寸里最好，和 Qwen 自家的混合推理模型一起站在帕累托前沿上。原书的交互图横轴是模型尺寸（越小越快越便宜），纵轴是在 8 个流行 LLM 基准上的胜率（Win rate %，不开推理的 instruct 模式），大致数值如下（据原文交互图数据）：
+        </p>
+        <table>
+            <thead>
+                <tr><th>模型</th><th>参数量（B）</th><th>胜率 %</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Llama3.2 3B Instruct</td><td>3.2</td><td>1.6</td></tr>
+                <tr><td>Qwen3 1.7B</td><td>2.0</td><td>2.35</td></tr>
+                <tr><td>Qwen2.5 3B Instruct</td><td>3.0</td><td>2.5</td></tr>
+                <tr><td>SmolLM3 3B</td><td>3.0</td><td>3.8</td></tr>
+                <tr><td>Qwen3 4B</td><td>4.1</td><td>4.65</td></tr>
+            </tbody>
+        </table>
+        <p>作者的评价是：几周的工作，这个结果还不赖。</p>
+
+        <h3>经验守则</h3>
+        <p><em>原书小节：Rules of Engagement</em></p>
+        <ul>
+            <li>别怕自己造偏好数据。推理成本已经便宜到“不值得计量”，从各家推理服务商生成 LLM 偏好简单又划算。</li>
+            <li>先用 DPO 做初始基线，再从那里迭代。根据偏好数据的类型，ORPO、KTO、APO 等算法可能比 DPO 好很多。</li>
+            <li>学习率用 SFT 的约 1/10。</li>
+            <li>扫描 $\beta$，通常在 0.01 到 0.5 之间。</li>
+            <li>多数偏好算法训过 1 个 epoch 就会过拟合，所以把数据分成几份，迭代地训练效果最好。</li>
+        </ul>
+        <p>
+            偏好优化常常是简单和性能之间的最佳平衡点，但它继承了一个限制：效果取决于你能收集到的离线偏好数据。到某个点，静态数据集的信号会耗尽，这时就需要能在模型和 prompt、环境交互时在线产生新反馈的方法。偏好优化在这里和更广的 on-policy、基于 RL 的方法接上了。
+        </p>
+    </section>
+    <section id="t06">
+        <h2>06. 走向 on-policy：超越监督标签</h2>
+        <p><em>原书小节：Going On-Policy and Beyond Supervised Labels</em></p>
+        <p>
+            如果你想让模型稳定地解数学题、生成能运行的代码、做多步规划，往往需要一个奖励信号（reward signal），光有“A 比 B 好”不够。这时 RL 就有意义了。它不再用偏好监督模型，改为让模型和一个环境交互（可以是数学验证器、代码执行器，甚至是真实用户反馈），直接从结果里学习。RL 在以下情况最有用：
+        </p>
+        <ul>
+            <li>能自动检查对错，比如单元测试、数学证明、API 调用，或者有高质量的验证器或奖励模型；</li>
+            <li>任务需要多步推理或规划，局部偏好抓不住长期的成败；</li>
+            <li>想优化偏好标签以外的目标，比如代码通过单元测试，或者把某个目标值最大化。</li>
+        </ul>
+        <p>LLM 上的 RL 主要有两种：</p>
+        <ul>
+            <li>基于人类反馈的强化学习（RLHF）：由 OpenAI 的 InstructGPT 论文推广，是 GPT-3.5 和很多现代 LLM 的基础。人工标注员比较模型输出（比如“A 比 B 好”），据此训练一个奖励模型去预测这些偏好，再用 RL 微调策略（policy，在这里就是被训练的语言模型），让它最大化这个学到的奖励。（旁注：奖励模型只是近似人类偏好，有时会助长奖励投机（reward hacking）：策略输出一段分布外的序列，比如“the the the the”，奖励模型却给了虚高的分，于是这个行为通过 RL 循环被固化进模型。）</li>
+            <li>可验证奖励的强化学习（Reinforcement Learning with Verifiable Rewards，RLVR）：由 DeepSeek-R1 推广。用验证器检查模型输出是否满足清楚定义的正确性标准（比如代码能否编译并通过所有测试，数学答案对不对），再用 RL 微调策略，让它产出更多可验证为正确的输出。</li>
+        </ul>
+        <p>
+            RLHF 和 RLVR 定义了模型优化“什么”，但没说“怎样”优化。实践中，基于 RL 的训练效率和稳定性很大程度上取决于学习算法是 on-policy（在策略）还是 off-policy（离策略）。
+        </p>
+        <p>
+            GRPO（Group Relative Policy Optimization，对同一个 prompt 采样一组回答，用组内相对得分代替单独的价值模型来估计每个回答的优势）这类方法通常归为 on-policy 算法：生成回答的模型（策略）就是被优化的那个模型。大体如此，但有几点保留。首先，为了优化生成环节，可能会先采样好几批生成结果，再对模型做 $k$ 次更新；第一批是 on-policy 的，后面几批就略微 off-policy 了。为了弥补生成用的模型和当前被优化的模型之间的“策略滞后”，会用重要性采样（importance sampling）和截断（clipping）来重新加权 token 概率、限制更新幅度。
+        </p>
+        <p>
+            （旁注：这里不讨论 off-policy RL，但确实有真正 off-policy 的 RL 算法，比如 Q-learning，生成轨迹的策略可以和被优化的策略完全不同。GRPO 用在 LLM 上时，生成用的策略可能落后于优化中的策略，但两者通常相差不到 16 步。）
+        </p>
+        <p>
+            LLM 的自回归生成很慢，所以 verl、PipelineRL 等框架加入了异步生成回答和“飞行中”（in-flight）更新模型权重，以最大化训练吞吐。这些做法实现起来更复杂、更需小心，但训练速度能比同步方法高 4 到 5 倍。后面会看到，这种效率提升对推理模型尤其明显，因为它们的 token 长度分布有长尾。
+        </p>
+        <p>
+            SmolLM3 发布时完全跳过了 RL，主要因为时间紧，而且靠离线偏好优化已经得到了同尺寸最好的模型。发布之后他们回头研究了这个课题，下一节分享其中的经验。
+        </p>
+
+        <h3>把 RLVR 用到混合推理模型上</h3>
+        <p><em>原书小节：Applying RLVR to Hybrid Reasoning Models</em></p>
+        <p>
+            混合推理模型给 RLVR 带来了额外的复杂度，因为两种推理模式的生成长度差别很大。原书画了 SmolLM3 最终 APO 检查点在 AIME25 上的 token 长度分布：<code>/no_think</code> 模式的解答中位长度约 2k token，<code>/think</code> 模式的中位长度大得多（16k token），而且分布有肥尾。理想情况下，他们希望用 RLVR 提升两种模式的整体表现，同时不要太剧烈地改变各自的长度分布。
+        </p>
+        <p>
+            为此他们先只优化 <code>/no_think</code> 模式，用的是 Big-Math 的一部分 prompt。Big-Math 是一个有 25 万多道已验证答案的数学题数据集。
+        </p>
+        <p>
+            出乎意料的是，直接套用 GRPO 导致了一种奖励投机：模型从未被要求输出长思维链，却学会了调用基座里的推理能力来提高奖励。奖励上去了，回答长度也跟着涨。按原文交互图数据，这次“朴素”运行的平均完成长度从约 820 token 一路涨到约 7,200 token（中途峰值约 10,700），训练奖励从约 0.23 升到约 0.59；图注写道：朴素 RLVR 拿到了高奖励、改善了下游表现，代价是完成长度爆炸。
+        </p>
+        <p>
+            换句话说，GRPO 版的 RLVR 把这个推理模型的 <code>/no_think</code> 模式变成了很像 <code>/think</code> 模式的东西。查看模型的回答时，他们发现它在生成长 CoT，甚至出现了推理模型特有的一些“认知行为”，比如“Wait, …”。示例如下（原文中的 LaTeX 公式这里改写为纯文本）：
+        </p>
+<pre><code>However, since the jogger and the train are moving in the same direction, the relative speed between them is the difference of their speeds:
+v_rel = v_t - v_j = 12.7778 - 2.7778 = 10 m/s
+
+**Wait,** let me double-check the calculation:
+
+**Wait,** 46 km/hr to m/s:
+46 * 1000 m / 3600 s = (46 * 10)/36 = 460/36 ≈ 12.7778 m/s (correct)
+10 km/hr is:
+10 * 1000 / 3600 = 10000 / 3600 ≈ 2.7778 m/s (correct)
+Difference: 12.7778 - 2.7778 = 10 m/s (exact, since 46-10=36 km/hr → 36*(1000/3600)=10 m/s exactly)
+
+The jogger is 340 meters ahead of the train's engine. When the train passes the jogger, the distance the train needs to cover relative to the jogger is 340 meters plus the length of the train? Wait, actually, let me think about the problem again.
+
+**Wait,** actually, when the problem says the train takes 46 seconds to pass the jogger, that usually means the time from the front of the train to the end passing the jogger. The length of the train would then be equal to the relative speed multiplied by the time.
+
+But first, the initial position: the jogger is 340 meters ahead of the engine. So the engine is 340 meters ahead of the jogger. Wait no, the wording says "340 m ahead of the engine", so the jogger is ahead by 340 meters. So when the jogger is running alongside, the engine of the train is 340 m away behind the jogger? Wait, maybe I need to clarify.
+
+**Wait** the problem says: "A jogger running at 10 km/hr alongside a railway track is 340 m ahead of the engine of a train running at 46 km/hr in the same direction. The train takes 46 seconds to pass the jogger. How long is the train in meters?"
+
+Hmm, so the jogger is 340 m ahead of the engine along the track. Since they're moving in the same direction, the train is behind the jogger by 340 meters. To pass the jogger, the train has to cover that 340 meters plus the length of the train itself?</code></pre>
+
+        <h4>用超长惩罚抑制奖励投机</h4>
+        <p>
+            这个问题可以用超长完成惩罚（overlong completion penalty）缓解：对超过一定长度的回答扣分。惩罚有两个参数：最大完成长度 $L_{\text{max}}$，和软惩罚缓冲区 $L_{\text{cache}}$。它是 DAPO 论文提出的改进之一，相当于加一个这样的奖励函数（$|y|$ 是回答长度）：
+        </p>
+        $$
+        R_{\text{length}}(y) = \begin{cases}
+        0, & |y| \le L_{\text{max}} - L_{\text{cache}} \\
+        \dfrac{L_{\text{max}} - L_{\text{cache}} - |y|}{L_{\text{cache}}}, & L_{\text{max}} - L_{\text{cache}} < |y| \le L_{\text{max}} \\
+        -1, & L_{\text{max}} < |y|
+        \end{cases}
+        $$
+        <p>
+            也就是说，长度在安全区内不扣分；进入最后 $L_{\text{cache}}$ 这段缓冲区后，扣分从 0 线性增加到 $-1$；超过上限直接扣 1 分。
+        </p>
+        <p>
+            有了这个惩罚，就能直接控制模型的输出分布，并量化“回答变长”和“性能变好”之间的权衡。他们把超长惩罚从 1.5k 调到 4k，步长 512 token。图注写道：超长惩罚约束了每次 rollout（模型针对一个 prompt 采样出的一次完整回答）的长度，同时也降低了平均奖励。按交互图数据，各惩罚设置下训练末期的平均完成长度大约在 550 到 1,200 token 之间，惩罚越宽松越长，和朴素运行的 7,000 多 token 相比被压住了。
+        </p>
+        <p>看 AIME25 上的提升，长度与性能的权衡更清楚（据原文交互图数据，列名按交互图标注的惩罚区间，起点为 APO 检查点的 8.49）：</p>
+        <table>
+            <thead>
+                <tr><th>训练步</th><th>1–1.5k</th><th>1.5–2k</th><th>2–2.5k</th><th>2.5–3k</th><th>3–3.5k</th><th>3.5–4k</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>0</td><td>8.49</td><td>8.49</td><td>8.49</td><td>8.49</td><td>8.49</td><td>8.49</td></tr>
+                <tr><td>100</td><td>8.75</td><td>14.27</td><td>16.04</td><td>18.33</td><td>18.39</td><td>17.14</td></tr>
+                <tr><td>200</td><td>11.61</td><td>16.3</td><td>16.41</td><td>19.06</td><td>18.91</td><td>19.06</td></tr>
+                <tr><td>300</td><td>11.56</td><td>19.01</td><td>16.77</td><td>19.48</td><td>23.33</td><td>22.14</td></tr>
+                <tr><td>400</td><td>11.77</td><td>17.97</td><td>16.25</td><td>19.9</td><td>22.34</td><td>23.54</td></tr>
+            </tbody>
+        </table>
+        <p>
+            可以清楚看到超长惩罚怎样影响下游表现：2k 到 4k 区间的惩罚带来了显著提升，同时把 token 分布控制住了。原书接着取第 400 步的检查点，比较了初始策略和不同惩罚下最终模型的输出 token 分布（交互图，未给出可摘录的汇总数字）。
+        </p>
+
+        <h4>合在一起</h4>
+        <p>
+            他们发现 2.5k 到 3k 的长度惩罚在性能和回答长度之间权衡最好。在 AIME 2025 上，GRPO 的成绩接近 APO 这类离线方法的两倍（据原文交互图数据）：
+        </p>
+        <table>
+            <thead>
+                <tr><th>方法</th><th>AIME25（<code>/no_think</code>）</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>SFT</td><td>4.01</td></tr>
+                <tr><td>APO</td><td>8.49</td></tr>
+                <tr><td>GRPO</td><td>19.9</td></tr>
+            </tbody>
+        </table>
+        <p>
+            知道了怎样提升 <code>/no_think</code> 模式，RL 流程的下一步就是两种推理模式的联合训练（joint training）。但他们发现这很难啃：每种模式需要各自的长度惩罚，两者相互作用到目前为止都导致训练不稳定。这是把 RL 用到混合推理模型上的主要难点，也体现在一个新趋势上：Qwen 等模型开发者开始把 instruct 版和 reasoning 版分开发布（比如 Qwen3-4B-Instruct-2507 和 Qwen3-4B-Thinking-2507）。
+        </p>
+        <p>
+            他们的实验表明，RLVR 能有效引导推理行为，但前提是仔细做奖励塑形（reward shaping）和稳定性机制。既然这么复杂，就值得问一句：强化学习是唯一可行的路吗？近期文献里其实提出了好几种更轻量的 on-policy 优化策略，只是开源社区出奇地少有人探索。这一章最后看看其中几种。
+        </p>
+
+        <h3>RL 是唯一的出路吗</h3>
+        <p><em>原书小节：Is RL the Only Game in Town?</em></p>
+        <p>
+            其他 on-policy 学习方法把偏好优化和蒸馏扩展成迭代循环，随着模型变化刷新训练信号。包括：
+        </p>
+        <ul>
+            <li>在线 DPO（Online DPO）：不在一个固定的偏好数据集上训一次了事，而是让模型持续采样新回答、收集新的偏好标签（来自奖励模型或 LLM 打分者）、再更新自己。这让优化保持 on-policy，减少训练数据和模型当前行为之间的偏移。</li>
+            <li>在线策略蒸馏（On-policy Distillation）：信号不来自偏好，而来自一个更强的教师模型。学生模型在每个训练步采样回答，用学生和教师在这些样本上 logits 之间的 KL 散度作为学习信号。学生因此能持续吸收教师的能力，不需要显式的偏好标签或验证器。原书引的是广义知识蒸馏（GKD）论文。</li>
+        </ul>
+        <p>
+            这些方法模糊了静态偏好优化和完整 RL 之间的界线：你仍然能适应模型当前的分布，又不必承担设计和稳定一个强化学习循环的全部复杂度。
+        </p>
+
+        <h3>该用哪种方法</h3>
+        <p><em>原书小节：Which Method Should You Use?</em></p>
+        <p>关于哪种 on-policy 方法“最好”的论文多如牛毛，但实践中的选择取决于下表里的几个因素：</p>
+        <table>
+            <thead>
+                <tr><th>算法</th><th>什么时候用</th><th>权衡</th><th>模型尺寸</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>在线 DPO</td><td>能便宜地拿到偏好标签。最适合让行为对齐不断变化的分布。</td><td>容易迭代扩展，比 RL 稳定，但依赖标签质量和覆盖面。支持它的训练框架很少。</td><td>任何尺寸都适用，只要偏好能捕捉到模仿之外的改进。</td></tr>
+                <tr><td>在线策略蒸馏</td><td>有更强的教师模型，想高效转移能力。</td><td>实现简单、运行便宜，但继承教师的偏差，上限受教师限制。只有 TRL 和 NemoRL 支持。</td><td>对中小模型（&lt;30B）最有效。</td></tr>
+                <tr><td>强化学习</td><td>有可验证的奖励，或任务需要多步推理、规划。也可以配奖励模型用，但有挑战（比如奖励投机：模型钻奖励模型的空子）。</td><td>灵活强大，但成本高、更难稳定，需要仔细做奖励塑形。多数后训练框架都支持。</td><td>最适合中大型模型（20B+），多出来的容量让它们能利用结构化的奖励信号。</td></tr>
+            </tbody>
+        </table>
+        <p>
+            开源生态里，GRPO 和 REINFORCE 这类强化学习方法用得最广。不过 Qwen3 技术报告强调，他们用在线策略蒸馏训练了 32B 以下的模型。Qwen3 的流程分两条线：旗舰模型从基座出发，依次经过 4 个阶段（长 CoT 冷启动、推理 RL、思考模式融合、通用 RL），得到 Qwen3-235B-A22B 和 Qwen3-32B；轻量模型则以基座为起点、以旗舰模型为教师，做“强到弱蒸馏”（Strong-to-Weak Distillation），得到 Qwen3-30B-A3B 和 14B/8B/4B/1.7B/0.6B。
+        </p>
+        <p>
+            小模型上的在线策略蒸馏有个有意思的性质：它通常比基于 RL 的方法效果更好，算力却只要一小部分。原因是它不必对每个 prompt 生成多次 rollout，只采样一次，再由教师在一次前向/反向传播里打分。Qwen3 技术报告显示，相对 GRPO 的提升可能很大：
+        </p>
+        <table>
+            <thead>
+                <tr><th>方法</th><th>AIME24</th><th>AIME25</th><th>MATH500</th><th>LiveCodeBench v5</th><th>MMLU-Redux</th><th>GPQA Diamond</th><th>GPU 小时</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>离线策略蒸馏</td><td>55.0</td><td>42.8</td><td>92.4</td><td>42.0</td><td>86.4</td><td>55.6</td><td>-</td></tr>
+                <tr><td>+ 强化学习</td><td>67.6</td><td>55.5</td><td>94.8</td><td>52.9</td><td>86.9</td><td>61.3</td><td>17,920</td></tr>
+                <tr><td>+ 在线策略蒸馏</td><td>74.4</td><td>65.5</td><td>97.0</td><td>60.3</td><td>88.3</td><td>63.3</td><td>1,800</td></tr>
+            </tbody>
+        </table>
+        <p>
+            最近 Thinking Machines 还表明，在线策略蒸馏能有效缓解灾难性遗忘，也就是一个后训练好的模型在新领域上继续训练后，原有能力退化。下表显示，Qwen3-8B 在内部数据上微调后，聊天能力（IFEval）大幅下跌，但用便宜的蒸馏就能恢复：
+        </p>
+        <figure><img src="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook/resolve/main/app/src/content/assets/image/Screenshot_2025-10-30_at_13_02_36_29c1384e-bcac-80d6-a72d-ff34bc221b60.png" alt="Thinking Machines 关于在线策略蒸馏缓解灾难性遗忘的结果表"><figcaption>图：Qwen3-8B 的内部知识问答与 IFEval 成绩。原模型 18% / 85%；用内部数据 100% 中期训练后 43% / 45%；70% 中期训练后 36% / 79%；70% 中期训练再加蒸馏后 41% / 83%（引自原书，原始数据来自 Thinking Machines）</figcaption></figure>
+        <p>
+            作者对在线策略蒸馏很看好，因为有大量能力强的开放权重 LLM，可以蒸馏成更小的、面向具体任务的模型。但所有在线策略蒸馏方法都有一个弱点：教师和学生必须用同一个分词器（tokenizer）。为了解决这个问题，HF 开发了一种新方法，叫通用在线策略 logit 蒸馏（General On-Policy Logit Distillation，GOLD），可以把任意教师蒸馏到任意学生。有兴趣可以看他们的技术文章。
+        </p>
+        <p>
+            类似地，FAIR 的研究者比较了 DPO 在完全 off-policy 和 on-policy 下的效果，表明可以用少得多的算力追平 GRPO。原书用一张示意图说明三种设置：生成器（Generator）用当前权重对 prompt 做 rollout，奖励模型或验证器打分，训练器（Trainer）更新权重；同步间隔记为 $s$。离线（$s=\infty$）指生成器始终不更新权重；半在线（$s=k$）指每 $k$ 步把训练器的权重同步给生成器一次；在线（$s=1$）指每步都同步。
+        </p>
+        <p>他们的论文显示，在线 DPO 在数学任务上效果好，即使是落后很多步的半在线变体，表现也相当：</p>
+        <table>
+            <thead>
+                <tr><th>训练方法</th><th>Math500</th><th>NuminaMath</th><th>AMC23</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Seed（Llama-3.1-8B-Instruct）</td><td>47.4</td><td>33.9</td><td>23.7</td></tr>
+                <tr><td>离线 DPO（$s = \infty$）</td><td>53.7</td><td>36.4</td><td>28.8</td></tr>
+                <tr><td>半在线 DPO（$s = 100$）</td><td>58.9</td><td>39.3</td><td>35.1</td></tr>
+                <tr><td>半在线 DPO（$s = 10$）</td><td>57.2</td><td>39.4</td><td>31.4</td></tr>
+                <tr><td>在线 DPO（$s = 1$）</td><td>58.7</td><td>39.6</td><td>32.9</td></tr>
+                <tr><td>GRPO</td><td>58.1</td><td>38.8</td><td>33.6</td></tr>
+            </tbody>
+        </table>
+        <p>
+            作者认为，无论是有效地扩展 RL（原书引了 ScaleRL 相关工作），还是探索其他提高计算效率的方法，都还有很多事可做。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 后训练收尾</h2>
+        <p><em>原书小节：Wrapping Up Post-Training</em></p>
+        <p>
+            读到这里，你已经有了后训练成功所需的核心要素，可以开始跑实验、测试不同算法去追 SOTA 了。但你大概也意识到，知道怎样训出好模型只是故事的一半。要让模型真正跑起来，还需要合适的基础设施。全书最后一部分就讲 LLM 训练里那位“无名英雄”：基础设施（第 7 章）。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>先问清是否真需要后训练、有没有高质量领域数据、能不能衡量成功。SmolLM3 的目标是一个多语言下推理也站得住、支持工具调用和长上下文的混合推理模型。</li>
+            <li>后训练的消融靠更小的数据集和更简单的算法，几乎不换基座模型。</li>
+            <li>评测要最先做，并且要和预训练团队商量好贯穿始终的核心评测；SmolLM3 因为赶工，RULER 直到发布前几天才接上，作者认为这是个错误。</li>
+            <li>评测守则：开发时用小子集；推理模型打分前去掉 CoT；固定 LLM 裁判及其版本，最好用开放权重模型；警惕基座污染；消融用过的都算验证集，留出测试集；保留自己的 vibe evals；题少的评测报告 <code>avg@k</code>；先复现公开结果；拿不准就回去看评测数据。</li>
+            <li>用训练框架，别什么都从零写；HF 在 TRL 的内部 fork 上做实验，再合并回主库。</li>
+            <li>几乎所有流程都从 SFT 开始：便宜、稳定、是后续方法的好基线。选基座看尺寸、架构（小规模稠密优于 MoE）和后训练口碑，Qwen 系列最顺手。</li>
+            <li>混合推理数据要按模式配对，配比按 token 而非样本数平衡（s1k-1.1 占约 1% 样本、约 11% token）。</li>
+            <li>训练时保留所有轮次的推理 token；SmolLM3 自制了聊天模板，支持结构化 system prompt、代码智能体和用 system 消息控制推理模式。</li>
+            <li>小基线：FullFT、学习率 1e-5、有效批大小 128、1 个 epoch，8×H100 上 30 到 90 分钟；结果显示混合模型有“分裂大脑”现象。</li>
+            <li>即使评测正常也要 vibe test：一个 bug 把所有样本的 system 消息清空了，评测上完全看不出来。</li>
+            <li>单轮推理数据不能泛化到多轮；IFThink 把 ThinkFollow 第 3 轮的模式切换正确率从 6.25% 提到 91.18%。</li>
+            <li>SFT 里要紧的超参数：掩码 user 轮次（主要提升 IFEval）；打包能提速 3 到 5 倍，但小数据集上会伤 IFEval 等评测；学习率在 [1e-6, 1e-4] 里扫，3e-6 到 1e-5 最好；最终训练加 epoch 还能多挤几个点。</li>
+            <li>中期训练（用 Llama-Nemotron + OpenThoughts3 推理数据，5 个 epoch，学习率 2e-5）让 <code>/think</code> 下的 AIME25 从 12.6 涨到 32.19；基座没见过多少推理数据时几乎总值得做，只想要风格类浅层能力时则不必。</li>
+            <li>频繁保存检查点并推到远程，让框架能自动重启；Accelerate 数据并行的 BF16 主权重 bug 一度让 loss 走样。</li>
+            <li>偏好优化守则：敢于自己造偏好数据；先用 DPO 做基线，再试 ORPO、KTO、APO（SmolLM3 用 APO-zero，IFEval 提升 15 到 20 点）；学习率约为 SFT 的 1/10；$\beta$ 在 0.01 到 0.5 之间扫；多数算法 1 个 epoch 后过拟合，切分数据迭代训练。</li>
+            <li>朴素的 GRPO 会让 <code>/no_think</code> 模式变成长 CoT；用 DAPO 的超长惩罚控制长度，2.5k 到 3k 最佳，AIME25 从 APO 的 8.49 涨到 19.9。两种模式联合 RL 仍不稳定，这也是 Qwen 开始分开发布 instruct 和 thinking 版的原因之一。</li>
+            <li>RL 之外还有在线 DPO 和在线策略蒸馏：后者在 Qwen3 上以约 1/10 的 GPU 小时超过了 RL，还能缓解灾难性遗忘；半在线 DPO 在数学任务上能追平 GRPO。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>The Smol Training Playbook · Beyond Base Models: Post-Training in 2025 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

@@ -1,0 +1,1612 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>设计模型架构 | Smol Training Playbook 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="02_从小规模消融实验开始.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Smol Training Playbook 目录</a> · 03</span>
+    <span><a href="04_数据配方.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 3 章 · 设计模型架构</h1>
+        <p class="subtitle">注意力、位置编码、稳定性、MoE、混合模型、分词器、优化器、学习率和批大小，每一项怎样用消融实验做决定，SmolLM3 最后选了什么，以及模型该多大、该训多少 token</p>
+        <div class="author-meta">
+            作者：Loubna Ben Allal、Lewis Tunstall、Nouamane Tazi、Elie Bakouch 等（Hugging Face）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://huggingfacetb-smol-training-playbook.hf.space/" target="_blank">The Smol Training Playbook</a> · Designing the Model Architecture（2025 年 10 月发布；本文依据原书英文源文件整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            上一章搭好了消融实验（Ablation，固定其他条件、只改一个变量的小规模对照训练）的框架，这一章开始做定义模型的大决定。模型多大、用哪种注意力、用什么分词器，每一个选择都会给之后的训练和使用带来约束，也带来机会。全章分三块：模型架构本身（注意力、嵌入、位置编码、稳定性、MoE、混合模型、分词器），优化器和训练超参数（AdamW 与 Muon、学习率调度、批大小、超参数的 scaling law），最后是 scaling law 本身：给定算力，参数量和训练数据量怎么分。每一块都配有作者在 1B 模型上做的消融实验结果，以及 SmolLM3 最终的选择。
+        </p>
+        <p>
+            读完你应该能看懂现代 LLM 技术报告里的那张配置表（MHA/GQA/MLA、RoPE/NoPE、WSD、batch size 这些列），知道哪些选择已经有共识、哪些还在争论，也知道怎样用小实验去验证一个架构改动。下一章（第 4 章）讲数据配方。
+        </p>
+        <p>
+            原书开篇先回到第 1 章的“训练罗盘”：做任何技术选择之前，先想清楚为什么训这个模型（why）、它应该是什么样（what）。目标是英文 SOTA？长上下文是不是优先？还是想验证一种新架构？训练循环看起来差不多，但要跑的实验和能接受的取舍完全不同。早点回答这些问题，才能决定时间怎么分给数据和架构，以及在开跑之前各自要创新到什么程度。
+        </p>
+        <p>
+            SmolLM3 的目标是：一个适合端侧（on-device）应用的强模型，多语言表现有竞争力，数学和代码扎实，长上下文处理可靠。前面章节说过，这些目标让团队选了 3B 参数的稠密模型：够大，能力够强；够小，能舒服地放进手机。考虑到边缘设备的内存限制和大约三个月的项目周期，他们选了稠密 Transformer，没有选 MoE 或混合架构。
+        </p>
+        <p>
+            SmolLM2（上一代小模型，有 135M、360M、1.7B 三个版本，只支持英文，上下文 8k）已经有一套在较小规模上可用的英文配方，但放大规模意味着每一项都要重新验证，还要面对多语言、更长上下文这些新问题。目标明确之后，做法也跟着变。比如 SmolLM2 在预训练末尾扩展上下文时遇到困难，所以 SmolLM3 从一开始就在架构上做了准备（用 NoPE 和文档内掩码，后面会讲），尽量提高长上下文扩展成功的机会，结果确实奏效了。
+        </p>
+        <p>
+            原书把这一阶段比作开跑前的战略规划：这些基础选对了，能在真正的训练马拉松里省掉很多昂贵的错误。
+        </p>
+        <ol>
+            <li><a href="#t01">架构选择</a>
+                <ul>
+                    <li><a href="#t01-1">注意力</a></li>
+                    <li><a href="#t01-2">嵌入共享</a></li>
+                    <li><a href="#t01-3">位置编码与长上下文</a></li>
+                    <li><a href="#t01-4">提高训练稳定性</a></li>
+                    <li><a href="#t01-5">其他考虑</a></li>
+                    <li><a href="#t01-6">走向稀疏：MoE</a></li>
+                    <li><a href="#t01-7">旁支：混合模型</a></li>
+                    <li><a href="#t01-8">用不用 MoE：怎样选基础架构</a></li>
+                    <li><a href="#t01-9">分词器</a></li>
+                    <li><a href="#t01-10">SmolLM3 的架构</a></li>
+                    <li><a href="#t01-11">行动准则（架构）</a></li>
+                </ul>
+            </li>
+            <li><a href="#t02">优化器与训练超参数</a>
+                <ul>
+                    <li><a href="#t02-1">优化器：AdamW 及其后来者</a></li>
+                    <li><a href="#t02-2">学习率</a></li>
+                    <li><a href="#t02-3">批大小</a></li>
+                    <li><a href="#t02-4">超参数的 scaling law</a></li>
+                    <li><a href="#t02-5">SmolLM3 的超参数</a></li>
+                    <li><a href="#t02-6">行动准则（超参数）</a></li>
+                </ul>
+            </li>
+            <li><a href="#t03">Scaling law：多少参数，多少数据</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 架构选择</h2>
+        <p><em>原书小节：Architecture Choices</em></p>
+        <p>
+            看看最近的模型，比如 Qwen3、Gemma 3、DeepSeek-V3，它们各有不同，但底座都是 2017 年《Attention Is All You Need》提出的 Transformer。这些年它的基本结构没怎么变，变的是核心组件的细节。不管你做稠密模型、混合专家模型（MoE）还是混合架构，用的都是同一套积木。
+        </p>
+        <p>
+            这些改进来自各个团队在追求更好性能时碰到的具体问题：推理时的内存限制、大规模训练的不稳定、要处理更长的上下文。有些改动已经被广泛采用，比如从多头注意力换成更省算力的分组查询注意力（GQA）；有些还在争论，比如各种位置编码方案。今天的实验，以后会沉淀成新的基线。
+        </p>
+        <p>
+            那么现在的 LLM 实际在用什么？不是所有模型都公开训练细节，但 DeepSeek、OLMo、Kimi、SmolLM 这些系列公开得够多，可以看出大致格局：
+        </p>
+        <div style="overflow-x:auto">
+        <table>
+            <thead>
+                <tr><th>模型</th><th>架构</th><th>参数量</th><th>训练 token</th><th>注意力</th><th>最终上下文</th><th>位置编码</th><th>精度</th><th>初始化（std）</th><th>优化器</th><th>最大 LR</th><th>LR 调度</th><th>Warmup 步数</th><th>Batch size</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>DeepSeek LLM 7B</td><td>Dense</td><td>7B</td><td>2T</td><td>GQA</td><td>4k</td><td>RoPE</td><td>BF16</td><td>0.006</td><td>AdamW</td><td>4.2×10⁻⁴</td><td>Multi-step</td><td>2k</td><td>9.4M</td></tr>
+                <tr><td>DeepSeek LLM 67B</td><td>Dense</td><td>67B</td><td>2T</td><td>GQA</td><td>4k</td><td>RoPE</td><td>BF16</td><td>0.006</td><td>AdamW</td><td>3.2×10⁻⁴</td><td>Multi-step</td><td>2k</td><td>18.9M</td></tr>
+                <tr><td>DeepSeek-V2</td><td>MoE</td><td>236B（激活 21B）</td><td>8.1T</td><td>MLA</td><td>128k</td><td>Partial RoPE</td><td>-</td><td>0.006</td><td>AdamW</td><td>2.4×10⁻⁴</td><td>Multi-step</td><td>2k</td><td>9.4M→37.7M（前 225B token 内逐步增大）</td></tr>
+                <tr><td>DeepSeek-V3</td><td>MoE</td><td>671B（激活 37B）</td><td>14.8T</td><td>MLA</td><td>128k</td><td>Partial RoPE</td><td>FP8</td><td>0.006</td><td>AdamW</td><td>2.2×10⁻⁴</td><td>Multi-step + cosine</td><td>2k</td><td>12.6M→62.9M（前 469B token 内逐步增大）</td></tr>
+                <tr><td>MiniMax-01</td><td>MoE + hybrid</td><td>456B（激活 45.9B）</td><td>11.4T</td><td>Linear attention + GQA</td><td>4M</td><td>Partial RoPE</td><td>-</td><td>Xavier 初始化 + DeepNorm 缩放</td><td>AdamW</td><td>2×10⁻⁴</td><td>Multi-step</td><td>500</td><td>16M→32M→64M→128M</td></tr>
+                <tr><td>Kimi K2</td><td>MoE</td><td>1T（激活 32B）</td><td>15.5T</td><td>MLA</td><td>128k</td><td>Partial RoPE</td><td>BF16</td><td>可能是 0.006</td><td>MuonClip</td><td>2×10⁻⁴</td><td>WSD</td><td>500</td><td>67M</td></tr>
+                <tr><td>OLMo 2 7B</td><td>Dense</td><td>7B</td><td>5T</td><td>MHA</td><td>4k</td><td>RoPE</td><td>BF16</td><td>0.02</td><td>AdamW</td><td>3×10⁻⁴</td><td>Cosine</td><td>2k</td><td>4.2M</td></tr>
+                <tr><td>SmolLM3</td><td>Dense</td><td>3B</td><td>11T</td><td>GQA</td><td>128k</td><td>NoPE</td><td>BF16</td><td>0.02</td><td>AdamW</td><td>2×10⁻⁴</td><td>WSD</td><td>2k</td><td>2.3M</td></tr>
+            </tbody>
+        </table>
+        </div>
+        <p>
+            表里的 MLA、NoPE、WSD 这些词，这一节都会讲到。现在只需要注意它们的多样：注意力机制有 MHA、GQA、MLA，位置编码有 RoPE、NoPE、partial RoPE，学习率调度有 cosine、multi-step、WSD。
+        </p>
+        <p>
+            面对这么长的选项清单，一时不知道从哪下手。作者的做法是一步一步来：先从最简单的基础架构（稠密模型）入手，逐项细看每个架构方面；然后深入 MoE 和混合模型，讨论什么时候值得用它们；最后看分词器（Tokenizer），一个常被忽视、被低估的组件。该用现成的还是自己训？怎样判断一个分词器好不好？
+        </p>
+        <div class="takeaway">
+            <p>
+                消融实验设置：本章大部分架构选择都用上一章的设置来验证：1B 基线模型（沿用 Llama 3.2 1B 架构），在 FineWeb-Edu、FineMath、Python-Edu 混合数据上训练 45B token。每个实验都同时看训练 loss 曲线和下游评测分数。所有 run 的配置都在 <a href="https://huggingface.co/datasets/HuggingFaceTB/training-guide-nanotron-configs/tree/main" target="_blank">HuggingFaceTB/training-guide-nanotron-configs</a>。
+            </p>
+        </div>
+        <p>
+            （原书旁注推荐 Sebastian Raschka 的 <a href="https://sebastianraschka.com/blog/2025/the-big-llm-architecture-comparison.html" target="_blank">“Big LLM Architecture Comparison”</a>，对 2025 年的现代 LLM 架构做了很好的总览。）
+        </p>
+        <p>先从每个 LLM 的核心开始：注意力机制。</p>
+
+        <h3 id="t01-1">注意力</h3>
+        <p><em>原书小节：Attention</em></p>
+        <p>
+            注意力机制是 Transformer 架构里研究最活跃的方向之一。预训练时，算力大头在前馈层（feedforward）；到了推理阶段，尤其是长上下文推理，注意力变成主要瓶颈，它推高计算成本和显存需求，降低吞吐。下面快速过一遍主要的注意力机制，看它们怎样在容量和速度之间取舍。
+        </p>
+
+        <h4>注意力要几个头？</h4>
+        <p>
+            多头注意力（Multi-head attention，MHA）是原始 Transformer 提出的标准注意力。思路是有 $N$ 个注意力头，各自独立做同一种检索：把隐藏状态变换成 query、key、value，用当前的 query 去和各个 key 匹配，找出最相关的 token，再把匹配到的 token 的 value（V）传下去。推理时，过去 token 的 K、V 不需要重算，可以复用；存这些历史 K、V 的内存叫 <strong>KV cache</strong>。上下文窗口变长时，这块缓存会迅速成为推理瓶颈，占掉大量显存。下面估算 Llama 3 架构用 MHA、序列长度 8,192 时的 KV cache 大小 $s_{KV}$：
+        </p>
+        $$
+        \begin{aligned}
+        s_{KV} &= 2 \times n_{bytes} \times seq \times n_{layers} \times n_{heads} \times dim_{heads} \\
+        &= 2 \times 2 \times 8192 \times 32 \times 32 \times 128 = 4 \text{ GB} \textit{ (Llama 3 8B)} \\
+        &= 2 \times 2 \times 8192 \times 80 \times 64 \times 128 = 20 \text{ GB} \textit{ (Llama 3 70B)}
+        \end{aligned}
+        $$
+        <p>
+            （原书旁注：想快速复习 Transformer，可以看 Jay Alammar 那篇有名的 <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank">The Illustrated Transformer</a>。）
+        </p>
+        <p>
+            开头的系数 2 是因为 key 和 value 都要存。可以看到，缓存大小随序列长度线性增长，而上下文窗口这几年是指数增长，已经到了百万 token 级。让缓存更省，推理时扩展上下文就容易得多。
+        </p>
+        <p>
+            自然要问：每个头真的都需要自己的 KV 吗？大概不需要。多查询注意力（Multi-query attention，MQA）和分组查询注意力（Grouped query attention，GQA）都针对这一点。最简单的做法是所有头共享同一组 KV，KV cache 直接除以 $n_{heads}$（对 Llama 3 70B 是 64 倍的缩减）。这就是 MQA，StarCoder 等模型用过它来替代 MHA。不过这样可能会丢掉比我们愿意接受的更多的注意力容量。另一种做法是让一组头共享 KV，比如四个头共用一组 KV 值，这就是 GQA，介于 MQA 和 MHA 之间。
+        </p>
+        <p>
+            更近一些，DeepSeek-V2 提出了多头潜在注意力（Multi-head latent attention，MLA），V3 也在用。它压缩缓存的思路不同：KV 的个数不变，减小的是它们的尺寸，只存一个潜在变量（latent），运行时再解压成 KV。DeepSeek 用这种办法把缓存压到相当于 2.25 组的 GQA，性能还比 MHA 强。要和 RoPE（旋转位置编码，按 token 位置旋转 query 和 key 向量来编码位置，后面位置编码一节细讲）配合，需要一个小改动：额外加一个小的潜在向量。DeepSeek-V2 给主潜在变量选了 $4 \times dim_{head}$，给 RoPE 部分选了 $1/2 \times dim_{head}$，合计 $4.5 \times dim_{head}$。这个潜在向量同时用于 K 和 V，所以开头的系数 2 就去掉了。
+        </p>
+        <p>
+            原书这里有一张交互示意图，画出 MHA、GQA、MQA、MLA 四种机制的结构。图注说：MLA 把 key 和 value 联合压缩进一个潜在向量，推理时 KV cache 显著变小。
+        </p>
+        <p>
+            下表比较这几种注意力机制每个 token 的 KV cache 参数量。要算总内存，再乘上每个参数的字节数（通常是 2）和序列长度。
+        </p>
+        <table>
+            <thead><tr><th>注意力机制</th><th>每 token 的 KV cache 参数量</th></tr></thead>
+            <tbody>
+                <tr><td>MHA</td><td>$2 \times n_{heads} \times n_{layers} \times dim_{head}$</td></tr>
+                <tr><td>MQA</td><td>$2 \times 1 \times n_{layers} \times dim_{head}$</td></tr>
+                <tr><td>GQA</td><td>$2 \times g \times n_{layers} \times dim_{head}$（通常 $g$ = 2、4、8）</td></tr>
+                <tr><td>MLA</td><td>$4.5 \times n_{layers} \times dim_{head}$</td></tr>
+            </tbody>
+        </table>
+        <p>接下来看这些注意力机制在真实实验里表现如何。</p>
+
+        <h4>消融实验：GQA 胜过 MHA</h4>
+        <p>
+            基线模型（<a href="https://huggingface.co/datasets/HuggingFaceTB/ablations-training-configs/blob/main/baseline_config_1B.yaml" target="_blank">配置</a>）用 32 个 query 头、8 个 KV 头，对应 GQA 比例 32 / 8 = 4（有些库把这个叫 GQA ratio：query 组数 = query 头数 / KV 头数）。如果改用 MHA，或者用更少的 KV 头、更高的 GQA 比例，性能会怎样变化？
+        </p>
+        <p>
+            改变 KV 头数会改变参数量，MHA 尤其明显。为了公平，MHA 那组减少了层数，否则会多出一亿以上参数；其余组保持默认的 16 层。比较对象是 MHA、MQA，以及四种 GQA 设置（比例 2、4、8、16）。Nanotron 配置在<a href="https://huggingface.co/datasets/HuggingFaceTB/training-guide-nanotron-configs/tree/main/attention" target="_blank">这里</a>。
+        </p>
+        <table>
+            <thead><tr><th>注意力类型</th><th>Query 头</th><th>KV 头</th><th>层数</th><th>参数量</th><th>备注</th></tr></thead>
+            <tbody>
+                <tr><td>MQA</td><td>32</td><td>1</td><td>16</td><td>1.21B</td><td></td></tr>
+                <tr><td>GQA（ratio 16）</td><td>32</td><td>2</td><td>16</td><td>1.21B</td><td></td></tr>
+                <tr><td>GQA（ratio 8）</td><td>32</td><td>4</td><td>16</td><td>1.22B</td><td>原表标为基线</td></tr>
+                <tr><td>GQA（ratio 4）</td><td>32</td><td>8</td><td>16</td><td>1.24B</td><td></td></tr>
+                <tr><td>GQA（ratio 2）</td><td>32</td><td>16</td><td>15</td><td>1.22B</td><td>减少了层数</td></tr>
+                <tr><td>MHA</td><td>32</td><td>32</td><td>14</td><td>1.20B</td><td>减少了层数</td></tr>
+                <tr><td>GQA（ratio 2）</td><td>32</td><td>16</td><td>16</td><td>1.27B</td><td>太大，没做消融</td></tr>
+                <tr><td>MHA</td><td>32</td><td>32</td><td>16</td><td>1.34B</td><td>太大，没做消融</td></tr>
+            </tbody>
+        </table>
+        <p>
+            （整理者注：原文正文说基线是 8 个 KV 头、比例 4，表格却把 4 个 KV 头、比例 8 的那行标为基线，交互图数据里基线也写作“GQA 8 groups”。原书在这里的“比例”和“组数”用法不统一，这里照原表转录。）
+        </p>
+        <p>
+            结果是：MQA 和 16 组的 GQA（分别只有 1 个和 2 个 KV 头）明显不如 MHA；2、4、8 组的 GQA 大致和 MHA 持平。据原文交互图数据，45B token 训完时的情况如下（loss 取末尾若干点平均，评测分数取最后几个检查点平均）：
+        </p>
+        <table>
+            <thead><tr><th>Run</th><th>训练 loss</th><th>HellaSwag</th><th>MMLU</th><th>ARC</th><th>PIQA</th><th>OpenBookQA</th><th>WinoGrande</th></tr></thead>
+            <tbody>
+                <tr><td>MHA</td><td>2.201</td><td>0.497</td><td>0.328</td><td>0.474</td><td>0.711</td><td>0.321</td><td>0.499</td></tr>
+                <tr><td>GQA 2 groups</td><td>2.199</td><td>0.500</td><td>0.331</td><td>0.482</td><td>0.713</td><td>0.318</td><td>0.500</td></tr>
+                <tr><td>GQA 4 groups</td><td>2.194</td><td>0.502</td><td>0.332</td><td>0.485</td><td>0.711</td><td>0.321</td><td>0.495</td></tr>
+                <tr><td>GQA 8 groups（baseline）</td><td>2.196</td><td>0.496</td><td>0.328</td><td>0.483</td><td>0.708</td><td>0.317</td><td>0.505</td></tr>
+                <tr><td>GQA 16 groups</td><td>2.226</td><td>0.485</td><td>0.322</td><td>0.470</td><td>0.706</td><td>0.312</td><td>0.493</td></tr>
+                <tr><td>MQA</td><td>2.235</td><td>0.484</td><td>0.325</td><td>0.471</td><td>0.701</td><td>0.326</td><td>0.501</td></tr>
+            </tbody>
+        </table>
+        <p>
+            loss 曲线和下游评测给出的结论一致。HellaSwag、MMLU、ARC 上看得很清楚，OpenBookQA 和 WinoGrande 噪声大一些。
+        </p>
+        <p>
+            由此看，GQA 是 MHA 的可靠替代：性能保住了，推理更高效。有些近期模型用 MLA 进一步压缩 KV cache，但它还没那么普及。作者没有消融 MLA，因为做实验时 Nanotron 还没实现它。SmolLM3 用的是 4 组的 GQA。
+        </p>
+        <p>除了注意力结构本身，训练时用什么样的注意力模式也有影响。</p>
+
+        <h4>文档掩码</h4>
+        <p>
+            怎样在训练序列上施加注意力，既影响计算效率，也影响模型性能。这就涉及文档掩码（Document masking），以及更大的问题：数据加载器里训练样本怎样组织。
+        </p>
+        <p>
+            预训练用固定的序列长度，但文档长短不一。一篇论文可能有 10k token，一段短代码可能只有几百。怎样把变长文档塞进定长序列？把短文档补齐（padding）到目标长度，会把算力浪费在无意义的填充 token 上。实际做法是打包（packing）：把文档打乱，用序列结束（EOS）token 拼接起来，再切成和序列长度一样的块。（另一种做法是在文档开头加序列开始 BOS token，这时模型或分词器配置里会有不同的 <code>bos_token_id</code>。）
+        </p>
+        <p>实际看起来是这样：</p>
+<pre><code>File 1: "Recipe for granola bars..." (400 tokens) &lt;EOS&gt;
+File 2: "def hello_world()..." (300 tokens) &lt;EOS&gt;
+File 3: "Climate change impacts..." (1000 tokens) &lt;EOS&gt;
+File 4: "import numpy as np..." (3000 tokens) &lt;EOS&gt;
+...
+
+After concatenation and chunking into 4k sequences:
+Sequence 1: [File 1] + [File 2] + [File 3] + [partial File 4]
+Sequence 2: [rest of File 4] + [File 5] + [File 6] + ...</code></pre>
+        <p>
+            如果一个文件够长，一条训练序列可能只装它一个；但大多数文件比 4k 短，所以序列一般是几个随机文件拼在一起。
+        </p>
+        <p>
+            用标准的因果掩码（causal masking），每个 token 可以看到打包序列里它前面的所有 token。上面的例子里，文件 4 的 Python 代码里的 token 能看到格兰诺拉燕麦棒的菜谱、那个函数定义和气候变化文章。
+        </p>
+        <p>
+            一个典型的 4k 预训练上下文里装了什么？Harm de Vries 的一篇<a href="https://www.harmdevries.com/post/context-length/" target="_blank">分析</a>发现，Common Crawl 和 GitHub 数据集里约 80–90% 的文件短于 2k token。原书用交互图统计了本书用到的较新数据集的文档长度分布，据原文交互图数据：
+        </p>
+        <table>
+            <thead><tr><th>文档长度</th><th>FineWeb-Edu</th><th>DCLM</th><th>FineMath</th><th>Python-Edu</th></tr></thead>
+            <tbody>
+                <tr><td>0–1k token</td><td>69.1%</td><td>67.7%</td><td>60.1%</td><td>91.6%</td></tr>
+                <tr><td>1–2k</td><td>21.6%</td><td>19.2%</td><td>22.6%</td><td>5.9%</td></tr>
+                <tr><td>2–3k</td><td>4.9%</td><td>5.9%</td><td>7.5%</td><td>1.4%</td></tr>
+                <tr><td>3–4k</td><td>1.8%</td><td>2.5%</td><td>3.4%</td><td>0.5%</td></tr>
+                <tr><td>16k 以上</td><td>0.17%</td><td>0.41%</td><td>0.53%</td><td>0.03%</td></tr>
+            </tbody>
+        </table>
+        <p>
+            FineWeb-Edu、DCLM、FineMath、Python-Edu 里也都有八成以上的文档短于 2k token。这意味着用 2k 或 4k 的训练序列加标准因果掩码，绝大多数 token 都在花算力关注和自己无关、只是被打包在一起的文档。
+        </p>
+        <div class="takeaway">
+            <p>
+                PDF 里的长文档：网页数据集大多是短文档，基于 PDF 的数据集内容长得多。<a href="https://huggingface.co/datasets/HuggingFaceFW/fineweb-2" target="_blank">FinePDFs</a> 的文档平均是网页文本的 2 倍长，把它和 FineWeb-Edu、DCLM 混在一起能提升性能。
+            </p>
+        </div>
+        <p>
+            除了算力浪费，Zhao 等人（2024）发现这种做法会引入无关内容的噪声，降低性能。他们建议用文档内掩码（intra-document masking）：修改注意力掩码，让 token 只能看到同一文档里在它前面的 token。原书用一张交互图对比了两种掩码：标准因果掩码是一个完整的下三角；文档内掩码则是沿对角线的若干小三角块，每块对应一个文档。
+        </p>
+        <p>
+            SkyLadder 论文也发现了文档内掩码的好处，但给了不同的解释：他们发现较短的上下文长度更适合训练，而文档内掩码实际上降低了平均上下文长度。
+        </p>
+        <figure>
+            <img src="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook/resolve/main/app/src/content/assets/image/image_27c1384e-bcac-807c-807b-fac08be1d884.png" alt="SkyLadder 的几组实验图">
+            <figcaption>图：SkyLadder 的几项发现。(a) 预训练时较短的上下文往往表现更好（验证困惑度更低）；(b) 文档内掩码（IntraDoc）的困惑度低于随机打包（Random）和语义分组（BM25）；(c) 即使没有位置编码，短上下文的优势依然存在；(d) IntraDoc 让有效上下文长度的分布偏向更短（引自原书）</figcaption>
+        </figure>
+        <p>
+            Meta 训练 Llama 3 时也用了文档内掩码。他们发现在短上下文预训练阶段影响有限，但在长上下文扩展阶段好处显著，因为那时注意力开销更大。此外，ProLong 论文显示，在继续预训练中用文档掩码扩展 Llama 3 8B 的上下文，对长上下文和短上下文基准都有好处。
+        </p>
+        <p>
+            作者在 1B 基线上做了消融，看文档掩码会不会影响短上下文性能（<a href="https://huggingface.co/datasets/HuggingFaceTB/training-guide-nanotron-configs/blob/main/doc_masking/doc_masking.yaml" target="_blank">配置</a>）。在 Nanotron 里打开文档掩码，只要把 <code>_use_doc_masking</code> 设为 <code>true</code>：
+        </p>
+<pre><code>model_config:
+  _attn_implementation: flash_attention_2
+  _fused_rms_norm: true
+  _fused_rotary_emb: true
+- _use_doc_masking: false
++ _use_doc_masking: true</code></pre>
+        <p>
+            结果是 loss 曲线和下游评测分数都和标准因果掩码一样。据原文交互图数据：不用文档掩码（基线）loss 约 2.199，用文档掩码约 2.196；HellaSwag 0.496 对 0.493，MMLU 0.328 对 0.326，PIQA 0.708 对 0.716。
+        </p>
+        <p>
+            和 Llama 3 一样，作者没看到对短上下文任务的明显影响，只有 PIQA 小幅提升。但扩展到长序列时，文档掩码对加速训练很重要，SmolLM3 的长上下文扩展要从 4k 拉到 64k（第 5 章“训练马拉松”详述），尤其用得上。所以 SmolLM3 整个训练过程都开着它。
+        </p>
+        <p>注意力怎样处理序列就讲到这里。下面看 Transformer 里另一大块参数：嵌入层。</p>
+
+        <h3 id="t01-2">嵌入共享</h3>
+        <p><em>原书小节：Embedding Sharing</em></p>
+        <p>
+            看基线消融模型的<a href="https://huggingface.co/datasets/HuggingFaceTB/training-guide-nanotron-configs/blob/main/baseline_config_1B.yaml" target="_blank">配置</a>，和标准 Transformer 不同的一点是开了嵌入共享（Embedding sharing，也叫绑定嵌入 tied embeddings，输入嵌入矩阵和输出层共用一份权重），对应的开关是 <code>tie_word_embeddings</code>。
+        </p>
+        <p>
+            LLM 有两个嵌入组件：输入嵌入，是一张 token 到向量的查找表（大小 <em>vocab_size</em> × <em>hidden_dim</em>）；输出嵌入，是最后那层把隐藏状态映射到词表 logits 的线性层（<em>hidden_dim</em> × <em>vocab_size</em>）。经典做法里两者是独立矩阵，嵌入参数一共 2 × <em>vocab_size</em> × <em>hidden_dim</em>。所以在小模型里，尤其词表很大时，嵌入能占总参数的很大一块。把输入嵌入在输出端复用，就成了小模型的自然优化。
+        </p>
+        <p>
+            原书这里有一个嵌入参数计算器。大模型一般不用这个技巧，因为嵌入在它们的参数预算里占比小。原文举例：不共享时，嵌入只占 Llama 3.2 8B（整理者注：应为 Llama 3.1 8B）参数的 13%，占 Llama 3.1 70B 的 3%，并配了饼图。据原文交互图里的配置推算，各模型的参数构成大致如下：
+        </p>
+        <table>
+            <thead><tr><th>模型</th><th>嵌入是否共享</th><th>总参数</th><th>嵌入占比</th><th>注意力占比</th><th>FFN 占比</th></tr></thead>
+            <tbody>
+                <tr><td>Llama 3.2 1B</td><td>共享</td><td>1.24B</td><td>21.3%</td><td>13.6%</td><td>65.2%</td></tr>
+                <tr><td>SmolLM3 3B</td><td>共享</td><td>3.08B</td><td>8.5%</td><td>12.3%</td><td>79.2%</td></tr>
+                <tr><td>Llama 3.1 8B</td><td>不共享</td><td>8.03B</td><td>13.1%</td><td>16.7%</td><td>70.2%</td></tr>
+                <tr><td>Llama 3.1 70B</td><td>不共享</td><td>70.55B</td><td>3.0%</td><td>17.1%</td><td>79.9%</td></tr>
+            </tbody>
+        </table>
+
+        <h4>消融实验：共享嵌入的模型追平更大的不共享模型</h4>
+        <p>
+            先参考 <a href="https://arxiv.org/abs/2402.14905" target="_blank">MobileLLM</a> 在 125M 规模上做的详细消融：嵌入共享让参数减少 11.8%，准确率几乎不降。
+        </p>
+        <p>
+            不共享嵌入会让参数量从 1.2B 涨到 1.46B。为了公平，作者另训了一个不共享嵌入、但层数更少的模型，使参数量和 1.2B 基线持平。然后比较两个 1.2B 模型：共享嵌入的基线（16 层）和不共享的 12 层版本；再加一个不共享、层数和基线一样的 1.46B 模型作参照（<a href="https://huggingface.co/datasets/HuggingFaceTB/training-guide-nanotron-configs/blob/main/baseline_config_1B.yaml" target="_blank">配置</a>）。据原文交互图数据：
+        </p>
+        <table>
+            <thead><tr><th>Run</th><th>训练 loss</th><th>HellaSwag</th><th>MMLU</th><th>ARC</th><th>PIQA</th><th>OpenBookQA</th><th>WinoGrande</th></tr></thead>
+            <tbody>
+                <tr><td>共享嵌入，16 层（基线，1.2B）</td><td>2.196</td><td>0.496</td><td>0.328</td><td>0.483</td><td>0.708</td><td>0.317</td><td>0.505</td></tr>
+                <tr><td>不共享，16 层（1.46B）</td><td>2.211</td><td>0.492</td><td>0.327</td><td>0.478</td><td>0.700</td><td>0.314</td><td>0.517</td></tr>
+                <tr><td>不共享，12 层（1.2B）</td><td>2.245</td><td>0.475</td><td>0.316</td><td>0.460</td><td>0.707</td><td>0.323</td><td>0.504</td></tr>
+            </tbody>
+        </table>
+        <p>
+            loss 和评测都显示：共享嵌入的 1.2B 基线参数少 18%，除了 WinoGrande 之外在所有基准上都和 1.46B 的不共享版本相当。不共享、层数减到 12 的 1.2B 模型两者都不如，loss 更高，下游分数更低。这说明在同样的参数预算下，加深网络比解绑嵌入收益更大。
+        </p>
+        <p>
+            据此，SmolLM3-3B 保留了共享嵌入。
+        </p>
+        <p>
+            不过嵌入本身不包含 token 的顺序信息，这是位置编码的任务。下一节看位置编码怎样演变：从标准 RoPE 到 NoPE（No Positional Embedding，不加位置编码）这类更适合长上下文的新做法。
+        </p>
+
+        <h3 id="t01-3">位置编码与长上下文</h3>
+        <p><em>原书小节：Positional Encoding and Long Context</em></p>
+        <p>
+            Transformer 处理文本时有个根本难题：它天然不知道词序，因为它通过并行的注意力运算一次性吃进整个序列。这让训练高效，但也带来问题：没有显式的位置信息，“Adam beats Muon”和“Muon beats Adam”在模型看来差不多。
+        </p>
+        <p>
+            解决办法是位置嵌入（Positional embeddings）：用数学编码给每个 token 一个序列中的唯一“地址”。随着上下文从早期 BERT 的 512 token 推到如今的数百万 token，位置编码的选择对性能和计算效率越来越要紧。
+        </p>
+
+        <h4>位置编码的演变</h4>
+        <p>
+            早期 Transformer 用简单的绝对位置嵌入（absolute positional embeddings），基本就是一张可学习的查找表，把每个位置（1、2、3……）映射成一个向量，加到 token 嵌入上。短序列上效果不错，但有个大限制：模型的最大输入长度被锁死在训练时的最大长度，没法直接泛化到更长的序列。
+        </p>
+        <p>
+            于是领域转向相对位置嵌入（relative positional embeddings），它刻画 token 之间的距离，不看绝对位置。这在直觉上说得通：两个词相隔 3 个位置，比它们在 (5,8) 还是 (105,108) 更重要。（原书旁注推荐 HF 的博客 <a href="https://huggingface.co/blog/designing-positional-encoding" target="_blank">Designing positional encoding</a>，一步步从最基础的位置表示讲到旋转编码。）
+        </p>
+        <p>
+            其中 ALiBi（Attention with Linear Biases）按 token 距离修改注意力分数：两个 token 离得越远，注意力就被一个简单的线性偏置罚得越多。labml.ai 上有 ALiBi 的详细实现。
+        </p>
+        <p>不过，最近的大语言模型里占主导的是 RoPE。</p>
+
+        <h4>RoPE：把位置当作旋转</h4>
+        <p>
+            RoPE 的核心想法是把位置信息编码成高维空间里的旋转角度。它按 query 和 key 向量的绝对位置把它们旋转一个角度，不往 token 嵌入上加位置向量。
+        </p>
+        <p>
+            直观地说，把嵌入里每两个维度看成一个圆上的坐标，按一个角度旋转。这个角度取决于：
+        </p>
+        <ul>
+            <li>token 在序列中的位置；</li>
+            <li>当前是哪一对维度（不同的维度对以不同频率旋转，频率是某个基准频率 base 的指数）。</li>
+        </ul>
+<pre><code>import torch
+
+def apply_rope_simplified(x, pos, dim=64, base=10000):
+    """
+    Rotary Positional Embedding (RoPE)
+
+    Idea:
+    - Each token has a position index p (0, 1, 2, ...).
+    - Each pair of vector dimensions has an index k (0 .. dim/2 - 1).
+    - RoPE rotates every pair [x[2k], x[2k+1]] by an angle θ_{p,k}.
+
+    Formula:
+      θ_{p,k} = p * base^(-k / (dim/2))
+
+    - Small k (early dimension pairs) → slow oscillations → capture long-range info.
+    - Large k (later dimension pairs) → fast oscillations → capture fine detail.
+    """
+    rotated = []
+    for i in range(0, dim, 2):
+        k = i // 2  # index of this dimension pair
+
+        # Frequency term: higher k → faster oscillation
+        inv_freq = 1.0 / (base ** (k / (dim // 2)))
+        theta = pos * inv_freq  # rotation angle for position p and pair k
+
+        cos_t = torch.cos(torch.tensor(theta, dtype=x.dtype, device=x.device))
+        sin_t = torch.sin(torch.tensor(theta, dtype=x.dtype, device=x.device))
+
+        x1, x2 = x[i], x[i+1]
+
+        # Apply 2D rotation
+        rotated.extend([x1 * cos_t - x2 * sin_t,
+                        x1 * sin_t + x2 * cos_t])
+
+    return torch.stack(rotated)
+
+
+# Q, K: [batch, heads, seq, d_head]
+Q = torch.randn(1, 2, 4, 8)
+K = torch.randn(1, 2, 4, 8)
+
+# 👉 apply RoPE to Q and K *before* the dot product
+Q_rope = torch.stack([apply_rope(Q[0,0,p], p) for p in range(Q.size(2))])
+K_rope = torch.stack([apply_rope(K[0,0,p], p) for p in range(K.size(2))])
+
+scores = (Q_rope @ K_rope.T) / math.sqrt(Q.size(-1))
+attn_weights = torch.softmax(scores, dim=-1)</code></pre>
+        <p>
+            （整理者注：原文代码是示意，下半段调用的 <code>apply_rope</code> 指上面定义的 <code>apply_rope_simplified</code>，也没有 <code>import math</code>，直接运行需要补上。）
+        </p>
+        <p>
+            用一个具体例子拆开看。取短语“The quick brown fox”里的“fox”。在 1B 基线模型里，每个注意力头的 query/key 向量是 64 维。RoPE 把它分成 32 对：(x₁, x₂)、(x₃, x₄)、(x₅, x₆)……之所以按对处理，是因为要在二维平面上绕圆旋转。只看第一对 (x₁, x₂)。“fox”在短语里位置是 3，所以 RoPE 把第一对维度旋转：
+        </p>
+<pre><code>rotation_angle = position × θ₀
+                = 3 × (1/10000^(0/32))
+                = 3 × 1.0
+                = 3.0 radians
+                = 172° degrees</code></pre>
+        <p>
+            基准频率是 10,000，但第一对维度（$k=0$）的指数是 0，所以基准频率不影响结果（任何数的 0 次方都是 1）。原书在这里配了一个 RoPE 旋转的交互演示。
+        </p>
+        <p>
+            有意思的地方在两个 token 通过注意力交互的时候。它们旋转后的表示做点积，结果通过两者旋转角之差直接编码了相对距离（$m$ 和 $n$ 是两个 token 的位置）：
+        </p>
+<pre><code>dot_product(RoPE(x, m), RoPE(y, n)) = Σₖ [xₖ * yₖ * cos((m-n) * θₖ)]</code></pre>
+        <p>
+            注意力模式只取决于 $m-n$，所以相隔 5 个位置的两个 token，不管在序列的哪个绝对位置，角度关系都一样。模型学到的是基于距离的模式，在序列任何位置都适用，也能外推到更长的序列。
+        </p>
+
+        <h4>设置 RoPE 频率</h4>
+        <p>
+            实践中，大多数 LLM 预训练从较短的上下文（2–4k token）开始，RoPE 基准频率用 10k 或 50k 这类值。从一开始就用很长的序列训练太贵：注意力随序列长度平方增长，而且长上下文数据（超过 4k 的样本）本来就少，前面讲文档掩码时已经看到了。研究还表明这样会损害短上下文性能（SkyLadder）。模型一开始通常先学词与词之间的短距离关联，长序列帮助不大。常见做法是大部分预训练用短序列，然后做继续预训练，或者把最后几千亿 token 用在长序列上。问题是，序列变长后，旋转角度和 token 位置成正比，也跟着变大，这会让远处 token 的注意力分数衰减得太快：
+        </p>
+<pre><code>θ = position x 1 / (base^(k/(dim/2)))</code></pre>
+        <p>
+            解决办法是随着序列变长调大基准频率，防止这种衰减，常用方法有 ABF 和 YaRN。
+        </p>
+        <p>
+            RoPE ABF（RoPE with Adjusted Base Frequency，调整基准频率的 RoPE）通过增大 RoPE 公式里的基准频率来解决长上下文的注意力衰减。这样一来，相邻位置之间的旋转角变小，远处 token 的注意力分数就不会掉得太快。ABF 可以一步到位（直接调高频率），也可以分多阶段（随上下文增长逐步调高）。它实现简单，让嵌入向量的分布粒度更细，模型更容易区分远处的位置。
+        </p>
+        <p>
+            ABF 简单有效，但它对所有维度统一缩放，在极长上下文下未必最优。YaRN（Yet another RoPE extensioN）更精细：它用一个斜坡（ramp）或缩放函数，对 RoPE 的不同维度不均匀地插值频率，不同频率分量用不同的缩放系数，以优化扩展后的上下文窗口。它还带有动态注意力缩放、注意力 logits 温度调整等附加技巧，帮助在很大的上下文长度下保持性能。YaRN 让“短训练、长测试”的策略变得高效，外推所需的 token 和微调都更少。它比 ABF 复杂，但在极长上下文上通常实测更好，缩放更平滑，能缓解注意力的灾难性丢失。它也可以只在推理时使用，不做任何微调。
+        </p>
+        <p>
+            这些频率调整方法都减缓了注意力分数的衰减，保住远处 token 的贡献。比如 Qwen3 训练时，把序列长度从 4k 扩到 32k 的同时，用 ABF 把频率从 10k 调到 1M；之后再用 YaRN 推到 131k（4 倍外推）。最优值目前没有强共识，通常值得在上下文扩展阶段试几种 RoPE 取值，看哪种在你的设置和评测基准上最好。
+        </p>
+        <p>
+            今天的主流模型大多用 RoPE：Llama、Qwen、Gemma 等等。这项技术在不同规模和架构（稠密、MoE、混合）上都被证明稳健。
+        </p>
+
+        <h4>混合位置编码</h4>
+        <p>
+            不过，当模型推向越来越大的上下文（如 Qwen 的百万 token 版本、Llama 4），RoPE 也开始碰到性能问题。在比大海捞针（Needle in a Haystack，NIAH，在长文本里藏一句话让模型找出来）更难的长上下文基准上，比如 RULER 和 HELMET，单靠在长上下文扩展时调高 RoPE 频率的做法有局限。于是出现了一些新技术。
+        </p>
+        <p>
+            本节开头说 Transformer 需要位置信息才能理解顺序，但最近的研究挑战了这个假设：如果根本不需要显式位置编码呢？
+        </p>
+        <p>
+            NoPE 训练 Transformer 时不加任何显式位置编码，让模型通过因果掩码和注意力模式隐式地学到位置信息。作者显示这种方法的长度泛化比 ALiBi 和 RoPE 更好。没有需要外推到训练长度之外的显式位置编码，NoPE 自然能处理更长的上下文。但实际中，NoPE 模型在短上下文的推理和知识任务上往往比 RoPE 模型弱（RNoPE 论文）。这说明显式位置编码虽然可能限制外推，但对训练长度以内的任务提供了有用的归纳偏置。
+        </p>
+        <p>
+            鉴于这些取舍，RNoPE 论文的作者提出可以把不同位置编码策略组合起来。他们提出的混合方法 RNoPE 在模型各层之间交替使用 RoPE 和 NoPE：RoPE 层提供显式位置信息，处理带近因偏好的局部上下文；NoPE 层改善长距离的信息检索。Llama 4、Command A 和 SmolLM3 最近都用了这种技术。
+        </p>
+        <div class="takeaway">
+            <p>
+                命名约定：为了简单，本书后文把 RNoPE 也叫“NoPE”。讨论长上下文模型时，人们也常用“NoPE”指 RNoPE。
+            </p>
+        </div>
+
+        <h4>消融实验：NoPE 在短上下文文档上追平 RoPE</h4>
+        <p>
+            来测试混合 NoPE 方案。比较三组：纯 RoPE 的 1B 基线；每四层去掉一次位置编码的 NoPE 变体；NoPE 加文档掩码，用来测试两种技术的相互作用。核心问题是：能不能在保住短上下文性能的同时，获得长上下文能力？据原文交互图数据：
+        </p>
+        <table>
+            <thead><tr><th>Run</th><th>训练 loss</th><th>HellaSwag</th><th>MMLU</th><th>ARC</th><th>PIQA</th><th>OpenBookQA</th><th>WinoGrande</th></tr></thead>
+            <tbody>
+                <tr><td>RoPE（基线）</td><td>2.199</td><td>0.496</td><td>0.328</td><td>0.483</td><td>0.708</td><td>0.317</td><td>0.505</td></tr>
+                <tr><td>NoPE</td><td>2.200</td><td>0.494</td><td>0.325</td><td>0.469</td><td>0.704</td><td>0.304</td><td>0.507</td></tr>
+                <tr><td>NoPE + 文档掩码</td><td>2.193</td><td>0.496</td><td>0.325</td><td>0.466</td><td>0.701</td><td>0.321</td><td>0.504</td></tr>
+            </tbody>
+        </table>
+        <p>
+            三组的 loss 和评测结果相近，说明 NoPE 保住了短上下文能力，同时为更好的长上下文处理打下基础。据此，SmolLM3 采用了 NoPE 加文档掩码的组合。
+        </p>
+        <p>
+            另一个互补的思路是只对模型维度的一部分施加 RoPE。RNoPE 在整层之间交替 RoPE 和 NoPE，部分 RoPE（partial RoPE）则在同一层内混合两者。GLM-4.5、MiniMax-01 等近期模型用了这个策略，更早的 GPT-J 里也有。所有用 MLA 的模型也都会用 partial RoPE，因为要让推理成本合理，它是必需的。
+        </p>
+        <div class="takeaway">
+            <p>技术解释：为什么 MLA 离不开 partial RoPE。</p>
+            <p>
+                MLA 靠“投影吸收”（projection absorption）让推理高效：它缓存的不再是每个头的 key $k_i^{(h)}$，换成一个小的共享潜在向量 $c_i = x_i W_c \in \mathbb{R}^{d_c}$，并把每个头的 query/key 映射合并，让每个分数都算得便宜。设 $q_t^{(h)} = x_t W_q^{(h)}$、$k_i^{(h)} = c_i E^{(h)}$，定义 $U^{(h)} = W_q^{(h)} E^{(h)}$，得到：
+            </p>
+            $$
+            s_{t,i}^{(h)} = \tfrac{1}{\sqrt{d_k}}\,\big(q_t^{(h)}\big)^\top k_i^{(h)} = \tfrac{1}{\sqrt{d_k}}\,\big(x_t U^{(h)}\big)^\top c_i
+            $$
+            <p>
+                于是用 $\tilde q_t^{(h)} = x_t U^{(h)} \in \mathbb{R}^{d_c}$ 和很小的缓存 $c_i$ 计算即可，不需要存每个头的 $k$。RoPE 会破坏这一点，因为它在两个映射之间插入了一个依赖维度对的旋转。全维度 RoPE 时：
+            </p>
+            $$
+            s_{t,i}^{(h)} = \tfrac{1}{\sqrt{d_k}}\,\big(x_t W_q^{(h)}\big)^\top \underbrace{R_{t-i}}_{\text{depends on } t-i}\,\big(c_i E^{(h)}\big)
+            $$
+            <p>
+                所以没法把 $W_q^{(h)}$ 和 $E^{(h)}$ 预先合并成固定的 $U^{(h)}$。partial RoPE 的解决办法是把头的维度拆开，$d_k = d_{\text{nope}} + d_{\text{rope}}$：大块不旋转，照旧吸收，即 $(x_t U_{\text{nope}}^{(h)})^\top c_i$；只在一小块上施加 RoPE。
+            </p>
+        </div>
+
+        <h4>为长上下文限制注意力范围</h4>
+        <p>
+            到这里讲的都是怎样为长上下文处理位置信息：启用 RoPE、关掉它（NoPE）、只在部分层用（RNoPE）或只在部分隐藏维度上用（partial RoPE）、调整它的频率（ABF、YaRN）。这些方法改的是模型怎样编码位置，以处理比训练时更长的序列。还有一种互补策略：位置编码不动，直接限制哪些 token 之间可以互相关注。
+        </p>
+        <p>
+            为什么这有用？设想一个用 8 token 序列预训练的模型，推理时要处理 16 个 token，超过了训练长度。位置 8–15 对模型的位置编码来说是分布外的。RoPE ABF 这类方法通过调整位置频率来应对；注意力范围类方法换了个思路：有策略地限制哪些 token 能互相看到，让注意力模式保持在模型熟悉的范围内，同时仍然处理完整序列。这还能同时降低计算成本和内存需求。
+        </p>
+        <p>
+            原书用一张交互图对比了在训练窗口为 8 时处理 16 token 序列的五种策略（完整因果注意力和下面四种）。
+        </p>
+        <p>
+            分块注意力（Chunked attention）把序列切成固定大小的块，token 只能在本块内关注。例子里 16 个 token 分成两个 8-token 块（0–7 和 8–15），token 8 到 15 完全看不到前一块。这形成了在块边界处重置的孤立注意力窗口。Llama 4 在 RoPE 层（四层里的三层）用 8,192 token 的分块注意力，NoPE 层保留完整上下文。这样限制了每层的 KV cache 大小，降低内存需求，但一个块里的 token 看不到前面的块，可能影响某些长上下文任务。
+        </p>
+        <p>
+            滑动窗口注意力（Sliding window attention，SWA）由 Mistral 7B 推广开来，基于“最近的 token 最相关”的直觉。它没有硬性的块边界，每个 token 只关注最近的 $N$ 个 token。图中每个 token 最多往回看 8 个位置，形成一个在序列上连续滑动的窗口：token 15 能看位置 8 到 15，token 10 能看位置 3 到 10。窗口向前滑动，在整个序列上保持局部上下文，没有分块造成的人为隔断。Gemma 3 在交替的层里组合 SWA 和完整注意力，和混合位置编码混用不同策略的思路类似。
+        </p>
+        <p>
+            双块注意力（Dual Chunk Attention，DCA）是一种无需训练的方法，它扩展了分块注意力，同时保留跨块的信息流动。例子里块大小 $s=4$，把 16 个 token 分成 4 块（对角线上 4 个 4×4 方块）。DCA 结合了三种机制：
+        </p>
+        <ol>
+            <li>块内注意力：token 在本块内正常关注（对角线图案）；</li>
+            <li>块间注意力：query 用位置索引 $c-1=7$ 去关注前面的块，让相对位置封顶在 7；</li>
+            <li>相邻块注意力：用局部窗口 $w=3$ 保持相邻块之间的局部性。</li>
+        </ol>
+        <p>
+            这样所有相对位置都落在训练分布内（0 到 7），跨块边界的过渡也平滑。DCA 让 Qwen2.5 这类模型在推理时支持超长上下文窗口（最多 100 万 token），不需要在百万 token 序列上继续训练。
+        </p>
+        <div class="takeaway">
+            <p>注意力汇聚点（Attention sinks）</p>
+            <p>
+                长上下文的 Transformer 里有个有趣现象：模型会给序列开头的几个 token 分配异常高的注意力分数，即使它们在语义上并不重要。这些开头 token 起到稳定注意力分布的作用，成为注意力可以堆积的“汇聚点”（<a href="https://arxiv.org/abs/2309.17453" target="_blank">Xiao et al., 2024</a>）。
+            </p>
+            <p>
+                实用的结论是：当上下文超出缓存大小时，只保留开头几个 token 的 KV cache，再加上最近 token 的滑动窗口，性能基本能保住。这个简单改动让模型无需微调、不降性能就能处理长得多的序列。
+            </p>
+            <p>
+                现代实现用不同方式利用 attention sink。原始研究建议预训练时加一个专门的占位 token，作为显式的汇聚点。最近 gpt-oss 这样的模型把 attention sink 实现为每个头一个可学习的偏置 logit（learned per-head bias logits），附加在注意力分数上，并不是输入序列里真实的 token。这样不用改分词后的输入，也能达到同样的稳定效果。
+            </p>
+            <p>
+                gpt-oss 还在注意力层里用了偏置项（bias units），这是 GPT-2 之后很少见的设计。这些偏置一般被认为对标准注意力运算是多余的（Dehghani 等人的<a href="https://arxiv.org/pdf/2302.08626" target="_blank">实验</a>显示对测试 loss 影响很小），但它们可以承担实现 attention sink 的专门功能。不管是用特殊 token、可学习偏置还是每头 logit 实现，attention sink 都在长上下文场景下给注意力分布一个稳定的“锚”，即使上下文任意变长，模型也能存下关于整个序列的通用信息。
+            </p>
+        </div>
+        <p>
+            注意力的核心组件到此讲完：平衡内存和计算的各种头配置（MHA、GQA、MLA），帮模型理解 token 顺序的位置编码策略（RoPE、NoPE 及其变体），让长上下文可行的注意力范围技术（滑动窗口、分块、attention sink）。也讨论了嵌入层该怎样配置。这些架构选择决定了模型怎样处理和表示序列。
+        </p>
+        <p>
+            但架构对了只完成了一半。设计得再好的模型也可能训练不稳定，规模大时尤其如此。下面看几种帮助训练保持稳定的技术。
+        </p>
+
+        <h3 id="t01-4">提高训练稳定性</h3>
+        <p><em>原书小节：Improving Stability</em></p>
+        <p>
+            接下来看 LLM 预训练最大的挑战之一：不稳定。它通常表现为 loss 尖峰（loss spike），也就是训练 loss 突然跳高，规模越大越常见。
+        </p>
+        <p>
+            第 5 章“训练马拉松”会深入讨论各类尖峰和处理办法（浮点精度、优化器、学习率等），但有些架构和训练技巧也能减少不稳定，这里先学几个。它们都是近期大规模训练（如 OLMo 2 和 Qwen3）用过的简单办法：Z-loss、嵌入层去掉权重衰减、QK-norm。
+        </p>
+
+        <h4>Z-loss</h4>
+        <p>
+            Z-loss（出自 PaLM 论文）是一种正则化技术，在损失函数里加一个惩罚项，防止最终输出的 logits 变得太大。它鼓励 logits 上 softmax 的分母 $Z$ 保持在合理范围，从而在训练中维持数值稳定：
+        </p>
+        $$
+        \mathcal{L}_{\text{z-loss}} = \lambda \cdot \log^2(Z)
+        $$
+        <p>
+            1B 模型上的消融显示，加 Z-loss 不影响训练 loss，也不影响下游性能。据原文交互图数据：不加 Z-loss（基线）最终 loss 约 2.200，加了约 2.193；HellaSwag 0.496 对 0.497，MMLU 0.328 对 0.334，其余基准几乎相同。SmolLM3 最终没用它，因为作者的 Z-loss 实现带来了一些训练开销，开训前没来得及优化。
+        </p>
+
+        <h4>嵌入层去掉权重衰减</h4>
+        <p>
+            权重衰减（Weight decay，每步把权重往零拉一点的正则化）通常施加在所有模型参数上，但 OLMo 2 发现把嵌入层排除在权重衰减之外能提高训练稳定性。原因是权重衰减会让嵌入的范数在训练中逐渐变小，而层归一化（layer normalization）的雅可比矩阵和输入范数成反比，于是前面几层的梯度可能变大（Takase 等人的论文）。
+        </p>
+        <p>
+            作者训练了三种配置来验证：标准权重衰减的基线；嵌入层不做权重衰减的变体；以及把已采用的改动全部合在一起的第三组（嵌入不衰减 + NoPE + 文档掩码），确认这些技术之间没有负面相互作用。三组的 loss 曲线和评测结果几乎相同，所以 SmolLM3 训练时三项改动都采用了。据原文交互图数据：
+        </p>
+        <table>
+            <thead><tr><th>Run</th><th>训练 loss</th><th>HellaSwag</th><th>MMLU</th><th>ARC</th><th>PIQA</th><th>OpenBookQA</th><th>WinoGrande</th></tr></thead>
+            <tbody>
+                <tr><td>有权重衰减（基线）</td><td>2.185</td><td>0.496</td><td>0.328</td><td>0.483</td><td>0.708</td><td>0.317</td><td>0.505</td></tr>
+                <tr><td>嵌入不做权重衰减</td><td>2.201</td><td>0.493</td><td>0.325</td><td>0.471</td><td>0.707</td><td>0.314</td><td>0.509</td></tr>
+                <tr><td>嵌入不衰减 + NoPE + 文档掩码</td><td>2.195</td><td>0.493</td><td>0.328</td><td>0.475</td><td>0.703</td><td>0.311</td><td>0.497</td></tr>
+            </tbody>
+        </table>
+
+        <h4>QK-norm</h4>
+        <p>
+            QK-norm 在计算注意力之前对 query 和 key 向量做层归一化。它防止注意力 logits 变得太大，许多近期模型用它来提高稳定性。
+        </p>
+        <p>
+            不过 RNoPE 论文发现 QK-norm 会损害长上下文任务的表现。他们的分析显示，QK-norm 让相关 token（“针”）上的注意力质量变低，无关上下文上的注意力质量变高。他们认为原因是归一化去掉了 query–key 点积里的幅度信息，使各注意力 logits 的大小更接近。因此 SmolLM3 没用 QK-norm。另外，作为 3B 的小模型，它面临的训练不稳定风险本来就比 QK-norm 最有用的那些大模型低。
+        </p>
+
+        <h3 id="t01-5">其他考虑</h3>
+        <p><em>原书小节：Additional Considerations</em></p>
+        <p>除了上面这些组件，还有几个架构决定，为完整起见列在这里。</p>
+        <p>
+            参数初始化：现代模型通常用截断正态初始化（均值 0，std 0.02 或 0.006），或者 μP（Maximal Update Parametrization，一种让最优超参数能从小模型迁移到大模型的参数化方案）这样的初始化方案，比如 Cohere 的 Command A。这也可以作为一个消融主题。
+        </p>
+        <p>
+            激活函数：SwiGLU 已成为现代 LLM 的事实标准，取代了 ReLU、GELU 这些旧选择。例外是 Gemma 2 用 GeGLU，NVIDIA 用 ReLU²（Nemotron 系列）。
+        </p>
+        <p>
+            更大的层面上，架构布局也影响模型行为。总参数量基本决定了语言模型的容量，但参数在深度和宽度上怎样分布也有关系。Petty 等人（2024）发现，在语言建模和组合性任务上，更深的模型胜过同样大小的更宽模型，直到收益饱和。MobileLLM 的消融显示，这种“深而窄”的策略对十亿参数以下的 LLM 效果好；更宽的模型则因为并行度更高，推理往往更快。现代架构对这个取舍有不同的处理，见 Sebastian Raschka 的 <a href="https://sebastianraschka.com/blog/2025/the-big-llm-architecture-comparison.html" target="_blank">LLM 架构比较</a>。
+        </p>
+        <p>
+            稠密 Transformer 架构里最值得为训练优化的几个方面就讲完了。近来还出现了作用于整个模型的架构改动，比如 MoE 和混合模型。先看 MoE。
+        </p>
+
+        <h3 id="t01-6">走向稀疏：MoE</h3>
+        <p><em>原书小节：Going Sparse: MoE</em></p>
+        <p>
+            混合专家模型（Mixture of Experts，MoE）的出发点是：预测每个 token 并不需要整个模型。原书用大脑作比：做不同任务时，大脑激活不同区域（比如视觉皮层或运动皮层）。对 LLM 来说，学会代码语法的那部分，在做翻译任务时可能用不上。如果能做好这一点，就能省下大量计算，因为推理时只需要跑整个模型的一部分。
+        </p>
+        <p>
+            技术上，MoE 的目标很简单：增加总参数量，但不增加每个 token 的“激活”参数量。粗略地说，总参数影响模型的总学习容量，激活参数决定训练成本和推理速度。这就是为什么现在许多前沿系统（DeepSeek-V3、Kimi K2，以及 Gemini、Grok 等闭源模型）都用 MoE 架构。下图来自 Ling 1.5 论文，比较了 MoE 和稠密模型的 scaling law。
+        </p>
+        <figure>
+            <img src="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook/resolve/main/app/src/content/assets/image/image_2931384e-bcac-80c4-ab02-f22c53e6fdee.png" alt="Ling 1.5 论文中 MoE 与稠密模型的 scaling law 对比">
+            <figcaption>图：Ling 1.5 论文中 MoE 与稠密模型的 scaling law 对比（引自原书）</figcaption>
+        </figure>
+        <p>
+            第一次接触 MoE 也不用担心，机制并不复杂。从标准稠密架构出发，看看要改哪些地方（图由 <a href="https://github.com/rasbt/LLMs-from-scratch/tree/main/ch04/07_moe" target="_blank">Sebastian Raschka</a> 绘制）：
+        </p>
+        <figure>
+            <img src="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook/resolve/main/app/src/content/assets/image/image_2931384e-bcac-8062-bc11-d1ee3706d996.png" alt="稠密 Transformer 块与 MoE 块的结构对比">
+            <figcaption>图：稠密 Transformer 块与 MoE 块的对比，MoE 把单个前馈层换成多个专家和一个路由器（Sebastian Raschka 绘，引自原书）</figcaption>
+        </figure>
+        <p>
+            MoE 把单个多层感知机（MLP）换成多个 MLP（即“专家”），并在它们前面加一个可学习的路由器（router）。对每个 token，路由器选出一小部分专家来执行。总参数和激活参数的区别就来自这里：模型有很多专家，但每个 token 只用其中几个。
+        </p>
+        <p>设计一个 MoE 层要回答几个核心问题：</p>
+        <ul>
+            <li>专家的形状与稀疏度：用很多小专家还是少数大专家？每个 token 激活几个专家，总共需要多少个（也就是稀疏度，或“top-$k$”）？要不要有一些通用专家始终激活？</li>
+            <li>利用率与专业化：怎样挑选被路由的专家，并让它们都被充分使用（避免闲置容量），同时还鼓励它们各自专精？实践中这是一个负载均衡问题，对训练和推理效率影响很大。</li>
+        </ul>
+        <p>
+            这里只关注一个目标：给定固定的算力预算，怎样选 MoE 配置让 loss 最低。这和纯粹的系统效率（吞吐、延迟）是不同的问题，后面再回来谈。
+        </p>
+        <p>
+            本节大部分内容沿用蚂蚁集团（Ant Group）MoE scaling law 论文的分析，用他们提出的效率杠杆（Efficiency leverage，EL）概念。简单说，EL 衡量要达到某个 MoE 设计的 loss，稠密模型需要多少算力，单位是浮点运算次数（FLOPs）。EL 越高，说明这个 MoE 配置每单位算力带来的 loss 改善比稠密训练越多。原书用一张示意图说明这个概念：两条 loss 随 FLOPs 下降的曲线，MoE 在约 1e22 FLOPs 就达到稠密模型约 5e22 FLOPs 才达到的 loss（图中目标 loss 为 1.6），此时 EL 约为 5（据原文交互图数据，图中曲线是示意）。
+        </p>
+        <p>下面看怎样设置 MoE 的稀疏度来提高效率杠杆。</p>
+
+        <h4>稀疏度与激活比例</h4>
+        <blockquote><p>TL;DR：稀疏度越高，FLOPs 效率越好；稀疏度很高时收益递减；最佳点取决于你的算力预算。</p></blockquote>
+        <p>
+            这一节要找出哪种 MoE 设置最好。从两个极端看，都不理想：一头是所有专家始终全激活，这就回到了稠密模型；另一头是激活参数极少（极端情况，只有一个参数激活），显然连一个窄领域的任务都解决不了。所以需要找一个中间点。在深入寻找最优设置之前，先定义两个量，激活比例（activation ratio）和它的倒数稀疏度（sparsity）：
+        </p>
+        $$
+        \text{activation ratio} = \frac{\#\text{activated experts}}{\#\text{total experts}}
+        $$
+        $$
+        \text{sparsity} = \frac{\#\text{total experts}}{\#\text{activated experts}} = \frac{1}{\text{activation ratio}}
+        $$
+        <p>
+            从计算角度看，成本只由激活参数决定。如果保持激活专家的数量（和大小）不变，增加专家总数，推理和训练的 FLOPs 预算基本不变，但模型容量增加了，只要训练得够久，模型一般会更好。
+        </p>
+        <p>
+            综合近期的 MoE 论文，可以得到一些有意思的经验结论：保持激活专家的数量和大小不变，增加专家总数（即降低激活比例、提高稀疏度）能降低 loss，但稀疏度很高之后收益递减。
+        </p>
+        <p>看下面两张图：</p>
+        <ul>
+            <li>Kimi K2 的图同时显示了两个效应：稀疏度越高性能越好，但随着稀疏度增大，收益逐渐变小。</li>
+            <li>蚂蚁集团的图得出同样结论，并多了一个结果：稀疏度更高的 MoE 从增加算力中获益更多。</li>
+        </ul>
+        <figure>
+            <img src="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook/resolve/main/app/src/content/assets/image/Capture_decran_2025-10-20_a_13_25_47_2921384e-bcac-8087-83e5-fa7a40c1f342.png" alt="Kimi K2 论文中稀疏度与性能的关系">
+            <figcaption>图：Kimi K2 论文中稀疏度与性能的关系（引自原书）</figcaption>
+        </figure>
+        <figure>
+            <img src="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook/resolve/main/app/src/content/assets/image/Capture_decran_2025-10-20_a_13_26_08_2921384e-bcac-80b5-ac36-fb73d6374208.png" alt="蚂蚁集团论文中激活比例、算力与效率杠杆的关系">
+            <figcaption>图：蚂蚁集团论文中激活比例、算力与效率杠杆的关系（引自原书）</figcaption>
+        </figure>
+        <p>下表列出一些 MoE 模型的稀疏度：</p>
+        <table>
+            <thead><tr><th>模型</th><th>专家总数</th><th>每 token 激活数（含共享专家）</th><th>稀疏度</th></tr></thead>
+            <tbody>
+                <tr><td>Mixtral-8×7B</td><td>8</td><td>2</td><td>4.0</td></tr>
+                <tr><td>Grok-1</td><td>8</td><td>2</td><td>4.0</td></tr>
+                <tr><td>Grok-2</td><td>8</td><td>2</td><td>4.0</td></tr>
+                <tr><td>OLMoE-1B-7B-0924</td><td>64</td><td>8</td><td>8.0</td></tr>
+                <tr><td>gpt-oss 20b</td><td>32</td><td>4</td><td>8</td></tr>
+                <tr><td>Step-3</td><td>48 路由 + 1 共享 = 49</td><td>3 路由 + 1 共享 = 4</td><td>12.25</td></tr>
+                <tr><td>GLM-4.5-Air</td><td>128 路由 + 1 共享 = 129</td><td>8 路由 + 1 共享 = 9</td><td>14.3</td></tr>
+                <tr><td>Qwen3-30B-A3B</td><td>128</td><td>8</td><td>16.0</td></tr>
+                <tr><td>Qwen3-235B-A22B</td><td>128</td><td>8</td><td>16.0</td></tr>
+                <tr><td>GLM-4.5</td><td>160 路由 + 1 共享 = 161</td><td>8 路由 + 1 共享 = 9</td><td>17.8</td></tr>
+                <tr><td>DeepSeek-V2</td><td>160 路由 + 2 共享 = 162</td><td>6 路由 + 2 共享 = 8</td><td>20.25</td></tr>
+                <tr><td>DeepSeek-V3</td><td>256 路由 + 1 共享 = 257</td><td>8 路由 + 1 共享 = 9</td><td>28.6</td></tr>
+                <tr><td>gpt-oss 120b</td><td>128</td><td>4</td><td>32</td></tr>
+                <tr><td>Kimi K2</td><td>384 路由 + 1 共享 = 385</td><td>8 路由 + 1 共享 = 9</td><td>42.8</td></tr>
+                <tr><td>Qwen3-Next-80B-A3B-Instruct</td><td>512 路由 + 1 共享 = 513</td><td>共激活 10 + 1 共享 = 11</td><td>46.6</td></tr>
+            </tbody>
+        </table>
+        <p>
+            近期的趋势很明显：MoE 模型越来越稀疏。不过最优稀疏度仍取决于硬件和端到端效率。比如 Step-3 追求峰值效率，为适应特定的硬件和带宽限制，故意没有把稀疏度拉满；gpt-oss-20b 的稀疏度低，是因为端侧内存限制（没被激活的专家也要占内存）。
+        </p>
+
+        <h4>粒度</h4>
+        <p>
+            除了稀疏度，还要决定每个专家多大。这由粒度（granularity）来刻画，这个指标是蚂蚁集团提出的。各篇论文的术语不统一，有的公式也略有不同，这里用和所引图一致的定义：
+        </p>
+        $$
+        G = \frac{\alpha \cdot d_{\text{model}}}{d_{\text{expert}}} \text{ with } \alpha = 2 \text{ or } 4
+        $$
+        <p>
+            在总参数固定的情况下，粒度越高，专家越多、每个专家维度越小。这个指标是专家维度（$d_{\text{expert}}$）和模型维度（$d_{\text{model}}$）之间的比值。
+        </p>
+        <p>
+            稠密模型里常见的经验法则是 MLP 维度设为 $d_{\text{intermediate}} = 4 \cdot d_{\text{model}}$。如果取 $\alpha = 4$（沿用 Krajewski 等人细粒度 MoE scaling law 论文的做法），可以粗略地把粒度理解为要几个专家才能凑出稠密 MLP 的宽度（$4\, d_{\text{model}} = d_{\text{intermediate}} = G\, d_{\text{expert}}$）。
+        </p>
+        <p>
+            这个理解只是粗略的启发：现代 MoE 设计分配的总容量通常比单个稠密 MLP 大得多，一一对应在实践中并不成立。蚂蚁集团团队选了 $\alpha = 2$，这只是另一种归一化约定。为了一致，本书采用这个约定。（原书旁注：因为 $G$ 随 $d_{\text{model}}$ 缩放，模型宽度不同时，跨模型比较会比较棘手。）
+        </p>
+        <p>尽管如此，下表还是列出一些近期 MoE 模型的数值：</p>
+        <table>
+            <thead><tr><th>模型</th><th>$d_\text{model}$</th><th>$d_\text{expert}$</th><th>$G = 2 d_\text{model} / d_\text{expert}$</th><th>年份</th></tr></thead>
+            <tbody>
+                <tr><td>Mixtral-8x7B</td><td>4,096</td><td>14,336</td><td>0.571</td><td>2023</td></tr>
+                <tr><td>gpt-oss-120b</td><td>2880</td><td>2880</td><td>2.0</td><td>2025</td></tr>
+                <tr><td>gpt-oss-20b</td><td>2880</td><td>2880</td><td>2.0</td><td>2025</td></tr>
+                <tr><td>Grok 2</td><td>8,192</td><td>16,384</td><td>1.0</td><td>2024</td></tr>
+                <tr><td>StepFun Step-3</td><td>7,168</td><td>5,120</td><td>2.8</td><td>2025</td></tr>
+                <tr><td>OLMoE-1B-7B</td><td>2,048</td><td>1,024</td><td>4.0</td><td>2025</td></tr>
+                <tr><td>Qwen3-30B-A3B</td><td>2,048</td><td>768</td><td>5.3</td><td>2025</td></tr>
+                <tr><td>Qwen3-235B-A22B</td><td>4,096</td><td>1,536</td><td>5.3</td><td>2025</td></tr>
+                <tr><td>GLM-4.5-Air</td><td>4,096</td><td>1,408</td><td>5.8</td><td>2025</td></tr>
+                <tr><td>DeepSeek-V2</td><td>5,120</td><td>1,536</td><td>6.6</td><td>2024</td></tr>
+                <tr><td>GLM-4.5</td><td>5,120</td><td>1,536</td><td>6.6</td><td>2025</td></tr>
+                <tr><td>Kimi K2</td><td>7,168</td><td>2,048</td><td>7.0</td><td>2025</td></tr>
+                <tr><td>DeepSeek-V3</td><td>7168</td><td>2048</td><td>7.0</td><td>2024</td></tr>
+                <tr><td>Qwen3-Next-80B-A3B</td><td>2048</td><td>512</td><td>8.0</td><td>2025</td></tr>
+            </tbody>
+        </table>
+        <p>
+            粒度怎样影响模型行为？看<a href="https://arxiv.org/pdf/2507.17702" target="_blank">蚂蚁集团论文</a>里的图：
+        </p>
+        <figure>
+            <img src="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook/resolve/main/app/src/content/assets/image/75ae60ff-50be-48e1-aad2-a8fc56120d3d_2921384e-bcac-80c2-984b-d81404e4bb7c.png" alt="蚂蚁集团论文中粒度与效率杠杆的关系">
+            <figcaption>图：蚂蚁集团论文中粒度与效率杠杆的关系（引自原书）</figcaption>
+        </figure>
+        <p>
+            粒度看起来不是 EL 的主要驱动因素。它有帮助，尤其在 2 以上，但不是决定 loss 的主导因素。而且存在一个最佳点：粒度调高到一定程度有用，之后收益变平。所以粒度是一个有用的调节旋钮，近期发布的模型明显倾向更高的值，但不应该孤立地优化它。
+        </p>
+        <p>另一个被广泛用来改进 MoE 的概念是共享专家。</p>
+
+        <h4>共享专家</h4>
+        <p>
+            共享专家（shared experts）的设置是让每个 token 都经过一小组始终开启的专家。这些共享专家吸收数据里基础的、反复出现的模式，让其余专家可以更大胆地专精。实践中一般不需要很多，模型设计者通常选一个，最多两个。随着粒度提高（比如从 Qwen3 那样的设置走向更接近 Qwen3-Next 的设置），共享专家往往更有用。从下面蚂蚁集团论文的图看，整体影响不大，不会显著改变 EL。一条简单的经验法则在大多数情况下就够了：用一个共享专家。这和 DeepSeek-V3、Kimi K2、Qwen3-Next 的选择一致，往往能在不增加多余复杂度的前提下把效率做到最好。
+        </p>
+        <figure>
+            <img src="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook/resolve/main/app/src/content/assets/image/Capture_decran_2025-10-21_a_11_11_38_2931384e-bcac-8008-ad8d-d5ab0c539d3a.png" alt="蚂蚁集团论文中共享专家对效率杠杆的影响">
+            <figcaption>图：蚂蚁集团论文中共享专家对效率杠杆的影响（引自原书）</figcaption>
+        </figure>
+        <p>
+            共享专家是某些 token 一定会经过的专家。那其他专家呢？怎样学会什么时候路由到哪个专家，又怎样保证不是只用少数几个、让其他专家闲着？这就是下面要讲的负载均衡。
+        </p>
+
+        <h4>负载均衡</h4>
+        <p>
+            负载均衡（Load balancing）是 MoE 里最要紧的一环，设置不好会毁掉其他所有设计选择。为什么负载不均会带来很多麻烦？设想一个很简单的分布式训练：4 块 GPU，模型的 4 个专家平均分到各块 GPU 上。如果路由崩溃，所有 token 都被送到专家 1，那就只有四分之一的 GPU 在干活，训练和推理效率都很差。模型的有效学习容量也会下降，因为不是所有专家都被激活。
+        </p>
+        <p>
+            为此可以给路由器加一个额外的损失项。下面是标准的基于辅助损失（auxiliary loss）的负载均衡：
+        </p>
+        $$
+        \mathcal{L}_{\text{Bal}} = \alpha \sum_{i=1}^{N_{r}} f_{i}\, P_{i}
+        $$
+        <p>
+            这个公式只有三个因子：系数 $\alpha$ 决定损失的强度；$f_i$ 是流量占比（经过专家 $i$ 的 token 所占比例）；$P_i$ 是概率质量，就是把经过该专家的 token 的路由概率加起来。两者缺一不可：$f_i$ 对应实际的均衡情况，$P_i$ 是平滑可导的，让梯度能流过去。
+        </p>
+        <p>
+            如果负载完全均衡，$f_i = P_i = 1/N_r$。但 $\alpha$ 要小心调：太小，对路由的引导不够；太大，路由的均匀性就比主要的语言模型损失还重要了。
+        </p>
+        <div class="takeaway">
+            <p>
+                无损失的负载均衡：也可以不加显式损失项来做均衡。DeepSeek-V3 在进入路由 softmax 的亲和度分数上加了一个简单的偏置项。如果某个专家过载，就把它的分数降一点（一个常数 $\gamma$），让它更不容易被选中；如果利用不足，就加 $\gamma$。这条简单的自适应规则就能实现负载均衡。
+            </p>
+        </div>
+        <p>
+            一个要紧的细节是在什么范围内计算路由统计量：$f_i$ 和 $P_i$ 是按本地批（每个 worker 自己的 mini-batch）算，还是全局算（跨 worker、跨设备汇总）？Qwen 团队的分析显示，当每个本地批里的 token 多样性不够时，本地计算会同时损害专家专业化（路由健康程度的一个好指标）和整体模型性能。专家专业化指的是对某个特定领域，一个或几个专家比其他专家激活得更频繁。换句话说，本地批的内容如果很窄，它的路由统计就会有噪声、有偏差，没法带来好的均衡。这意味着只要可行，就应该用全局统计量（至少要跨设备汇总）。在那篇论文发表时，包括 Megatron 在内的许多框架默认都是本地计算这些统计量。
+        </p>
+        <p>下图来自 Qwen 的论文，展示了按 micro-batch 汇总和按 global batch 汇总的区别，以及它对性能和专业化的影响：</p>
+        <figure>
+            <img src="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook/resolve/main/app/src/content/assets/image/Capture_decran_2025-10-21_a_15_34_27_2931384e-bcac-8066-834b-c485ae8d1fa5.png" alt="Qwen 论文中 micro-batch 与 global batch 负载均衡的对比">
+            <figcaption>图：Qwen 论文中按 micro-batch 与按 global batch 计算负载均衡统计量的对比，及其对性能和专家专业化的影响（引自原书）</figcaption>
+        </figure>
+        <p>
+            总的来说，围绕 MoE 做架构消融很棘手，因为它和许多方面相互影响。比如共享专家有没有用，可能取决于模型的粒度。值得花些时间设计一组好的实验，确保真能得到想要的结论。
+        </p>
+        <p>MoE 的基础到这里讲完，但还有很多可以探索。下面是一份不完整的清单：</p>
+        <ul>
+            <li>零计算专家、MoE 层重缩放和训练监控（<a href="https://arxiv.org/abs/2509.01322" target="_blank">LongCat-Flash 论文</a>）；</li>
+            <li>正交损失负载均衡（如 <a href="https://github.com/PaddlePaddle/ERNIE" target="_blank">ERNIE 4.5</a>）；</li>
+            <li>在训练过程中调度负载均衡系数；</li>
+            <li>架构/优化与 MoE 的相互作用，比如：优化器的排名在 MoE 上会不会变；怎样把 μP 用到 MoE 上；怎样为 MoE 调整学习率（因为各专家每个批次看到的 token 数不同）；</li>
+            <li>开头放几层稠密层。</li>
+        </ul>
+        <p>这些留给有兴趣的读者深入。接下来是最后一个主要架构选择：混合模型。</p>
+
+        <h3 id="t01-7">旁支：混合模型</h3>
+        <p><em>原书小节：Excursion: Hybrid Models</em></p>
+        <p>
+            最近的一个趋势是在标准稠密或 MoE 架构上加入状态空间模型（State space models，SSM，一类用固定大小的隐状态逐步处理序列的模型）或线性注意力机制（Falcon-H1、MiniMax-01）。这些新模型试图解决 Transformer 在高效处理超长上下文方面的根本弱点。它们取了循环模型和 Transformer 的中间路线：循环模型能以线性复杂度处理任意长的上下文，但可能没法充分利用上下文信息；Transformer 在长上下文时很贵，但能很好地利用上下文里的模式。
+        </p>
+        <p>
+            有一些研究试图弄清 SSM 的长处和短处。比如 Waleffe 等人（2024）研究了 Mamba 模型（SSM 的一种），发现它们在很多基准上表现不错，但在 MMLU 和其他几个任务上不如 Transformer。他们推测差距来自上下文学习（in-context learning）能力的不足。把 SSM 和稠密或 MoE 模型的模块组合起来，能兼得两者的长处，所以叫混合模型（hybrid models）。
+        </p>
+        <p>
+            这些线性注意力机制的核心思路是重新安排计算顺序，让注意力不再花 $O(n^2d)$，因为这在长上下文下变得不可承受。怎么做到的？先回顾推理时的注意力公式。第 $t$ 个 token 的输出是：
+        </p>
+        $$
+        \mathbf{o}_{t} = \sum_{j=1}^{t} \frac{\exp\!\big(\mathbf{q}_{t}^{\top}\mathbf{k}_{j}\big) \mathbf{v}_{j}}{\sum_{l=1}^{t} \exp\!\big(\mathbf{q}_{t}^{\top}\mathbf{k}_{l}\big)}
+        $$
+        <p>去掉 softmax：</p>
+        $$
+        o_t = \sum_{j=1}^{t} (q_t^\top k_j)\, v_j
+        $$
+        <p>重新排列：</p>
+        $$
+        \sum_{j=1}^{t}(q_t^\top k_j)\,v_j = \Big(\sum_{j=1}^{t} v_j k_j^\top\Big) q_t
+        $$
+        <p>定义运行状态：</p>
+        $$
+        S_t \triangleq \sum_{j=1}^{t} k_j v_j^\top = K_{1:t}^\top V_{1:t} \in \mathbb{R}^{d\times d}
+        $$
+        <p>它的更新很简单：</p>
+        $$
+        S_t = S_{t-1} + k_t v_t^\top
+        $$
+        <p>于是可以写成：</p>
+        $$
+        o_t = S_t q_t = S_{t-1} q_t + v_t (k_t^\top q_t)
+        $$
+        <p>
+            为什么重排有用？左边的形式 $\sum_{j\le t}(q_t^\top k_j)v_j$ 的意思是：对每个过去的 token $j$，算一个点积 $q_t^\top k_j$（一个标量），用它缩放 $v_j$，再把这 $t$ 个向量加起来，第 $t$ 步大约要 $O(td)$ 的工作量。右边的形式把它改写成 $\big(\sum_{j\le t} v_j k_j^\top\big) q_t$：维护一个运行状态矩阵 $S_t=\sum_{j\le t} v_j k_j^\top\in\mathbb{R}^{d\times d}$，它已经概括了所有过去的 $(k_j,v_j)$。每来一个新 token，用一次外积 $v_t k_t^\top$ 更新它，成本 $O(d^2)$；然后输出只是一次矩阵向量乘法 $S_t q_t$（也是 $O(d^2)$）。所以从头生成 $T$ 个 token，用左边的形式是 $O(T^2 d)$，维护 $S_t$ 用右边的形式是 $O(T d^2)$。直观地说：左边是每一步做很多次小的“点积、缩放、累加”；右边是“一个预先汇总好的矩阵乘以 query”，用对维度的依赖换掉了对序列长度的依赖。这里讲的是推理和循环形式，训练时它也更高效，重排就是下面这个等式：
+        </p>
+        $$
+        \underset{n\times n}{(QK^\top)}\,V = Q\,\underset{d\times d}{(K^\top V)}
+        $$
+        <p>
+            这看起来和 RNN 的结构很像。问题解决了吗？差不多。实践中 softmax 起着重要的稳定作用，朴素的线性注意力没有某种归一化会不稳定。为此人们提出了几种实用的变体。
+        </p>
+
+        <h4>Lightning Attention</h4>
+        <p>
+            NormAttention 把 softmax 归一化换成基于范数的缩放，以控制注意力的幅度、提高稳定性。<a href="https://arxiv.org/abs/2405.17381" target="_blank">Lightning Attention</a> 在这个思路上，着重把实现做得快而高效，并做了几处重要的架构调整。两者的公式如下。
+        </p>
+        <p>NormAttention：</p>
+        $$
+        \text{RMSNorm}(Q(K^TV))
+        $$
+        <p>Lightning Attention：</p>
+        <p>第 1 步，QKV 投影 + SiLU：</p>
+        $$
+        Q = \text{SiLU}(Q), \; K = \text{SiLU}(K), \; V = \text{SiLU}(V), \; G = \sigma(G)
+        $$
+        <p>第 2 步，衰减因子（$KV_t$ 即前面记号里的 $S_t$）：</p>
+        $$
+        KV_t = \lambda \, KV_{t-1} + k_t^\top v_t
+        $$
+        $$
+        o_t = q_t \, KV_t
+        $$
+        <p>第 3 步，RMSNorm + 门控：</p>
+        $$
+        Y = G \odot \text{RMSNorm}(O)
+        $$
+        <p>
+            据 MiniMax-01 的论文，用 Lightning Attention 的混合模型在大多数任务上追平 softmax 注意力。原书用交互图展示了 410M 到 7B 四个规模上的基准结果，据原文交互图数据摘几列：
+        </p>
+        <table>
+            <thead><tr><th>规模</th><th>常识推理平均（CSR-AVG）：Softmax / Lightning / Hybrid</th><th>NIAH：Softmax / Lightning / Hybrid</th></tr></thead>
+            <tbody>
+                <tr><td>410M</td><td>43.5 / 44.0 / 44.5</td><td>52.0 / 14.0 / 84.2</td></tr>
+                <tr><td>1B</td><td>47.5 / 48.0 / 49.5</td><td>44.0 / 29.0 / 95.7</td></tr>
+                <tr><td>3B</td><td>50.5 / 55.2 / 55.2</td><td>46.0 / 11.0 / 98.0</td></tr>
+                <tr><td>7B</td><td>55.0 / 57.5 / 58.3</td><td>60.0 / 20.0 / 97.7</td></tr>
+            </tbody>
+        </table>
+        <p>
+            有意思的是，在 NIAH 这类检索任务上，混合模型比完整的 softmax 注意力好得多，这可能说明 softmax 层和线性层之间有某种协同。（表中纯 Lightning Attention 在 NIAH 上反而很差。）
+        </p>
+        <div class="takeaway">
+            <p>MiniMax M2</p>
+            <p>
+                出人意料的是，最近发布的 MiniMax-M2 没有用混合或线性注意力。据该团队的预训练负责人说，MiniMax-M1 早期用 Lightning Attention 的实验在小规模上、在当时流行的基准（MMLU、BBH、MATH）上看着很有希望，但到了更大规模，他们发现它“在复杂的多跳推理任务上有明显缺陷”。他们还提到强化学习（RL）训练中的数值精度问题和基础设施成熟度是主要障碍，结论是：在大规模上设计一种新架构是个多变量问题，因为它对数据分布、优化器等其他参数敏感，所以既难又耗算力。不过他们也承认，“随着 GPU 算力增长放缓而数据长度持续增加，线性注意力和稀疏注意力的好处会逐渐显现”。这既说明了架构消融的复杂，也说明了研究和生产现实之间的差距。
+            </p>
+        </div>
+        <p>下面看看其他注意力方法，以及怎样在一个统一框架里理解它们。</p>
+
+        <h4>进阶线性注意力</h4>
+        <p>
+            从循环模型学到的一课是：让状态偶尔放下过去。实践中，就是给上一步的状态加一个门 $\mathbf{G}_t$：
+        </p>
+        $$
+        \mathbf{S}_t = \mathbf{G}_t \odot \mathbf{S}_{t-1} + \mathbf{v}_t \mathbf{k}_t^{\top}
+        $$
+        <p>
+            几乎所有近期的线性注意力机制都有这个门控组件，区别在于 $\mathbf{G}_t$ 的实现。下表列出各种门的形式和对应的架构，出自 <a href="https://arxiv.org/abs/2312.06635" target="_blank">Yang et al., 2024</a>（偏置项省略）：
+        </p>
+        <div style="overflow-x:auto">
+        <table>
+            <thead><tr><th>模型</th><th>参数化形式</th><th>可学习参数</th></tr></thead>
+            <tbody>
+                <tr><td>Mamba</td><td>$\mathbf{G}_t = \exp(-(\mathbf{1}^\top \boldsymbol{\alpha}_t) \odot \exp(\mathbf{A})), \; \boldsymbol{\alpha}_t = \text{softplus}(\mathbf{x}_t \mathbf{W}_{\alpha_1} \mathbf{W}_{\alpha_2})$</td><td>$\mathbf{A} \in \mathbb{R}^{d_k \times d_v}, \; \mathbf{W}_{\alpha_1} \in \mathbb{R}^{d \times \frac{d}{16}}, \; \mathbf{W}_{\alpha_2} \in \mathbb{R}^{\frac{d}{16} \times d_v}$</td></tr>
+                <tr><td>Mamba-2</td><td>$\mathbf{G}_t = \gamma_t \mathbf{1}^\top \mathbf{1}, \; \gamma_t = \exp(-\text{softplus}(\mathbf{x}_t \mathbf{W}_{\gamma})\exp(a))$</td><td>$\mathbf{W}_{\gamma} \in \mathbb{R}^{d \times 1}, \; a \in \mathbb{R}$</td></tr>
+                <tr><td>mLSTM</td><td>$\mathbf{G}_t = \gamma_t \mathbf{1}^\top \mathbf{1}, \; \gamma_t = \sigma(\mathbf{x}_t \mathbf{W}_{\gamma})$</td><td>$\mathbf{W}_{\gamma} \in \mathbb{R}^{d \times 1}$</td></tr>
+                <tr><td>Gated Retention</td><td>$\mathbf{G}_t = \gamma_t \mathbf{1}^\top \mathbf{1}, \; \gamma_t = \sigma(\mathbf{x}_t \mathbf{W}_{\gamma})^{\frac{1}{\tau}}$</td><td>$\mathbf{W}_{\gamma} \in \mathbb{R}^{d \times 1}$</td></tr>
+                <tr><td>DFW（Mao, 2022；Pramanik et al., 2023）</td><td>$\mathbf{G}_t = \boldsymbol{\alpha}_t^\top \boldsymbol{\beta}_t, \; \boldsymbol{\alpha}_t = \sigma(\mathbf{x}_t \mathbf{W}_{\alpha}), \; \boldsymbol{\beta}_t = \sigma(\mathbf{x}_t \mathbf{W}_{\beta})$</td><td>$\mathbf{W}_{\alpha} \in \mathbb{R}^{d \times d_k}, \; \mathbf{W}_{\beta} \in \mathbb{R}^{d \times d_v}$</td></tr>
+                <tr><td>GateLoop</td><td>$\mathbf{G}_t = \boldsymbol{\alpha}_t^\top \mathbf{1}, \; \boldsymbol{\alpha}_t = \sigma(\mathbf{x}_t \mathbf{W}_{\alpha_1})\exp(\mathbf{x}_t \mathbf{W}_{\alpha_2} \mathrm{i})$</td><td>$\mathbf{W}_{\alpha_1} \in \mathbb{R}^{d \times d_k}, \; \mathbf{W}_{\alpha_2} \in \mathbb{R}^{d \times d_k}$</td></tr>
+                <tr><td>HGRN-2</td><td>$\mathbf{G}_t = \boldsymbol{\alpha}_t^\top \mathbf{1}, \; \boldsymbol{\alpha}_t = \gamma + (1-\gamma)\sigma(\mathbf{x}_t \mathbf{W}_{\alpha})$</td><td>$\mathbf{W}_{\alpha} \in \mathbb{R}^{d \times d_k}, \; \gamma \in (0,1)^{d_k}$</td></tr>
+                <tr><td>RWKV-6</td><td>$\mathbf{G}_t = \boldsymbol{\alpha}_t^\top \mathbf{1}, \; \boldsymbol{\alpha}_t = \exp(-\exp(\mathbf{x}_t \mathbf{W}_{\alpha}))$</td><td>$\mathbf{W}_{\alpha} \in \mathbb{R}^{d \times d_k}$</td></tr>
+                <tr><td>Gated Linear Attention（GLA）</td><td>$\mathbf{G}_t = \boldsymbol{\alpha}_t^\top \mathbf{1}, \; \boldsymbol{\alpha}_t = \sigma(\mathbf{x}_t \mathbf{W}_{\alpha_1} \mathbf{W}_{\alpha_2})^{\frac{1}{\tau}}$</td><td>$\mathbf{W}_{\alpha_1} \in \mathbb{R}^{d \times 16}, \; \mathbf{W}_{\alpha_2} \in \mathbb{R}^{16 \times d_k}$</td></tr>
+            </tbody>
+        </table>
+        </div>
+        <p>
+            （整理者注：原文表格里部分下标在转换时丢了下划线，如 “x t W α”，这里按 Yang et al. 原论文的写法补回成 $\mathbf{x}_t \mathbf{W}_{\alpha}$。）
+        </p>
+        <p>
+            其中比较突出的是 Mamba-2，它被用在好几个混合模型里，比如 Nemotron-H、Falcon H1、Granite-4.0-h。不过现在还处于早期阶段，扩展到大型混合模型时有不少细节要考虑。
+        </p>
+        <p>
+            这些注意力机制有前景，但 MiniMax 在 M2 上的经验说明，小规模上的好处不一定能转化到大规模生产系统。话虽如此，混合模型进展很快，仍是前沿训练的可靠选择。Qwen3-Next 用了门控 DeltaNet 更新，报告称它长上下文推理更快、训练更快，在标准基准上表现更好。作者也期待 Kimi 的下一个模型，它很可能会用他们新的 <a href="https://arxiv.org/abs/2510.26692" target="_blank">Kimi Delta Attention</a>。还要提一下稀疏注意力（Sparse Attention），它只对选中的块或 query 计算注意力，来解决长上下文的扩展问题，例子有 Native Sparse Attention、DeepSeek Sparse Attention 和 InfLLM v2（MiniCPM4）。
+        </p>
+        <p>知道了有哪些架构可选，怎样在它们之间做选择？在讲分词器之前先把这个问题说完。</p>
+
+        <h3 id="t01-8">用不用 MoE：怎样选基础架构</h3>
+        <p><em>原书小节：To MoE or Not to MoE: Choosing a Base Architecture</em></p>
+        <p>
+            用稠密、MoE 还是混合模型，通常取决于几个核心因素：模型部署在哪里、团队的经验、时间线。下面简要过一遍各自的优缺点，并给出一棵简单的决策树。
+        </p>
+        <p>
+            稠密 Transformer（Dense transformers）是标准的仅解码器（decoder-only）Transformer 架构，每个参数对每个 token 都激活。数学推导可以看哈佛 NLP 的博客 <a href="https://nlp.seas.harvard.edu/2018/04/03/attention.html" target="_blank">The Annotated Transformer</a>，建立直觉可以看 Jay Alammar 的 <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank">The Illustrated Transformer</a>。
+        </p>
+        <ul>
+            <li>优点：支持广泛，理解透彻，训练稳定，每参数性能好。</li>
+            <li>缺点：计算量随规模线性增长，70B 模型的成本约是 3B 的 23 倍。</li>
+            <li>适用：内存受限的场景，或者第一次训 LLM 的团队，这通常是默认选择。</li>
+        </ul>
+        <p>
+            混合专家模型把 Transformer 里的前馈层换成多个“专家”，由一个门控网络把每个 token 只送到少数几个专家。结果是用一小部分计算量获得大网络的容量。比如 <a href="https://huggingface.co/moonshotai/Kimi-K2-Instruct" target="_blank">Kimi K2</a> 总参数 1T，每个 token 只激活 32B。代价是所有专家都必须加载进内存。图解可以看 Maarten Grootendorst 的<a href="https://newsletter.maartengrootendorst.com/p/a-visual-guide-to-mixture-of-experts" target="_blank">博客</a>。
+        </p>
+        <ul>
+            <li>优点：训练和推理的每单位计算性能更好。</li>
+            <li>缺点：内存需求高（所有专家都要加载），训练比稠密 Transformer 复杂。框架支持在改善，但不如稠密模型成熟；分布式训练复杂，要处理专家放置、负载均衡和 all-to-all 通信等问题。</li>
+            <li>适用：内存不受限，想要每单位计算的最高性能。</li>
+        </ul>
+        <p>
+            混合模型把 Transformer 和 Mamba 这类状态空间模型结合起来，某些运算是线性复杂度，相比注意力的平方复杂度更省。可参考 Sasha Rush 的<a href="https://srush.github.io/annotated-mamba/hard.html" target="_blank">博客</a>和 Maarten Grootendorst 关于 Mamba 与 SSM 的<a href="https://newsletter.maartengrootendorst.com/p/a-visual-guide-to-mamba-and-state" target="_blank">图解</a>。
+        </p>
+        <ul>
+            <li>优点：长上下文处理可能更好，处理超长序列更高效。</li>
+            <li>缺点：不如稠密和 MoE 架构成熟，经过验证的训练配方更少，框架支持有限。</li>
+            <li>适用：想扩展到超大上下文，同时降低标准 Transformer 的推理开销。</li>
+        </ul>
+        <p>
+            （原书旁注：也有团队开始探索用于文本的扩散模型，但这些模型和其他实验性方案还处于很早期，不在本书范围内。）
+        </p>
+        <p>
+            做决定时，先问模型部署在哪里，再考虑团队经验和训练时间线，评估自己能负担多少探索。原书的决策流程图如下（据原文交互图内容整理）：
+        </p>
+        <ul>
+            <li>模型在哪里运行？
+                <ul>
+                    <li>边缘设备、手机等内存受限环境：大多数情况选稠密；经验丰富的团队可以考虑混合。</li>
+                    <li>其他（内存更充裕）：看团队经验。
+                        <ul>
+                            <li>第一次训 LLM：稠密，先把基础打好。</li>
+                            <li>有经验、熟悉稠密模型：看时间线。时间紧、需要稳妥路线，选稠密；时间灵活、愿意探索，选 MoE 或 MoE + 混合，每单位计算性能更好。</li>
+                            <li>经验很丰富：MoE 或 MoE + 混合。</li>
+                        </ul>
+                    </li>
+                </ul>
+            </li>
+        </ul>
+        <p>
+            SmolLM3 想做一个用于端侧部署的强小模型，时间线大约三个月，团队过去主要训的是稠密模型。这排除了 MoE（内存限制）和混合架构（探索时间短，而且稠密模型就能支持 128k token 的目标上下文），所以选了 Llama 风格的稠密模型。
+        </p>
+        <p>模型架构定了，接下来看分词器，它是数据和模型之间的桥梁。</p>
+
+        <h3 id="t01-9">分词器</h3>
+        <p><em>原书小节：The Tokenizer</em></p>
+        <p>
+            分词方案大概是语言模型里最被低估的组件之一。它是人类语言和模型所处的数学世界之间的翻译。架构创新往往抢走风头，但和任何翻译一样，翻译质量很重要。那么怎样构建或挑选适合自己需求的分词器？
+        </p>
+
+        <h4>分词器基础</h4>
+        <p>
+            分词器（Tokenizer）的核心工作是把原始文本转换成模型能处理的数字序列：把连续文本切成一个个可处理的单元，叫 token。在进入技术细节之前，先回答几个指导分词器设计的基本问题：
+        </p>
+        <ul>
+            <li>要支持哪些语言？如果要做多语言模型，但分词器只见过英文，那么模型碰到非英文文本时效率会很低，文本会被切成比必要多得多的 token。这直接影响性能、训练成本和推理速度。</li>
+            <li>哪些领域重要？除了语言，数学和代码这类领域需要仔细处理数字的表示。</li>
+            <li>目标数据配比是什么？如果打算从头训练分词器，理想情况是用一份能反映最终训练配比的样本来训练它。</li>
+        </ul>
+        <p>
+            回答完这些问题，就可以看主要的设计决定了。（原书旁注：HF 的 LLM 评测指南里的<a href="https://github.com/huggingface/evaluation-guidebook/blob/main/contents/general-knowledge/tokenization.md" target="_blank">“Tokenization”一节</a>介绍了分词器并链接了不少资源；想深入基础，Andrej Karpathy 的 <a href="https://www.youtube.com/watch?v=zduSFxRajkE" target="_blank">Let's Build the GPT Tokenizer</a> 是很好的动手教程。）
+        </p>
+
+        <h4>词表大小</h4>
+        <p>
+            词表（vocabulary）就是一本字典，列出模型认识的所有 token（最小的文本单元，比如词、子词或符号）。
+        </p>
+        <p>
+            词表越大，通常压缩文本越高效，因为每句话生成的 token 更少。但有计算上的取舍：词表大小直接决定嵌入矩阵的大小。词表大小 $V$、隐藏维度 $h$ 时，输入嵌入有 $V \times h$ 个参数，输出层还有 $V \times h$ 个。对小模型来说，这可能占总参数的很大一块（前面“嵌入共享”一节已经看到），但随着模型变大，相对成本会缩小。
+        </p>
+        <p>
+            最佳点取决于目标覆盖范围和模型大小。只做英文的模型，5 万左右的 token 一般够用；多语言模型往往需要 10 万以上，才能高效处理多种书写系统和语言。Llama 3 这样的现代 SOTA 模型采用了 128k 以上的词表，以提高多语言的 token 效率。同系列的小模型则用嵌入共享来降低嵌入参数的占比，同时仍然享受大词表的好处。
+        </p>
+        <p>
+            Dagan 等人（2024）分析了词表大小对压缩、推理和内存的影响。他们观察到，词表变大带来的压缩收益以指数速度递减，说明存在一个最优大小。推理方面，大模型从更大的词表获益，因为压缩在前向传播上省下的，比 softmax 里多出的嵌入 token 花掉的更多。内存方面，最优大小取决于序列长度和批大小：上下文越长、批越大，越能从大词表获益，因为 token 更少，KV cache 也更省。
+        </p>
+        <p>
+            （原书旁注：把词表大小设成 128 的倍数，比如用 50,304 而不是 50,000，可以优化吞吐。现代 GPU 在矩阵维度能被更高次的 2 的幂整除时运算更好，因为内存对齐更高效，未对齐访存的开销更少。Horace He 有一篇相关的<a href="https://www.thonking.ai/p/what-shapes-do-matrix-multiplications" target="_blank">博客</a>。）
+        </p>
+
+        <h4>分词算法</h4>
+        <p>
+            了解了定义分词器的关键参数，就面临一个实际决定：用现成的分词器，还是从头训一个？答案取决于覆盖度，也就是在目标词表大小下，现有分词器能否很好地处理你的语言和领域。
+        </p>
+        <p>
+            现有分词器里，字节对编码（Byte-pair encoding，BPE，反复把最常一起出现的相邻符号合并成新 token 的算法）仍是最流行的选择。也有 WordPiece、SentencePiece 等其他算法，但用得少一些。（还有越来越多研究关注无分词器方案，直接在字节或字符上工作，可能彻底取消分词这一步。）
+        </p>
+        <p>
+            关于覆盖度，原书用交互图比较了 GPT-2 的纯英文 BPE 分词器和 Gemma 3 的多语言 SentencePiece 分词器，对同一句英文和阿拉伯文的切分结果。
+        </p>
+        <p>
+            两者在英文上表现差不多，但在阿拉伯文上差别惊人：GPT-2 把文本切成一百多个碎片，Gemma 3 得益于多语言训练数据和更大、更包容的词表，切出的 token 少得多。
+        </p>
+        <p>
+            不过，评估分词器质量不能只看几个切分例子就下结论，就像不能不做消融、凭直觉改架构一样。需要具体的指标。
+        </p>
+
+        <h4>衡量分词器质量</h4>
+        <p>评估分词器表现，可以用 FineWeb2 里用到的两个关键指标：</p>
+        <ul>
+            <li>繁殖率（Fertility）：编码一个词平均需要多少 token（词到 token 的比率）。繁殖率越低，压缩越好，训练和推理越快。</li>
+            <li>续接词比例（Proportion of continued words）：有多少比例的词被切成了多段。比例越低越好，说明被打碎的词越少，分词越高效。</li>
+        </ul>
+        <p>
+            繁殖率以“词”为单位来定义，是因为在有合适的词切分工具时（比如 <a href="https://spacy.io/" target="_blank">Spacy</a> 或 <a href="https://stanfordnlp.github.io/stanza" target="_blank">Stanza</a>），它能给出有意义的跨语言比较。只比较单一语言的分词器时，可以用字符数或字节数代替词数，得到字符到 token 或字节到 token 的比率。但这两个指标做跨语言比较有局限。字节会有偏差，因为不同文字的字符需要不同的字节数（比如 UTF-8 里汉字占 3 字节，拉丁字母占 1 或 2 字节）。字符数也有问题，它没考虑不同语言的词长差别很大，比如中文的词往往比德语的复合词短得多。
+        </p>
+        <p>这两个指标可以这样实现：</p>
+<pre><code>import numpy as np
+
+def compute_tokenizer_metrics(tokenizer, word_tokenizer, text):
+    """
+    Computes fertility and proportion of continued words.
+
+    Returns:
+        tuple: (fertility, proportion_continued_words)
+            - fertility: average tokens per word (lower is better)
+            - proportion_continued_words: percentage of words split into 2+ tokens (lower is better)
+    """
+    words = word_tokenizer.word_tokenize(text)
+    tokens = tokenizer.batch_encode_plus(words, add_special_tokens=False)
+    tokens_per_word = np.array(list(map(len, tokens["input_ids"])))
+
+    fertility = np.mean(tokens_per_word).item()
+    proportion_continued_words = (tokens_per_word &gt;= 2).sum() / len(tokens_per_word)
+
+    return fertility, proportion_continued_words</code></pre>
+        <p>
+            对代码和数学这些专门领域，除了繁殖率，还要更深入地看分词器怎样处理领域特有的模式。大多数现代分词器做单个数字切分，“123”变成 ["1", "2", "3"]（PaLM、DeepSeek-V2 都这样做）。把数字拆开看似反直觉，但它能帮模型更有效地学到算术规律。如果“342792”被编码成一个不可分的 token，模型就得记住这个 token 和其他每个数字 token 做加减乘时的结果；拆开之后，模型学的是逐位运算怎样进行。有些分词器，比如 Llama 3 的，把 1 到 999 的数字编码成独立 token，更大的数由这些 token 组合而成。（原书旁注：<a href="https://huggingface.co/spaces/huggingface/number-tokenization-blog" target="_blank">From Digits to Decisions: How Tokenization Impacts Arithmetic in LLMs</a> 比较了不同分词方案在数学任务上的表现。）
+        </p>
+
+        <h4>评估分词器</h4>
+        <p>
+            为了跨语言比较分词器，采用 FineWeb2 分词器分析的设置，用维基百科文章作评估语料。每种语言抽 100 篇文章，样本有意义，计算量也可控。
+        </p>
+        <p>先安装依赖，定义要比较的分词器和语言：</p>
+<pre><code>pip install transformers datasets sentencepiece 'datatrove[multilingual]'
+# we need datatrove to load word tokenizers</code></pre>
+<pre><code>tokenizers = [
+    ("Llama3", "meta-llama/Llama-3.2-1B"),
+    ("Gemma3", "google/gemma-3-1b-pt"),
+    ("Mistral (S)", "mistralai/Mistral-Small-24B-Instruct-2501"),
+    ("Qwen3", "Qwen/Qwen3-4B")
+]
+
+languages = [
+    ("English", "eng_Latn", "en"),
+    ("Chinese", "cmn_Hani", "zh"),
+    ("French", "fra_Latn", "fr"),
+    ("Arabic", "arb_Arab", "ar"),
+]</code></pre>
+        <p>然后加载维基百科样本，用流式读取，避免下载整个数据集：</p>
+<pre><code>from datasets import load_dataset
+
+wikis = {}
+for lang_name, lang_code, short_lang_code in languages:
+    wiki_ds = load_dataset("wikimedia/wikipedia", f"20231101.{short_lang_code}", streaming=True, split="train")
+    wiki_ds = wiki_ds.shuffle(seed=42, buffer_size=10_000)
+    # Sample 100 articles per language
+    ds_iter = iter(wiki_ds)
+    wikis[lang_code] = "\n".join([next(ds_iter)["text"] for _ in range(100)])</code></pre>
+        <p>
+            数据准备好后，对每个分词器和每种语言做评估。每个组合都从 <a href="https://github.com/huggingface/datatrove" target="_blank">DataTrove</a> 加载对应的词切分器，计算两个指标：
+        </p>
+<pre><code>from transformers import AutoTokenizer
+from datatrove.utils.word_tokenizers import load_word_tokenizer
+import pandas as pd
+
+results = []
+
+for tokenizer_name, tokenizer_path in tokenizers:
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+
+    for lang_name, lang_code, short_lang_code in languages:
+        word_tokenizer = load_word_tokenizer(lang_code)
+
+        # Compute metrics on Wikipedia
+        fertility, pcw = compute_tokenizer_metrics(tokenizer, word_tokenizer, wikis[lang_code])
+
+        results.append({
+            "tokenizer": tokenizer_name,
+            "language": lang_name,
+            "fertility": fertility,
+            "pcw": pcw
+        })
+
+df = pd.DataFrame(results)
+print(df)</code></pre>
+        <p>
+            输出如下（原文的结果表比上面代码里的语言列表多出 Spanish、Portuguese、Italian 三种语言，这里照原样整理；数值越低越好）：
+        </p>
+        <table>
+            <thead><tr><th>语言</th><th>Llama3 繁殖率 / 续接词比例</th><th>Gemma3</th><th>Mistral (S)</th><th>Qwen3</th></tr></thead>
+            <tbody>
+                <tr><td>English</td><td>1.482 / 0.322</td><td>1.413 / 0.260</td><td>1.591 / 0.368</td><td>1.544 / 0.328</td></tr>
+                <tr><td>Chinese</td><td>1.602 / 0.426</td><td>1.471 / 0.331</td><td>1.782 / 0.471</td><td>1.454 / 0.307</td></tr>
+                <tr><td>French</td><td>1.728 / 0.482</td><td>1.563 / 0.399</td><td>1.686 / 0.465</td><td>1.749 / 0.478</td></tr>
+                <tr><td>Spanish</td><td>1.721 / 0.463</td><td>1.586 / 0.407</td><td>1.703 / 0.457</td><td>1.758 / 0.469</td></tr>
+                <tr><td>Portuguese</td><td>1.865 / 0.492</td><td>1.905 / 0.461</td><td>2.014 / 0.496</td><td>2.064 / 0.501</td></tr>
+                <tr><td>Italian</td><td>1.812 / 0.541</td><td>1.696 / 0.484</td><td>1.816 / 0.534</td><td>1.883 / 0.549</td></tr>
+                <tr><td>Arabic</td><td>2.350 / 0.718</td><td>2.254 / 0.701</td><td>2.149 / 0.660</td><td>2.255 / 0.660</td></tr>
+            </tbody>
+        </table>
+        <p>
+            结果显示了不同优先级下的赢家和取舍。原书交互图还标出了各分词器的词表大小：Llama3 128k，Mistral Small 131k，Qwen3 151k，Gemma3 262k。
+        </p>
+        <p>
+            Gemma 3 的分词器在多种语言上繁殖率和切词率都低，英文、法文、西班牙文尤其明显，这可以用它的多语言训练数据和很大的词表（262k，大约是 Llama 3 的 128k 的 2 倍）来解释。Qwen3 的分词器在中文上表现突出，但在英文、法文、西班牙文上落后于 Llama 3。Mistral Small 的分词器在阿拉伯文上最好，但在英文和中文上不如其他几个。
+        </p>
+
+        <h4>用现成的还是自己训</h4>
+        <p>
+            现在已经有不少强分词器可选。许多近期模型从 GPT-4 的分词器这类起点出发，再补充多语言 token。Llama 3 的分词器在多语言文本和代码上平均表现好，Qwen2.5 的在中文和一些低资源语言上尤其出色。怎样决定用现成的还是自己训？几条指导：
+        </p>
+        <ul>
+            <li>什么时候用现成的：如果你的用例和上面比较过的分词器的语言、领域覆盖匹配，它们都是久经考验的可靠选择。SmolLM3 训练时选了 Llama 3 的分词器：它在目标语言（英语、法语、西班牙语、葡萄牙语、德语、意大利语）上分词质量有竞争力，词表大小也适中，适合小模型。对于嵌入占总参数比例更小的大模型，Gemma 3 的效率优势更有吸引力。</li>
+            <li>什么时候自己训：如果要训练低资源语言，或者数据配比很特殊，多半需要自己训分词器来保证覆盖。这时要用一份尽量接近最终训练配比的数据来训分词器。这会带来一个先有鸡还是先有蛋的问题：做数据消融、找合适配比需要分词器。办法是在启动最终训练前重新训一遍分词器，确认下游性能有提升、繁殖率依然良好。</li>
+        </ul>
+        <p>
+            分词器的选择看似是个技术细节，但它影响模型性能的方方面面。值得花时间把它做好。
+        </p>
+
+        <h3 id="t01-10">SmolLM3 的架构</h3>
+        <p><em>原书小节：SmolLM3</em></p>
+        <p>
+            看过架构的全景、做过一些消融之后，看看这些在 SmolLM3 上怎样落地。
+        </p>
+        <p>
+            SmolLM 系列的目标是推动小模型能力的边界。SmolLM2 提供了 135M、360M、1.7B 三个能干的模型，都是为端侧高效运行设计的。SmolLM3 想在保持能放进手机的同时提升性能，并补上 SmolLM2 的短板：多语言、超长上下文处理、强推理能力。作者认为 3B 参数是这个平衡的最佳点。
+        </p>
+        <p>
+            因为是在放大一套已经验证过的配方，自然倾向稠密 Transformer。当时 Nanotron 还没实现 MoE，而团队已经有训练强小稠密模型的经验和基础设施。更重要的是，端侧部署受内存限制：参数很多的 MoE 即使每次只激活少数参数，也要把所有专家加载进内存，这很受限，所以稠密模型更实际。
+        </p>
+        <p>
+            他们以 SmolLM2 1.7B 的架构为起点，然后用 Qwen2.5-3B 的布局在 100B token 上训练了一个 3B 消融模型，作为测试各项改动的可靠基线。每个架构改动都必须满足下面之一：在英文基准上改善 loss 和下游性能，或者带来可衡量的好处（比如推理速度），同时不降低质量。
+        </p>
+        <p>开跑前测试过、最终入选的改动有这些：</p>
+        <ul>
+            <li>分词器：动架构之前先要选分词器。团队找了一组覆盖目标语言和领域的候选。根据繁殖率分析，Llama 3.2 的分词器在六种目标语言上的表现和 128k 的词表大小之间取得了最好的平衡：词表够大，能保证多语言效率；又没有大到让嵌入权重撑大 3B 的参数量。</li>
+            <li>分组查询注意力：在 3B 规模、100B token 上再次确认了之前的结论，4 组 GQA 和 MHA 性能相当。KV cache 的效率收益不能放过，尤其在内存宝贵的端侧部署上。</li>
+            <li>长上下文用 NoPE：实现了混合位置编码，每第四层用 NoPE，其余层用 RoPE。3B 消融确认了之前的发现：NoPE 改善了长上下文处理，没有牺牲短上下文性能。</li>
+            <li>文档内注意力掩码：训练时阻止跨文档的注意力，有助于在超长序列上训练时的速度和稳定性。同样，作者发现它不影响下游性能。</li>
+            <li>模型布局优化：比较了文献中几个近期 3B 模型的布局，有的偏深，有的偏宽。在自己的训练设置上测试了 Qwen2.5-3B（3.1B）、Llama 3.2-3B（3.2B）、Falcon3-H1-3B（3.1B）三种布局，深度和宽度各不相同。结果是：所有布局的 loss 和下游性能几乎一样，尽管 Qwen2.5-3B 的参数实际更少。但 Qwen2.5-3B 的架构更深，和“网络深度有益于泛化”的研究（Petty 等人）一致。所以他们选了更深的布局，押注它在训练后期会有帮助。</li>
+            <li>稳定性改进：保留了 SmolLM2 的共享嵌入，并加了一个受 OLMo 2 启发的新技巧，嵌入层去掉权重衰减。消融显示这不损害性能，还降低了嵌入范数，有助于防止训练发散。</li>
+        </ul>
+        <p>
+            系统化消融的好处在于，每项改动都验证过，所以可以放心地把它们组合在一起。
+        </p>
+        <div class="takeaway">
+            <p>
+                在消融中组合改动：实践中是逐步测试的。一项特性验证通过后，就并入基线，再在此基础上测下一项。测试顺序有讲究：先测久经考验的特性（共享嵌入 → GQA → 文档掩码 → NoPE → 去掉权重衰减）。
+            </p>
+        </div>
+
+        <h3 id="t01-11">行动准则（架构）</h3>
+        <p><em>原书小节：Rules of Engagement</em></p>
+        <blockquote><p>TL;DR：用例决定选择。</p></blockquote>
+        <p>
+            让部署目标指导架构决定。评估新的架构创新时，考虑模型实际会怎样运行、在哪里运行。
+        </p>
+        <p>
+            在创新和务实之间找到平衡。不能忽视重大的架构进步，有 GQA 这样更好的选择还用 MHA，是糟糕的技术决定。要跟进最新研究，采用那些在规模上有明确、经过验证的好处的技术。但要抵制追逐每一篇承诺边际收益的新论文的诱惑（除非你有资源，或者你的目标就是做架构研究）。
+        </p>
+        <p>
+            系统化胜过直觉。每个架构改动都要验证，不管它在纸面上看着多有前景。先单独测试各项改动，再组合，这样才能弄清每项的影响。
+        </p>
+        <p>
+            规模效应是真实存在的，条件允许时在目标规模上重新消融。不要假设小规模消融的结论在目标模型规模上完全成立。有算力的话，尽量再确认一遍。
+        </p>
+        <p>
+            在你实际的领域上验证分词器效率。目标语言和领域上的繁殖率，比照搬最新模型的选择更重要。50k 的英文分词器撑不起认真的多语言工作，但如果你没覆盖那么多语言，也不需要 256k 的词表。
+        </p>
+        <p>模型架构定了，下面处理驱动学习过程的优化器和超参数。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 优化器与训练超参数</h2>
+        <p><em>原书小节：Optimizer and Training Hyperparameters</em></p>
+        <p>
+            各部分正在就位：消融做了，架构定了，分词器也选了。但真正开训之前，还有几个要紧的决定：用哪个优化器？学习率和批大小多少？训练中学习率怎样调度？
+        </p>
+        <p>
+            省事的办法是直接从文献里另一个强模型那里借数值。大实验室用着行，我们用着也该行吧？很多情况下确实可以，前提是借的是架构和规模相近的模型的数值。
+        </p>
+        <p>
+            但不针对自己的设置调这些值，就可能白白丢掉性能。文献里报告的超参数是针对特定数据和约束优化的，有时那些约束甚至和性能无关：也许学习率是开发早期随手定的，之后再没回头看。即使模型作者做了彻底的超参数扫描，那些最优值也是在他们自己的架构、数据和训练方式组合下找到的，不是我们的。文献值是很好的起点，但值得在附近探索一下有没有更好的值。
+        </p>
+        <p>
+            这一节会看最新的优化器（以及老牌的 AdamW 是否依然经得起<a href="https://blog.iclr.cc/2025/04/14/announcing-the-test-of-time-award-winners-from-iclr-2015/" target="_blank">时间检验</a>），深入 cosine 衰减之外的学习率调度，并研究给定模型和数据规模时怎样调学习率和批大小。
+        </p>
+        <p>先从优化器之争开始。</p>
+
+        <h3 id="t02-1">优化器：AdamW 及其后来者</h3>
+        <p><em>原书小节：Optimizers: AdamW and Beyond</em></p>
+        <p>
+            优化器（Optimizer）是整个 LLM 训练的心脏。它根据过去的更新、当前权重和由 loss 算出的梯度，决定每个参数这一步实际怎么更新。同时它也很吃内存和算力（见 <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook?section=profiling_the_memory_usage" target="_blank">Ultra-Scale Playbook 的显存分析</a>），会影响需要多少 GPU、训练多快。（原书旁注：不清楚优化器是什么、有什么用，可以看 Sebastian Ruder 关于<a href="https://www.ruder.io/optimizing-gradient-descent/" target="_blank">梯度下降与优化器</a>的博客，里面比较了不少优化器。）
+        </p>
+        <p>作者把 LLM 预训练用的优化器现状“认真”总结成了下表：</p>
+        <table>
+            <thead><tr><th>模型</th><th>优化器</th></tr></thead>
+            <tbody>
+                <tr><td>Kimi K2、GLM 4.5</td><td>Muon</td></tr>
+                <tr><td>其他所有人</td><td>AdamW</td></tr>
+            </tbody>
+        </table>
+        <p>为什么大家都用 AdamW？</p>
+        <p>
+            写这部分的作者（Elie）认为是因为“大家懒”，但其他人可能会更实际地说：AdamW 长期以来在各种规模上都表现良好，比竞争者好；而换掉这么核心的组件总有点吓人，尤其是在超长训练中测试它的表现很难（也就是很贵）。
+        </p>
+        <p>
+            而且公平地比较优化器比看上去难。规模会改变训练动态，这在小规模消融里很难模拟，所以调超参数很复杂。你可能会说：“没事，我的 AdamW 调了好几周，同一套超参数拿来比就行。”可惜不是这样。每个优化器都要做一次像样的超参数搜索（一维？二维？三维？），这让优化器研究又难又贵。（原书旁注：基线常常没调好，新优化器是在跟一个弱的 AdamW 设置比。最近一项研究，Stanford Marin 团队的 Fantastic Pretraining Optimizers，显示光是这一点就能让报告的收益严重失真。）
+        </p>
+        <p>先从经典开始，也就是 Durk Kingma 在 Google Scholar 上惊人引用量的基础之一：AdamW。</p>
+
+        <h4>AdamW</h4>
+        <p>
+            Adam（Adaptive Momentum Estimation，自适应矩估计）是一种一阶优化方法，只看梯度。它利用由过去梯度得来的动量，为每个参数自适应地调整学习率。
+        </p>
+        <p>
+            细心的读者会问：是不是漏了个 W？确实。之所以专门加上 W（weight decay，权重衰减），是因为在标准的随机梯度下降（SGD）里，可以直接往 loss 里加一项 $\lambda \theta^2$（$\theta$ 是权重）来做 L2 正则；但对 Adam 这样做的话，自适应学习率也会作用到 L2 正则上，正则强度就会依赖梯度的大小，效果被削弱。这不是我们想要的。AdamW 把权重衰减从主优化循环里解耦出来，解决了这个问题。
+        </p>
+        <p>有意思的是，过去几年 AdamW 的超参数几乎没动过：</p>
+        <ul>
+            <li>β₁ = 0.9，β₂ = 0.95</li>
+            <li>梯度范数裁剪（grad norm clipping）= 1.0</li>
+            <li>权重衰减 = 0.1（Llama 3 405B 降到 0.01）</li>
+        </ul>
+        <p>
+            Llama 1、2、3 和 DeepSeek-V1、V2、V3-671B 用的都是这同一组三元设置，没有改过。Durk Kingma 是不是一直都是对的，还是我们能做得更好？
+        </p>
+
+        <h4>一句话讲 Muon</h4>
+        <p>
+            Adam 是一阶方法，只用梯度。Muon 是一种二阶优化器，作用在参数张量的矩阵视角上：
+        </p>
+        $$
+        \begin{aligned}
+        G_t &= \nabla_{\theta}\mathcal{L}_t(\theta_{t-1}) \\
+        B_t &= \mu\, B_{t-1} + G_t \\
+        O_t &= \mathrm{NewtonSchulz5}(B_t) \approx U V^\top \quad \text{if } B_t = U\Sigma V^\top \text{ (SVD)} \\
+        \theta_t &= \theta_{t-1} - \eta\, O_t
+        \end{aligned}
+        $$
+        <p>
+            看这几行公式，你可能会问：为什么说它是二阶方法？只看到梯度，没有高阶项。二阶优化其实发生在 Newton-Schulz 那一步里，这里不展开。讲 Muon 的优质资料很多（原书推荐 <a href="https://kellerjordan.github.io/posts/muon/" target="_blank">Keller Jordan</a> 和 <a href="https://jeremybernste.in/writing/deriving-muon" target="_blank">Jeremy Bernstein</a> 的博客，以及 Jia-Bin Huang 的<a href="https://www.youtube.com/watch?v=bO5nvE289ec" target="_blank">视频</a>，后者是很好的入门），这里只讲三个核心想法：
+        </p>
+        <ol>
+            <li>矩阵级几何，不是逐参数更新：AdamW 逐参数做预条件（对角的二阶矩）。Muon 把每个权重矩阵当作一个整体，沿 $G=UV^{\top}$ 更新，捕捉行/列子空间的结构。</li>
+            <li>通过正交化得到各向同性的步长：用奇异值分解（SVD）把 $G=U\Sigma V^{\top}$ 拆开，把大小（$\Sigma$）和方向（左右子空间 $U$、$V$）分离。用 $UV^{\top}$ 替换 $G$，丢掉奇异值，让步长在活跃子空间里是各向同性（isotropic）的。乍看有点反直觉，扔掉 $\Sigma$ 像是丢了信息，但它减少了沿坐标轴的偏向，鼓励探索那些本来会被很小的奇异值压制的方向。这种探索是否会让模型学到一些只看 loss 看不出来的不同能力，目前还是开放问题。</li>
+            <li>经验上更能容忍大批量：实践中 Muon 往往能承受更大的批大小。批大小一节会更深入讨论，这可能是采用 Muon 的一大动机。</li>
+        </ol>
+        <p>
+            多年来社区基本定在 AdamW 上，前沿实验室的优化器配方往往保密（比如 Qwen 就没讲过他们的），但最近 Muon 在一些备受关注的发布中被采用（如 Kimi K2 和 GLM-4.5）。希望以后能看到更多公开、稳健的使用配方。
+        </p>
+        <p>
+            优化器的动物园五花八门，研究者在组合各种动量和导数方面很有创意，在起名方面更有创意：Shampoo、SOAP、PSGD、CASPR、DION、Sophia、Lion……连 AdamW 都有自己的变体，比如 NAdamW、StableAdamW 等等。把这些优化器都讲一遍够写一本单独的指南，这里先不展开。作者推荐 Stanford Marin 团队的论文（Fantastic Pretraining Optimizers），他们对很多优化器做了基准测试，说明了比较时调超参数有多重要。
+        </p>
+        <p>
+            几乎每个优化器选择都伴随一个问题：权重更新该多大？这由学习率决定，它通常是优化器公式里的一个标量。话题看似简单，下一节会看到它有很多面。
+        </p>
+
+        <h3 id="t02-2">学习率</h3>
+        <p><em>原书小节：Learning Rate</em></p>
+        <p>
+            学习率（Learning rate，LR）是最重要的超参数之一。每个训练步，它控制根据算出的梯度把模型权重调整多少。学习率太低，训练慢得难受，还可能卡在糟糕的局部极小值；loss 曲线看着很平，算力预算烧掉了却没有实质进展。学习率太高，优化器步子迈得太大，越过最优解，永远收敛不了（或者出现最糟的情况：loss 发散，一路飙升）。
+        </p>
+        <p>
+            而且最佳学习率本身也不是常数，因为训练过程中学习动态在变。训练早期离好解还远，高学习率有效；接近收敛时，高学习率会带来不稳定。这就是学习率调度（Learning rate schedule）的用处：先从零预热（warmup），避免早期混乱；再衰减，让模型落进一个好的极小值。这些模式（比如 warmup + cosine 衰减）多年来在神经网络训练中一再被验证。
+        </p>
+        <div class="takeaway">
+            <p>
+                Warmup 步数：大多数现代 LLM 用固定的 warmup 步数（比如 2,000），不随模型大小和训练长度变，可以看“架构选择”一节开头的<a href="#t01">那张表</a>。对很短的训练，常用总步数的 1–5%。对较长的训练，作者发现增加 warmup 步数一般不影响性能。
+            </p>
+        </div>
+        <p>下面先看几种常见的调度，再讨论怎样选峰值。</p>
+
+        <h4>学习率调度：cosine 衰减之外</h4>
+        <p>
+            调整学习率有助于收敛，这一点早已为人所知（Smith 等人的 super-convergence 研究）。很长一段时间里，cosine 衰减是训练 LLM 的首选调度：warmup 之后从峰值学习率开始，沿余弦曲线平滑下降。它简单好用，主要缺点是不灵活：必须事先知道要训练多少步，因为余弦周期的长度必须和总训练时长匹配。这在几种常见场景下会出问题：模型还没到平台期，你又拿到了更多算力想多训一阵；或者你在做 scaling law 实验，要在不同 token 数上训练同一个模型。cosine 衰减逼你从头再来。
+        </p>
+        <p>
+            （原书旁注：这种不灵活曾让早期的 scaling law 研究出现偏差。Kaplan 等人在不同 token 数上训练模型时用了固定长度的 cosine 调度，低估了数据量的影响。Chinchilla 研究纠正了这一点，让调度长度和每个模型的实际训练时长匹配。）
+        </p>
+        <p>
+            现在许多团队用的调度不需要在 warmup 后立刻开始衰减，比如预热-稳定-衰减（Warmup–stable–decay，WSD，出自 MiniCPM）和多阶梯（multi-step，DeepSeek LLM 用过）两种。大部分训练保持一个恒定的高学习率，然后 WSD 在最后阶段（通常是最后 10–20% 的 token）急剧衰减，multi-step 则用几次离散的下降（阶梯）来降低学习率。比如 DeepSeek LLM 的 multi-step 调度在训练的 80% 和 90% 处各降一次。原书在这里用交互图画出了 cosine、WSD 和 multi-step 三种调度曲线。
+        </p>
+        <p>
+            这些调度比 cosine 衰减有实际优势：可以在训练中途延长训练而不用重启；可以提前衰减，更清楚地看到训练进展；可以在一次主训练里跑不同 token 数的 scaling law 实验。研究还显示 WSD 和 multi-step 都能追平 cosine 衰减的性能（Hägele 等人的 WSD 研究、DeepSeek LLM），同时在真实训练场景里更实用。（原书旁注：GLM-4.5 最近提到 WSD 在通用基准（SimpleQA、MMLU）上不如 cosine 衰减，但没给出任何结果。）
+        </p>
+        <p>
+            你大概也注意到了，这些调度比 cosine 衰减多了新的超参数。WSD 的衰减阶段该多长？multi-step 每个阶梯该多长？
+        </p>
+        <ul>
+            <li>WSD：要追平 cosine 所需的冷却（cooldown）时长，随训练变长而减少。一般建议把总 token 的 10–20% 分给衰减阶段（Hägele 等人）。下一小节的消融会确认这个设置能追平 cosine。</li>
+            <li>multi-step：DeepSeek LLM 的消融发现，他们的基线 80/10/10 划分（稳定到 80%，第一阶梯 80–90%，第二阶梯 90–100%）能追平 cosine，调整比例还能超过它（比如用 70/15/15 和 60/20/20）。</li>
+        </ul>
+        <p>
+            学习率调度还可以更有创意。看看其他几个 DeepSeek 模型的调度（原书交互图比较了 DeepSeek 几代的 multi-step 调度曲线）：
+        </p>
+        <p>
+            DeepSeek LLM 用的是基线 multi-step 调度（80/10/10）。DeepSeek V2 把比例调成 60/30/10，给第一个衰减阶梯更多时间。DeepSeek V3 最有创意：恒定阶段之后，它接的是一段 cosine 衰减（从训练的 67% 到 97%），再保持一小段恒定，最后做一次陡降。
+        </p>
+        <div class="takeaway">
+            <p>
+                DeepSeek 的调度改动：DeepSeek-V2 和 V3 的技术报告没有给出这些调度改动的消融。对你自己的设置，先从简单的 WSD 或 multi-step 开始，再考虑通过消融调参数。
+            </p>
+        </div>
+        <p>奇特的学习率调度就看到这里，下面花些 GPU 时间看看实际什么管用。</p>
+
+        <h4>消融实验：WSD 追平 cosine</h4>
+        <p>
+            来做个消融，测试 WSD 是否真能追平 cosine。这里不展示 multi-step 的消融，推荐看 DeepSeek LLM 的消融，它们显示 multi-step 在不同阶段划分下都能追平 cosine。
+        </p>
+        <p>比较 cosine 衰减和两种衰减窗口（10% 和 20%）的 WSD。据原文交互图数据：</p>
+        <table>
+            <thead><tr><th>Run</th><th>训练 loss</th><th>HellaSwag</th><th>MMLU</th><th>ARC</th><th>PIQA</th><th>OpenBookQA</th><th>WinoGrande</th></tr></thead>
+            <tbody>
+                <tr><td>Cosine（基线）</td><td>2.203</td><td>0.496</td><td>0.328</td><td>0.483</td><td>0.708</td><td>0.317</td><td>0.505</td></tr>
+                <tr><td>WSD，衰减 10%</td><td>2.205</td><td>0.494</td><td>0.326</td><td>0.473</td><td>0.697</td><td>0.316</td><td>0.505</td></tr>
+                <tr><td>WSD，衰减 20%</td><td>2.183</td><td>0.487</td><td>0.329</td><td>0.476</td><td>0.708</td><td>0.320</td><td>0.508</td></tr>
+            </tbody>
+        </table>
+        <p>
+            三种配置的最终性能相近。从 loss 和评测曲线（特别是 HellaSwag）能看到一个有意思的规律：在稳定阶段（WSD 开始衰减之前），cosine 的 loss 和评测分数更好；可一旦 WSD 进入衰减阶段，loss 和下游指标都几乎线性地改善，到训练结束时 WSD 追上了 cosine。
+        </p>
+        <p>
+            这确认了 WSD 10–20% 的衰减窗口足以追平 cosine 的最终性能，同时保留了中途延长训练的灵活性。SmolLM3 选了衰减 10% 的 WSD。
+        </p>
+        <div class="takeaway">
+            <p>
+                比较不同调度器训练的中途模型：如果在稳定阶段比较 cosine 和 WSD 的中间检查点，要先给 WSD 的检查点做一次衰减，比较才公平。
+            </p>
+        </div>
+        <p>常见的学习率调度看完了，下一个问题是：学习率到底设多少？</p>
+
+        <h4>找最优学习率</h4>
+        <p>
+            要为特定的调度器和训练设置找最优学习率，可以像架构选择那样在短消融上做学习率扫描。但最优学习率取决于训练时长：在短消融里收敛最快的学习率，不一定是完整训练的最佳值。而且我们负担不起把好几周的昂贵训练跑很多遍来测不同学习率。
+        </p>
+        <p>
+            先看几个能快速排除明显过高或过低学习率的简单扫描，再讨论超参数的 scaling law。
+        </p>
+
+        <h4>消融实验：学习率扫描</h4>
+        <p>
+            为展示学习率的影响，在 45B token 的 1B 消融模型上做一次扫描。同一个模型、同样的设置，用四个学习率训练：1e-4、5e-4、5e-3、5e-2。结果清楚地显示了两个极端的危险。据原文交互图数据：
+        </p>
+        <table>
+            <thead><tr><th>Run</th><th>训练 loss</th><th>HellaSwag</th><th>MMLU</th><th>ARC</th><th>PIQA</th><th>OpenBookQA</th><th>WinoGrande</th></tr></thead>
+            <tbody>
+                <tr><td>LR 1e-4</td><td>2.309</td><td>0.435</td><td>0.310</td><td>0.436</td><td>0.690</td><td>0.294</td><td>0.498</td></tr>
+                <tr><td>LR 5e-4（基线）</td><td>2.198</td><td>0.496</td><td>0.328</td><td>0.483</td><td>0.708</td><td>0.317</td><td>0.505</td></tr>
+                <tr><td>LR 5e-3</td><td>2.186</td><td>0.472</td><td>0.317</td><td>0.460</td><td>0.688</td><td>0.302</td><td>0.501</td></tr>
+                <tr><td>LR 5e-2</td><td>8.283</td><td>0.259</td><td>0.249</td><td>0.263</td><td>0.508</td><td>0.264</td><td>0.479</td></tr>
+            </tbody>
+        </table>
+        <p>
+            （整理者注：交互图数据里 LR 5e-3 的评测只记录到约 36B token，表中是它最后几个检查点的分数，和其他 run 不完全可比。）
+        </p>
+        <p>
+            LR 5e-2 几乎立刻发散：loss 早早飙升，再没恢复，模型不可用。LR 1e-4 太保守，训练稳定，但收敛比其他学习率慢得多。居中的 LR 5e-4 和 LR 5e-3 收敛更好，性能相当。
+        </p>
+        <p>
+            SmolLM3 这边，作者用 AdamW 和 WSD 调度，在 100B token 上训练 3B 模型，比较了几个学习率。他们发现 2e-4 在 loss 和下游性能上都比 1e-4 收敛快得多，而 3e-4 只比 2e-4 略好一点。3e-4 的这点边际收益伴随着长训练中更高的不稳定风险，所以选了 2e-4 作为最佳点。
+        </p>
+        <p>
+            这类扫描能排除明显太高（发散）或太低（收敛慢）的学习率，但每个模型规模都做扫描很快就会变贵；更要紧的是，短训练的结果未必能准确转化到完整训练上。这时 scaling law 就很有价值了。
+        </p>
+        <p>不过在讲超参数的 scaling law 之前，先讨论另一个和学习率相互作用的关键超参数：批大小。</p>
+
+        <h3 id="t02-3">批大小</h3>
+        <p><em>原书小节：Batch Size</em></p>
+        <p>
+            批大小（Batch size）是每次更新模型权重之前处理的样本数，它直接影响训练效率和最终模型性能。如果硬件和训练栈能在多设备上良好扩展，增大批大小能提高吞吐（throughput，训练时每秒处理的 token 数）。但超过某个点之后，更大的批会开始损害数据效率：模型需要更多的总 token 才能达到同样的 loss。这个转折点叫临界批大小（critical batch size，McCandlish 等人提出）。
+        </p>
+        <p>扩大批大小有两种情况：</p>
+        <ul>
+            <li>在临界值以下增大批大小：增大批大小并重新调学习率后，用和小批量同样多的 token 就能达到同样的 loss，没有浪费数据。</li>
+            <li>在临界值以上增大批大小：更大的批开始牺牲数据效率，达到同样的 loss 需要更多的总 token（也就是更多钱），即使因为更多芯片同时在忙，墙钟时间下降了。</li>
+        </ul>
+        <p>下面看为什么要重新调学习率，以及怎样估计临界批大小。</p>
+        <p>
+            批大小增大时，每个 mini-batch 的梯度都是对真实梯度更好的估计。这让你可以安全地迈更大的步子（即提高学习率），用更少的更新次数达到目标 loss。问题是怎样缩放。
+        </p>
+        <p>对 $B$ 个样本求平均：</p>
+        <ul>
+            <li>批梯度：$\tilde{g}_{B} = \frac{1}{B}\sum_{i=1}^{B} \tilde{g}^{(i)}$</li>
+            <li>均值不变：$\mathbb{E}\!\left[\tilde{g}_{B}\right] = g$</li>
+            <li>但协方差缩小：$\mathrm{Cov}\!\left(\tilde{g}_{B}\right) = \frac{\Sigma}{B}$</li>
+        </ul>
+        <p>SGD 的参数更新是：</p>
+        <ul>
+            <li>$\Delta w = -\,\eta \,\tilde{g}_{B}$</li>
+        </ul>
+        <p>这个更新的方差正比于：</p>
+        <ul>
+            <li>$\mathrm{Var}(\Delta w) \propto \eta^{2}\,\frac{\Sigma}{B}$</li>
+        </ul>
+        <p>
+            所以要让更新的方差大致不变，批大小放大 $k$ 倍时，学习率应该放大 $\sqrt k$ 倍。假设你已经算出了最优批大小和学习率，发现可以把批大小增大到临界批大小，而且能提高吞吐，那就需要相应地调整最优学习率（原书旁注推荐苏剑林的<a href="https://kexue.fm/archives/11260" target="_blank">系列文章</a>，里面有更多相关数学）：
+        </p>
+        $$
+        B_{\text{critical}} \rightarrow kB_{\text{optimal}} \quad\Rightarrow\quad \eta_{\text{critical}} \rightarrow \sqrt{k}\eta_{\text{optimal}}
+        $$
+        <p>
+            对 AdamW 或 Muon 这类优化器，一条有用的经验法则是随批大小增长按平方根缩放学习率（square root LR scaling），但具体怎样起作用取决于优化器。比如用 AdamW 时，和 <code>beta1</code>/<code>beta2</code> 的相互作用可能带来很不一样的行为。Merrill 等人（2025）提出了一个务实的替代办法：在一个短窗口内让训练分叉。一个 run 保持原批大小，另起一个用更大批大小和重新缩放过的学习率，只有在重新缩放后两条 loss 曲线对得上时，才采用更大的批大小。他们在切换批大小时重新预热学习率、重置优化器状态，还设了一个容差和一个时间窗口来判断 loss 是否“匹配”，这两个旋钮都靠经验选。他们的结果表明，$B_\text{simple}$ 这个估计（本身也有噪声）低估了“实际”的临界批大小。这给了你一个快速、低风险的办法，检查新的批大小和学习率组合是否保持了训练动态。
+        </p>
+        <p>
+            （整理者注：原文这里没有给出 $B_\text{simple}$ 的定义。它来自 McCandlish 等人的论文，即“简单梯度噪声尺度”，大致是梯度噪声的总方差除以真实梯度范数的平方，$B_\text{simple} = \mathrm{tr}(\Sigma)/\lVert g\rVert^2$，用来估计临界批大小。）
+        </p>
+        <p>
+            临界批大小不是固定的，它随训练推进而增大。训练早期，模型在迈大的梯度步，$\lVert g\rVert^2$ 大，所以 $B_\text{simple}$ 小，临界批大小也小。后期模型更新趋于稳定，更大的批变得更有效。这就是为什么有些大规模训练让批大小逐步增大，也就是所谓的批大小预热（batch size warmup）。比如 DeepSeek-V3 在前约 469B token 用 12.6M 的批，之后的训练增大到 62.9M。这样的批大小预热和学习率预热目的一样：随着梯度噪声尺度增大，让模型保持在高效前沿上，整个训练过程都稳定高效。
+        </p>
+        <p>
+            另一个有意思的做法是把 loss 当作临界批大小的代理指标。MiniMax-01 就这么做，最后阶段他们用 128M 的批大小训练。他们没有提高学习率，所以这个批大小调度起到了类似学习率衰减调度的作用。
+        </p>
+        <div class="takeaway">
+            <p>调批大小和学习率：实践中可以这样选。</p>
+            <ul>
+                <li>先根据 scaling law（见下一节）或文献，选出你认为最优的批大小和学习率。</li>
+                <li>然后调批大小，看能不能提高训练吞吐。</li>
+            </ul>
+            <p>
+                要点是：从起始批大小到临界批大小之间往往有一段空间，在这段里增大批大小能提高硬件利用率，又不牺牲数据效率，但必须相应地重新调学习率。如果吞吐提升不明显，或者测试更大的批大小（配上重新缩放的学习率）显示数据效率变差，就沿用之前的值。
+            </p>
+        </div>
+        <p>上面提到，选批大小和学习率起点的一个办法是用 scaling law。下面看它是怎样工作的。</p>
+
+        <h3 id="t02-4">超参数的 scaling law</h3>
+        <p><em>原书小节：Scaling Laws for Hyperparameters</em></p>
+        <p>
+            最优学习率和批大小不只取决于模型架构和大小，还取决于算力预算，而算力预算由模型参数量和训练 token 数决定。实践中这些因素相互作用，决定了更新该激进还是保守。这就是 scaling law 的用武之地。
+        </p>
+        <p>
+            Scaling law（缩放定律）建立的是经验关系，描述随着训练规模增大（模型更大或数据更多），模型性能怎样变化（完整历史见本章最后一节）。它也能帮我们预测放大训练时该怎样调整学习率、批大小这些关键超参数，<a href="https://arxiv.org/abs/2401.02954" target="_blank">DeepSeek LLM</a> 和 <a href="https://arxiv.org/abs/2412.15115" target="_blank">Qwen2.5</a> 的近期工作就展示了这一点。这样就能有根据地设定默认值，不必完全依赖超参数扫描。
+        </p>
+        <p>
+            要在这个场景里用 scaling law，需要一个衡量训练规模的量。标准指标是算力预算 $C$，可以近似为 $C \approx 6 \times N \times D$，其中 $N$ 是模型参数量（比如 1B = 1e9），$D$ 是训练 token 数。它通常用 FLOPs 衡量，这是一种和硬件无关的计算量度量。如果 FLOPs 太抽象，可以这样想：在 100B token 上训练 1B 参数的模型，消耗的 FLOPs 是在 100B token 上训 2B 模型、或在 200B token 上训 1B 模型的一半。
+        </p>
+        <p>
+            常数 6 来自对训练 Transformer 所需浮点运算的经验估计：每个参数每个 token 大约 6 FLOPs。（原书旁注：想要考虑 MoE 层和混合层的更精确度量，可以看 Megatron-LM 里的 <a href="https://github.com/NVIDIA/Megatron-LM/blob/f34fa11af6f5dc65f5342f2a785c3227446cebfd/megatron/training/training.py#L158" target="_blank"><code>num_floating_point_operations</code></a> 函数。）
+        </p>
+        <p>
+            这和学习率有什么关系？可以推导出把最优学习率和批大小表示为总算力预算 $C$ 的函数的 scaling law。它们帮助回答这样的问题：
+        </p>
+        <ul>
+            <li>从 1B 放大到 7B 参数时，学习率该怎样变？</li>
+            <li>训练数据翻倍，要不要调学习率？</li>
+        </ul>
+        <p>
+            以 DeepSeek LLM 的做法为例。先选学习率调度，最好是 WSD，因为它灵活。然后在一系列算力预算上（比如 1e17、5e17、1e18、5e18、1e19、2e19 FLOPs）用不同的批大小和学习率组合训练模型。说白了就是：用不同 token 数训练不同大小的模型，测试不同的超参数设置。这里 WSD 的优势就显出来了，同一个训练可以延长到不同的 token 数，不用重启。
+        </p>
+        <p>
+            对每个设置，扫描学习率和批大小，找出达到接近最优性能的配置，通常定义为和最佳验证 loss 相差在很小范围内（比如 0.25%）；验证 loss 在一个和训练集分布相近的独立验证集上计算。每个接近最优的配置给出一个数据点：（算力预算 $C$，最优学习率 $\eta$）或（$C$，最优批大小 $B$）。在双对数坐标上画出来，这些关系通常呈幂律，近似为直线（如下图）。拟合这些数据点，就能得到描述最优超参数随算力怎样变化的 scaling law。
+        </p>
+        <p>
+            这个过程有一个重要发现：在固定的模型大小和算力预算下，性能在很宽的超参数范围内都保持稳定。也就是说存在一个宽的最佳区域，不是一个窄的最优点。不需要找到完美的值，只要足够接近就行，这让整个流程实用得多。
+        </p>
+        <p>下面是 DeepSeek LLM 推出的 scaling law 结果，每个点代表一个接近最优的设置：</p>
+        <figure>
+            <img src="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook/resolve/main/app/src/content/assets/image/image_2471384e-bcac-8059-84a4-d4ce5ae3847c.png" alt="DeepSeek LLM 的批大小和学习率 scaling law">
+            <figcaption>图：DeepSeek LLM 拟合出的最优批大小、最优学习率随算力预算变化的 scaling law，每个点是一个接近最优的设置（引自原书）</figcaption>
+        </figure>
+        <p>
+            这些结果背后的直觉是：训练越大、越长，我们越想要更稳定的更新（更小的学习率）和更高效的梯度估计（更大的批大小）。
+        </p>
+        <p>
+            这些 scaling law 给出学习率和批大小的起点。但真正的目标是“在时间和 GPU 数量的约束下达到更低的 loss”，同时从每个 token 里榨取全部信号；“每次梯度用最优的样本数”只是手段。
+        </p>
+        <p>
+            实践中，你也许可以把批大小增大到超过预测的最优批大小，显著提高吞吐，同时不明显损害数据效率，上限就是前面讨论的临界批大小。
+        </p>
+
+        <h3 id="t02-5">SmolLM3 的超参数</h3>
+        <p><em>原书小节：SmolLM3</em></p>
+        <p>
+            SmolLM3 最后用了什么？消融时，作者在 100B token 上训练 1B 模型，比较了 AdamW、AdEMAMix 和 Muon。调好的 Muon 能胜过 AdamW，但它对学习率敏感，容易发散。AdEMAMix 达到和 Muon 相近的 loss，但没那么敏感。AdamW 最稳定，但最终 loss 比调好的另两者高。
+        </p>
+        <p>
+            然而放大到 3B 时，Muon 和 AdEMAMix 发散得更频繁了。这可能是因为一个并行相关的 bug，作者在做完消融后才发现它（见第 5 章“训练马拉松”），但没有确认。他们最后决定用 AdamW（beta1 0.9，beta2 0.95），权重衰减 0.1，梯度裁剪 1。归根结底，是一套很普通（vanilla）的设置。
+        </p>
+        <p>
+            学习率调度选了 WSD。SmolLM2 已经成功用过它，事实证明这是他们最好的决定之一：好用，总训练时长灵活，还能做训练中途的衰减实验。学习率扫描之后定在 2e-4。全局批大小测了 2M 到 4M token 的若干值，发现对 loss 和下游性能影响很小，于是选了吞吐最好的 2.36M token。
+        </p>
+
+        <h3 id="t02-6">行动准则（超参数）</h3>
+        <p><em>原书小节：Rules of Engagement</em></p>
+        <blockquote><p>TL;DR：平衡探索和执行，做完胜过完美。</p></blockquote>
+        <p>
+            前面谈了很多“是什么”（优化器、学习率、批大小），“怎么做”同样重要。怎样判断什么值得实验？时间怎样安排？什么时候停止探索、直接开训？
+        </p>
+        <p>
+            在探索和执行之间合理分配时间。花几周打磨一个新方法带来的小改进，不如把同样的算力投到更好的数据整理或更彻底的架构消融上。根据作者的经验，虽然可能让架构爱好者失望，但最大的性能提升通常来自数据整理。
+        </p>
+        <p>
+            拿不准时，优先选灵活和稳定，不选峰值性能。如果两种方法表现差不多，选更灵活、实现更成熟稳定的那个。像 WSD 这样允许延长训练或做中途实验的学习率调度，比一个可能收敛略好但死板的调度更有价值。
+        </p>
+        <p>
+            知道什么时候停止优化、开始训练。总还有一个超参数可调，一个优化器可试。给探索定个截止日期并遵守它：真正训完的模型，永远胜过那个从未开训的完美模型。
+        </p>
+        <figure>
+            <img src="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook/resolve/main/app/src/content/assets/image/Capture_decran_2025-10-27_a_22_10_05_2991384e-bcac-802a-a6e6-dab0f9f410ec.png" alt="再做一个消融也无妨的梗图">
+            <figcaption>图：“再做一个消融也无妨！”（剧透：有妨。）作者 sea_snell（引自原书）</figcaption>
+        </figure>
+        <p>
+            完美是好的敌人，在算力预算和截止日期都有限的时候尤其如此。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. Scaling law：多少参数，多少数据？</h2>
+        <p><em>原书小节：Scaling Laws: How Many Parameters, How Much Data?</em></p>
+        <p>
+            深度学习早期，语言模型（以及训练它们的集群）还没有“大”起来的时候，训练通常不太受算力限制。训练模型时，你会挑硬件装得下的最大模型和批大小，一直训到模型开始过拟合或者数据用完。不过即使在那时，人们也感觉到规模是有帮助的，比如 <a href="https://arxiv.org/abs/1712.00409" target="_blank">Hestness 等人</a>在 2017 年给出了一整套结果，表明训练更大的模型、训练更久，能带来可预测的收益。
+        </p>
+        <p>
+            在大语言模型时代，我们总是受算力限制。为什么？早期关于可扩展性的观念由 Kaplan 等人的 <a href="https://arxiv.org/abs/2001.08361" target="_blank">Scaling Laws for Neural Language Models</a> 正式化，它表明语言模型的性能在许多个数量级的规模上都惊人地可预测。这引发了语言模型规模和训练时长的爆炸式增长，因为它提供了一种准确预测扩大规模能带来多少性能提升的方法。于是，造更好语言模型的竞赛变成了在更多数据上、用不断增长的算力预算训练更大模型的竞赛，语言模型的开发很快就受制于算力。
+        </p>
+        <p>
+            面对算力限制，最重要的问题是：训一个更大的模型，还是在更多数据上训？出人意料的是，Kaplan 等人的 scaling law 认为，把算力更多地分给模型规模、远超以往的最佳实践，是有利的。这推动了比如在相对不多的 token 预算（300B token）上训练庞大的 175B 参数 GPT-3。后来 <a href="https://arxiv.org/abs/2203.15556" target="_blank">Hoffmann 等人（2022）</a>重新审视，发现 Kaplan 等人的方法有个方法论问题，重新推导出的 scaling law 主张把更多算力分给训练时长。比如按它的结论，175B 参数的 GPT-3 要达到算力最优，应该训练 3.7T token。Hoffmann 等人修正后的 scaling law 被称为 Chinchilla 定律，名字来自促成这次修正的 Chinchilla 模型。
+        </p>
+        <p>
+            这让领域从“把模型做大”转向“训得更久、更好”。不过，大多数现代训练仍然不严格遵循 Chinchilla 定律，因为它有个缺陷：它预测的是给定算力预算下性能最好的模型大小和训练时长，但没有考虑更大的模型在训练之后更贵。换句话说，我们可能宁愿用给定的算力预算训一个更小的模型、训更久，即使这不是“算力最优”，因为这样推理成本更低（<a href="https://arxiv.org/abs/2401.00448" target="_blank">Sardana et al., 2025</a>；<a href="https://www.harmdevries.com/post/model-size-vs-compute-overhead/" target="_blank">de Vries, 2023</a>）。如果预期模型会被大量用于推理（比如因为它是开源发布的），就会这样选。最近，这种把模型训练得超过 scaling law 建议时长的“过度训练”（overtraining）已成为标准做法，SmolLM3 也是这样做的。
+        </p>
+        <p>
+            scaling law 会针对给定算力预算建议模型大小和训练时长，但选择过度训练，就意味着这两项要自己定。SmolLM3 先选定了 3B 参数的目标规模。参照近期规模相近的模型，比如 Qwen3-4B、Gemma 3 4B 和 Llama 3.2 3B，作者认为 3B 足够大，能让模型具备有意义的能力（比如推理和工具调用），又足够小，能实现极快的推理和高效的本地使用。至于训练时长，他们先注意到近期模型都被极度过度训练了，比如前面提到的 Qwen3 系列号称训练了 36T token。因此训练时长往往由可用算力决定。他们拿到了 384 块 H100、大约一个月的使用时间，在模型 FLOPs 利用率（MFU，实际有效计算量占硬件峰值算力的比例）约 30% 的假设下，这足够训练 11T token。
+        </p>
+        <div class="takeaway">
+            <p>
+                Scaling law 的价值：尽管有这些偏离，scaling law 仍有实际价值。它们为实验设计提供基线，人们常用 Chinchilla 最优的设置来获取消融信号，它们还能帮助预测某个模型规模能否达到目标性能。正如 Harm de Vries 在 <a href="https://www.harmdevries.com/post/model-size-vs-compute-overhead/" target="_blank">Go Smol or Go Home</a> 里指出的，缩小模型规模时会碰到一个临界模型大小：达到给定 loss 所需的最小容量，低于它就开始收益递减。
+            </p>
+        </div>
+        <p>
+            模型架构、训练设置、模型大小和训练时长都定下来了，接下来要准备两个关键部分：教模型的数据配方，以及可靠地训练它的基础设施。SmolLM3 的架构定为 3B 参数后，需要整理出一份能带来强多语言、数学和代码性能的数据配方，并搭建足以撑住 11T token 训练的稳健基础设施。这些基础必须打好，再好的架构选择也救不了糟糕的数据整理或不稳定的训练系统。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>先定目标再选架构。SmolLM3 要做端侧可用的多语言、长上下文、会推理的模型，项目周期约三个月，于是选了 3B 稠密 Transformer，排除了 MoE（端侧内存放不下全部专家）和混合架构（探索时间不够）。</li>
+            <li>注意力：GQA 在 2、4、8 组时和 MHA 性能相当，KV cache 却小得多；MQA 和 16 组的 GQA 明显变差。SmolLM3 用 4 组 GQA。MLA 压缩更狠，但作者没有消融。</li>
+            <li>文档内掩码在短上下文上几乎不影响性能，但对长上下文扩展的训练速度很重要；SmolLM3 全程开启。</li>
+            <li>嵌入共享：1.2B 的共享嵌入模型追平 1.46B 的不共享模型；同参数量下，加深网络比解绑嵌入收益更大。</li>
+            <li>位置编码：RNoPE（每四层一层不加位置编码）在短上下文上和 RoPE 持平，为长上下文打基础；长上下文扩展时用 ABF、YaRN 调 RoPE 频率，最优值没有共识，要实验。</li>
+            <li>稳定性：Z-loss 不伤性能但 SmolLM3 因实现开销没用；嵌入去掉权重衰减被采用；QK-norm 因为损害长上下文检索没用。</li>
+            <li>MoE：在固定激活参数下，稀疏度越高 loss 越低但收益递减；粒度在 2 以上有帮助但不是主导因素；一个共享专家通常就够；负载均衡最要紧，统计量尽量全局计算。</li>
+            <li>混合模型进展很快，但 MiniMax-M2 的经历说明小规模的好处不一定能在大规模生产中兑现。</li>
+            <li>分词器用繁殖率和续接词比例衡量；SmolLM3 用 Llama 3.2 的 128k 分词器。</li>
+            <li>架构的行动准则：让部署目标指导决定；在创新和务实间平衡；系统化胜过直觉；规模效应真实存在，尽量在目标规模上重新消融；在实际领域上验证分词器效率。</li>
+            <li>优化器与超参数：SmolLM3 用 AdamW（β₁ 0.9，β₂ 0.95，权重衰减 0.1，梯度裁剪 1），WSD 调度、10% 衰减，学习率 2e-4，全局批大小 2.36M token。WSD 能追平 cosine，又允许中途延长训练。</li>
+            <li>批大小放大 $k$ 倍时，学习率大约放大 $\sqrt{k}$ 倍；临界批大小随训练增大，可以做批大小预热。超参数的 scaling law 给出起点，最佳区域很宽。</li>
+            <li>超参数的行动准则：平衡探索和执行，最大收益通常来自数据；拿不准时选灵活和稳定；给探索定截止日期，做完胜过完美。</li>
+            <li>Scaling law：Chinchilla 修正了 Kaplan 的结论，但现代模型普遍过度训练以降低推理成本。SmolLM3 用 384 块 H100 约一个月，按约 30% MFU 训练 11T token。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>The Smol Training Playbook · Designing the Model Architecture · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

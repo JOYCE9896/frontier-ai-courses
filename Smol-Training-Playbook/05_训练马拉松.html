@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>训练马拉松 | Smol Training Playbook 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="04_数据配方.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">Smol Training Playbook 目录</a> · 05</span>
+    <span><a href="06_后训练.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 5 章 · 训练马拉松</h1>
+        <p class="subtitle">384 张 H100 上训 11T token 的一个月里出了哪些问题、怎样排查，以及训练中途怎样换数据、扩上下文</p>
+        <div class="author-meta">
+            作者：Loubna Ben Allal、Lewis Tunstall、Nouamane Tazi、Elie Bakouch 等（Hugging Face）· 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://huggingfacetb-smol-training-playbook.hf.space/" target="_blank">The Smol Training Playbook</a> · The Training Marathon（2025 年 10 月发布；本文依据原书英文源文件整理，是中文转述和讲解，不是逐字翻译；图片引自原书，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一章讲什么</h2>
+        <p>
+            到这一步，架构验证过了，数据配比定好了，超参数也调好了，剩下的就是搭好基础设施、按下“开始训练”。SmolLM3 在 384 张 H100 GPU（48 个节点）上训了将近一个月，处理了 11T token。这一章讲一次长时间训练里实际会发生什么：开训前的检查、躲不开的意外，以及怎样让训练保持稳定。读完会明白为什么扎实的消融实验和可靠的基础设施都不能少。GPU 硬件、存储系统、吞吐优化这些基础设施细节放在最后一章（第 7 章）。
+        </p>
+        <p>
+            作者团队训过很多次模型：从 StarCoder、StarCoder2 到 SmolLM、SmolLM2，再到 SmolLM3。每一次都不一样，就算你已经训过十几个模型，新的一次照样会出新状况。这一章想讲的是怎样提高胜算，让你在意外出现时有准备。章节后半部分讲训练监控、loss 尖峰（loss spike）的预防和处理，以及中期训练（mid-training）：第二、第三阶段的数据配比和把上下文从 4k 扩到 128k 的过程。
+        </p>
+        <ol>
+            <li><a href="#t01">开训前检查清单</a></li>
+            <li><a href="#t02">规模放大后的意外</a></li>
+            <li><a href="#t03">稳住训练</a></li>
+            <li><a href="#t04">中期训练</a></li>
+            <li><a href="#t05">预训练收尾</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开训前检查清单</h2>
+        <p><em>原书小节：Preflight Checklist: What to Verify Before Training Starts</em></p>
+        <p>
+            按下“开始训练”之前，团队会过一遍清单，确认整条流程端到端都能跑通：
+        </p>
+        <ul>
+            <li>
+                基础设施就绪：
+                <ul>
+                    <li>集群支持 Slurm 预留（reservation，提前锁定一批节点专供自己用）就用上。SmolLM3 整个训练期间固定预留了 48 个节点，没有排队延迟，吞吐稳定，还能长期跟踪每个节点的健康状况。</li>
+                    <li>开训前给 GPU 做压力测试，用的是 GPU Fryer 和 DCGM Diagnostics，用来发现降频（throttling）或性能衰退。SmolLM3 开训前就查出两张 GPU 在降频，换掉之后才开始。</li>
+                    <li>避免存储膨胀。他们的系统把每个 checkpoint 上传到 S3，等下一个 checkpoint 存好后立刻删掉本地副本，所以快速的本地 SSD 上永远最多只留一个。</li>
+                </ul>
+            </li>
+            <li>评测设置：评测耗时容易被低估。手动跑、记录结果、画图，能吃掉好几个小时。能全自动就全自动，并在开训前确认它们能正常运行和记录。SmolLM3 每存一个 checkpoint，就会自动在集群上触发一个评测任务，结果记到 Wandb 和 Trackio。</li>
+            <li>Checkpoint 和自动恢复：确认 checkpoint 存得对，训练任务能从最新一个 checkpoint 恢复，不需要人工介入。在 Slurm 上用 <code>--requeue</code> 选项，任务失败后会自动重新提交，从最近的 checkpoint 接着训。</li>
+            <li>指标记录：确认记下了所有关心的指标，包括评测分数、吞吐（tokens/sec）、训练 loss、梯度范数（gradient norm）、节点健康（GPU 利用率、温度、显存占用），以及这次训练特有的调试指标。</li>
+            <li>训练配置复查：再核对一遍训练配置、启动脚本和 Slurm 提交命令。</li>
+        </ul>
+        <p>
+            原书在这里提示：GPU 测试、存储基准测试、监控搭建和容错训练系统的详细做法，见基础设施一章。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 规模放大后的意外</h2>
+        <p><em>原书小节：Scaling Surprises</em></p>
+        <p>
+            做完大量消融后，团队准备好开始全量训练。3B 模型在 100B token 上的消融结果很有希望：相对 SmolLM2 的架构改动（GQA、NoPE、document masking、tokenizer，见第 3 章“架构选择”）要么提升了性能、要么持平；数据配比也在英语、多语言、代码和数学之间找到了平衡（见第 4 章）。配置在 384 张 GPU（48 个节点）上优化到了约 30% 的 MFU（Model FLOPs Utilization，模型实际用到的算力占 GPU 理论峰值算力的比例）。开训前他们还在 48 个节点上跑了些消融来验证吞吐，细节在基础设施一章。
+        </p>
+        <p>
+            接下来就是大活：11T token。问题从这时开始接连出现。
+        </p>
+
+        <h3>谜题 1：吞吐不见了</h3>
+        <p><em>原书小节：Mystery #1—The Vanishing Throughput</em></p>
+        <p>
+            开训后几个小时内，吞吐就大幅下滑，一路往下掉，中间还有反复的急跌。
+        </p>
+        <p>
+            原书的提示框解释了为什么吞吐重要：吞吐衡量训练时系统每秒处理多少 token，直接决定训练时间。吞吐掉 50%，一个月的训练就变成两个月。
+        </p>
+        <p>
+            原文交互图（Throughput Weka Drops）显示了这次下跌（据原文交互图数据）：约 3,200 个 step 里，每张 GPU 每秒的 token 数中位数约 13,700，但大约 37% 的 step 低于中位数的 80%，跌到 7,000 上下甚至更低，最低只有一两百。
+        </p>
+        <p>
+            消融里从没出过这种事，那么变了什么？三样东西：
+        </p>
+        <ol>
+            <li>训练数据集的大小。现在用的是完整的约 24 TB 训练数据，消融用的是较小子集，不过数据来源相同。</li>
+            <li>训练步数。按 11T token 设了真实的总步数，消融只有 100B token 的短训练周期。</li>
+            <li>可能还有硬件状态。消融时正常的 GPU 可能会坏，网络连接也可能在持续高负载下变差。</li>
+        </ol>
+        <p>
+            其他一切和吞吐消融完全相同：节点数、dataloader 配置、模型布局、并行设置……
+        </p>
+        <p>
+            直觉上，数据集大小和步数都不该导致吞吐下降，所以他们先怀疑硬件。查节点监控指标发现，吞吐大跌和磁盘读取延迟的尖峰同时出现，矛头直指数据存储。
+        </p>
+        <p>
+            他们集群的训练数据有三层存储：
+        </p>
+        <ul>
+            <li>FSx：网络附加存储，用的是 Weka。Weka 采用“保热”（keep-hot）缓存模式：常访问的文件存在本地，容量快满时把不活跃的“冷”文件驱逐到 S3。</li>
+            <li>Scratch（本地 NVMe RAID）：每个节点上的快速本地存储（8 块 3.5 TB 的 NVMe 盘组成 RAID），比 FSx 快，但只有本节点能访问。</li>
+            <li>S3：远程对象存储，放冷数据和备份。</li>
+        </ul>
+        <p>
+            SmolLM3 的 24 TB 数据一开始放在 FSx（Weka）上。24 TB 训练数据，再加上其他几个团队已经占用的空间，把 Weka 的容量推到了极限。它开始在训练中途驱逐数据分片（shard），被驱逐的分片又得取回来，造成停顿，这就解释了吞吐的大幅下跌。
+        </p>
+        <p><em>修复 1：换数据存储</em></p>
+        <p>
+            他们找不到办法在 Weka 里把数据集目录在整个训练期间钉成“热”状态，于是改存储方式。直接从 S3 流式读取太慢，最后决定把数据放到每个节点的本地 scratch 存储上。
+        </p>
+        <p>
+            这样也有代价：一个节点挂了被换掉，新换上的 GPU 节点上没有数据。用 <code>s5cmd</code> 从 S3 下载 24 TB 要 3 小时。改成用 <code>fpsync</code> 从另一个健康节点复制，不经过 S3，缩短到 1.5 小时。之所以更快，是因为所有节点都在同一个数据中心。
+        </p>
+        <p>
+            即便如此，每坏一个节点就停 1.5 小时，还得马上手动把数据拷到新节点，仍然很麻烦。最后让情况可以忍受的办法是：在 Slurm 预留里多留一个预先装好数据集的备用节点。哪个节点挂了，立刻换上备用节点，恢复延迟为零。备用节点闲着的时候跑评测或开发任务，不算浪费。
+        </p>
+        <p>
+            谜题 1 算是解决了……他们当时是这么以为的。
+        </p>
+
+        <h3>谜题 2：吞吐下跌还在</h3>
+        <p><em>原书小节：Mystery #2—The Persistent Throughput Drops</em></p>
+        <p>
+            数据挪到 scratch 之后，单次的吞吐急跌还是在发生，硬件监控指标里却查不到任何异常。原文的对比图把修好存储后的吞吐（橙色）和消融时的吞吐（蓝色）放在一起，可以看到急跌反而更尖锐了（据原文交互图数据：约 1,900 个 step 中两条曲线中位数都在 13,800 左右，但修好存储后的那条最低跌到两百多，消融那条最低约 6,400）。
+        </p>
+        <p>
+            他们仍然怀疑硬件，于是在更少的节点上测试，因为 384 张 GPU 里有东西坏掉的概率很高。意外的是，在单个节点上就能复现一模一样的吞吐急跌，而且不管测哪个节点都一样。这排除了硬件问题。
+        </p>
+        <p>
+            回到和消融相比变了的三样东西：数据存储已经通过改用节点本地存储解决，硬件也排除了，只剩一个变量：步数。他们把步数从 3M 调回 32k 来测试，吞吐急跌变小了。步数越大，急跌越尖锐、越频繁。
+        </p>
+        <p>
+            下面是他们用的确切配置，其他一切不变。（原书 diff 里的两个标题与数值看起来对调了：3,200,000 步那组才是长训练，32,000 步那组是短训练。这里照原书保留。）
+        </p>
+<pre><code>## Short run (32k steps)
+- "lr_decay_starting_step": 2560000
+- "lr_decay_steps": 640000
+- "train_steps": 3200000
+
+## Long run (3.2M steps)
++ "lr_decay_starting_step": 26000
++ "lr_decay_steps": 6000
++ "train_steps": 32000
+</code></pre>
+        <p>
+            结果很清楚：短训练只有小幅吞吐下跌，步数长的训练下跌更尖锐、更频繁。所以问题出在软件瓶颈，不在硬件，而且很可能在 dataloader，因为训练的其他组件处理每个 batch 的方式都一样，与总步数无关。
+        </p>
+        <p>
+            这时他们才意识到，自己从没用 Nanotron 的 dataloader 做过大规模预训练。SmolLM2 训练时吞吐一直很稳，用的是一个从 Megatron-LM 派生的 dataloader（<code>TokenizedBytes</code>），通过一个内部的 Nanotron 封装接入。SmolLM3 换成了 Nanotron 内置的 dataloader（<code>nanosets</code>）。
+        </p>
+        <p>
+            深入读它的实现后发现，它很粗糙地建了一个巨大的索引，这个索引随训练步数增长。步数很大时，共享内存占用变高，从而引发吞吐下跌。
+        </p>
+        <p><em>修复 2：换回 TokenizedBytes dataloader</em></p>
+        <p>
+            为了确认 dataloader 就是元凶，他们用内部的 SmolLM2 框架、<code>TokenizedBytes</code> dataloader 跑同样的配置。在 48 个节点、同样的数据集上，一次下跌都没有。
+        </p>
+        <p>
+            最快的办法是把这个 dataloader 复制进 Nanotron。下跌消失，吞吐回到目标值。
+        </p>
+        <p>
+            可以重新开训了……直到下一个意外。
+        </p>
+
+        <h3>谜题 3：loss 噪声变大</h3>
+        <p><em>原书小节：Mystery #3—The Noisy Loss</em></p>
+        <p>
+            换了新 dataloader 后，吞吐不再下跌，但 loss 曲线看起来噪声更大了。
+        </p>
+        <p>
+            <code>nanosets</code> 产出的 loss 更平滑。这个差别让他们想起一次以前的调试经历：几年前，他们在预训练代码里发现过一个打乱（shuffle）的 bug，文档被打乱了，但一个 batch 里的序列没被打乱，导致 loss 出现小尖峰。
+        </p>
+        <p>
+            检查新 dataloader 证实了这一点：它按顺序从每个文档里读序列。短文件没问题，可在代码这类领域，一个很长的低质量文件就可能填满整个 batch，引起 loss 尖峰。
+        </p>
+        <p><em>修复 3：在序列层面打乱</em></p>
+        <p>
+            有两个选择：
+        </p>
+        <ol>
+            <li>改 dataloader，让它随机访问（风险：内存占用更高）；</li>
+            <li>离线预先打乱 tokenize 好的序列。</li>
+        </ol>
+        <p>
+            开训时间紧，集群预留又在计时，他们选了更安全、更快的方案 2。tokenize 好的数据已经在每个节点上，本地重新打乱成本很低（约 1 小时）。每个 epoch 用不同的随机种子生成打乱后的序列，避免各 epoch 之间重复同样的打乱模式。
+        </p>
+        <p>
+            原书在这里放了一个警示框“知道什么时候打补丁、什么时候修根”：面对紧急期限，采用一个已验证的方案或快速绕行，可能比调试自己坏掉的实现更快。前面他们直接接入 <code>TokenizedBytes</code> dataloader，没去修 <code>nanosets</code> 的索引实现；这里又选了离线预打乱，没改 dataloader。但捷径走太多也要小心，否则会得到一个拼拼凑凑、难以维护和优化的系统。
+        </p>
+
+        <h3>第二次开训</h3>
+        <p><em>原书小节：Launch, Take Two</em></p>
+        <p>
+            到这时他们有了：
+        </p>
+        <ul>
+            <li>稳定的吞吐（scratch 存储 + 备用节点策略）；</li>
+            <li>不再有步数引起的下跌（<code>TokenizedBytes</code> dataloader）；</li>
+            <li>干净的序列级打乱（每个 epoch 离线预打乱）。</li>
+        </ul>
+        <p>
+            重新开训后，这次一切正常。loss 曲线平滑，吞吐稳定，终于可以专心训练，不用四处救火了。
+        </p>
+
+        <h3>谜题 4：表现不达预期</h3>
+        <p><em>原书小节：Mystery #4—Unsatisfactory Performance</em></p>
+        <p>
+            前两天训得很顺，日志里没有任何问题的迹象。但在大约 1T token 处，评测结果出了意外。
+        </p>
+        <p>
+            监控流程的一部分是评测中间 checkpoint，并和历史训练对比。比如他们有 SmolLM2（1.7B）按相似配方训练时的中间 checkpoint，可以在相同训练阶段比较两个模型的进度。结果让人困惑：3B 模型参数更多、数据配比更好，在同一个训练点上却比 1.7B 模型差。loss 还在降，benchmark 分数也在涨，但涨得明显比预期慢。
+        </p>
+        <p>
+            SmolLM3 相对 SmolLM2 引入的每一项架构和数据改动都充分测过，所以他们把注意力转向训练框架。两套训练设置之间只剩少数几处没测过的差别，最明显的是张量并行（Tensor Parallelism，TP，把一层的权重矩阵切开分到多张 GPU 上计算）：SmolLM2 一张 GPU 就放得下，训练时没用 TP；SmolLM3 需要 TP=2 才放得进显存。之前没想到要测它，因为 3B 消融里本来就用了 TP，而且结果看起来合理。
+        </p>
+        <p><em>修复 4：最后一个修复</em></p>
+        <p>
+            为了验证 TP bug 的假设，他们用和 SmolLM3 完全相同的设置训了一个 1.7B 模型：相同的架构改动（document masking、NoPE）、相同的数据配比、相同的超参数，分别开 TP 和不开 TP。差别一眼就能看出：开 TP 的版本 loss 一直更高，下游表现更差。这确认了问题和 TP 有关。
+        </p>
+        <p>
+            接着他们仔细检查 TP 实现，对比 TP 和非 TP 训练的权重。问题很隐蔽，影响却不小：所有 TP rank（参与张量并行的每张 GPU 进程）用的是相同的随机种子，而每个 rank 本应用不同的种子初始化。这让各个分片的权重初始化相互关联，影响了收敛。影响不是灾难性的，模型仍在训练、仍在进步，但带来的低效足以解释在大规模下看到的差距。
+        </p>
+        <p>
+            修复如下：
+        </p>
+<pre><code>diff --git a/src/nanotron/trainer.py b/src/nanotron/trainer.py
+index 1234567..abcdefg 100644
+--- a/src/nanotron/trainer.py
++++ b/src/nanotron/trainer.py
+@@ -185,7 +185,10 @@ class DistributedTrainer:
+     ):
+         # Set random states
+-        set_random_seed(self.config.general.seed)
++        # Set different random seed for each TP rank to ensure diversity
++        tp_rank = dist.get_rank(self.parallel_context.tp_pg)
++        set_random_seed(self.config.general.seed + tp_rank)
+</code></pre>
+        <p>
+            原文的 loss 对比图（TP Debug Fix Loss）里有三条曲线：TP1（不开 TP）、TP2（开 TP，修复前）和 TP2 修复后。据原文交互图数据，训到约 9B token 时，最后一段的平均 loss 大约是 TP1 3.00、修复前 TP2 3.04、修复后 TP2 3.01。
+        </p>
+        <p>
+            把种子改成每个 TP rank 各不相同之后，他们重做消融，确认 TP 和非 TP 训练的 loss 曲线和下游表现现在一致。为了确保没有别的隐藏问题，他们又做了额外的合理性检查：一个 3B 参数、SmolLM2 风格（架构和数据都按 SmolLM2）的训练，和一个单独的 3B SmolLM3 训练，都拿来和 SmolLM2 的 checkpoint 对比。结果符合预期：1.7B 的 SmolLM2 比 3B 的 SmolLM2 变体差，后者又被 SmolLM3-3B 超过。
+        </p>
+        <p>
+            原文还有一组六个 benchmark 的评测曲线（训到 200B token）。下表取约 100B token 处的分数（据原文交互图数据，取该位置附近几个点的平均，SmolLM2 1.7B 一列对应约 105B token）：
+        </p>
+        <table>
+            <thead>
+                <tr><th>Benchmark</th><th>SmolLM2 1.7B</th><th>SmolLM3（有 TP bug）</th><th>SmolLM3（修复后）</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>HellaSwag</td><td>0.592</td><td>0.579</td><td>0.619</td></tr>
+                <tr><td>MMLU</td><td>0.345</td><td>0.337</td><td>0.356</td></tr>
+                <tr><td>ARC</td><td>0.507</td><td>0.498</td><td>0.522</td></tr>
+                <tr><td>PIQA</td><td>0.729</td><td>0.724</td><td>0.741</td></tr>
+                <tr><td>OpenBookQA</td><td>0.320</td><td>0.318</td><td>0.328</td></tr>
+                <tr><td>WinoGrande</td><td>0.537</td><td>0.515</td><td>0.526</td></tr>
+            </tbody>
+        </table>
+        <p>
+            有 TP bug 的 3B 模型在六项上都低于 1.7B 的 SmolLM2，修复后除 WinoGrande 外都超过了它。到 200B token 时，修复后的 SmolLM3 与有 bug 的版本相比，HellaSwag 约 0.651 对 0.610，ARC 约 0.546 对 0.501。
+        </p>
+        <p>
+            这次调试印证了前面讲过的一条核心原则，原书在这里引用了自己第 2 章的话：扎实的消融设置的价值不止于做出好模型。主训练出问题时（不管准备得多充分，一定会出问题），我们希望对自己做过的每个决定都有把握，并且能很快找出哪些组件没被充分测试、可能是问题来源。这些准备能省下调试时间，也保护我们以后的精神健康。
+        </p>
+        <p>
+            最糟的情况是盯着一个神秘的训练故障，完全不知道 bug 藏在哪儿。因为训练设置里其他组件都验证过，他们才能把 TP 锁定为唯一可能的原因，并在发现性能差距后一天之内修好。
+        </p>
+        <p>
+            至此，开训以来接连出现的一串意外问题全部解决。后面一个月的训练相对平静，就是稳步地把几万亿 token 变成一个训完的模型，偶尔因节点故障重启。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 稳住训练</h2>
+        <p><em>原书小节：Staying the Course</em></p>
+        <p>
+            上一节说明，从消融放大到完整预训练，不是插上就能用的。会遇到意想不到的问题，但每一个都被找到并解决了。这一节讲大规模训练要有的监控设置和要考虑的问题：遇到问题后什么时候该重启训练？训练深处才冒出的问题怎么处理？哪些指标真正重要？整个训练是否该保持固定的数据配比？
+        </p>
+
+        <h3>训练监控：不只看 loss 曲线</h3>
+        <p><em>原书小节：Training Monitoring: Beyond Loss Curves</em></p>
+        <p>
+            loss 曲线当时看起来没问题，他们发现 TP bug 靠的是下游评测落后于预期。另外，有 SmolLM2 中间 checkpoint 的评测结果也很要紧，它们最早提示 3B 模型走偏了。所以训大模型时，<strong>尽早开始跑下游评测</strong>；如果要和某个开源模型对比，可以问问作者能不能提供中间 checkpoint，它们作为参照点很有价值。
+        </p>
+        <p>
+            基础设施方面，最重要的指标是吞吐，以每秒 token 数衡量。SmolLM3 预期整个训练期间吞吐稳定在 13,500 到 14,000 tokens/sec，任何持续偏离都是危险信号。但只看吞吐不够，还需要持续的硬件健康监控，提前预判和发现硬件故障。他们跟踪的关键指标包括 GPU 温度、显存占用和计算利用率，记到 Grafana 看板里，并设置了硬件异常的 Slack 实时告警。
+        </p>
+
+        <h3>修好再重启，还是边训边修</h3>
+        <p><em>原书小节：Fix and Restart vs. Fix on the Fly</em></p>
+        <p>
+            既然他们在 1T token 后重启了训练，就引出一个问题：出了问题是不是总要重启？答案取决于问题的严重程度和根本原因。
+        </p>
+        <p>
+            在他们的情况里，TP 种子 bug 意味着一开始就站错了脚：一半的权重没有正确初始化。模型的表现和 SmolLM2 差不多，在相近的位置进入平台期，也就是说最后很可能得到一个表现相同、训练成本却接近两倍的模型。重启是合理的。不过很多问题可以在训练中途纠正，避免浪费算力。最常见的是 loss 尖峰：训练 loss 突然跳高，可能只是小波动，也可能是发散（divergence，loss 失控上升、训练崩掉）的信号。
+        </p>
+        <p>
+            Stas Bekman 在《Machine Learning Engineering Open Book》里说得好：“训练 loss 曲线就像心跳图，有好的、坏的，还有该让你担心的。”原文这里嵌了一个 Trackio 看板，对比可恢复和不可恢复两种尖峰的 loss 曲线。
+        </p>
+        <p>
+            loss 尖峰分两类：
+        </p>
+        <ul>
+            <li>可恢复的尖峰：可能很快恢复（尖峰之后立刻回来），也可能慢慢恢复（要再训若干步才回到尖峰前的轨迹）。通常可以继续训下去。如果恢复太慢，可以回退到之前的 checkpoint，跳过有问题的 batch。</li>
+            <li>不可恢复的尖峰：模型要么发散，要么停在比尖峰前更差的水平。这需要比回退 checkpoint 更大的干预。</li>
+        </ul>
+        <p>
+            训练不稳定的原因目前还没完全搞清楚，但已知规模越大越频繁。假设架构和优化器都比较保守，常见的原因有：
+        </p>
+        <ul>
+            <li>学习率过高：会在训练早期造成不稳定，降低学习率可以解决。</li>
+            <li>坏数据：通常是可恢复尖峰的主要原因，不过可能恢复得慢。问题可能在训练很深处才出现，也就是模型碰到低质量数据的时候。</li>
+            <li>数据与参数状态的相互作用：PaLM 观察到，尖峰往往来自特定数据 batch 和特定模型参数状态的组合，不单是“坏数据”。从另一个 checkpoint 用同样的问题 batch 训练，并不会复现尖峰。</li>
+            <li>初始化不好：OLMo 2 最近的工作表明，把缩放初始化（scaled initialization）换成简单的正态分布（均值 0、标准差 0.02）提高了稳定性。</li>
+            <li>精度问题：现在已经没人用 FP16 训练了，BLOOM 当时发现 FP16 比 BF16 不稳定得多。</li>
+        </ul>
+        <p>
+            那能做什么？
+        </p>
+        <p><em>尖峰发生前：把稳定性做进去</em></p>
+        <p>
+            学习率保守、数据好的小模型很少出尖峰，但大模型需要主动采取稳定措施。随着越来越多团队做大规模训练，大家积累了一套防止训练不稳定的手段：
+        </p>
+        <ul>
+            <li>数据过滤和打乱：读到这里你会发现他们一再回到数据上。确保数据干净、打乱充分，可以预防尖峰。比如 OLMo 2 发现，去掉含重复 n-gram 的文档（长度 1 到 13 个 token 的片段重复 32 次以上）显著减少了尖峰频率。</li>
+            <li>训练上的修改：Z-loss 正则化（在损失里加一项惩罚 softmax 归一化项的对数，防止输出 logits 变得过大）能抑制 logits 增长，且不影响性能。把 embedding 排除在权重衰减（weight decay）之外也有帮助。</li>
+            <li>架构上的修改：QK-norm（在注意力计算前对 query 和 key 投影做归一化）被证明有效。OLMo 2 和其他团队发现它有助于稳定；Marin 团队还发现它甚至可以在训练中途加上，用来修复发散问题。</li>
+        </ul>
+        <p><em>尖峰还是发生了：止损</em></p>
+        <p>
+            即便有这些预防措施，尖峰仍可能出现。可选的处理方法有：
+        </p>
+        <ul>
+            <li>跳过有问题的 batch：回退到尖峰之前，跳过那些问题 batch。这是处理尖峰最常用的办法。Falcon 团队（《The Falcon Series of Open Language Models》）跳过了 1B token 来解决尖峰；PaLM 团队发现跳过尖峰位置附近 200 到 500 个 batch 就能防止复发。</li>
+            <li>收紧梯度裁剪（gradient clipping，梯度范数超过阈值时按比例缩小）：临时调低梯度范数阈值。</li>
+            <li>做架构修正：如上所述，QK-norm 可能有效。</li>
+        </ul>
+        <p>
+            到这里已经讲完了遇到的规模化问题（从吞吐下跌到 TP bug）、及早发现问题的监控做法，以及预防和修复 loss 尖峰的策略。本章最后讲多阶段训练怎样提升模型的最终表现。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 中期训练</h2>
+        <p><em>原书小节：Mid-Training</em></p>
+        <p>
+            现代 LLM 预训练通常有多个阶段，各用不同的数据配比，最后往往还有一个扩展上下文长度的阶段。比如 Qwen3 用三阶段：在 4k 上下文长度下用 30T token 的通用阶段；用 5T 更高质量 token、侧重 STEM 和代码的推理阶段；最后是在 32k 上下文长度下用几千亿 token 的长上下文阶段。SmolLM3 的思路类似：有计划地引入更高质量的数据集、扩展上下文，再加上根据性能监控做的临时调整。
+        </p>
+        <p>
+            上一章讲过，数据配比不必在整个训练里固定。多阶段训练允许随训练推进有策略地调整各数据集比例。有些干预从一开始就计划好了：SmolLM3 早就定好在第二阶段引入更高质量的 FineMath4+ 和 Stack-Edu，在最后的衰减阶段加入整理过的问答和推理数据。另一些是被动的，由训练中的性能监控驱动。比如训练 SmolLM2 时，发现数学和代码表现落后于目标，他们就专门整理了全新的数据集（FineMath 和 Stack-Edu），在训练中途引入。无论是按计划的课程推进，还是针对新出现的短板调整，这种灵活性让算力预算发挥出最大价值。
+        </p>
+
+        <h3>第二、第三阶段的配比</h3>
+        <p><em>原书小节：Stage 2 and Stage 3 Mixtures</em></p>
+        <p>
+            原文的交互图画出了三个训练阶段，以及网页/代码/数学比例的变化。每个阶段的 SmolLM3 训练配置（含确切的数据权重）都在 SmolLM GitHub 仓库里公开。各阶段构成背后的理由见第 4 章“数据配方”。图中的比例如下（据原文交互图数据）：
+        </p>
+        <table>
+            <thead>
+                <tr><th>阶段</th><th>token 数</th><th>上下文</th><th>网页</th><th>代码</th><th>数学</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Stage 1：基础训练</td><td>8T</td><td>4k</td><td>85%</td><td>12%</td><td>3%</td></tr>
+                <tr><td>Stage 2：注入高质量数据</td><td>2T</td><td>4k</td><td>75%</td><td>15%</td><td>10%</td></tr>
+                <tr><td>Stage 3：学习率衰减</td><td>1.1T</td><td>4k</td><td>63%</td><td>24%</td><td>13%</td></tr>
+            </tbody>
+        </table>
+        <p>
+            第一阶段：基础训练（8T token，4k 上下文）。这个打基础的阶段用核心预训练配比：网页数据（FineWeb-Edu、DCLM、FineWeb2、FineWeb2-HQ），来自 The Stack v2 和 StarCoder2 的代码，以及来自 FineMath3+ 和 InfiWebMath3+ 的数学。全部在 4k 上下文长度下训练。
+        </p>
+        <p>
+            第二阶段：注入高质量数据（2T token，4k 上下文）。这一阶段引入过滤后的更高质量数据集，包括代码方面的 Stack-Edu，数学方面的 FineMath4+ 和 InfiWebMath4+，以及面向高阶数学推理的 MegaMath（其中加入了 Qwen 问答数据、合成改写数据和文本与代码交错的块）。
+        </p>
+        <p>
+            第三阶段：学习率衰减，加入推理和问答数据（1.1T token，4k 上下文）。在学习率衰减阶段，进一步上采样高质量代码和数学数据集，同时引入 OpenMathReasoning、OpenCodeReasoning、OpenMathInstruct 这类指令和推理数据。问答样本只是简单地拼接起来，用换行分隔。
+        </p>
+
+        <h3>长上下文扩展：从 4k 到 128k token</h3>
+        <p><em>原书小节：Long Context Extension: From 4k to 128k Tokens</em></p>
+        <p>
+            上下文长度决定模型一次能处理多少文本。分析长文档、在多轮对话里保持连贯、处理整个代码库，都离不开它。SmolLM3 从 4k token 开始训练，但实际应用需要扩展到 128k。
+        </p>
+        <p><em>为什么在训练中途扩展上下文</em></p>
+        <p>
+            从一开始就用长上下文训练，计算成本很高，因为注意力机制的开销随序列长度平方增长。而且研究表明（《How to Train Long-Context Language Models (Effectively)》），在训练末尾或继续预训练时用几百亿到一千亿 token 扩展上下文，就足以达到不错的长上下文表现。
+        </p>
+        <p><em>分步扩展：4k → 32k → 64k</em></p>
+        <p>
+            他们没有直接跳到 128k，而是分阶段逐步扩展，让模型在每个长度上先适应，再往上推。一共做了两个长上下文阶段：先从 4k 到 32k，再从 32k 到 64k（128k 的能力来自推理时的外推，没有在 128k 上训练）。他们发现，每个阶段在 50B token 上重新开始一个学习率调度，比在主衰减阶段的最后 100B token 里扩展上下文效果更好。每个阶段都跑了消融，寻找合适的长上下文数据配比和 RoPE theta 值，并用 RULER benchmark 评测。
+        </p>
+        <p>
+            原书的提示框讲了基座模型上的长上下文评测：长上下文消融期间，他们发现 HELMET benchmark 在基座模型上噪声很大（同样的训练换个种子，结果差别明显）。Gao 等人（2025）建议在上面先做监督微调（SFT，Supervised Fine-Tuning，用标注好的指令-回答数据继续训练）来降低这些任务上的方差。他们选择改用 RULER，发现它在基座模型层面给出的信号更可靠。
+        </p>
+        <p>
+            这一阶段常见的做法是上采样长文档，比如长网页和书籍，来提升长上下文表现（ProLong 论文、Qwen3）。他们跑了好几组消融，上采样书籍、文章，甚至仿照 Qwen2.5-1M 的方法，用 FineWeb-Edu 和 Python-Edu 合成用于检索和中间填充（fill-in-the-middle）任务的文档。出乎意料的是，这些都没有比直接用第三阶段的基线配比更好。基线配比在 RULER 上已经能和 Llama 3.2 3B、Qwen2.5-3B 这些 SOTA 模型竞争。他们推测原因是基线配比里本来就有来自网页和代码的长文档（估计占 token 的 10%），而且用了 NoPE 也有帮助。（旁注推荐阅读《How to Train Long-Context Language Models (Effectively)》了解更多长上下文扩展的经验。）
+        </p>
+        <p><em>调整基础频率的 RoPE（ABF）</em></p>
+        <p>
+            RoPE（Rotary Position Embedding，旋转位置编码，用不同频率的旋转把 token 位置编码进 query 和 key）有一个基础频率参数 theta，调大它能让位置编码适应更长的序列，这种做法叫 ABF（Adjusted Base Frequency）。从 4k 扩到 32k 时，他们把 RoPE theta 调到 2M；从 32k 扩到 64k 时调到 5M。用更大的值（比如 10M）RULER 分数略有提升，但伤了一些短上下文任务，比如 GSM8k，所以最后停在 5M，它对这些任务没有影响。
+        </p>
+        <p>
+            在上下文扩展阶段，他们还顺便进一步上采样了数学、代码和推理问答数据，并加入了几十万条 ChatML 格式的样本。另据旁注，他们在 4k→32k 扩展时还试过滑动窗口注意力（sliding window attention，每个 token 只看前面固定长度窗口内的 token），窗口大小 4k、8k、16k，在 RULER 上都比全注意力差。
+        </p>
+        <p><em>YARN 外推：做到 128k</em></p>
+        <p>
+            他们希望 SmolLM3 推理时能处理 128k，但在 128k 序列上训练成本太高。于是用了 YARN（Yet Another RoPE extensioN method，《YaRN: Efficient Context Window Extension of Large Language Models》），它能让模型外推到超过训练长度的位置。
+        </p>
+        <p>
+            理论上 YARN 能把序列长度扩大四倍。他们发现，用 64k checkpoint 在 128k 上的表现比用 32k checkpoint 好，说明训练长度越接近目标推理长度越有利。但推到 256k（4 × 64k）时 RULER 表现下降，所以建议模型最多用到 128k。
+        </p>
+        <p>
+            到这里，SmolLM3 的整个预训练过程就讲完了，从规划、消融到正式训练，以及其间所有幕后的问题。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 预训练收尾</h2>
+        <p><em>原书小节：Wrapping Up Pretraining</em></p>
+        <p>
+            前面讲了很多：从帮你决定为什么训、训什么的训练罗盘，到验证每个架构选择的规划和系统消融，再到正式的训练马拉松。在他们这次训练里，意外在规模放大后才出现：吞吐莫名崩塌、dataloader 瓶颈，还有一个隐蔽的张量并行 bug，逼得他们在 1T token 处重启。
+        </p>
+        <p>
+            那些光鲜的技术报告背后的混乱现实，现在摆在眼前了。原书的原话是：<em>训练 LLM 靠的是有纪律的实验和快速调试，这和架构创新、数据整理同样重要。</em>规划找出值得测什么，消融验证每个决定，监控及早发现问题，出了故障时，系统性的去风险（derisking）工作会告诉你该往哪里找。
+        </p>
+        <p>
+            对 SmolLM3 来说，这套流程交付了当初想做的东西：一个在 11T token 上训练的 3B 模型，在数学、代码、多语言理解和长上下文任务上有竞争力，处在 Qwen3 系列模型的 Pareto 前沿上。
+        </p>
+        <p>
+            原文最后一张交互图比较了几个基座模型的胜率（win rate），评测项为 HellaSwag、ARC、WinoGrande、CommonsenseQA、MMLU-CF、MMLU Pro CF、PIQA、OpenBookQA、GSM8K、MATH、HumanEval+ 和 MBPP+。图中数值如下（据原文交互图数据）：
+        </p>
+        <table>
+            <thead>
+                <tr><th>模型</th><th>参数量（B）</th><th>胜率</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Qwen3 1.7B Base</td><td>1.7</td><td>2.1</td></tr>
+                <tr><td>SmolLM3 3B Base</td><td>3.0</td><td>4.0</td></tr>
+                <tr><td>Qwen2.5 3B</td><td>3.1</td><td>3.1</td></tr>
+                <tr><td>Llama3.2 3B</td><td>3.2</td><td>2.3</td></tr>
+                <tr><td>Qwen3 4B Base</td><td>4.0</td><td>4.9</td></tr>
+                <tr><td>Gemma3 4B Base</td><td>4.3</td><td>4.5</td></tr>
+            </tbody>
+        </table>
+        <p>
+            基座模型的 checkpoint 存好了，训练完成，很容易觉得大功告成：模型能很好地预测文本，benchmark 分数不错，也有当初瞄准的能力。可现在人们要的是助手和编程 agent，不是只会预测下一个 token 的原始模型。这就轮到后训练（post-training）了。和预训练一样，现实比你想的更乱。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一章的要点</h2>
+        <ul>
+            <li>开训前检查：Slurm 预留节点、GPU 压力测试（查出并换掉 2 张降频 GPU）、本地只留一个 checkpoint、评测全自动、<code>--requeue</code> 自动恢复、指标记录齐全、配置复查。</li>
+            <li>谜题 1：Weka 容量被推到极限，训练中途驱逐数据分片导致吞吐大跌。改用节点本地 scratch，节点间 <code>fpsync</code> 复制把补数据从 3 小时缩到 1.5 小时，再预留一个装好数据的备用节点，做到零恢复延迟。</li>
+            <li>谜题 2：单节点也能复现吞吐急跌，排除硬件；步数越大下跌越严重，根源是 <code>nanosets</code> 随步数增长的巨大索引。换回 SmolLM2 用的 <code>TokenizedBytes</code> dataloader。</li>
+            <li>谜题 3：新 dataloader 按顺序读文档里的序列，长的低质量代码文件能填满整个 batch。离线按 epoch 用不同种子预打乱（约 1 小时）。紧急时先用已验证方案或绕行，但别让补丁越堆越多。</li>
+            <li>谜题 4：约 1T token 时 3B 模型不如同阶段的 SmolLM2 1.7B。原因是所有 TP rank 用了相同随机种子，权重初始化相互关联；改成种子加 tp_rank，一天内定位并修复，然后重启。</li>
+            <li>发现 TP bug 靠的是下游评测和参照模型的中间 checkpoint，loss 曲线看不出来。吞吐预期 13,500 到 14,000 tokens/sec，持续偏离就是警报；硬件指标进 Grafana，异常发 Slack。</li>
+            <li>重启与否看严重程度和根因。loss 尖峰分可恢复和不可恢复；常见原因有学习率过高、坏数据、数据与参数状态的相互作用、初始化不好、精度问题。</li>
+            <li>预防：数据过滤和打乱、Z-loss、embedding 不做权重衰减、QK-norm。补救：回退并跳过问题 batch（Falcon 跳过 1B token，PaLM 跳过 200 到 500 个 batch）、临时收紧梯度裁剪、QK-norm。</li>
+            <li>三阶段配比：8T（网页/代码/数学 85/12/3）→ 2T（75/15/10）→ 1.1T 学习率衰减（63/24/13），全在 4k 上下文。</li>
+            <li>长上下文：4k→32k（RoPE theta 2M）→64k（theta 5M），每阶段 50B token、重新开一个学习率调度；10M theta 伤 GSM8k；用 RULER 代替噪声大的 HELMET；上采样长文档没带来提升；YARN 外推到 128k，256k 会退化。</li>
+            <li>训练 LLM 靠有纪律的实验和快速调试，和架构创新、数据整理同样重要。SmolLM3 3B 基座在 Qwen3 系列的 Pareto 前沿上。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>The Smol Training Playbook · The Training Marathon · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>
