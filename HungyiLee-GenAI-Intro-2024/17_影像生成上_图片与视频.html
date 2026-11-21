@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第17讲：影像生成（上）：AI 怎样生成图片和视频 | 李宏毅 生成式 AI 导论 2024 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="16_Speculative_Decoding.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">生成式 AI 导论 2024 目录</a> · 17</span>
+    <span><a href="18_影像生成下_经典方法.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第17讲：影像生成（上）：AI 怎样生成图片和视频</h1>
+        <p class="subtitle">和影像有关的生成式 AI 有哪两类，Sora、Talking Head、ControlNet 等应用，图片和视频怎样被编码成 patch，文字生图怎样训练、怎样用 CLIP 评估，个人化生图，以及文字生视频为什么难：运算量、伪 3D attention 和多阶段生成</p>
+        <div class="author-meta">
+            主讲：李宏毅（Hung-yi Lee，台湾大学电机系）· 上课日期：2024 年 5 月 31 日 · 时长：49 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=5H2bVEmYDNg" target="_blank">课堂录像</a>（台大公开，2024 年春季，本文依据录像字幕整理）· <a href="https://speech.ee.ntu.edu.tw/~hylee/genai/2024-spring-course-data/0531/0531_vision.pdf" target="_blank">投影片</a>
+        </div>
+    </header>
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>这一讲回答一个问题：今天的 AI 怎样根据一段文字（或别的条件）生成图片和视频，Sora 背后大概用了什么原理。它接在第 15 讲“生成策略”后面：那一讲说过图片生成很少一个像素一个像素地接龙，多用一次到位的平行生成，并留下了“脑补”问题；这一讲把这些放到图片和视频上具体走一遍。这是学期最后一堂实体课，用的幻灯片 0531_vision 前半部分（第 1–35 页），后半部分（经典方法 VAE、Flow、Diffusion、GAN 和 Genie）在第 18 讲。</p>
+        <p>主要例子：GPT-4o 评价两个都叫李宏毅的人的照片，Sora 官方 Demo 里的怪物和蜡烛、沉在海里的纽约、越分越多的小狼和会跑掉的塑料椅，他用开源模型做的 Talking Head，芙莉莲动画片段的 24fps 和 1fps 对比，“一只在奔跑的狗”这句贯穿全讲的文字，LAION 数据集，他家客厅的钟，以及一分钟视频需要 36 兆次 attention 的估算。</p>
+        <ol>
+            <li><a href="#t01">两类和影像有关的生成式 AI，GPT-4o 看照片</a> · <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">生成影像的应用：Sora、视频生视频、Talking Head、ControlNet</a> · <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=204s" target="_blank">0:03:24</a></li>
+            <li><a href="#t03">图片和视频由什么构成：像素、帧、fps</a> · <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=690s" target="_blank">0:11:30</a></li>
+            <li><a href="#t04">AI 怎样“看”图片和视频：编码器、patch、解码器</a> · <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=833s" target="_blank">0:13:53</a></li>
+            <li><a href="#t05">文字生图怎样训练：LAION 数据和平行生成 patch</a> · <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=1278s" target="_blank">0:21:18</a></li>
+            <li><a href="#t06">怎样评估生成的图片：CLIP Score</a> · <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=1812s" target="_blank">0:30:12</a></li>
+            <li><a href="#t07">一张图胜过千言万语：个人化图像生成</a> · <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=1955s" target="_blank">0:32:35</a></li>
+            <li><a href="#t08">文字生视频的挑战：运算量和伪 3D attention</a> · <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=2250s" target="_blank">0:37:30</a></li>
+            <li><a href="#t09">分阶段生成：以 Imagen Video 为例</a> · <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=2697s" target="_blank">0:44:57</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 两类和影像有关的生成式 AI，GPT-4o 看照片</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=0s" target="_blank">0:00:00</a>–0:03:24</em></p>
+        <h3>两个方向</h3>
+        <p>他先复述生成式 AI 要做的事：有一个输入，也就是 condition（条件），根据这个条件生成一些东西。和影像有关的生成式 AI 可以从两个方向讨论：</p>
+        <ul>
+            <li>影像当作条件：模型看一张图片或一段视频，生成对应的东西，比如生成对应的文字。</li>
+            <li>影像当作输出：给一个条件，生成对应的图片或视频。</li>
+        </ul>
+        <p>这堂课专注于第二类，第一类只很快看一下。</p>
+        <h3>GPT-4o 评价两个“李宏毅”</h3>
+        <p>能看图的模型大家已经不陌生，GPT-4o 就能看图片。他给 GPT-4o 两张照片，两个人都叫李宏毅（一位是演员李宏毅，一位是他自己），问哪一个比较帅。他说不用期待模型直接回答，现在的模型很精明，不会正面回答这种问题，但会评论两人的衣着：左边穿牛仔外套的年轻人比较时尚有型，右边穿白衬衫戴眼镜的男士看起来专业而有亲和力，“但是我不知道谁比较帅，你觉得呢？”</p>
+        <p>接着他问：根据衣着打扮，猜一下这两个人从事什么职业。GPT-4o 猜得蛮准：牛仔外套的年轻人可能从事时尚、娱乐或创意领域的工作（那位确实是知名演员）；右边的人可能从事学术、技术或商业领域，例如教授、工程师或经理。</p>
+        <p>他又补了一句：GPT-4o 心里还是有审美标准的，如果逼它一定要选，不管问几次它都说左边那位比较帅，但会强调右边这位也很有魅力，魅力来自专业性和亲和力。他把这个回答秀出来，说经过大量 RLHF 以后的 GPT-4o 讲话“就是个人精”，大家可以学一学它讲话的风格。</p>
+        <p>幻灯片上另有一页（第 9 页）画了语言模型看图的一种可能做法：把图片切成 patch，每个 patch 当作“某种特殊的语言”里的一个 token，和文字 token 一起放进词表（vocabulary），再让语言模型读进去回答“照片中的人看起来怎么样”；页上注明“让模型看影像有很多方法，此处只说明了某一种可能性”。延伸阅读是 An Introduction to Vision-Language Modeling（arXiv 2405.17247）。录像里这一页没有展开讲。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 生成影像的应用：Sora、视频生视频、Talking Head、ControlNet</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=204s" target="_blank">0:03:24</a>–0:11:30</em></p>
+        <h3>文字生视频：Sora 的 Demo</h3>
+        <p>讲根据条件生成视频，就不能不提 Sora。学期初 OpenAI 放出 Sora 的 Demo：读一段描述影像的文字，就能生出清晰的对应视频，一时轰动。他提醒：Sora 到现在都没有真的开放使用，网上看到的 Demo 都来自 OpenAI 自己发的两篇 Blog，链接放在幻灯片上。</p>
+        <p>他挑了两个例子，输入文字在下面，生成的视频在上面：</p>
+        <ul>
+            <li>一个毛茸茸的小怪物跪在一根逐渐融化的红色蜡烛旁边（提示词原文：Animated scene features a close-up of a short fluffy monster kneeling beside a melting red candle…）。</li>
+            <li>纽约街道沉到海底，像亚特兰蒂斯一样，鱼、鲸鱼、海龟和鲨鱼在街上游。</li>
+        </ul>
+        <p>他说这两段是特意挑的现实中不可能出现的场景。Sora 也能生成很逼真的现实场景，但那样你分不清到底是训练数据里有一模一样的视频，还是 Sora 真的创造出来的；选不可能出现的场景，是要说明 Sora 有可能创造出现实中没有的画面。</p>
+        <h3>Sora 的瑕疵</h3>
+        <p>仔细看还是有瑕疵：小怪物没动，背后的墙却一直左右移动，蛮不自然；纽约街上的水生生物会变形，远看明明是一只海龟，近看突然缩成一条鱼。他又找了两个比较有趣的瑕疵：</p>
+        <ul>
+            <li>让 Sora 画五只小狼（Five gray wolf pups frolicking…），画出来的小狼会分裂，越来越多。</li>
+            <li>考古学家在沙漠里挖出一张塑料椅（Archeologists discover a generic plastic chair in the desert…）：挖出一个东西，像变魔术一样变出一张椅子，然后椅子自己跑掉了。</li>
+        </ul>
+        <p>他的评价是，就算有瑕疵，在年初时已经很让人震惊。</p>
+        <h3>视频生视频</h3>
+        <p>也可以用视频生成视频，应用有：</p>
+        <ul>
+            <li>视频补全：给一段没完成的视频，让 AI 把剩下的部分续写出来。</li>
+            <li>风格转换：比如把黑白视频上色，可以用在老电影修复上，让它看起来更有现代感。</li>
+            <li>画质提升：把低分辨率的视频直接提升画质。</li>
+        </ul>
+        <h3>Talking Head</h3>
+        <p>输入也不限于影像。现在已经有很多人在用的是 Talking Head：给生成式 AI 一段你的录音和一张你的照片，它去想象你说这句话时嘴型和脸应该是什么样子。他用的是今年 3 月一篇论文里的开源模型（幻灯片上是 AniPortrait，arXiv 2403.17694，Hugging Face 上有 Demo）。他说商用软件很多，通常要付钱，这个是免费开源的，每个人都能试。</p>
+        <p>他现场播放结果：给一句录音“这门课是生成式 AI 导论”，加一张随便的照片，照片里的人就配合这句话的嘴型讲话。他吐槽：照片里自己是没露牙齿的，模型硬要给他加上很白的牙齿。</p>
+        <p>他说马上能想到的应用是 VTuber：Talking Head 背后直接接 GPT-4o，马上就能做一个没有真人的 YouTuber。他预测几个月后就会有人说出现了一个讲话很有趣的新 VTuber，再过几周它突然承认这个 VTuber 不存在，背后是 GPT-4o 加 Talking Head；他说剧本已经帮大家写好了，要用就拿去用。（他在 YouTube 说明栏补了一条续集：再过几个月，会有一些 VTuber 看起来像语言模型操控，其实是人类的“中之人”在假扮 AI，“假扮 AI”成为潮流，最后难以分辨 VTuber 背后是人还是语言模型。）</p>
+        <h3>其他条件：ControlNet</h3>
+        <p>还可以拿很多别的东西当条件：画一张草图，让 AI 画出精细的图；打一个草稿，让 AI 根据草稿画；给一个人的站姿，让 AI 生成对应姿势的人像。他引的论文里有一个网络叫 ControlNet（arXiv 2302.05543），讲的就是怎样加入各式各样的条件来生成图片。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 图片和视频由什么构成：像素、帧、fps</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=690s" target="_blank">0:11:30</a>–0:13:53</em></p>
+        <p>讲完应用，转到这些 AI 是怎么做出来的。他先复习图片和视频的基本单位。</p>
+        <h3>图片由像素构成</h3>
+        <p>像素越多，图片越清晰。他放了同一张图的两个版本：左边 1024×1024 分辨率，里面有 1024×1024 个像素，很清晰；如果只用 16×16 共 256 个点描述（每个点代表一个颜色），图就很模糊。（录像里这里一度口误说成“256乘256个点”，幻灯片和前文都是 16×16。）</p>
+        <h3>视频由一帧一帧的图片构成</h3>
+        <p>视频就是一串图片，其中每一张叫一个 frame，中文叫“帧”。fps（frames per second）表示每秒有几帧，也就是每秒有几张图片。图片够多，人看起来就是流畅的视频，感觉不到它是一张张图片接起来的。</p>
+        <p>YouTube 上的视频通常是 24fps，一秒由 24 张图片接成。他播放了动画《葬送的芙莉莲》里芙莉莲打破一个“绝对不可能打破的结界”的片段：左边 24fps，流畅；右边同一段改成 1fps，每秒只有一张图，很卡，像网络不好的时候，“要不要让人好好看动画啦”。他补充：玩游戏的话 24fps 还是太低，可能要 60fps 才会觉得丝滑流畅。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. AI 怎样“看”图片和视频：编码器、patch、解码器</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=833s" target="_blank">0:13:53</a>–0:21:18</em></p>
+        <h3>为什么不直接用像素</h3>
+        <p>他说今天多数 AI 模型不直接拿像素当输入。直接用像素也可以，早年很多人这么做，后来发现像素太复杂了。今天能生成又大又清晰的图，要归功于一些影像压缩技术：给一张 64×64 的图，不会让模型直接生成一张 64×64 分辨率的图。</p>
+        <h3>编码器（Encoder）把图片切成 patch 并压缩</h3>
+        <p>图片先通过一个编码器（Encoder）。编码器通常先把图片切成一块一块；例子里 64×64 的图被切成 4×4 共 16 块，每一块叫一个 patch。每个 patch 再被压缩，压缩成什么样取决于编码器：</p>
+        <ul>
+            <li>有的方法给每个 patch 一个独特的符号，好像一种新的语言，每个 patch 就是这种语言里的一个 token。</li>
+            <li>有的编码器把每个 patch 变成一个低维度的向量：一个 patch 本来有很多像素，把这些信息浓缩成几个数字来表示。</li>
+        </ul>
+        <p>编码器有很多种，共同点是把影像变得更简单：切成 patch，每个 patch 用简单的方式表示。然后把图片里的 patch 拉直，本来是 2D 的，拉成一条线，再交给 Transformer 这类模型处理。模型生成图片时也是生成一排 patch，这排 patch 通过一个解码器（Decoder）还原成图片。</p>
+        <h3>这不就是降低分辨率吗？</h3>
+        <p>他预设了一个同学可能会问的问题：编码器做的是不是就是把 64×64 的图降成 4×4？他说概念上也许类似，但编码器和解码器做的事远比调高调低分辨率复杂。它们都是很复杂的神经网络，里面往往是 Transformer，有很多层。所以把图片变成 4×4 共 16 个 patch，解码回来的狗并不会是只有 16 个格子的马赛克：解码器还原时不只看一个 patch，会考虑这个 patch 和邻近的 patch，甚至整张图所有的 patch 一起还原。压缩和还原都是用神经网络做的，可以把图压到很简单，解回来看起来仍是同一张图。细节他在幻灯片右边留了一篇有代表性的论文，类似技术很多。</p>
+        <p>他在 YouTube 说明栏对这一段补了一段历史：深度学习兴起之前，影像处理要按人为制定的特征抽取方式先把影像转成特征，再把特征作为模型输入，处理拆成多个步骤；深度学习兴起后，神经网络可以直接用最原始的像素当输入；而为了生成更高清、更细致的影像，在 patch 上处理又成了必要步骤，好像回到了先抽特征的框架，不同的是这次的 patch 特征由另一个神经网络自动学出来，不靠人工设计。</p>
+        <h3>视频的编码：时间方向也压缩</h3>
+        <p>视频可以用图片编码器把每一帧分别转成一排 patch，但视频还能压得更多。图片只有高和宽两个方向可以压缩，视频多了时间维度，可以在时间方向上也压缩。常见做法是把相邻几帧合在一起压缩：例子里视频有四帧，第一、二帧一起压，第三、四帧一起压；具体是把两帧里位置相同的 patch 再进一步压缩，变成一个“视频的 patch”，最后把视频的 patch 拉直排成一排。</p>
+        <p>他让大家记住一个前提：后面的讨论都假设一段视频已经被描述成一排 patch，不再讲视频怎样转成 patch：「总之你心里要知道对于人工智慧来说 一段影片就是一排的Patch」。</p>
+        <h3>Sora 也用 patch</h3>
+        <p>他说 OpenAI 不会明着告诉你它做了什么，但从 Sora Blog 的图里可以清楚看出它用了 patch：一段视频通过 Encoder 变成一堆 patch，压缩方向可以是同一张图的长和宽，也可以是时间方向，所以每一小块 patch 可能对应视频里的一段长、一段宽和一段时间；最后把这些 patch 拉直，丢进 Transformer 之类的模型。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 文字生图怎样训练：LAION 数据和平行生成 patch</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=1278s" target="_blank">0:21:18</a>–0:30:12</em></p>
+        <p>进入模型部分。他先以文字生图为例讲模型怎样训练，然后很快扩展到文字生视频。</p>
+        <h3>需要什么训练数据</h3>
+        <p>他先问全班：这已经是这学期最后一堂实体课了，猜得出训练“输入文字、输出图片”的模型需要什么数据吗？他用之前讲过的文字接龙对照：教语言模型做文字接龙，就是给一句话，告诉它接下来接哪个 token；图片生成道理类似，要收集一大堆图片和这些图片对应的文字描述，机器就学会看到这段文字应该生成这样的图片（幻灯片上的例子是“一只在奔跑的狗”“阳光下的猫”“雪地里的猫”“沙滩上的狗”）。</p>
+        <h3>LAION</h3>
+        <p>现在的生图模型很厉害，输入什么往往都能生成对应的图，甚至直接打一个够有名的人名，画出来的脸会和那个名人蛮像。靠的是什么数据？现在已经有大规模的开源文字生图数据，其中一个是名叫 LAION 的机构释出的，里面是大量图片，每张都有对应的文字。LAION 最大的数据集有 58 亿张图（幻灯片：LAION 5.85B），大到他们专门做了一个搜索引擎，输入一段文字就告诉你数据集里哪些图对应类似的文字。</p>
+        <p>这么大的数据从哪来？他说想也知道是从网上爬下来的：网上很多图片本来就有对应的文字描述，把图和描述一起爬下来，再做后处理，比如拿掉 18 禁的照片，拿掉文字和图对得不好的。</p>
+        <p>他提到使用这种数据集有风险。LAION 对外宣称只是帮忙收集了这些图片，并不拥有所有权，拿去训练是你家的事。很多公司拿它训练，比如做 Stable Diffusion 的 Stability AI，后来被一些画家告了。他调侃 OpenAI 死都不告诉你数据从哪来，搞不好也是同一个数据集，“但只要不讲就不会被告这样”。</p>
+        <h3>第一种想法：Patch 接龙（Auto-regressive）</h3>
+        <p>有了文字和图片的配对，图片又用 patch 表示，就可以训练一个 Transformer。一种可能是像语言模型做文字接龙一样，训练 Transformer 做“Patch 接龙”：看到这段文字，先生出编号 1 的 patch，把它贴到文字后面，再看下一个生哪个，也许是编号 7，再贴到后面，再生编号 99……把一张图的 patch 都生出来，通过 decoder 还原成图。</p>
+        <p>但他提醒，上上周讲生成策略时已经说过（第 15 讲），文字生图很少用这种接龙方式。接龙的专有名词叫 Auto-regressive（自回归）。原因是就算把图片表示成 patch，一张图里 patch 的数量可能还是太多。</p>
+        <h3>实际做法：一次平行生成所有 patch</h3>
+        <p>生图时往往一步到位，用 non-autoregressive 的模型，一张图所有的 patch 同时生成。上上周他画的图是：告诉 Transformer 产生位置 1 的 patch，它生出 patch 1；产生位置 2，生出 patch 7；产生位置 3，生出 patch 99。同一个模型同时生成，不用等 patch 一个个出来。</p>
+        <p>他说那是概念上的画法。实际做法是：假设这张图由 4×4 共 16 个 patch 组成，一开始就告诉同一个 Transformer 要生 patch 1 到 patch 16，Transformer 同时把 16 个 patch 都生出来。所以这 16 个位置是同时丢给一个 Transformer 一起生成的，并不是完全分开各生各的。</p>
+        <p>好处在于 Transformer 里有 attention。attention 的意思是每个位置处理时都会参考其他位置的信息。所以生成某个 patch 时会参考其他 patch 的生成过程，生出来的图 patch 之间还有一些关联，不会毫不相关。</p>
+        <h3>attention 不能保证解决“脑补”问题</h3>
+        <p>他接着说，就算用了 attention，也不能保证解决第 15 讲提到的“脑补”问题：如果每个位置看到“一只在奔跑的狗”，各自想画的狗不一样，就可能画出很多只狗叠在同一张图里（幻灯片：“最终还是各自独立生成”）。这个问题实际怎么处理，他说后面的课（第 18 讲）会再看到；这里先假设 Transformer 能处理，告诉它生 16 个位置的 patch，它就一次生出来，patch 之间的关系由 attention 处理。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 怎样评估生成的图片：CLIP Score</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=1812s" target="_blank">0:30:12</a>–0:32:35</em></p>
+        <p>概念上知道怎样生成图片后，他问：给模型一个指令，它生成一张图，怎么知道结果好不好？</p>
+        <p>他回顾第 12 讲评估语言模型时的结论：评估方法很多，但人类才是最好的评估者（Evaluator）；人的时间有限，所以也许可以让 GPT-4 这类较强的模型代替人评估其他模型。影像里也有类似趋势：当然可以让人去看像不像一只奔跑的狗，但人没力气看太多图，所以常见做法是引入一个叫 CLIP 的模型（arXiv 2103.00020）。</p>
+        <h3>CLIP 怎么训练</h3>
+        <ul>
+            <li>从网上收集大量图片和对应的文字。</li>
+            <li>给 CLIP 一张图片和它对应的文字，要输出高分。</li>
+            <li>把数据集里的图片和文字任意配错，比如把“阳光下的猫”配给狗的图，把“沙滩上的狗”配给猫的图，CLIP 要学会这是不正确的配对，给低分。</li>
+        </ul>
+        <p>这样 CLIP 从大量数据中学会：正确配对高分，不正确配对低分。这个模型已经训练好并开源。</p>
+        <h3>CLIP Score</h3>
+        <p>很多图片生成模型直接拿 CLIP 衡量：生成一张图后，把输入的文字描述和这张图一起丢给 CLIP，看它给多少分，这个指标叫 CLIP Score，分数越高代表生成模型做得越好。他说这个方法听起来蛮简单，也依赖 CLIP 本身的能力，但是今天主流的做法之一。他的观察是：今天评估生成式 AI 好坏的，通常已经是另一个 AI，人不再是唯一的评估者。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 一张图胜过千言万语：个人化图像生成</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=1955s" target="_blank">0:32:35</a>–0:37:30</em></p>
+        <h3>文字描述不出来的东西</h3>
+        <p>生成图片有一个特殊难点：一张图胜过千言万语，很多东西难以用文字描述。他举的是自家客厅的一个钟。他想让 DALL·E（通过 GPT-4 使用）画一个一模一样的钟，于是描述：现代简约设计风格，钟面是一个大约圆形的框架，黑色金属材质，没有传统刻度；中央是一块浅色、接近长方形的木板，上下镂空，木板右下角印有“patya”字样，没有其余花纹；指针黑色、简约，只有时针和分针，没有秒针，装在木板中央。</p>
+        <p>他说自己试了很久，不断改文字描述，希望越像越好，“在我把那天的额度都用完之前”能画出的最像的钟也只是幻灯片上那样：已经很像了，但不管怎么描述，和真正的钟还是有差距。因为很多图像是文字难以描述的。</p>
+        <h3>做法：给它取一个没用过的名字，再微调</h3>
+        <p>办法之一是个人化的图像生成，这也是课程最后一个作业要做的事。假设桌上有一个很特别的雕塑，很难描述，就直接给它取个特别的名字，比如叫 S*（S star），叫什么都可以，但要用一个平常不用的符号。</p>
+        <p>他解释为什么不能用平常的词：如果把它叫“狗”，以后你就再也画不出正常的狗了，画出来的狗都会长成那个雕塑的样子；而且模型可能被那个词的意思污染，你说这是狗，它可能会给雕像加一个狗头，觉得它应该长得像狗。所以要选一个没有特殊意思、平常也不会再用的符号。</p>
+        <p>然后教文字生图模型：以后说“S* 的照片”，就要画出这样的图；用这些图片微调（fine-tune）模型，它就认得这个客制化的对象，之后可以把它放进各种场景。幻灯片上的例子来自论文（arXiv 2208.01618，另附 2208.12242），他们只用了 3 到 5 张图片，这种客制化不需要很多图。教会以后可以下各种和 S* 有关的指令：</p>
+        <ul>
+            <li>An oil painting of S*：画一幅油画版的 S*。</li>
+            <li>生成 S* 风格的 App icon。</li>
+            <li>让 Elmo（那个红色怪物）做得像 S* 一样，模型居然听懂了。</li>
+            <li>生成一个针织版的 S*，它也知道什么叫针织版。</li>
+        </ul>
+        <p>所以用少量图片就能客制化文字生图模型。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 文字生视频的挑战：运算量和伪 3D attention</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=2250s" target="_blank">0:37:30</a>–0:44:57</em></p>
+        <h3>原理上没有不同</h3>
+        <p>文字生图和文字生视频有什么不同？他说原理上没什么不同：文字生图是产生一堆 patch，对应一张图；文字生视频只是产生更多 patch，一大排 patch 合起来对应一段视频，“就 结束了”。</p>
+        <h3>为什么难：算一下运算量</h3>
+        <p>那为什么大家觉得文字生视频是很大的挑战？他带大家算复杂度：</p>
+        <ul>
+            <li>假设每秒 24 帧（一般看视频就是 24 帧）。</li>
+            <li>假设每帧用 64×64 个 patch 描述。按今天 Encoder 的能力，64×64 个 patch 还原回去大概是 1024×1024 的图，只是普通清晰度的影像。</li>
+            <li>一分钟视频：24×60 = 1440 帧；每帧 64×64 个 patch，约 600 万个 patch。</li>
+        </ul>
+        <p>他说 600 万听起来不算惊人，现在动不动就听到神经网络参数上亿，百万对你来说不算大数字。但别忘了 Transformer 要做 attention，每个位置和每个位置两两都要做。600 万个 patch 两两做 attention，次数是 600 万的平方，约 36 兆。也就是生成一段一分钟、并不特别高清的视频，每一层做 attention 时要做 36 兆次。所以文字生视频最大的挑战是运算量太大，近年一系列研究都在想办法减少运算量。</p>
+        <h3>改造 attention：Spatial 和 Temporal</h3>
+        <p>第一个想法是改造 attention。算 attention 是为了让不同 patch 之间有关联，画面才一致；但一分钟视频里第一帧左上角的 patch，真的和最后一帧右下角的 patch 有关联吗？也许不需要算那么多。</p>
+        <ul>
+            <li>Spatio-temporal attention（3D）：一个 patch 既和同一帧所有 patch 做 attention，也和其他帧的 patch 做。既考虑空间又考虑时间。他说今天可能已经很少有人硬做这种 attention，运算量太大，没办法生成高清的影像。</li>
+            <li>Spatial attention（2D）：不管帧与帧的关系，每个 patch 只和同一帧里的 patch 做 attention，只考虑长和宽两个方向。至少能保证同一帧的画面一致、不违和；但只有它的话，画面和画面之间就不连贯了。</li>
+            <li>Temporal attention（1D）：考虑时间，一个 patch 只和其他帧同样位置的 patch 做 attention。它只考虑时间维度，没考虑空间维度，显然也有问题。</li>
+        </ul>
+        <p>两种都有局限，要用哪个？他的回答是“我全都要”：把 spatial attention 和 temporal attention 叠在一起、交替使用，造出一个“伪 3D”的 attention。他说今天做视频生成常看到这样的架构。</p>
+        <h3>伪 3D 省了多少</h3>
+        <ul>
+            <li>完整 3D：约 36 兆次。</li>
+            <li>Spatial：一帧里 64×64 个 patch 两两做，(64×64)² 次，再乘 1440 帧，约 240 亿次。</li>
+            <li>Temporal：时间维度 1440 个位置两两做，1440² 次，再乘每帧 64×64 个位置，约 85 亿次。</li>
+        </ul>
+        <p>他说这也是上亿级别，但 240 亿加 85 亿合起来的伪 3D，和全 3D 相比差了千倍，运算量只有全 3D 的千分之一左右。这是今天视频生成模型常用的技术。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 分阶段生成：以 Imagen Video 为例</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=2697s" target="_blank">0:44:57</a>–0:49:29</em></p>
+        <h3>回到第 15 讲：不一定一步到位</h3>
+        <p>另一个减少运算量的方法也来自第 15 讲的生成策略：生成不一定要一步到位，可以分成很多步骤依序执行。给生成式 AI 一个条件，先生成第一版，再由另一个生成式 AI 把第一版变成第二版……最后一个模型把第 N-1 版变成第 N 版。人们以为输入条件就直接产生第 N 版，其实中间经过了很多个模型，每个模型只专注一个任务，像一条流水线，每一站都不复杂，接起来就能做复杂的事。</p>
+        <p>视频生成常做类似设计。第 K-1 版到第 K 版的差别可以是：</p>
+        <ul>
+            <li>分辨率：第 K-1 版每帧分辨率低，第 K 版高。这个模型只需专注于根据已有的低分辨率图片生成高分辨率图片。</li>
+            <li>帧数：比如第 K-1 版每秒只有 2 张图，第 K 版扩展到每秒 4 张。这个模型只需专注于预测两张图中间应该插入什么内容（做内插），看起来才连贯。</li>
+        </ul>
+        <h3>Imagen Video 的流水线</h3>
+        <p>他说不知道 Sora 是怎么做的，但可以看 Google 的 Imagen Video（arXiv 2210.02303）。论文图里每个框代表一个模型，框上三个数字依次是帧数、每帧的宽和高。他按图念了一遍：</p>
+        <ol>
+            <li>Base model 读文字，只生成 16 帧，每帧 40×24，3fps，所以视频长约 5 秒。他说这个结果人看了一定觉得不知道在做什么，但没关系。</li>
+            <li>下一个模型把 3fps 提到 6fps。</li>
+            <li>下一个模型把每帧分辨率从 40×24 提到 80×48。</li>
+            <li>再一个模型从 80×48 提到 320×192。</li>
+            <li>再提帧数：6fps 到 12fps。</li>
+            <li>再提帧数：12fps 到 24fps，这是一般看动画的帧数。</li>
+            <li>320×192 还是太低，最后扩展到 1280×768，和屏幕一样大，就得到清晰的视频。</li>
+        </ol>
+        <p>他说这也是今天文字生视频常用的技巧之一。</p>
+        <h3>延伸阅读</h3>
+        <p>最后推荐两篇：一篇讲语言模型怎样把影像当作输入（An Introduction to Vision-Language Modeling，arXiv 2405.17247），一篇讲 Diffusion Model 怎样生成视频（Video Diffusion Models: A Survey，arXiv 2405.03150）。幻灯片接下来的“经典影像生成方法”在下一讲。</p>
+    </section>
+
+    <section id="how">
+        <h2>他是怎么讲的</h2>
+        <h3>讲的顺序</h3>
+        <p>先给框架，再看效果，最后拆机制。开头用一句“生成式 AI 就是根据 condition 生东西”把影像相关的 AI 分成“看影像”和“生影像”两类，第一类只用 GPT-4o 看照片的例子带过，宣布这堂课只讲第二类。然后花约 8 分钟放应用：Sora Demo、Sora 的瑕疵、视频生视频、Talking Head、ControlNet。先让人看到能做到什么、哪里还做不好，再进原理。</p>
+        <p>原理部分从最底层的单位开始：像素、帧、fps，然后是编码器把图片切成 patch。他在这里立了一个后面一直用的约定：从此“一段视频就是一排 patch”，不再回头讲转换细节。有了这个约定，文字生图就能接到学生已经熟悉的文字接龙上（数据是图文配对，模型可以做 Patch 接龙），再用第 15 讲的结论把它修正为平行生成。文字生视频放在最后，并且先说“原理上没有不同，只是 patch 更多”，再用一道算术题说明为什么难，随后给两条解法（伪 3D attention、分阶段生成）。每个新点都挂在上一个点上：patch 让生图变成“接龙”，生图的 patch 数量引出平行生成，视频的 patch 数量引出运算量。</p>
+        <p>中间插入两个“横向”话题：怎样评估（CLIP）和文字描述不出来怎么办（个人化生图）。评估接在第 12 讲“用强模型代替人评估”上；个人化生图接在最后一个作业上。“脑补”问题他点出来但明确留到下一讲。</p>
+        <h3>每个概念用了什么例子</h3>
+        <ul>
+            <li>影像作为条件 → GPT-4o 评价两个都叫李宏毅的人，被逼选谁帅时的回答：「他现在讲话已经非常的精明 就是个人精」 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=152s" target="_blank">0:02:32</a></li>
+            <li>文字生视频的能力 → Sora 官方 Demo，特意挑现实中不可能出现的场景（融化蜡烛旁的怪物、沉入海底的纽约），用来排除“训练数据里本来就有”的解释 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=348s" target="_blank">0:05:48</a></li>
+            <li>生成视频的缺陷 → 会动的墙、海龟变鱼、越分越多的小狼、跑掉的塑料椅 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=395s" target="_blank">0:06:35</a></li>
+            <li>Talking Head → 用自己的照片和一句“这门课是生成式 AI 导论”现场生成：「而且我照片里面是没有牙齿的啦 他硬要帮我加个牙齿上去啦」 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=593s" target="_blank">0:09:53</a></li>
+            <li>fps → 芙莉莲打破结界片段 24fps 对比 1fps：「要不要让人好好看动画啦」 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=833s" target="_blank">0:13:53</a></li>
+            <li>编码器和降分辨率的区别 → 用“4×4 解码回来会不会只剩 16 个格子的狗”这个担心来说明解码器会看邻近和全图的 patch <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=1032s" target="_blank">0:17:12</a></li>
+            <li>文字生图的训练数据 → 和文字接龙对照（给一句话、告诉它接哪个 token），配“一只在奔跑的狗”等图文对 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=1324s" target="_blank">0:22:04</a></li>
+            <li>数据版权风险 → LAION、Stability AI 被画家告、OpenAI 不公开数据：「但只要不讲就不会被告这样」 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=1514s" target="_blank">0:25:14</a></li>
+            <li>CLIP 的训练 → “阳光下的猫”配狗图、“沙滩上的狗”配猫图作为错误配对 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=1908s" target="_blank">0:31:48</a></li>
+            <li>文字描述不了图像 → 他家客厅的钟，写了一长段描述反复改，「在我把那天的额度都用完之前」也只画到差不多 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=2053s" target="_blank">0:34:13</a></li>
+            <li>为什么个人化要用生僻符号 → 「如果你把它叫做狗 那就不好了 以后你就再也画不出狗来了」 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=2102s" target="_blank">0:35:02</a></li>
+            <li>视频运算量 → 一分钟 24fps、每帧 64×64 patch 的逐步计算，最后落在「六百万的平方是三十六兆啊」 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=2346s" target="_blank">0:39:06</a></li>
+            <li>伪 3D attention → 2D 和 1D 都有局限，「就是我全都要 不要想那么多」 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=2545s" target="_blank">0:42:25</a></li>
+            <li>分阶段生成 → Imagen Video 论文图，逐个框念出帧数和分辨率的变化 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=2810s" target="_blank">0:46:50</a></li>
+        </ul>
+        <h3>简化了什么、跳过了什么</h3>
+        <ul>
+            <li>幻灯片第 20–22、29、31 页都标着“为了方便同学们理解，本页投影片对于模型做了大量的简化”。他把生图模型画成一个 Transformer 吃文字、吐 patch。</li>
+            <li>平行生成先给“概念上”的画法（位置 1、2、3 各自生成），再说“实际上”是把 16 个位置同时交给同一个 Transformer。先简化，再在同一段里修正。</li>
+            <li>视频转 patch 的细节讲一次之后明说不再讲：「我们就不会特别把影片转patch这个部分再告诉你」 <a href="https://www.youtube.com/watch?v=5H2bVEmYDNg&t=1178s" target="_blank">0:19:38</a>。编码器的具体做法只留一篇论文。</li>
+            <li>“脑补”问题点出来后说先假设 Transformer 能处理，留到后面。</li>
+            <li>语言模型看图（幻灯片第 9 页）没有展开，只在最后给延伸阅读。</li>
+            <li>Sora 的内部做法他多次说不知道：从 Blog 的图推断用了 patch；分阶段生成“虽然我们不知道Sora是怎么做的”，改用 Google 的公开论文举例。</li>
+            <li>YouTube 说明栏补了一段“从人工特征到像素再到 patch”的历史，课上没讲。</li>
+        </ul>
+        <h3>怎样处理误解和提问</h3>
+        <ul>
+            <li>他自己替学生提问：编码器是不是就是降分辨率？回答“概念上也许类似”，然后说明编码器和解码器是多层神经网络，还原时会看邻近乃至整张图的 patch。</li>
+            <li>“600 万听起来不大”这个直觉先承认（参数动辄上亿），再用“attention 是两两计算”推翻。</li>
+            <li>Sora 的 Demo：提醒网上的视频都来自 OpenAI 自己的 Blog，模型并未开放；挑选不可能场景，避免“只是背下了训练数据”的误读。</li>
+            <li>CLIP Score：说明它“听起来蛮简单”且依赖 CLIP 自身能力，但仍是主流做法。</li>
+            <li>本讲没有学生现场提问的记录。课堂开头他对全班提问（需要什么训练数据），随即自己用文字接龙作答。</li>
+        </ul>
+        <h3>现场演示</h3>
+        <ul>
+            <li>GPT-4o：上传两张“李宏毅”的照片，问谁比较帅、各自职业，以及被逼选择时的回答（截图展示）。</li>
+            <li>AniPortrait 开源 Talking Head：自己的照片加一句录音，播放生成的说话视频，指出模型自行加了牙齿。</li>
+            <li>DALL·E：用长段文字描述客厅的钟，展示当天额度用完前最接近的结果和真钟的对比。</li>
+            <li>视频素材：Sora Blog 的四段视频，芙莉莲片段 24fps/1fps 对照。</li>
+        </ul>
+        <h3>其他手法</h3>
+        <ul>
+            <li>回调前几讲：第 15 讲（生成策略：Auto-regressive vs non-autoregressive、脑补问题、分步生成），第 12 讲（人是最好的评估者，用强模型代替人），第 8 讲的 RLHF（GPT-4o“个人精”）。文字接龙作为理解 patch 接龙的桥。</li>
+            <li>贯穿全讲的一句例子文字“一只在奔跑的狗”，从训练数据、平行生成到视频 patch 都用它，下一讲继续用。</li>
+            <li>流行文化和自嘲：两个李宏毅比帅、照片被加牙齿、芙莉莲、“我全都要”、客厅的钟和用完的额度。</li>
+            <li>预言式段子：给 VTuber 写好“背后其实是 GPT-4o”的剧本，并在 YouTube 说明栏续写成“人类假扮 AI”。</li>
+            <li>算术题作为说服手段：把“视频难”换成具体数字（600 万 patch、36 兆、240 亿、85 亿、千倍），每一步都从大家能接受的假设（24fps、64×64）出发。</li>
+            <li>新术语成对出现：英文名加一句中文解释（frame 叫帧、Auto-regressive 是接龙的专有名词、Spatial 是 2D、Temporal 是 1D）。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>李宏毅 · 生成式 AI 导论 2024 · Lecture 17: Generative AI for Images (1): How AI Makes Images and Videos · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

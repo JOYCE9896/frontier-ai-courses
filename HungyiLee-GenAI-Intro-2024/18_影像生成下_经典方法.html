@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第18讲：影像生成（下）：经典方法速览与和生成的视频互动 | 李宏毅 生成式 AI 导论 2024 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="17_影像生成上_图片与视频.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">生成式 AI 导论 2024 目录</a> · 18</span>
+    <span><a href="19_GPT-4o语音技术猜测.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第18讲：影像生成（下）：经典方法速览与和生成的视频互动</h1>
+        <p class="subtitle">同一段文字对应很多张图，模型“无所适从”；四种经典方法怎样处理这个问题：VAE 和 Flow 用编码器抽出“脑补”信息，Diffusion 反复去噪并和 Transformer 结合（Sora），GAN 用 Discriminator 当外挂；最后是能用按钮操控生成画面的 Genie</p>
+        <div class="author-meta">
+            主讲：李宏毅（Hung-yi Lee，台湾大学电机系）· 上课日期：2024 年 5 月 31 日 · 时长：37 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=OYN_GvAqv-A" target="_blank">课堂录像</a>（台大公开，2024 年春季，本文依据录像字幕整理）· <a href="https://speech.ee.ntu.edu.tw/~hylee/genai/2024-spring-course-data/0531/0531_vision.pdf" target="_blank">投影片</a>
+        </div>
+    </header>
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>这是同一堂课（5 月 31 日，学期最后一堂实体课）的下半段，用的是幻灯片 0531_vision 第 36–62 页。上半段（第 17 讲）说明了生图和生视频模型怎样把影像变成一排 patch，并用 Transformer 一次平行生成，但留下一个没解决的问题：同一段文字可以对应很多不同的图，各个 patch 各自“脑补”，结果互相打架。这一讲用这个问题当主线，很快介绍四种经典影像生成方法 VAE、Flow-based Model、Diffusion Model 和 GAN，说明每种方法怎样应对它，以及 Sora 用的 Diffusion Transformer 是什么。最后一段讲能不能和生成的视频实时互动，介绍 Genie。</p>
+        <p>主要例子：在草原上跑的哈士奇和在都市里跑的柴犬（同一句“一只在奔跑的狗”），老板一会儿叫你往东一会儿叫你往西，用臭脸向量和笑脸向量改他自己的照片，“雪地里的猫”被一步步去噪，画得很差的抽象狗和三只脚的“三角猫”，横向卷轴游戏、小孩涂鸦和随手拍的照片变成可玩的游戏，以及在电脑前学开车。</p>
+        <ol>
+            <li><a href="#t01">四种经典方法，和它们共同面对的难题</a> · <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">把文字没说的信息补进去：Auto-encoder 和 VAE</a> · <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=195s" target="_blank">0:03:15</a></li>
+            <li><a href="#t03">Flow-based Model，以及 noise 里有信息</a> · <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=635s" target="_blank">0:10:35</a></li>
+            <li><a href="#t04">Diffusion Model 和 Diffusion Transformer</a> · <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=831s" target="_blank">0:13:51</a></li>
+            <li><a href="#t05">GAN：向 Discriminator 学，没有标准答案</a> · <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=1218s" target="_blank">0:20:18</a></li>
+            <li><a href="#t06">GAN 是外挂，以及四种方法的课程年表</a> · <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=1610s" target="_blank">0:26:50</a></li>
+            <li><a href="#t07">和生成的影像互动：Genie</a> · <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=1753s" target="_blank">0:29:13</a></li>
+            <li><a href="#t08">Genie 能做什么：随手造游戏和开放世界</a> · <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=2136s" target="_blank">0:35:36</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 四种经典方法，和它们共同面对的难题</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=0s" target="_blank">0:00:00</a>–0:03:15</em></p>
+        <h3>要介绍的方法</h3>
+        <ul>
+            <li>Variational Auto-encoder，缩写 VAE</li>
+            <li>Flow-based Model</li>
+            <li>Diffusion Model，今天大家耳熟能详</li>
+            <li>Generative Adversarial Network，缩写 GAN</li>
+        </ul>
+        <p>Sora 用的是 Diffusion Model。他给了一个辨认方法：如果在论文或 Blog 里看到图是从一大堆噪声（noise）慢慢生出来的，噪声越来越少，最后变成高清的图，那通常就是 Diffusion。他说虽然今天 Diffusion 可能最常用，还是要多介绍几种经典方法，让大家知道影像生成真正的难点、真正被克服的挑战是什么。</p>
+        <h3>难点：同一段文字，很多种样子</h3>
+        <p>上一讲说过，今天生图、生视频常用的神经网络架构是 Transformer（过去比较常用 CNN），概念很简单：每段文字产生一排 patch，就能产生图片。但训练时会遇到问题。在训练数据里找“一只奔跑的狗”，会发现它有很多样子：可以是在草原上奔跑的哈士奇，也可以是在都市里奔跑的柴犬。</p>
+        <p>对 Transformer 来说，它得到的教材是：输入“一只奔跑的狗”时，有时要它产生这些 patch，有时要它产生另一些 patch。只叫它生哈士奇，它生得出来；只叫它生柴犬，也生得出来；有时叫它生柴犬有时叫它生哈士奇，它就“无所适从”（幻灯片原词），每个 patch 想生的东西都不一样，可能生出各种奇怪的混种图片。</p>
+        <p>他用上班打比方：老板只叫你往东没问题，只叫你往西也没问题，最怕老板有时叫你往东、有时叫你往西。Transformer 学影像时也一样，因为图片对应的文字通常没办法完整描述整张图，于是出现很多“同样文字对应不同图片”的情况，它不知道该听哪一笔训练数据。</p>
+        <p>接下来他把生图模型简化成一个方框，框里其实是一个 Transformer，读一段文字、生一堆 patch、patch 再变成图。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 把文字没说的信息补进去：Auto-encoder 和 VAE</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=195s" target="_blank">0:03:15</a>–0:10:35</em></p>
+        <h3>先把额外信息标出来</h3>
+        <p>难点是文字往往没法完整描述影像。一个可能的办法：训练数据里文字没提到的东西，我们自己加进去。告诉生图模型，这一张要生成的是“一只哈士奇在草原上奔跑”，另一张是“柴犬在都市里奔跑”，比原来的“一只奔跑的狗”多了品种和地点。把文字没提到的信息标出来，也交给生图模型，它就知道同样的输入为什么对应不同的图，因为有额外信息，它会读这个信息再生成，就不会再碰到“同样输入要不同输出”的问题。</p>
+        <h3>信息抽取模型从哪来</h3>
+        <p>这些标注从哪里来？也许可以训练一个“信息抽取”的模型：给它一张图和一段文字描述，它把图里文字没描述到的东西抽出来，交给生图模型。有了它，就能把训练数据里每张图的额外信息都抽出来，生图模型学起来更容易。</p>
+        <p>新问题是怎样训练这个信息抽取模型。训练模型通常要大量成对的输入和输出，你要怎么找人标注“这张图里没被描述到的信息就是这些”？他说有一个方法不需要额外标注：让生图模型和信息抽取模型一起训练，它们有一个共同目标。</p>
+        <ul>
+            <li>信息抽取模型读训练数据里的一张图，以及这张图附带的文字描述，把文字没提到的东西抽出来。</li>
+            <li>把抽到的信息和文字描述一起交给生图模型，生成一张图。</li>
+            <li>共同目标：输入一张图，经过这一连串处理，最后输出的图要和输入越接近越好。</li>
+        </ul>
+        <p>中间抽出来的到底是什么不重要，我们也不知道，没有标准答案；只要它抽出的东西能帮生图模型生出和输入一模一样的图，信息抽取模型就算成功了。这样一次解决两个问题：信息抽取模型学会抽出文字没表达的信息，生图模型训练时又有这些额外信息辅助。</p>
+        <h3>这个框架叫 Auto-encoder</h3>
+        <p>这整个框架叫 Auto-encoder（自编码器）。信息抽取模型叫 Encoder，生图模型叫 Decoder，两者一起训练，让输入和输出越接近越好。</p>
+        <p>他接着修正一个由讲法带来的印象：前面让人以为信息抽取模型输出的是文字，那是为了方便理解。生图模型又不是人，不需要读文字，只要能传递一些它读得懂的“密码”就好。所以一般抽出来的是一串数值，也就是一个向量。向量的每个维度可能对应某种含义，比如第一维代表狗的品种，第二维代表背景在什么地方（幻灯片上画成 0.5、1.0 这样的数）；给生图模型不同的向量，它就生出不同的狗。</p>
+        <h3>生成时，额外信息从哪来：掷骰子</h3>
+        <p>训练时有 Encoder 也有 Decoder，可真正生成时怎么办？生成时只有一段文字描述，图还没生出来，根本不知道文字没描述的信息是什么。训练时可以从图里抽，是因为图已经在手上了。</p>
+        <p>他的解法是：既然已经知道这些要“脑补”的信息是用一些数值表示的，使用时就先掷骰子，把向量里每个数值都随机掷出来，掷到多少就是多少。反正现在人没有输入，人大概也不知道要脑补什么，就交给概率决定。生图模型根据输入的文字和这个随机产生的脑补向量生成最终结果。</p>
+        <p>他说这个模型其实就是 VAE。也许有同学以前听过 VAE，听到的讲法不是这样，他这里用的是一个可能更容易理解的讲法，说明 VAE 为什么长这样：有一个 Encoder 抽出文字没法描述的信息，有一个 Decoder 用脑补的信息还原出图。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. Flow-based Model，以及 noise 里有信息</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=635s" target="_blank">0:10:35</a>–0:13:51</em></p>
+        <h3>只训练一个可逆的 Decoder</h3>
+        <p>Flow 和 VAE 很像，唯一不同是：VAE 要训练一个 Encoder 和一个 Decoder，Flow 的想法是 Encoder 和 Decoder 做的事正好相反，一个从图里抽信息，一个把信息还原成图，有必要训练两个模型吗？于是只训练一个 Decoder，并强迫它是 invertible（可逆）的，也就是它一定有反函数，反函数做的正好是 Decoder 的反向操作，直接拿来当 Encoder。所以 Flow-based Model 只训练一个 Decoder，同时就有了 Encoder（幻灯片上记作 f 和 f⁻¹）。</p>
+        <h3>noise 这个名字的误导</h3>
+        <p>他说在文献里，Encoder 抽出来、Decoder 拿来脑补的东西通常叫 noise。这个词可能让人以为里面都是不重要、没用的信息，其实不然，noise 里往往包含很重要的信息。</p>
+        <p>他用一个真实实验说明（幻灯片注明 Powered by OpenAI 的 Glow）：</p>
+        <ul>
+            <li>找一大堆脸很臭的人，把照片丢进 Encoder 抽出向量，平均起来就是“臭脸向量”。</li>
+            <li>找一些在笑的人，照片丢进 Encoder，平均起来是“笑脸向量”。</li>
+            <li>拿一张照片（他自己的脸，他说照片里自己已经在笑了）丢进 Encoder 得到一个向量，Decoder 可以把它还原成原图。</li>
+            <li>在这个向量上减掉臭脸向量、加上笑脸向量，再经过 Decoder，照片里的人就笑得更开心。</li>
+        </ul>
+        <p>所以这些叫 noise 的向量里有丰富的信息，甚至可以直接调整它们来调整输出图片的效果。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. Diffusion Model 和 Diffusion Transformer</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=831s" target="_blank">0:13:51</a>–0:20:18</em></p>
+        <h3>反复使用同一个去噪模块</h3>
+        <p>Diffusion Model 的 Decoder 输入和输出跟前两个模型一样：输入一个包含脑补信息的 noise，产生一张图。不同的是它反复使用同一个 Decoder，每次只做一件简单的事：去除噪声，也就是 denoise。</p>
+        <p>流程是：一开始给一张纯噪声，送进 Decoder 里的 Denoise 模块，再加上文字描述（幻灯片例子是 A cat in the snow）。Denoise 模块把噪声去掉一点，让它看起来更像文字描述的“雪地里的猫”。第一次也许不太成功，只去掉一点；但它会锲而不舍，把结果再丢回去 denoise 一次，看起来就更像猫。这个过程通常反复 500 次、1000 次，最后产生清晰的图。</p>
+        <p>他说 Diffusion 的痛点就在于 denoise 要做很多很多次。今天相关研究集中在怎样用更少的次数得到清晰的图：传统是 500、1000 次，很多人想有没有办法 10 次、5 次，甚至 1 次就好，这是今天的研究趋势。</p>
+        <h3>训练数据自己造：加噪声</h3>
+        <p>Denoise 模型要学怎么去除噪声，所以需要有噪声的图和没有噪声的图。训练数据里只有没噪声的图和对应的文字，有噪声的图就自己造：用掷骰子的方式产生一些噪声，加到训练图片上。通常加很多次，第一次、第二次，越加越多，直到完全看不出原来图里是什么。</p>
+        <p>这样就有了加噪声前和加噪声后的图。然后告诉 Denoise 模型：这张图加了这个噪声就变成这样，现在给你加噪声后的图和这段文字描述，你要还原回加噪声之前的样子。每一步都这样教。教会以后就能用它来生成图片。</p>
+        <h3>Diffusion Transformer</h3>
+        <p>Denoise 模型的神经网络架构也是 Transformer，所以 Diffusion 可以和 Transformer 结合，这是今天常用的技术，叫 Diffusion Transformer（幻灯片引 arXiv 2212.09748）。他说 Sora 也提到用的是这种方式。（他在 YouTube 说明栏更正：课上说的“Sora 的 paper”是口误，Sora 没有 paper，只有 Blog。）</p>
+        <p>具体是：原本 Transformer 是给一些输入，产生一排 patch，再还原成图。用 Diffusion 的话，Transformer 每次做的事就是 denoise：一开始输入的 patch 全是噪声，第一次用 Transformer 去掉一些噪声，第二次（同样的参数）再去掉更多，第三次再去掉更多……用个五百一千次，最后得到干净的 patch，丢进 Decoder 还原成图片。</p>
+        <p>扩展到视频是一样的事：输入是有噪声的视频 patch，Transformer 输出比较干净的 patch，做几百、几千次去噪，期待最后得到一堆干净的 patch，再还原成影像。这就是今天用 Diffusion 加 Transformer 生成视频的模型；根据 Sora 的 Blog，他们很可能用了类似的技术。</p>
+        <h3>和 VAE、Flow 怎么类比</h3>
+        <p>VAE 和 Flow 都有一个 Encoder 和一个 Decoder。Diffusion 也有 Decoder，里面做的是多次 denoise。至于 Encoder，也就是把图片变成噪声这一步，Diffusion 没有专门训练模型，因为噪声是自己加进去的：把图加大量噪声直到看不出原来的样子，这个过程对应其他模型里 Encoder 的工作，在 Diffusion 文献里叫 Forward Process；Decoder 做的事叫 Reverse Process。</p>
+        <p>幻灯片第 45、46 页注明这里是“极度简化后的讲法”，详细说明见他机器学习课的 Diffusion 系列视频。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. GAN：向 Discriminator 学，没有标准答案</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=1218s" target="_blank">0:20:18</a>–0:26:50</em></p>
+        <h3>为什么单独讲</h3>
+        <p>另一个很知名的模型是 Generative Adversarial Network（GAN）。他没有把 GAN 和前三个放在一起讲，因为它和其他模型有根本差异，比较像一个额外的“外挂”。</p>
+        <h3>先训练一个会打分的模型</h3>
+        <p>回到难点：同一段文字对应很多不同的图，模型生得晕头转向。也许不该直接用真实图片教生图模型，而是先训练另一个 AI，让它先“咀嚼”好一只奔跑的狗应该长什么样，再来教生图模型。</p>
+        <p>他说这里的概念和上一讲的 CLIP 基本一模一样：GAN 里也训练一个吃一张图、读一段文字、评价两者有多匹配的模型，只是换了个名字叫 Discriminator（判别器）。</p>
+        <h3>坏例子从哪来</h3>
+        <p>如果训练 Discriminator 时只有好例子，它从没见过坏例子，测试时看到坏例子也会说好，因为只教过它输出高分、竖大拇指。所以训练时也要给坏例子。CLIP 的坏例子是把图片和文字随机打乱配对；GAN 用的是另一个方法：</p>
+        <ul>
+            <li>假设已经有一个生图模型，先别问它哪来的，它只是有点差。</li>
+            <li>用它先生一些图：叫它画一只奔跑的狗，它画了一只抽象的狗；叫它画阳光下的猫，它画了一只背景黄色、很抽象、只有三只脚的“三角猫”。</li>
+            <li>告诉 Discriminator：看到这只抽象的狗要说不好，看到三角猫也要说不好。</li>
+        </ul>
+        <p>给它正面和反面的例子，它就学会评价一张图和一段文字是否匹配。</p>
+        <h3>Generator 向 Discriminator 学</h3>
+        <p>有了 Discriminator，生图模型就不跟真实图片学，改跟 Discriminator 学。在 GAN 框架里，生图模型叫 Generator（生成器）。它先生成一张图，把图和文字丢给 Discriminator；Discriminator 觉得这只抽象的狗太差，给负评；Generator 调整参数的方向，就是想办法骗过 Discriminator，生成一张 Discriminator 觉得很棒的图，那就成功了。</p>
+        <p>他指出这和跟 ground truth（标准答案图片）学的不同：跟正确图片学时，同样的文字可能对应不同答案；现在由 Discriminator 评价好坏，没有单一正确解答，只要 Generator 生出的图 Discriminator 觉得好，就成功了。</p>
+        <h3>交替训练</h3>
+        <p>实际做法是 Generator 和 Discriminator 交替训练：先有一个 Generator，用它的输出训练 Discriminator；有了 Discriminator，回头训练 Generator，让它生出 Discriminator 觉得好的图；然后 Discriminator 也更新参数，让自己更厉害一点；如此交替。</p>
+        <h3>GAN 还需要输入 noise 吗</h3>
+        <p>他预设了一个问题：GAN 的 Generator 还需要输入噪声吗？输入噪声是为了让模型根据噪声里的信息脑补，知道要生什么。他说有 Discriminator 的情况下其实可以不用。文献里多数 GAN 都还是给了噪声，但他自己的实际经验是：如果是文字生图，有 Discriminator 的情况下，不加噪声也能把 Generator 训练起来。</p>
+        <h3>和 RLHF 对比</h3>
+        <p>他把 GAN 和第 8 讲的 RLHF 对照。RLHF 是大型语言模型训练的第三阶段，会训练一个 Reward Model，语言模型跟 Reward Model 学。对应到 GAN，Discriminator 就是 Reward Model。唯一不同是 Reward Model 学习时有人的标注，人告诉它这个答案多好、另一个多差；Discriminator 学习时不需要人介入，它用一个假设：只要是 AI 生成的图基本都是差的，原来训练数据里的图都是好的（幻灯片：“不同之处：只要AI产生的都是坏的”）。</p>
+        <p>他在 YouTube 说明栏补充了更多差异：GAN 的 Generator 和 Discriminator 交替训练，早期 RLHF 只训练一次 Reward Model 之后就固定不变，不过 LLaMA 2 的 Reward Model 和语言模型也是交替训练的；RLHF 用 RL 算法（例如 PPO）训练语言模型，GAN 的 Generator 通常不需要 RL 算法更新参数，但如果 GAN 生成的输出是离散的，Generator 也需要用 RL 算法训练。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. GAN 是外挂，以及四种方法的课程年表</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=1610s" target="_blank">0:26:50</a>–0:29:13</em></p>
+        <h3>GAN 和 Diffusion 谁比较强？</h3>
+        <p>常有人问 GAN 和 Diffusion 谁比较强。他说这不是一个好问题。就像 RLHF 是一个可以强化模型能力的方法，GAN 也是，它是一个外挂，可以挂在 VAE 上，也可以挂在 Flow 上、Diffusion 上。VAE、Flow、Diffusion 的 Decoder（在 GAN 框架里叫 Generator）后面都可以再挂一个 Discriminator 来强化。幻灯片列了三篇结合的论文：</p>
+        <ul>
+            <li>VAE + GAN：arXiv 1512.09300</li>
+            <li>Flow + GAN：arXiv 1705.08868</li>
+            <li>Diffusion + GAN：arXiv 2206.02262</li>
+        </ul>
+        <h3>想学更多：他频道上的旧课</h3>
+        <p>这些经典方法在他的 YouTube 频道上都有对应视频，从录制的课程也能看出模型的历史变化（按他口述）：</p>
+        <ul>
+            <li>VAE：2016 年“机器学习”。</li>
+            <li>GAN：2018 年“机器学习及其深层与结构化”，花了三分之一的课时讲 GAN，可讲的太多，所以有一个 GAN 系列。</li>
+            <li>Flow-based Model：2019 年“机器学习”。</li>
+            <li>Diffusion Model：2023 年“机器学习”。他说 Diffusion 背后有很多数学原理，真要讲两三周都讲不完。</li>
+        </ul>
+        <p>如果觉得今天讲得不够清楚，更详细的内容和背后的数学原理都在他的频道上。（注：YouTube 说明栏里这四个链接和课程年份的对应与他口述不完全一致；幻灯片第 45、46 页把 Diffusion 的详细说明指向 2023 年那个播放列表。）</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 和生成的影像互动：Genie</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=1753s" target="_blank">0:29:13</a>–0:35:36</em></p>
+        <h3>问题：能不能操控生成的视频</h3>
+        <p>最后一段讲：AI 能生成影像了，人能不能和生成的影像有更即时的互动？每次讲 Sora 大家都会播那段女士在东京街头走路的视频，能不能直接用上下左右操控她走哪条路？那就等于操控一个 Avatar 在东京街头漫游，等于做出一个开放世界的 3D 游戏。</p>
+        <p>他说并非不可能，有一篇论文 Genie: Generative Interactive Environments（arXiv 2402.15391）想做类似的事。他先打预防针：它做的不是 3D 游戏，都是 2D 横向卷轴游戏。</p>
+        <h3>Genie 做什么</h3>
+        <p>模型（幻灯片上叫 Dynamic Model）读一个画面作为输入，同时还读你输入的动作。可以想象接一个摇杆，按上下左右，动作会影响输出：同样的画面，按的按钮不同，输出就不同。按“右”之后看到第二个画面，第二个画面又成为输入，再按一个 A，又产生新画面，游戏就能一直玩下去。等于用影像生成技术即时控制生成的结果。</p>
+        <h3>训练数据的难题：没有按键记录</h3>
+        <p>怎么训练？需要游戏画面加玩家当时的输入。不是每个画面都有输入，可以把“没按任何按钮”也当作一种特别的输入。如果能收集到画面加按钮，训练就易如反掌：教 AI 看到这张图加这个动作，就生成这张图；看到这两张图加这两个动作，就生成下一张，以此类推。生图怎么做大家已经会了。</p>
+        <p>真正的难点是 Genie 只能从网上收集大量游戏视频，但没有使用者输入的动作，不知道产生这些画面时人按了什么按钮。</p>
+        <h3>用 Auto-encoder 的思路反推按钮：Latent Action</h3>
+        <p>Genie 反推按钮的做法，和刚才讲 VAE 时的 Auto-encoder 概念基本一模一样。之前是：信息抽取模型抽出文字没法描述的信息，生图模型据此还原原图。对 Genie 来说，根据之前的游戏画面预测下一个画面时也缺少信息，缺的是使用者的动作：不知道使用者按左还是按右，就不知道人物往左跑还是往右跑。</p>
+        <ul>
+            <li>训练一个“动作抽取”模型：读之前的游戏画面和下一个画面，看两者有什么差异，归纳出人按了哪个按钮才造成这个变化。</li>
+            <li>没有动作标注，就用 Auto-encoder 的方式训练：动作抽取模型猜一个动作，把这个动作加上之前的画面交给生图模型，让它生成下一个画面，要求生成结果和真实的下一个画面越接近越好。</li>
+            <li>如果动作抽取模型猜对了，生图模型才可能生对；所以生图模型能生对，可能就代表动作抽取模型猜出了人实际按的按钮。</li>
+        </ul>
+        <p>这些动作不是真正收集到的，是动作抽取模型猜出来的，所以前面加上 Latent（潜在的）这个字，叫 Latent Action。Genie 论文假设人能按的按钮有八个，编号 1 到 8。哪个对应上、哪个对应下、哪个是 A、哪个是 B，他说不知道也不重要，只要记得有八个按钮能操控图片生成。</p>
+        <p>论文发现输入同样的按钮，不同画面里的变化是一致的。例如输入一串指令 6, 6, 7, 6, 7, 6, 5, 5, 2, 7，不管在哪个画面，都会让人物往右移动，整个画面往左下角移动，显然像是使用者按了一个“右跳”。所以可以通过 Latent Action 大致猜出使用者实际按的是哪个按钮。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. Genie 能做什么：随手造游戏和开放世界</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=2136s" target="_blank">0:35:36</a>–0:37:00</em></p>
+        <p>有了 Genie，就可以随便创造游戏：给它一张小孩的涂鸦当游戏画面，就可以开始玩，按一个右上跳，它就往右上跳。真实场景的照片也可以：随手拍一张雷神索尔（Thor）的照片输入 Genie，按往右上跳，它就跳起来了。所以未来能更即时地和影像生成模型互动。</p>
+        <p>这样的模型能干什么，只是更快地造游戏吗？他举的设想是学开车：现在要去驾训班，上完再去路考，没学好的话路口很危险。未来也许在自己电脑前就能学开车，有一个假的方向盘，转方向盘屏幕画面就变。你可能觉得这和一般赛车游戏一样，但一般赛车游戏场景有限，是程序事先规划好的；有了能互动的影像生成模型，也许就能在一个开放世界里开车，一直往前开，画面一直出现，永远不会停。他说以后世界可能就会变成这样。</p>
+        <p>幻灯片最后一页列了 Sora 技术报告的标题（OpenAI 那篇 Blog 题为 Video generation models as world simulators）和 Wayve 的 GAIA-1（arXiv 2309.17080，自动驾驶场景的生成模型），录像里没有逐一讲解这一页。</p>
+    </section>
+
+    <section id="how">
+        <h2>他是怎么讲的</h2>
+        <h3>讲的顺序</h3>
+        <p>整段围绕一个问题组织：同一段文字对应很多张图，模型该怎么学。他开头先列出四种方法和“Sora 用 Diffusion”这个结论，再说明为什么还要讲其他方法：要让大家知道“真正被克服的挑战是什么”。随后立刻用哈士奇和柴犬把这个挑战讲具体，再用老板往东往西的比方让人感受到“无所适从”。四种方法都被放回这个问题上讲，不按时间顺序，也不从数学定义讲起。</p>
+        <p>方法之间一层层接：先用“把文字没说的信息补进去”这个朴素想法推出信息抽取模型；再问“标注从哪来”推出两个模型一起训练，顺势命名为 Auto-encoder、Encoder、Decoder；再问“生成时没有图怎么办”推出掷骰子，最后才揭晓“这其实就是 VAE”。Flow 只讲和 VAE 的一处差别（Decoder 可逆，反函数当 Encoder）。Diffusion 讲成“输入输出和前面一样，只是反复用同一个 Decoder 去噪”，并把加噪声对应到前面模型的 Encoder。GAN 被单独放在后面，理由是它“比较像一个额外的外挂”，并借上一讲的 CLIP 和第 8 讲的 RLHF 来解释。最后的 Genie 又回调 Auto-encoder：缺的不再是文字没说的信息，而是玩家按的按钮。</p>
+        <h3>时间分配</h3>
+        <p>这一段 37 分钟，他自己说是“很快提到”。按录像位置算：问题设定约 3 分钟，Auto-encoder 加 VAE 约 7 分钟（大部分花在推导“为什么需要 Encoder”和“生成时怎么办”），Flow 约 3 分钟，Diffusion 约 6 分半，GAN 连同“外挂”和课程年表约 9 分钟，Genie 及其用途约 8 分钟。最长的部分是 VAE 的推导和 GAN，前者为后面所有方法（包括 Genie）铺好了 Encoder/Decoder 的说法，后者借 CLIP 和 RLHF 两次回调来讲。Flow 讲得最短，只交代它和 VAE 的一处不同，再配一个实验。</p>
+        <h3>每个概念用了什么例子</h3>
+        <ul>
+            <li>一对多的难题 → 草原上的哈士奇和都市里的柴犬，对模型来说「对这个transformer来说 他就无所适从」 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=98s" target="_blank">0:01:38</a></li>
+            <li>无所适从的感受 → 上班的比方：「最怕的就是遇到老板有时候叫你往东 有时候叫你往西」 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=147s" target="_blank">0:02:27</a></li>
+            <li>Encoder 输出为什么是向量 → 「它又不是人 它不需要读文字 你只要能够传递一些密码」 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=440s" target="_blank">0:07:20</a>；向量维度举例为狗的品种和背景</li>
+            <li>VAE 生成时的随机向量 → 掷骰子：「我们就把这件事情交给上天来决定」 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=585s" target="_blank">0:09:45</a></li>
+            <li>noise 里有信息 → 臭脸向量和笑脸向量，用来改他自己的照片：「啊这是我的脸呐 但是我看起来已经在笑了」 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=737s" target="_blank">0:12:17</a></li>
+            <li>Diffusion 的反复去噪 → A cat in the snow 一步步变清晰，「但是Denoise的这个Module会锲而不舍」 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=881s" target="_blank">0:14:41</a></li>
+            <li>Diffusion 的训练数据 → 自己掷骰子加噪声，加到看不出原物，再教模型还原 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=976s" target="_blank">0:16:16</a></li>
+            <li>Discriminator 的反例 → 差劲生成器画的抽象狗和「但是只有三只脚他是个三角猫」 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=1361s" target="_blank">0:22:41</a></li>
+            <li>GAN 没有标准答案 → 「只要另外一个人工智慧觉得好,基本上就是成功了」 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=1457s" target="_blank">0:24:17</a></li>
+            <li>Discriminator 是什么 → 直接说就是 CLIP 换个名字，又说就是 RLHF 里的 Reward Model <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=1561s" target="_blank">0:26:01</a></li>
+            <li>和生成画面互动 → Sora 的东京街头女士，能不能用上下左右控制她 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=1753s" target="_blank">0:29:13</a></li>
+            <li>Latent Action → 八个按钮，「不知道也不重要」，一串 6676765527 等于“右跳” <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=2089s" target="_blank">0:34:49</a></li>
+            <li>Genie 的用途 → 小孩涂鸦、雷神索尔照片变游戏，在电脑前学开车 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=2136s" target="_blank">0:35:36</a></li>
+        </ul>
+        <h3>简化了什么、跳过了什么</h3>
+        <ul>
+            <li>他明说 VAE 用的是自己的讲法：「我这边就是用一个也许比较更容易理解的讲法」 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=585s" target="_blank">0:09:45</a>。没有讲变分推断、KL 项这类内容。</li>
+            <li>先让人以为 Encoder 输出的是文字（“哈士奇、草原”），之后马上说明那是为了方便理解，实际是向量。</li>
+            <li>Diffusion 幻灯片标注“此处是极度简化后的讲法”，数学原理留给旧课：「其实要讲的话两三周都是讲不完的」 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=1704s" target="_blank">0:28:24</a>。</li>
+            <li>生图模型简化为一个方框，框里是 Transformer。</li>
+            <li>GAN 只讲了文字生图条件下的 Discriminator；RLHF 与 GAN 的更多差异放在 YouTube 说明栏补充。</li>
+            <li>Genie 预先降低期待：「我这边先打个预防针 他做的不是3D游戏」 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=1753s" target="_blank">0:29:13</a>。</li>
+        </ul>
+        <h3>怎样处理误解和提问</h3>
+        <ul>
+            <li>noise 这个名字：他点出它“可能会让你觉得”里面都是没用的信息，再用臭脸笑脸实验推翻。</li>
+            <li>“GAN 和 Diffusion 谁比较强”这个常见提问：「其实我觉得这并不是一个好的问题」 <a href="https://www.youtube.com/watch?v=OYN_GvAqv-A&t=1610s" target="_blank">0:26:50</a>，理由是 GAN 是外挂，可以挂在其他方法上，因此两者不是同一层面的选项。</li>
+            <li>他替学生问“GAN 还需不需要输入噪声”，回答结合了自己的实际经验（文字生图时不加也能训练起来），并说明文献里多数仍会加。</li>
+            <li>“这不就跟赛车游戏一样吗”：他回答赛车游戏场景有限、由程序事先规划，生成模型可以无限往前开。</li>
+            <li>口误更正放在 YouTube 说明栏：Sora 没有 paper 只有 Blog。</li>
+            <li>本段录像里没有学生现场提问的记录。</li>
+        </ul>
+        <h3>现场演示</h3>
+        <ul>
+            <li>没有现场操作工具。他展示的是素材：Glow 的人脸编辑结果（用他自己的照片加减臭脸、笑脸向量），Diffusion 逐步去噪的示意图，Genie 项目页上的 Latent Action 序列、小孩涂鸦和照片变游戏的动图。</li>
+        </ul>
+        <h3>其他手法</h3>
+        <ul>
+            <li>一个问题贯穿所有方法：每种方法都回答“文字没说的那部分从哪来”，VAE/Flow 靠 Encoder 抽出再随机掷骰，Diffusion 靠反复去噪，GAN 靠换一个学习对象。</li>
+            <li>用已经讲过的东西解释新东西：Discriminator 说成 CLIP 换名字，又对应到 RLHF 的 Reward Model；Genie 的动作抽取说成 Auto-encoder 的翻版。</li>
+            <li>先提朴素方案，再追问它的缺口（标注从哪来、生成时没图怎么办），每个追问引出下一个组件，最后才说出正式名称。</li>
+            <li>拟人化动词：模型“头脑就会很破”“锲而不舍”“咀嚼”“骗过 Discriminator”。</li>
+            <li>沿用上一讲的“一只在奔跑的狗”和“阳光下的猫”作为全段的例子文字。</li>
+            <li>结尾落在一个生活场景（学开车、开放世界），从技术回到“这能干什么”。</li>
+            <li>把旧课年份当成方法发展史来介绍（2016 VAE、2018 GAN、2019 Flow、2023 Diffusion）。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>李宏毅 · 生成式 AI 导论 2024 · Lecture 18: Generative AI for Images (2): VAE, Flow, Diffusion, GAN · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

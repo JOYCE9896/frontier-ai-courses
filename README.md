@@ -26,6 +26,7 @@ Stanford、CMU、Harvard、MIT、Berkeley 和 ETH Zürich 2025-2026 学年 AI �
 | :-- | :-- |
 | [AI 基础](https://joyce9896.github.io/frontier-ai-courses/00-Foundations/) | 向量、概率、导数、神经网络、Transformer、训练与解码，每篇用具体数字算一遍 |
 | [3Blue1Brown 深度学习系列](https://joyce9896.github.io/frontier-ai-courses/3Blue1Brown-Deep-Learning/) | 用动画从神经网络讲到 Transformer、注意力和 MLP，每篇附讲法分析 |
+| [台大李宏毅：生成式 AI 导论 2024](https://joyce9896.github.io/frontier-ai-courses/HungyiLee-GenAI-Intro-2024/) | 零先修的中文入门课，从文字接龙讲到 Agent、Transformer、图像和语音生成，每讲附讲法分析 |
 | [动手练习](https://joyce9896.github.io/frontier-ai-courses/01-Labs/) | 能跑的小程序，代码和实际运行结果原样贴出：从零训练一个小 LLaMA 等 |
 
 ### CS 基础

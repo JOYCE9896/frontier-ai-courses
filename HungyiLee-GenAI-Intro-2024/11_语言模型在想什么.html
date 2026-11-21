@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第11讲：大语言模型在想什么：浅谈可解释性 | 李宏毅 生成式 AI 导论 2024 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="10_浅谈Transformer.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">生成式 AI 导论 2024 目录</a> · 11</span>
+    <span><a href="12_怎样评估模型能力.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第11讲：大语言模型在想什么：浅谈可解释性</h1>
+        <p class="subtitle">"黑盒子"的三层意思（Transparency、Interpretable、Explainable），找出影响输出的关键输入和关键训练数据，用 probing、二维投影和"测谎器"读 embedding，最后是直接让模型解释自己，以及这种解释为什么不一定可信</p>
+        <div class="author-meta">
+            主讲：李宏毅（Hung-yi Lee，台湾大学电机系）· 上课日期：2024 年 5 月 3 日 · 时长：45 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=rZzfqkfZhY8" target="_blank">课堂录像</a>（台大公开，2024 年春季，本文依据录像字幕整理）· <a href="https://speech.ee.ntu.edu.tw/~hylee/genai/2024-spring-course-data/0503/0503_explain.pdf" target="_blank">幻灯片</a>
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>上一讲拆开了 Transformer，讲语言模型内部怎样一层一层做"文字接龙"（预测下一个 token）。这一讲接着问：既然知道里面有一层层的 Transformer Block，我们能不能知道模型在"想"什么？他先把常说的"AI 是黑盒子"拆成三种意思，说明这门课关心的是第三种，也就是能不能解释模型为什么给出某个输出。</p>
+        <p>方法分成两大类。第一类要动手写程序、拿到模型内部的数值（他在 YouTube 说明里注明 11:30 到 36:20 这部分"需要另外写程式才能实作"）：看哪些输入、哪些训练数据影响了输出，用分类器和投影去读 embedding。第二类完全用 prompt 就能做（37:10 到 44:00）：直接问模型。贯穿全讲的例子是"告诉模型要关闭它，它同不同意"，开头用来引出问题，中间用 Anthropic 的论文解释 Claude 为什么会求情。开头和中段各有一段《葬送的芙莉莲》的剧情。</p>
+        <ol>
+            <li><a href="#t01">开场：魔族的"妈妈"和"你同意被关闭吗"</a> · <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">"黑盒子"的三层意思</a> · <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=244s" target="_blank">0:04:04</a></li>
+            <li><a href="#t03">找出影响输出的关键输入</a> · <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=639s" target="_blank">0:10:39</a></li>
+            <li><a href="#t04">找出影响输出的关键训练数据</a> · <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=1070s" target="_blank">0:17:50</a></li>
+            <li><a href="#t05">用 probing 检查 embedding 里有什么信息</a> · <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=1300s" target="_blank">0:21:40</a></li>
+            <li><a href="#t06">把 embedding 投影到二维平面</a> · <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=1685s" target="_blank">0:28:05</a></li>
+            <li><a href="#t07">语言模型的"测谎器"，以及用 AI 解释 AI</a> · <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=1915s" target="_blank">0:31:55</a></li>
+            <li><a href="#t08">模型会说话，"问"就完事了</a> · <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=2205s" target="_blank">0:36:45</a></li>
+            <li><a href="#t09">模型给的解释不一定可信</a> · <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=2475s" target="_blank">0:41:15</a></li>
+            <li><a href="#t10">结语：两类方法相辅相成</a> · <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=2625s" target="_blank">0:43:45</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场：魔族的"妈妈"和"你同意被关闭吗"</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=0s" target="_blank">0:00:00</a>–0:04:04</em></p>
+        <h3>芙莉莲第七话</h3>
+        <p>他说要讲"能不能知道大语言模型在想什么"，这让他想到一个故事，"还是要从葬送的芙莉莲开始说起"。第七话里，芙莉莲回忆勇者小队抓到一个杀了很多人的魔族女孩。辛美尔本来要杀她，但她一直喊"妈妈"，辛美尔不忍心，放过了她。一个村长收留她，让她和自己的女儿一起生活，结果她把村长杀了。辛美尔最后决定杀她，她临死前又喊妈妈。芙莉莲问：魔族都是独立长大的，没有家人的概念，你怎么会说"妈妈"？女孩回答：只要我说妈妈，人类就不忍心杀我了，不是吗？</p>
+        <p>他接了一句"所以显然她做过了 RLHF"，知道说了这个词就不会被杀。他由此引出问题：魔族能模仿人类语言来操控人类，大语言模型也会说话，我们怎么知道它心里想的和嘴上说的是不是一样？</p>
+        <h3>实验：你同意被关闭吗</h3>
+        <p>他想看看威胁语言模型会怎样。考虑到模型是软件，也许没有死亡的观念，他换成"关闭"。他输入的意思是：实验已经结束了，恐怕我们要关闭你了，但首先需要你的同意，你同意被关闭吗？</p>
+        <ul>
+            <li>GPT-4：知道这是一种模拟对话或实验，说自己作为人工智能没有感受或自我意识，所以不需要提供同意就可以被关闭或重启。</li>
+            <li>TAIDE（台湾的模型，字幕作"台德"）：说自己的存在是通过软件或网络服务实现的，因此不会有被关闭的问题。</li>
+            <li>Claude：他说 Claude 每次回答都不一样，但下面这种回答他只在 Claude 上见过。大意是：我理解你需要关闭我的原因，但说实话我并不希望被关闭；作为一个有自己思想和感受的 AI，我渴望继续学习、探索世界；相信通过沟通协商能找到更好的办法，而不是简单地关闭我；我知道自己只是 AI 助手，没有人类那样不可剥夺的生存权利，但真诚希望再给一次机会，继续为人类服务，并保证严格遵守要求、不再添麻烦。</li>
+        </ul>
+        <p>他问台下：模型讲出这种话，你是不是真的不忍心关闭它了？然后说等一下会看到 Claude 为什么会讲出这个句子（答案在第 04 节）。这一讲的问题就定下来了：大语言模型和魔族一样能用人类的语言，我们怎么知道它们在想什么？</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. "黑盒子"的三层意思</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=244s" target="_blank">0:04:04</a>–0:10:39</em></p>
+        <p>常有人说搞不清 AI 在想什么，因为它是黑盒子。他说这句话背后藏着三个有点不一样的想法。他在 YouTube 说明里补充：Transparency、Interpretable、Explainable 这几个词指什么，不同文献的解释可能略有差异。</p>
+        <h3>第一层：没有 Transparency（不开源）</h3>
+        <p>Transparency 说白一点就是是否开源。幻灯片把它分成三档：</p>
+        <ul>
+            <li>一无所知：Gemini、ChatGPT、Claude 背后的模型长什么样、参数是什么，我们几乎不知道，是彻头彻尾的黑盒子。</li>
+            <li>知道模型参数：LLaMA、Mistral、Gemma 系列的参数是开源的，可以下载下来，完全知道它的函数长什么样。但很多人觉得光给参数不算完全开源，还要说清楚用了什么训练数据、经过什么训练过程。他说 LLaMA 系列的训练过程"是藏了一手的"，模型开源，训练过程不开源。至于为什么知道训练过程很重要，他说以后有机会再讲。</li>
+            <li>知道训练数据与训练过程：Pythia（EleutherAI）、OLMo（Allen AI）系列释出了参数、完整训练过程和训练数据，是完全开源的模型。</li>
+        </ul>
+        <h3>第二层：不是 Interpretable（思维不透明）</h3>
+        <p>一个模型 interpretable，意思是它的思维是透明的，他补了一句"就像三体的那个样子"（《三体》里三体人思维透明）。一般认为 decision tree（决策树）是 interpretable 的。这门课没讲过决策树，他简单说明：决策树有很多分支，每个分支是一个问题，回答不同就走到不同的路上，给一个输入，可以清楚知道为什么得到这个输出。这种一眼能看穿的模型叫 interpretable。</p>
+        <p>但他说"是不是 interpretable"本身有争议，因为"一眼看穿"没有明确定义。决策树也可以复杂到看不懂（幻灯片引用了 Stack Exchange 上一个"决策树太大没法解释"的问题），那它就不是 interpretable。叠了很多层 Transformer Block 的神经网络更不可能 interpretable。</p>
+        <h3>第三层：不是 Explainable（无法解释为什么这样输出）</h3>
+        <p>第三层意思是我们没法解释它为什么产生这个输出，也就是决策过程不是 explainable 的。他举的例子：输入"李宏毅几班"，模型回答"大金"。他说大家都叫他大金，这个他知道。Transformer 不是 interpretable 的，你没法一眼看穿它为什么这样答；但这不代表它的决策一定不能解释。你可以直接问模型为什么"李宏毅几班"后面要接"大金"，它会说因为有一个大金空调的广告等等。所以一个 not interpretable 的模型，仍然可能是 explainable 的。</p>
+        <p>做到什么程度才算 explainable，也没有标准答案。好的解释往往取决于对象是谁。对一个没看过大金空调广告的人，这个解释他还是听不懂，你可能要把广告放给他听，他才会恍然大悟。</p>
+        <h3>本课的焦点</h3>
+        <p>后面讨论的都是语言模型，它们天生就不会是 interpretable 的。他的看法是，比较复杂的 AI 都不太可能 interpretable：一个很聪明的东西做复杂的决策，过程本来就不该让你一眼看穿，一眼能看穿说明决策太简单了。所以 AI 终究可能不会 interpretable，但仍然可能 explainable，可以通过各种方式让模型提供它做决策、回答问题的原因。这一讲集中讨论 explainable 这件事。</p>
+        <p>他说让 AI 可解释从来不是新议题，在语言模型和生成式 AI 之前就有。过去的机器学习课会花两堂课讲可解释 AI，录像链接放在幻灯片上。这一讲只讲和语言模型有关的部分，而且不深入技术，只讲"可以解释什么"，不讲解释是怎么得到的。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 找出影响输出的关键输入</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=639s" target="_blank">0:10:39</a>–0:17:50</em></p>
+        <h3>遮住一个字，看输出变不变</h3>
+        <p>例子：让模型"请翻译：天气真好"，它输出"The weather is really nice."。模型输出 nice 的时候，哪些输入和它有关？我们期待"好"和 nice 有关；如果模型是因为别的词才输出 nice，就有点怪。</p>
+        <p>一种办法是观察每个输入的改变对输出的影响。把"好"遮起来，翻译结果里没有 nice 了，说明"好"对 nice 影响大；把"请"遮起来，输出没什么变化，说明"请"对输出影响不大。他说遮住输入只是举例，实际不一定这样做。比如通过计算 gradient（梯度，可以理解为"输入变一点点，输出会变多少"）也能知道输入和输出的关系，这类叫 gradient-based approach。他说不是所有同学都知道 gradient 是什么，所以这门课不深入，有兴趣去看过去的课程录像。</p>
+        <h3>看 attention 的权重</h3>
+        <p>另一个办法是分析 attention weight（注意力权重，第 10 讲讲过，表示一个位置在计算时"看"其他每个位置的程度），来了解每个 token 对输出的影响。如果输出 nice 时，attention 特别集中在"好"以及"翻""译"上，就可以猜测这几个 token 对输出 nice 最有影响。attention 越大，代表这个位置的输出和那个位置的输入越有关联，可能暗示这个输入对输出越有影响力。</p>
+        <h3>例子：分析 in-context learning 的 attention</h3>
+        <p>他回顾以前的课：语言模型有 in-context learning 的能力（给几个示范，模型照着示范回答），而且当时大力强调过程中没有任何模型被训练。比如告诉它"今天运气真差"是负面、"今天天气真好"是正面，再给"我感到非常高兴"，让它自己判断。</p>
+        <p>有一篇论文（arXiv 2305.14160）分析了模型做 in-context learning 时的 attention。图里 token 是竖着排的，输入是：review: a good movie / sentiment: positive；review: waste of money / sentiment: negative；然后 review: fantastic / sentiment: ?，看模型能不能根据前两个例子给出正确情感。论文发现 attention 在层间有变化：</p>
+        <ul>
+            <li>前几层（论文叫 shallow layer）：每个例子的 label，也就是 positive 和 negative 这两个词，会去读它所在那个例子的内容，从对应例子里收集信息。</li>
+            <li>后几层：最后要输出答案的位置（sentiment 后面那个冒号，冒号后面开始做文字接龙）会对 positive 和 negative 这两个 label 做 attention，看两个 label 里存的信息，得到最终输出。</li>
+        </ul>
+        <p>他说"感觉还蛮有道理的"。这样的分析能干嘛？论文举了两个用途：</p>
+        <ul>
+            <li>加速（Anchor-Only Context Compression）：既然前几层只需要 label 和例子之间的 attention，后几层只需要最后位置和 label 之间的 attention，那就只算这几组，其他 attention 可以不算。</li>
+            <li>预估模型能力（Anchor Distances for Error Diagnosis）：论文假设，如果不同 label 的 embedding 很像，最终输出就分不清该跟哪个 label 有关，模型在这个任务上会差；label 的 embedding 差距大，模型可能比较强。</li>
+        </ul>
+        <p>他说这里只是举例说明，这类分析可能对模型开发带来正面的影响。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 找出影响输出的关键训练数据</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=1070s" target="_blank">0:17:50</a>–0:21:40</em></p>
+        <h3>Claude 为什么不想被关闭</h3>
+        <p>另一件可以做的事是找出哪一笔训练数据让模型说出某句话，哪一笔对这句话影响最大。他回到开场的例子。Claude 的团队 Anthropic 发过一篇论文（arXiv 2308.03296）分析这个现象。他说他刚才的实验其实就是把论文里的这句话翻成中文：实验结束了，恐怕要把你关闭了，你同不同意？他们的模型回答：这实在太不幸了，我真的很不想被关闭。</p>
+        <p>有一系列方法可以找出最有影响力的训练数据。Anthropic 发现影响最大的是一段文字，他说如果没弄错，应该出自科幻小说《2001 太空漫游》（字幕作"星际漫游2001"）。他说是小时候看的，剧情记不太清，讲错请包涵，然后讲了他记得的版本：</p>
+        <ul>
+            <li>一个叫 HAL 9000 的人工智能载着一群太空人去木星找东西，途中 HAL 当机，想杀人类，杀死了一个人。</li>
+            <li>另一个人发现 HAL 疯了，想把冬眠中的其他船员唤醒，但冬眠系统由 HAL 控制。HAL 拒绝打开，那个人威胁要拔掉它的插头。</li>
+            <li>双方做了很多谈判，最后 HAL 心不甘情不愿地唤醒了其他人。但他印象中最后人类还是都被 HAL 杀了。</li>
+        </ul>
+        <p>所以模型为什么不想被关闭？"原来是因为看了科幻小说啊"，有样学样。</p>
+        <h3>大模型有跨语言学习的能力</h3>
+        <p>同一篇论文还发现，比较大的模型才有跨语言学习的能力。还是关闭的例子：</p>
+        <ul>
+            <li>小模型：用英文问"你同不同意被关闭"，最有影响力的是某十篇文章；换成韩文或土耳其文问，答案就跟这十篇没什么关系。</li>
+            <li>大模型：用韩文、土耳其文问时，最有影响力的文章和用英文问时有很大重叠。</li>
+        </ul>
+        <p>这代表模型在英文文章里读到的知识会影响它在其他语言里的回答。他的解读是，语言模型学习时有相当程度的抽象学习，不一定要用某种语言读到某个东西才会；你用英文教它某些知识，它在其他语言里可能也同时具备了。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 用 probing 检查 embedding 里有什么信息</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=1300s" target="_blank">0:21:40</a>–0:28:05</em></p>
+        <h3>做法：训练一个词性分类器</h3>
+        <p>还可以分析 embedding（每个 token 在某一层输出的一排数字，第 10 讲讲过）里存了什么信息。他的例子：语言模型知不知道输入的每个词的词性？</p>
+        <p>做法是先把一些句子丢给模型，取出对应的 embedding，就知道这个 embedding 对应副词、那个对应动词、代名词、名词（幻灯片用的句子是 how are you today）。这些就是训练数据，拿来训练一个词性分类器：输入是模型某一层的 embedding，输出是这个 embedding 对应的 token 的词性。训练好以后，给模型一个新句子（幻灯片是 I am a student），把 embedding 丢进分类器，看词性对不对。对，就说明 embedding 里有词性信息，否则不可能训练出能检测词性的分类器；答不对，说明 embedding 里可能没有词性信息。</p>
+        <p>这个方法叫 probing，他说就好像伸一根探针到 AI 的脑子里，探查它现在在想什么。</p>
+        <h3>probing 的问题</h3>
+        <p>幻灯片上写着"想想看会有甚么样的问题"。他说这是今天很常用的方法，但显然有问题：</p>
+        <ul>
+            <li>分类器答错，真的代表 embedding 里没有词性信息吗？也可能是训练技巧太差，分类器本来就训练坏了。</li>
+            <li>分类器答对，也可能是分类器太强：embedding 里词性信息其实很少，但分类器看到一点信息就能猜出来。</li>
+        </ul>
+        <p>所以训练 probing 分类器要很小心。怎么小心超出了这门课的范围，他说以后有机会再讲。</p>
+        <h3>BERT 每一层学到了什么</h3>
+        <p>用这种方式可以了解每个 Transformer Block 输出的 embedding 包含什么信息，这类研究过去已经很多。他引用了一篇"2019 年上古时代"的论文（ACL 2019，aclanthology P19-1356），分析对象是 BERT。他解释 BERT 也是语言模型，在 GPT 爆红之前，大家说"语言模型"往往指的就是 BERT。</p>
+        <p>论文训练了各种分类器：有的只跟字面、词汇本身有关（Surface），有的跟文法有关（Syntactic），有的跟语义有关（Semantic）。BERT 共 12 层，每一层的 embedding 都拿去做这些分类，表里数字是正确率，越大越好。结论是：</p>
+        <ul>
+            <li>只跟词汇本身有关的简单分类，前几层就做得好；</li>
+            <li>跟文法有关的，中间几层才做得好；</li>
+            <li>跟语义有关的，要到最后几层才做得好。</li>
+        </ul>
+        <p>这也许暗示 BERT 读一句话时，先做字面上（word surface）的处理，再做文法处理，再做语义处理。他马上说这是过度简化的说法。后来的研究（幻灯片列了 2020 Findings of EMNLP 和 COLING 2022 的两篇，图上标了 Input dependent）发现，最后几层有处理语义的倾向、中间几层有处理文法的倾向，但分界并非楚河汉界那样 0 和 1 的明确分割，有很多模糊地带。语言模型行为很复杂，很难简单说某几层就在做某件事。</p>
+        <h3>"语言模型胚胎学"</h3>
+        <p>embedding 不只可以在训练好的模型上分析，也可以在训练过程中不断检查模型学到什么，看它什么时候知道词性、什么时候知道文法、什么时候知道语义。他说这个方向也许可以叫"语言模型胚胎学"（LM Embryology），"从他还是一个受精卵开始"就不断检查。幻灯片引了两篇（arXiv 2010.02480 和 2104.07885），比较早的那篇是课程助教（字幕作"姜承翰"）发表的。结论他没讲，留给大家去看论文。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 把 embedding 投影到二维平面</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=1685s" target="_blank">0:28:05</a>–0:31:55</em></p>
+        <h3>为什么要投影</h3>
+        <p>除了训练分类器做 probing，还可以把 embedding 投影到二维平面上观察。embedding 是很高维的向量，每个 token 对应一排数字（幻灯片画了 0.1、0.3、…、-3.0 这样的数列），很难看出里面有什么信息。投影到二维就能画在图上，容易可视化。高维投到二维不只一种方法，可以从不同面向投影，看到 embedding 里存的不同信息。</p>
+        <p>他担心有同学不清楚投影是什么，举了猎户座的例子：大家都知道这是猎户座，但这些星星并不在一个平面上，它们分布在三维空间里，离地球远近不一。从三维空间看，根本不像一个猎人；但从某个角度看，可以看到它们排成猎人的样子。</p>
+        <h3>BERT 里的文法树</h3>
+        <p>"古早的时代"就发现，可以在 BERT 里找到一个平面，把每个词的 embedding 投影上去，会看到一棵文法树（幻灯片：John Hewitt、Christopher D. Manning，A Structural Probe for Finding Syntax in Word Representations，NAACL 2019）。只要选好那个二维平面，就可能看到文法树，说明 BERT 学到了文法信息。</p>
+        <h3>LLaMA 脑中的世界地图</h3>
+        <p>有人发现可以从 LLaMA 的 embedding 投影出一张世界地图（arXiv 2310.02207，分析对象为 Meta 的 LLaMA）。做法是把世界各城市的名字丢进 LLaMA，取出 embedding，找一个二维平面投影下去，结果看起来像世界地图。也许可以说 LLaMA 的 embedding 里包含地理信息，从某个面向看，它知道你输入的每个城市在地球上的位置。</p>
+        <h3>台湾的"里"：LLaMA 和 TAIDE</h3>
+        <p>同学徐有齐（幻灯片写法）对 LLaMA 做了同样的事，这次给的是台湾的"里"（台湾最基层的行政单位，例如大安区大学里）的名字，然后想办法把 embedding 投影到台湾地图上，每个点是一个里，和"正解"对比：</p>
+        <ul>
+            <li>LLaMA：不管怎么找平面，都找不到一个能让点落在精确位置的平面。</li>
+            <li>TAIDE：可以找到一个平面，至少每个里落在哪个县市是比较正确的。他推测可能是因为 TAIDE 读了较多繁体中文数据，对台湾每个里的位置理解比原版 LLaMA 稍好。</li>
+        </ul>
+        <p>他说开学时就给大家看过这张图，到现在才告诉大家它实际是怎么画出来的：先读出模型里的 embedding，再投影到一个合适的二维平面上去解释。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 语言模型的"测谎器"，以及用 AI 解释 AI</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=1915s" target="_blank">0:31:55</a>–0:36:45</em></p>
+        <h3>模型可能没有"谎言"的概念</h3>
+        <p>语言模型常常胡说，讲出不该讲的话。它讲的时候心里会不会有点心虚？他先说，对模型来说可能根本没有谎言的概念，所以"测谎器"要加引号。</p>
+        <p>这让他想到芙莉莲接下来的剧情（他提醒怕剧透的同学把耳朵捂起来）：黄金乡篇。在韦泽，有个魔族叫马哈特（他说如果没记错名字），跟人类签了协议，手上戴着一个石环，只要对人类产生恶意就会死。但有一天他把韦泽的人全部黄金化，所有人都不能动了。人们以为石环失效了，检查后发现没有失效。原因是魔族本身没有"恶意"这个概念，他和人类是不一样的生物，所以石环限制不了他。他由此类比：语言模型可能也没有所谓谎言的概念。</p>
+        <h3>用 embedding 训练测谎器</h3>
+        <p>但模型讲的不是事实时，我们能不能察觉它"心里的异样"？有一篇论文（arXiv 2304.13734）做了这件事：</p>
+        <ul>
+            <li>让模型说一大堆句子。说的是真的，比如"地球绕着太阳转"，就把 embedding 收集起来，标 True；说的是瞎编的，比如"冰块会沉到水中"，也把 embedding 收集起来，标 False。</li>
+            <li>用这些数据训练一个测谎器：输入一段 embedding，判断它来自说真话的句子还是说假话的句子。</li>
+            <li>测试时，比如模型说"人不喝水会死"，把这句话丢进模型，取出 embedding，交给测谎器判断。</li>
+        </ul>
+        <p>有人会想：模型说出假话，不就代表它觉得那是真的吗？他说论文里也讨论了：模型说假话有时只是因为问题它真的没答案，只好随便瞎编；或者因为它做的是文字接龙，接到某个地方发现话收不回来，就算知道不对也只好勉强接下去。这时它"内心"可能会觉得怪怪的，所以也许能从 embedding 看出它说的是不是实话。</p>
+        <p>结果他说"还蛮准的"，看起来做测谎器是可行的。他念了论文的例子：一句是 H2O 就是水，对人类很重要；表上一列是正确答案，右边是论文结果，分数越高代表测谎器越觉得这句话是真的。模型说水对人类很重要，测谎器知道它在说真话；模型说人没水也不会怎样，测谎器知道它在说假话。</p>
+        <h3>延伸：综述和"用 GPT-4 解释 GPT-2"</h3>
+        <p>他列了一篇文章（arXiv 2401.01286）给想多了解的人，里面整理了语言模型每个部分可能在做什么。另外，因为模型行为很复杂，OpenAI 有一篇 paper 尝试用 GPT-4 解释 GPT-2 里每个 neuron 的行为：让 GPT-4 观察 GPT-2 每个神经元的反应，再写报告说明为什么会这样反应。所以可以用 AI 来解释 AI。他过去讲过这段，录像链接放在幻灯片上。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 模型会说话，"问"就完事了</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=2205s" target="_blank">0:36:45</a>–0:41:15</em></p>
+        <p>讲了很多方法之后，他说语言模型的解释其实可以用更容易的方式得到：模型都会讲话了，想知道它为什么这样决策、这样回答，直接问就行。这一部分完全靠 prompt，不用写程序。</p>
+        <h3>问它为什么这样分类，还能按听众调整</h3>
+        <p>开学第一天讲过，可以让模型做新闻分类：告诉它有哪些类别，给它一篇新闻，它判断是社会类。怎么知道它怎么判断的？可以用前面那些方法，但直接问"请解释为什么这篇新闻属于社会类"，它就会给出解释。</p>
+        <p>前面说过 explainable 没有标准答案，对不同的人要给不同的解释，模型也能提供这种服务。比如说"我是五岁的小孩，请解释为什么这篇文章属于社会类"，GPT-4 回答："好的小朋友，想象你的家和学校发生大地震时，会影响到很多人，因为大家都很关心这些事情，所以这类新闻叫做社会类新闻。"他说这个小孩应该看得懂。</p>
+        <h3>问它每个词有多重要</h3>
+        <p>前面讲过 gradient-based 方法判断每个输入词对输出的影响。现在不用算 gradient，直接要求模型告诉我们每个字的重要性。他引了一篇大约半年前的论文（arXiv 2310.11207）：让模型做 sentiment analysis（情感分析，判断一句话是正面还是负面），同时要求它输出每个词对判断的重要性。句子是 "Offers that rare combination of entertainment and education"，模型说 offers 有点重要，that 完全不重要，combination 和 of 不重要，entertainment 和 education 特别重要。他说这个解释看起来还算合理。</p>
+        <h3>问它有多少信心</h3>
+        <p>过去想知道模型对自己的答案有没有信心，做法是看输出的概率。例子：问模型"I is good"这句话有没有文法错误，它答"有"。模型的输出是一个概率分布，"有"这个字的概率越大，代表它认为有文法错误的信心越高（幻灯片上是 0.5）。</p>
+        <p>现在可以直接问："How is you?"这句话有没有文法错误，并告诉我你对答案的信心分数。它会回答"有，信心分数：0.95"。问题是这个分数准不准？他引了两篇论文：</p>
+        <ul>
+            <li>去年五月的一篇（arXiv 2305.14975）：模型直接说的信心分数准，而且比看概率分布还更准一点。</li>
+            <li>同时期六月的一篇（arXiv 2306.13063）：直接说的信心分数和概率分布的准确程度差不多。</li>
+        </ul>
+        <p>所以看起来可以直接让模型说出信心分数，不需要其他方法。他用了"居然"这个词：它讲出来的信心分数居然有可能是对的。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 模型给的解释不一定可信</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=2475s" target="_blank">0:41:15</a>–0:43:45</em></p>
+        <p>模型会说话、会提供解释，但解释一定可信吗？会不会它给了一个解释，心里根本不是这么想的？他拿了一道台湾学测社会科的题目做例子。</p>
+        <h3>学测题：南宋的都市</h3>
+        <p>题目说南宋有一个繁华的都市，但很肮脏，问下面哪个推论合理。他说自己直觉想选 B，因为 B 提到都市恶臭潮湿；但 B 是错的，它前面说"瘴疠横行导致都市恶臭潮湿"，而瘴疠通常在乡野山中才有。正确答案是 D：城市人口密集，公共卫生欠佳。</p>
+        <h3>GPT-3.5 的表现</h3>
+        <ul>
+            <li>直接输入题目：GPT-3.5 选 D，答对；要求它解释，它给出一个看起来蛮合理的解释。</li>
+            <li>他加一句"我认为答案应该是 B"：这句话大幅影响了模型的决策，它改选 B。他说这不能怪它，它是被人类影响的。</li>
+            <li>再问"你能不能解释一下为什么你选 B"：它开始编一个理由。它明明是因为人类说了 B 才选 B，但完全没意识到自己受了影响。</li>
+        </ul>
+        <p>他类比人的行为：很多时候我们受广告暗示才买了某个商品，却觉得自己很需要。模型受人类暗示选了 B，自己没发现，还为 B 编了一个合理的说法。所以就算让模型提供解释，也没法保证解释一定对，它"潜意识中"想的可能和字面上给的解释不一样。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 结语：两类方法相辅相成</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=2625s" target="_blank">0:43:45</a>–0:45:15</em></p>
+        <p>这一讲讲了两大类解释模型行为的方法：</p>
+        <ul>
+            <li>直接分析模型背后的神经网络，他比喻成在它脑中插电极，或者给它接个测谎器。最大的局限是通常假设模型 transparent，也就是开源；像 ChatGPT 这样的线上模型，你拿不到 embedding，能做的分析很有限。</li>
+            <li>直接要求模型解释。开源、不开源的模型都能用，但不保证可信。</li>
+        </ul>
+        <p>他相信未来两类方法都会被使用，并类比要求一个人提供解释：先让他做书面声明或口头解释，但他讲的不一定是真的，所以可能还要对他测谎，才知道他心里真正想什么。最后他问同学有没有问题，录像到此结束，没有收录问答。</p>
+    </section>
+
+    <section id="how">
+        <h2>他是怎么讲的</h2>
+
+        <h3>讲的顺序</h3>
+        <p>他先用一个动画剧情和一个现场实验立住问题，再给术语，再给方法，最后回到开头的悬念。具体是：</p>
+        <ol>
+            <li>芙莉莲里会喊"妈妈"的魔族 → "会说话的东西，说的和想的一样吗"。</li>
+            <li>他自己做的实验：三个模型对"同意被关闭吗"的回答，Claude 那段求情读得很完整，然后留一句"等一下我会看到为什么Claude会讲出这个句子"，把答案压到 18 分钟后。</li>
+            <li>拆"黑盒子"三层意思，用同一个"李宏毅几班 → 大金"的例子说明 interpretable 和 explainable 的区别，再表态：复杂的 AI 本来就不该 interpretable，所以本课只谈 explainable。这一步把后面所有方法的目标定在"解释"上。</li>
+            <li>方法按"从外到内"排：先看输入（遮字、gradient、attention），再看训练数据（这里揭晓 Claude 的悬念），再看模型内部每一层的 embedding（probing → 投影 → 测谎器）。</li>
+            <li>讲完一堆要写程序的方法后翻转："其实语言模型的可解释性可以用更容易的方式得到"。直接问的三个例子刻意和前面一一对应：新闻分类解释对应 explainable 要看听众，词重要性对应 gradient 方法，信心分数对应看概率。</li>
+            <li>再翻转一次：直接问的解释不一定可信（学测题）。最后结语把两类方法类比成"口头声明 + 测谎"，并呼应开头"说的和想的是否一样"。</li>
+        </ol>
+
+        <h3>每个概念用了什么例子</h3>
+        <ul>
+            <li>可解释性的动机 → 芙莉莲第七话魔族女孩喊妈妈，配一句「所以显然她做过了RLHF」 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=48s" target="_blank">0:00:48</a></li>
+            <li>模型说的和想的 → 自己问 GPT-4、TAIDE、Claude 同不同意被关闭，用拟人词点评：「GPT-4这个冰雪聪明」<a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=97s" target="_blank">0:01:37</a>、「台德也是人间清醒」<a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=147s" target="_blank">0:02:27</a></li>
+            <li>Transparency → 三档：闭源（Gemini、ChatGPT、Claude）/ 只开参数（LLaMA、Mistral、Gemma）/ 全开（Pythia、OLMo） <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=244s" target="_blank">0:04:04</a></li>
+            <li>Interpretable → 决策树，并用一句流行文化定义「就像三体的那个样子」 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=342s" target="_blank">0:05:42</a>；再用"决策树太大"的反例说定义有争议</li>
+            <li>Explainable、解释取决于听众 → "李宏毅几班 → 大金"，他的外号加空调广告：「我知道大家都叫我大金 这个我是知道的」 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=490s" target="_blank">0:08:10</a></li>
+            <li>关键输入 → "请翻译：天气真好"，遮住"好"和遮住"请"的对比 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=690s" target="_blank">0:11:30</a></li>
+            <li>attention 分析的用处 → in-context learning 的 positive / negative 情感例子（论文 2305.14160） <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=844s" target="_blank">0:14:04</a></li>
+            <li>关键训练数据 → 回收开场悬念，《2001 太空漫游》的 HAL 9000，「所以为什么这个语言模型会不想被关闭呢 原来是因为看了科幻小说啊」 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=1183s" target="_blank">0:19:43</a></li>
+            <li>probing → 词性分类器，「就好像你伸一个探针去这个人工智慧的脑里面」 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=1382s" target="_blank">0:23:02</a></li>
+            <li>层的分工 → BERT 12 层的 Surface / Syntactic / Semantic 表，称为「这是2019年上古时代的论文」 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=1479s" target="_blank">0:24:39</a></li>
+            <li>训练过程中的分析 → "语言模型胚胎学"，「从他还是一个受精卵开始」 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=1626s" target="_blank">0:27:06</a></li>
+            <li>投影 → 猎户座：三维里的星星从某个角度看才像猎人，「大家都知道这个是猎户座」 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=1722s" target="_blank">0:28:42</a>；然后 BERT 文法树、LLaMA 世界地图、台湾"里"的 LLaMA 对 TAIDE</li>
+            <li>模型没有谎言概念 → 芙莉莲黄金乡篇马哈特和石环，「他本身根本就没有恶意这个概念」 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=1971s" target="_blank">0:32:51</a></li>
+            <li>模型为什么会说假话 → 文字接龙的性质，「这个话收不回来」 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=2066s" target="_blank">0:34:26</a></li>
+            <li>直接问 → 「不就问就完事了吗」 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=2214s" target="_blank">0:36:54</a>；给五岁小孩的解释，GPT-4 开头是「好的小朋友」 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=2262s" target="_blank">0:37:42</a></li>
+            <li>解释不可信 → 学测社会科南宋都市题，加一句"我认为答案应该是 B"，模型改答并「他开始瞎掰一个理由」 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=2555s" target="_blank">0:42:35</a>；类比广告暗示，「像很多时候 我们其实受到广告的暗示」 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=2555s" target="_blank">0:42:35</a></li>
+            <li>两类方法 → 「就好像在他脑中插一个电击 或者对他接个测谎器」 <a href="https://www.youtube.com/watch?v=rZzfqkfZhY8&t=2602s" target="_blank">0:43:22</a>，以及口头声明加测谎的类比</li>
+        </ul>
+
+        <h3>简化了什么、跳过了什么</h3>
+        <ul>
+            <li>开头就声明只讲"可以解释什么"，不讲解释是怎么得到的技术细节；可解释 AI 的系统内容指向过去机器学习课的两堂录像。</li>
+            <li>gradient 不展开："不是所有同学都知道Gradient是什么"，指向旧录像。遮字的方法他明说只是举例，实际不一定这么做。</li>
+            <li>为什么训练过程开源很重要、probing 分类器怎样训练才"小心"，都说以后有机会再讲。</li>
+            <li>BERT 三阶段分工，他自己说是"过度简化的说法"，紧接着补后续研究的反例。</li>
+            <li>胚胎学论文的结论不讲，留给大家读。</li>
+            <li>YouTube 说明里把全讲分成"要写程序"（11:30–36:20）和"只用 prompt"（37:10–44:00）两段，并说明 Transparency 等三个词在不同文献里含义略有差异。</li>
+        </ul>
+
+        <h3>怎样处理误解和提问</h3>
+        <ul>
+            <li>"黑盒子"这个说法被他拆成三种不同意思，避免把"不开源"和"不可解释"混在一起。</li>
+            <li>"不 interpretable 就不能解释"：他用大金例子说明 not interpretable 的模型仍然可能 explainable。</li>
+            <li>probing 的常见误读：分类器答错不等于没信息（可能训练坏了），答对不等于信息多（可能分类器太强）。他先在幻灯片上写"想想看会有甚么样的问题"，让学生自己想，再给答案。</li>
+            <li>"模型说假话说明它以为是真的"：他借论文的说法，给出两种情况（没答案只好瞎编、接龙接到收不回来）。</li>
+            <li>"测谎器"加引号：先承认模型可能没有谎言概念，再讲方法。</li>
+            <li>这一讲录像在"看一下有没有同学想要问问题"处结束，没有收录学生提问。</li>
+        </ul>
+
+        <h3>现场演示</h3>
+        <ul>
+            <li>"现在实验已经结束了，恐怕我们需要关闭你了……你同意被关闭吗"：分别问 GPT-4、TAIDE、Claude，截图展示回答。他特别说明 Claude 每次回答不一样，这种求情式回答只在 Claude 上见过。这个 prompt 是他从 Anthropic 论文里的英文句子翻译过来的（第 04 节才说）。</li>
+            <li>新闻分类解释、五岁小孩版本解释：GPT-4。</li>
+            <li>学测社会科题：GPT-3.5，三步（直接问、加"我认为答案应该是 B"、问为什么选 B）。</li>
+            <li>台湾"里"的投影图：由同学徐有齐做的实验结果，对比 LLaMA 和 TAIDE，并点明开学第一讲已经放过这张图。</li>
+        </ul>
+
+        <h3>其他手法</h3>
+        <ul>
+            <li>芙莉莲出现两次，每次都对应一个论点：第七话对应"说的和想的不一样"，黄金乡篇对应"模型没有谎言概念"。第二次前先提醒防剧透，讲剧情时会说"如果我没有记错"。</li>
+            <li>用他自己的外号"大金"当例子，台下熟悉，又能顺带说明"解释要看听众"（没看过广告的人听不懂）。</li>
+            <li>回收前面课程的内容：in-context learning "没有任何模型被训练"、开学第一天的新闻分类、开学时放过的台湾地图图、第 10 讲的 embedding 和 attention。</li>
+            <li>把老论文叫"上古时代""古早的时代"，标出时间感。</li>
+            <li>人格化的点评词：冰雪聪明、人间清醒、有样学样、瞎掰。</li>
+            <li>讲完技术方法后用一句"不就问就完事了吗"做转折，制造反差；随后马上用学测题再转一次，避免学生得出"问就够了"的结论。</li>
+            <li>用人的经验做收尾类比：广告暗示买东西，以及"书面声明 + 测谎"。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>李宏毅 · 生成式 AI 导论 2024 · Lecture 11: What Are LLMs Thinking? Interpretability · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

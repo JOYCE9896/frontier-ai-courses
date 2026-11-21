@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第10讲：语言模型怎样做文字接龙：浅谈 Transformer | 李宏毅 生成式 AI 导论 2024 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="09_AI_Agent.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">生成式 AI 导论 2024 目录</a> · 10</span>
+    <span><a href="11_语言模型在想什么.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第10讲：语言模型怎样做文字接龙：浅谈 Transformer</h1>
+        <p class="subtitle">一句话进入语言模型后经过的五个步骤：Tokenization、Token Embedding 和 Positional Embedding、Attention（含 Causal Attention 和 Multi-head Attention）、Feed Forward 组成的 Transformer Block、Output Layer；为什么只看左边的 token，为什么长文本难处理，以及加速 Attention、train short test long、Mamba 等研究方向</p>
+        <div class="author-meta">
+            主讲：李宏毅（Hung-yi Lee，台湾大学电机系）· 上课日期：2024 年 5 月 3 日 · 时长：38 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI" target="_blank">课堂录像</a>（台大公开，2024 年春季，本文依据录像字幕整理）· <a href="https://speech.ee.ntu.edu.tw/~hylee/genai/2024-spring-course-data/0503/0503_transformer.pdf" target="_blank">幻灯片</a>
+        </div>
+    </header>
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>课程前面反复说过，语言模型做的事是“文字接龙”，也就是根据前文预测下一个 token；语言模型是一个有大量未知参数的函数，参数靠训练数据找出来。这一讲第一次打开这个函数，看它内部长什么样。今天的语言模型用的神经网络叫 Transformer，他按一句话进入模型后的处理顺序，把它拆成五步讲：Tokenization、Input Layer（理解每个 token）、Attention（理解上下文）、Feed Forward（整合、思考）、Output Layer（得到输出），中间的 Attention 加 Feed Forward 会反复叠很多层。</p>
+        <p>这是 5 月 3 日那堂课的前半段，目的是给后半段的可解释性（第11讲“语言模型在想什么”）做铺垫：要探讨模型“心里在想什么”，先得了解它的运作机制。视频标题注明“已经熟悉 Transformer 的同学可略过本讲”，说明里也写了：为了让第一次学的同学容易理解，对 Transformer 的说明做了部分简化。贯穿全讲的例子是一句英文“introduction of generative ai”和中文的“苹果电脑”与“来吃苹果”。</p>
+        <ol>
+            <li><a href="#t01">开场：语言模型这个函数长什么样</a> · <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">Transformer 的五个步骤概览</a> · <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=198s" target="_blank">0:03:18</a></li>
+            <li><a href="#t03">第一步：把文字变成 token</a> · <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=297s" target="_blank">0:04:57</a></li>
+            <li><a href="#t04">第二步之一：Token Embedding，理解每个 token 的意思</a> · <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=541s" target="_blank">0:09:01</a></li>
+            <li><a href="#t05">第二步之二：Positional Embedding，加入位置</a> · <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=833s" target="_blank">0:13:53</a></li>
+            <li><a href="#t06">第三步：Attention 要解决什么问题</a> · <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=929s" target="_blank">0:15:29</a></li>
+            <li><a href="#t07">Attention 怎么算：相关性和加权求和</a> · <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=1125s" target="_blank">0:18:45</a></li>
+            <li><a href="#t08">Attention Matrix、Causal Attention 和 Multi-head Attention</a> · <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=1367s" target="_blank">0:22:47</a></li>
+            <li><a href="#t09">Feed Forward、Transformer Block 和 Output Layer</a> · <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=1562s" target="_blank">0:26:02</a></li>
+            <li><a href="#t10">为什么只看左边的 token</a> · <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=1730s" target="_blank">0:28:50</a></li>
+            <li><a href="#t11">为什么长文本是个挑战</a> · <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=2000s" target="_blank">0:33:20</a></li>
+            <li><a href="#t12">值得关注的研究方向</a> · <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=2100s" target="_blank">0:35:00</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场：语言模型这个函数长什么样</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=0s" target="_blank">0:00:00</a>–0:03:18</em></p>
+        <h3>为什么这时候讲 Transformer</h3>
+        <p>他说这堂课分两部分：前半段终于要深入语言模型内部，看它的神经网络，也就是“大名鼎鼎的 Transformer”在做什么；单独讲这一段，是为了给下半段铺垫。下半段要探讨大语言模型“心里究竟在想些什么”，在那之前必须先了解它的运作机制。</p>
+        <h3>回顾：语言模型是一个函数</h3>
+        <p>他回顾前面一再强调的观点：语言模型做的事就是文字接龙，这个能力是从大量训练数据中学出来的。语言模型是一个函数，内部有很多未知参数，训练数据用来找出这些参数。幻灯片上的训练数据示例是：输入“人工智”输出“慧”，输入“不要忘了今天来开”输出“会”，输入“床前明月”输出“光”。问题是这个函数到底长什么样？很多同学知道背后是神经网络，而神经网络有很多种，今天语言模型最常用的一种叫 Transformer。</p>
+        <h3>语言模型的演进</h3>
+        <p>语言模型不是一直用 Transformer。幻灯片列出演进顺序：</p>
+        <ul>
+            <li><strong>N-gram</strong>：深度学习发达以前，人们还不用神经网络做语言模型，通常用 N-gram 模型，它不是神经网络技术。</li>
+            <li><strong>Feed-forward Network</strong>：后来开始用神经网络。</li>
+            <li><strong>RNN（Recurrent Neural Network，循环神经网络）</strong>：再之后人们知道要用 RNN。</li>
+            <li><strong>Transformer</strong>：今天的主角。</li>
+        </ul>
+        <p>他说这段历史太冗长，今天不细讲，想了解可以看他过去的上课录像，链接放在幻灯片上。他提到 ChatGPT 的 T 就是 Transformer 的 T，可见 Transformer 对大语言模型的重要性。他也先声明今天讲的是简化版，并不是 Transformer 的全部，想深入了解可以看幻灯片上附的两段旧录像。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. Transformer 的五个步骤概览</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=198s" target="_blank">0:03:18</a>–0:04:57</em></p>
+        <p>他先给整体流程：一句话被语言模型读进去，经过哪些步骤才得到输出的概率分布。幻灯片上的输入是“这门课是生成式 AI 导”，模型要接出“论”。</p>
+        <ol>
+            <li><strong>Tokenization</strong>：把文字转成 token。</li>
+            <li><strong>Input Layer</strong>：理解每一个 token。</li>
+            <li><strong>Attention</strong>：只理解单个 token 不够，还要考虑 token 和 token 之间的关系，也就是理解上下文。</li>
+            <li><strong>Feed Forward</strong>：可以想成把 Attention 模块的输出加以整合，再进一步思考。</li>
+            <li><strong>Output Layer</strong>：把输出转成概率分布。</li>
+        </ol>
+        <p>Attention 加 Feed Forward 合起来叫一个 Transformer Block。一个 Transformer 里有很多个 Block，数量由设计者自己定；Block 被用很多次，代表机器在“反复思考”（幻灯片写“Transformer Block × N”）。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 第一步：把文字变成 token</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=297s" target="_blank">0:04:57</a>–0:09:01</em></p>
+        <h3>token 是什么</h3>
+        <p>对语言模型来说，真正处理的单位叫 token，输入和输出都以 token 为单位。所以拿到一个句子，它做的第一件事是把句子转成 token 的序列（sequence）。例子：输入“introduction of generative ai”，可能切成 int、roduction、of、gener、ative、ai。introduction 切成两个，of 本身是一个，generative 切成两个，ai 本身是一个。</p>
+        <h3>token 列表从哪里来</h3>
+        <p>要切 token，先得有一个 token 列表（Token list）。打造语言模型时，开发者根据自己对语言的理解准备这份列表，它就是模型处理文字的基本单位。因为是自己定的，不同模型的 token 列表不一样。</p>
+        <ul>
+            <li>很多中文模型把一个汉字当作一个 token，因为对中文使用者来说以方块字为单位最自然。</li>
+            <li>ChatGPT 不是专为中文打造，它面向各种语言，不是一个汉字一个 token；对它来说，好几个 token 才能组成一个汉字。</li>
+        </ul>
+        <h3>BPE：自动找 token</h3>
+        <p>token 也可以自动取得。有一个算法叫 Byte Pair Encoding（BPE），从大量文字里找出常一起出现的模式（pattern），把这些模式当作 token。他说 BPE 不是唯一的方法，只是特别有代表性。它的思路是：先收集大量文字，看哪些符号常一起出现。比如 gener 常一起出现，ative 常一起出现，它们就各自成为一个 token；generative 这一整串出现得不够多，就不会被当作一个 token。</p>
+        <p>他强调怎么做 Tokenization 要问打造语言模型的人。这一步没有需要训练的参数（幻灯片原话：“这页投影片没有需要训练的参数”），是人事先定好的模块。他说 token 是一个比较模糊、由人定出来的概念，如果你拿一个符号问他“这是不是一个 token”，他没办法回答，因为每个模型的 token 都不一样。</p>
+        <h3>演示：OpenAI tokenizer 网站</h3>
+        <p>想知道 GPT-3.5 和 GPT-4 用哪些 token，可以用 OpenAI 提供的网站（platform.openai.com/tokenizer），把文章贴进去，它会显示有哪些 token。他贴了一段英文，网站显示共 65 个 token：</p>
+        <ul>
+            <li>Language 是一个 token，Model 是一个 token。</li>
+            <li>Probabilistic 被拆成两个 token。</li>
+            <li>年份 1980 也被拆成两个：198 是一个 token，0 是另一个；列表里没有 1980 这个 token。至于为什么这样，都是 OpenAI 事先定好的。</li>
+        </ul>
+    </section>
+
+    <section id="t04">
+        <h2>04. 第二步之一：Token Embedding，理解每个 token 的意思</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=541s" target="_blank">0:09:01</a>–0:13:53</em></p>
+        <h3>把 token 变成向量</h3>
+        <p>句子拆成 token 后，下一步要知道每个 token 是什么意思。做法是把每个 token 用一个向量（vector，一串数字）表示：本来是一个符号，进入第二个模块后变成一串数字。这个把东西变成向量的过程叫 embedding，得到的向量有时也直接叫 embedding。</p>
+        <h3>为什么要变成向量</h3>
+        <p>原本每个 token 都是独立的符号：apple 是一个符号，cat 是一个符号，dog 是一个符号（他说幻灯片上本来想打 dog，打成了 dot），run、jump 也各是一个符号。run 和 jump 都是动作，感觉应该比较接近，跟 cat、apple 比较远。但从 token 的角度看，每个 token 都独立，run 跟 jump、run 跟 apple 都没有特别的关系，词汇之间的关联反映不出来。</p>
+        <p>把 token 表示成向量后，语义越相近的 token，embedding 距离越近。把 embedding 画成图，可能会看到所有动物聚成一群，植物聚成另一群，动词一群，名词又一群（幻灯片上的图里 dog、cat、rabbit 在一起，jump、run 在一起，flower、tree 在一起）。这样后面的模块处理 token 时，就能知道 token 之间的关联。</p>
+        <h3>embedding 怎么得到：查表，表是学出来的</h3>
+        <p>Transformer 里有一张表，存着所有 token 和各自对应的 embedding。做 embedding 时实际做的事就是查表：看到 int，去表里把 int 对应的向量拿出来；看到 ai，就把 ai 的向量拿出来。</p>
+        <p>这张表从哪里来？每个 token 对应的向量就是语言模型的参数。他请大家回想：语言模型里有很多未知参数，要靠训练数据找出来，token embedding 就是待找参数的一部分，不需要人去设定，由训练数据自动找出来。幻灯片还附了他过去讲 Word Embedding 的录像链接。</p>
+        <h3>限制：没有考虑上下文</h3>
+        <p>这种 embedding 有个问题：同一个 token 的 embedding 是固定的。比如 bank 有两个意思，银行或河岸，但不论在句子里指哪个，用的都是同一个 token embedding。上下文要到第三步才考虑进来。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 第二步之二：Positional Embedding，加入位置</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=833s" target="_blank">0:13:53</a>–0:15:29</em></p>
+        <p>刚才处理的是语义信息，还需要位置信息：要知道每个 token 在句子里的哪个位置，因为同一个 token 在不同位置可能代表不同意思。</p>
+        <p>一种做法是给每个位置也设一个向量：一串数字代表位置 1，另一串代表位置 2，以此类推。然后把位置 1 的 token embedding 加上代表位置 1 的向量，等于把位置 1 的信息加进去，其他位置同理。这样 embedding 里就同时有语义和位置信息。这些每个位置独有的向量叫 positional embedding。</p>
+        <p>positional embedding 怎么来？最早的 Transformer 是人设计的，自己决定位置 1、位置 2 的向量长什么样；近年来 positional embedding 也可以学，当作参数的一部分，用训练数据自动找出来（幻灯片写“Positional Embedding 可以在训练时得到的参数”，做法也是查表）。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 第三步：Attention 要解决什么问题</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=929s" target="_blank">0:15:29</a>–0:18:45</em></p>
+        <h3>同一个“果”，两种意思</h3>
+        <p>第三步考虑上下文，负责这件事的模块叫 Attention。最开始的 token embedding 不考虑上下文，所以“苹果电脑”的“果”和“来吃苹果”的“果”，token embedding 一模一样。经过 Attention 之后，Attention 会考虑整个句子的上下文，这两个“果”上下文不同，embedding 就会变得不一样。</p>
+        <p>这种考虑了上下文的 embedding 叫 Contextualized Embedding（Contextualized Token Embedding）。这时同一个 token 语义不同时可以有不同的 embedding，比如 bank 指银行和指河岸时就不一样了。</p>
+        <h3>Attention Is All You Need 的真正贡献</h3>
+        <p>讲到 Attention，就有一篇很有名的论文 Attention Is All You Need（2017 年，他说也算“上古时代”的文章）。他指出很多人误以为是这篇论文提出了 Attention，这是误解。在这篇论文之前，Attention 就是语言模型里常用的机制，只是过去认为 Attention 要搭配 RNN 才能有较好的结果。这篇论文的贡献是告诉大家可以把 RNN 拿掉，拿掉了结果也没有比较差，当时大家都很惊讶。RNN 训练时有效率上的限制，所以当时人们本来就希望拿掉它。从论文名字也能看出来：只用 Attention 就搞定了语言模型的任务，不需要 RNN。幻灯片原文：“这篇文章主要的贡献是发现不需要 Recurrent Neural Network (RNN)，只需要 Attention 就够了”。</p>
+        <h3>先记住一个大原则</h3>
+        <p>在深入细节之前，他先给一个“听不懂也要记住”的大原则：Attention 输入一排向量，每个向量代表一个 token，输出另一排一样长度的向量；对每个 token 来说，就是把上下文的信息加进它的 embedding 里。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. Attention 怎么算：相关性和加权求和</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=1125s" target="_blank">0:18:45</a>–0:22:47</em></p>
+        <h3>第一步：找出相关的 token</h3>
+        <p>他以句子中间那个 embedding 为例，看它进入 Attention 后怎样得到输出。第一件事是从整个句子里找出相关的 token。有一个“计算相关性”的模块：读入当前要处理的 embedding，再读入句子里另一个 token 的 embedding，输出一个分数，代表两个 token 的关联性。</p>
+        <p>这个模块也是一个函数，幻灯片记作 f，输入两个 embedding，输出一个分数。f 里有参数，所以也要学：怎么计算相关性同样是从训练数据得到的。</p>
+        <p>视频说明对 f 内部做了补充（0:19:10 处）：先把两个输入分别乘上两个不同的矩阵（这两个矩阵从训练数据学得），得到两个向量，也就是文献里常说的 query q 和 key k，再把这两个向量做内积（点积），得到 Attention Weight。</p>
+        <p>接着把中间这个向量跟句子里每一个向量，包括它自己，都算一次相关性。这些相关性分数叫 Attention Weight。幻灯片上的例子是 0.1、0.5、0.4、0.0、0.0。</p>
+        <h3>第二步：集合相关信息</h3>
+        <p>下一步根据 Attention Weight 把句子里的 embedding 加起来：0.1 乘第一个向量，0.5 乘第二个，0.4 乘第三个，全部相加，就是 Attention 模块在这个位置的输出。这叫 weighted sum（加权求和）。他的概括是：先看哪些信息相关，再把相关信息集合起来。</p>
+        <p>幻灯片在这里注明“此处为简化的讲法，事实上在相加前还要过一个 Linear Transform”。视频说明也补充（0:20:40 处）：这里省略了文献里常提到的 value v。</p>
+        <h3>再算一个位置</h3>
+        <p>他接着用右数第二个向量再走一遍，原理相同：拿它跟其他所有向量算相关性（这次是 0.0、0.0、0.4、0.3、0.3），再做 weighted sum：绿色向量乘 0.3，黄色乘 0.3，蓝色乘 0.4，相加得到这个位置的输出。他说这是 Attention 的基本概念，做过一些简化，真想了解可以看原始论文或他过去的录像。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. Attention Matrix、Causal Attention 和 Multi-head Attention</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=1367s" target="_blank">0:22:47</a>–0:26:02</em></p>
+        <h3>Attention Matrix</h3>
+        <p>按刚才的讲法，所有 token 两两之间都要算相关性：第一个向量跟五个向量各算一次，第二个也跟五个各算一次，以此类推。五个向量就要算 5×5 共 25 个 Attention Weight，合起来叫 Attention Matrix。</p>
+        <p>视频说明补充两点：一是按上面 q、k 的算法，Attention Matrix 不一定对称，自己对自己算出的 Attention Weight 也不一定最高（0:22:30 处）；二是因为下面要讲的 Causal Attention，Attention Matrix 实际上是一个三角矩阵（Triangular Matrix）（0:23:00 处）。</p>
+        <h3>Causal Attention：只看左边</h3>
+        <p>实际实现时，模型计算某个 token 的 Attention Weight 只考虑它左边，也就是句子里在它前面的 token，不管右边的。幻灯片上的例子：某个 token 只跟左边两个 token 算出 0.3 和 0.7，再做 0.7×、0.3× 的加权求和。这种只看前面 token 的 Attention 叫 Causal Attention（字幕误作“Koso的Attention”）。为什么这样做，他说等一下再揭晓（见第 10 节）。</p>
+        <h3>Multi-head Attention：相关不只一种</h3>
+        <p>今天的语言模型用的都是 Multi-head Attention。原因是相关性不只一种，“相关”可以从不同面向看：dog 和 cat 都是动物，所以相关；dog 和 bark 也相关，因为 bark（吠叫）是狗会做的动作，但这跟 dog 和 cat 的关联不同。只用一个计算关联性的模块，可能没法准确算出关联性。</p>
+        <p>所以需要多个计算关联性的模块。幻灯片用颜色区分：蓝色模块算出一组 Attention Weight（0.1、0.5、0.4、0.0、0.0），另一个黄色模块有自己的参数，也是从训练数据学出来，算出另一组不同的权重（0.3、0.4、0.0、0.3、0.0）。实际实现时不会只有两组，他说通常至少弄个 16 组。</p>
+        <p>然后对每一组 Attention Weight 各做一次 weighted sum。第二组的例子：蓝色乘 0.3，红色乘 0.4，黄色乘 0.3，相加得到另一个输出。所以 Attention 模块给出的是多组输出，每种关联性一组。这些输出还需要整合，这就交给下一个模块。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. Feed Forward、Transformer Block 和 Output Layer</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=1562s" target="_blank">0:26:02</a>–0:28:50</em></p>
+        <h3>Feed Forward Network</h3>
+        <p>负责整合的是一个 Feed Forward Network：把 Attention 输出的多个向量全部丢进去，综合考虑，最后输出一个向量。它也是一个神经网络，里面也有很多层、很多参数，都从训练数据学出来。</p>
+        <h3>Transformer Block 和 layer</h3>
+        <p>Attention 模块加 Feed Forward 模块合起来叫一个 Transformer Block，是 Transformer 的基本单位。一个 Transformer 里不会只有一个 Block：先做 Tokenization，再做 Token Embedding 得到第一组 embedding，通过第一个 Transformer Block（Attention 和 Feed Forward）得到考虑过上下文的另一组 embedding；一个 Block 不够，再通过下一个，一直下去，要叠几个由你决定。</p>
+        <p>文献里通常把每个 Transformer Block 称为一个 layer（Layer 1、Layer 2……）。他补充：从神经网络的角度看，一个 Block 里其实有很多层，但文献上习惯把一个 Block 算作一层。</p>
+        <h3>Output Layer</h3>
+        <p>通过最后一个 Transformer Block 后，把句尾那个向量拿出来，送进 Output Layer。Output Layer 也是一个函数，里面是一个 Linear Transform 加一个 Softmax，输出一个概率分布。他当场更正幻灯片的笔误：幻灯片写的“Linear Transformer”应为“Linear Transform”。他再给一句听不懂也能记住的说法：把最后一个 Block 最后一个位置的输出丢给另一个模块，这个模块输出概率分布。</p>
+        <p>到这里，一个句子从输入 Transformer 到输出“下一个 token 该接哪个”的概率分布，整个过程就讲完了。</p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 为什么只看左边的 token</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=1730s" target="_blank">0:28:50</a>–0:33:20</em></p>
+        <h3>回到文字接龙的过程</h3>
+        <p>接着回答前面留下的问题：为什么 Attention 只考虑前面的 token？这要回到语言模型运作的基本逻辑。问 ChatGPT 一个问题时，模型实际看到的输入可能是“User: 你打的文字 AI:”，然后开始接龙：先接出第一个 token W1，再把 W1 接到输入后面，根据整串文字再接一次得到 W2，再把 W2 贴上去，以此类推，直到产生“结束”符号。</p>
+        <h3>算过的不用再算</h3>
+        <p>产生 W1 时，模型里有一大堆 Transformer Block，每个 Block 里的 Attention 中，“AI:”这个 token 在句子最右边，会跟它左边所有 token 计算 Attention Weight，这个过程在每个 Block 里反复发生，直到产生一个 token。</p>
+        <p>接着把 W1 串在原输入后面，再输入同一个语言模型。因为模型是同一个，“AI:”跟它左边那些 token 的关联性在上一步已经算过，不用再算第二次，把前一步产生 W1 时算出的 Attention 记下来就好。（这种保存前面计算结果的做法，文献里一般叫 KV cache；他课上没有用这个名字。）</p>
+        <p>唯一新的是“AI:”跟新出现的 W1 之间的 Attention，上一步没算过，要额外花资源。他问：能不能干脆不算？答案是可以，现在发现根本不用管“AI:”跟 W1 的 Attention，只管它跟左边的就好。</p>
+        <h3>多算一点会不会更好</h3>
+        <p>他设想有人会问：多算一些 Attention，让“AI:”也考虑右边新生成的 token，用算力换更精确的结果，行不行？他说过去确实有一些模型这样做，把完整的 Attention 都算出来，但看起来表现并没有比较好；而 ChatGPT 系列都只考虑左边的 Attention，表现却很惊人。所以现在的认知是不需要多算，保留和左边 token 算过的 Attention 就够了。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 为什么长文本是个挑战</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=2000s" target="_blank">0:33:20</a>–0:35:00</em></p>
+        <p>他说了解了这个机制，就知道为什么处理超长文本是巨大挑战。各家大语言模型炫耀效能时，常用的一个指标就是能读多长的文本。</p>
+        <p>困难在于：假设输入 100K 个 token，Attention 模块读过 100K 个 token 还不够，还要计算 100K 个 token 两两之间的 Attention，计算次数是输入长度的平方，也就是 100K 的平方。以文本长度为横轴、计算 Attention 的次数为纵轴画图，次数增长得很快。算力消耗跟文本长度的平方成正比，不是跟长度本身成正比，所以长文本需要耗费大量算力。</p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 值得关注的研究方向</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=2100s" target="_blank">0:35:00</a>–0:38:15</em></p>
+        <p>他说这堂课只是简单介绍 Attention 机制，为下一堂课做铺垫，最后列几个值得关注的方向（这几页幻灯片不在公开的 PDF 里，论文名这里不列）：</p>
+        <ul>
+            <li><strong>加快 Attention 的计算</strong>：因为计算量跟长度的平方成正比，怎么加速成了重要议题。他说过去的录像里对加速 Attention 的方法做过完整整理。</li>
+            <li><strong>无限长度的 Attention</strong>：近年有文献期待做到无限长度的 Attention。他留了两篇做法截然不同的论文，意思是怎样把 Attention 做好，今天还有很多可以思考的方向。</li>
+            <li><strong>train short test long</strong>：超长文本很难大量收集。能不能训练时只用较短的文本，测试时读懂较长的文本？他的说法是：练习阅读时只看过短篇小说，练完之后能不能读长篇小说。有一系列技术在做这件事，他列了几篇重要文献。</li>
+            <li><strong>Mamba 系列</strong>：Transformer 不一定是语言模型的最终答案，还有其他架构在研究能否取代 Attention，比较知名的是 Mamba。它跟 RNN 很像，但去掉了 RNN 训练时效率低的问题。他说如果 Mamba 复兴，就像 RNN 又回来了：之前 Attention 取代了 RNN，现在 RNN 又要回来取代 Attention。</li>
+            <li><strong>Jamba</strong>：最近的模型，是 Mamba 的延伸。Attention 和 RNN 一定互斥吗？Jamba 把类似 RNN 的 Mamba 跟 Transformer 结合起来。</li>
+        </ul>
+        <p>他说这些都是很新的论文，不适合在这堂课细讲，以后有机会再分享。今天主要想讲的是：一个句子读入语言模型时，怎样通过一连串步骤求出下一个 token 的概率分布。</p>
+    </section>
+
+    <section id="how">
+        <h2>他是怎么讲的</h2>
+        <h3>讲的顺序</h3>
+        <ol>
+            <li>先说为什么现在讲：下半堂要讲“模型在想什么”，所以先要懂机制。动机放在最前面。</li>
+            <li>回扣全课最熟的说法“语言模型是做文字接龙的函数，参数靠训练数据找”，再把问题落到“这个函数长什么样”。新内容挂在旧概念上。</li>
+            <li>用一张演进图（N-gram → Feed-forward → RNN → Transformer）交代来龙去脉，然后明说跳过。RNN 在这里只露个名字，到讲 Attention Is All You Need 和 Mamba 时又被用上。</li>
+            <li>先给五步总览图，再一步一张幻灯片走下去，最后在结尾放回同一张总览图（幻灯片第 4 页和第 27 页相同）。</li>
+            <li>每一步都先讲“它要解决什么问题”，再讲做法，再讲参数从哪来：token embedding 先说 run、jump 和 apple 区分不开，再说查表，再说表是训练出来的；然后立刻指出它的缺口（bank 两个意思），这个缺口就是下一步 Attention 的理由。</li>
+            <li>Causal Attention 先当规则抛出，说“等一下再揭晓”，讲完整个流程后，回到文字接龙一步步产生 W1、W2 的过程来解释，再顺势推出长文本为什么难，最后接研究方向。</li>
+        </ol>
+        <h3>每个概念用了什么例子</h3>
+        <ul>
+            <li>语言模型的训练数据 → “人工智”接“慧”、“床前明月”接“光”（幻灯片第 2 页）。</li>
+            <li>Tokenization → “introduction of generative ai”切成 int / roduction / of / gener / ative / ai（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=297s" target="_blank">0:04:57</a>）。</li>
+            <li>token 是人定的 → 中文模型一字一 token，ChatGPT 几个 token 才组成一个汉字；OpenAI tokenizer 网站上 1980 被拆成 198 和 0（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=494s" target="_blank">0:08:14</a>）。他的说法：「Token本身是一个比较模糊的概念 它是人定出来的」（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=446s" target="_blank">0:07:26</a>）。</li>
+            <li>BPE → gener、ative 常一起出现所以各成 token，generative 整串不够常见所以不是（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=446s" target="_blank">0:07:26</a>）。</li>
+            <li>embedding 的意义 → run、jump 和 cat、apple 本是互不相干的符号，变成向量后动物、植物、动词各聚一群（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=591s" target="_blank">0:09:51</a>）。</li>
+            <li>token embedding 不看上下文 → bank 是银行还是河岸（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=784s" target="_blank">0:13:04</a>）。</li>
+            <li>Attention 的作用 → “苹果电脑”的果和“来吃苹果”的果（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=929s" target="_blank">0:15:29</a>）。</li>
+            <li>weighted sum → 幻灯片上的具体数字 0.1、0.5、0.4，同一个算法用第二个位置再演示一次（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=1223s" target="_blank">0:20:23</a>）。</li>
+            <li>Multi-head → dog 和 cat 都是动物，dog 和 bark 是狗和狗的动作，两种“相关”不一样（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=1419s" target="_blank">0:23:39</a>）。</li>
+            <li>train short test long → 「虽然他在练习阅读的时候都只看过短篇小说 但是他能不能够在练习完之后读长篇小说」（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=2152s" target="_blank">0:35:52</a>）。</li>
+            <li>Mamba → RNN 被 Attention 取代后又回来：「现在Recurrent Neural Network又要回来取代掉Attention了」（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=2199s" target="_blank">0:36:39</a>）。</li>
+        </ul>
+        <h3>简化了什么、跳过了什么</h3>
+        <ul>
+            <li>开头就声明讲的是简化版，幻灯片第 3 页写“本课程会对 Transformer 的说明进行大量简化，详细内容请见过去课程”，视频标题也说熟悉的同学可略过。</li>
+            <li>N-gram、Feed-forward、RNN 的演进只列名字，指向旧录像。</li>
+            <li>计算相关性的函数 f 只说“有参数、要学”，没讲 query、key 和内积；value v 和相加前的 Linear Transform 也省略。这些都由幻灯片小字或视频说明补回（0:19:10、0:20:40 两条）。</li>
+            <li>Attention Matrix 的对称性、三角矩阵形状，课上没讲，视频说明补充（0:22:30、0:23:00）。</li>
+            <li>Feed Forward 内部、Output Layer 的 Linear Transform 和 Softmax 只点名，不展开。</li>
+            <li>加速 Attention、无限长度、train short test long、Mamba、Jamba 都只给方向和文献，说“今天不适合细讲”。</li>
+            <li>他两次给“听不懂也没关系”的保底版本：「假设你等一下讲的东西听不懂的话 就记得这个大原则就可以了」（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=1125s" target="_blank">0:18:45</a>），以及 Output Layer 那句「反正就是把这个Transformer Block 最后一层的最后一个输出 丢给另外一个模组」（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=1707s" target="_blank">0:28:27</a>）。</li>
+        </ul>
+        <h3>怎样处理误解和提问</h3>
+        <ul>
+            <li>“Attention Is All You Need 发明了 Attention”：他直接点名这是误解，「那很多人误以为是 这一篇文章提出了Attention这个想法 那其实这是一个误解啦」（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=1027s" target="_blank">0:17:07</a>），再说明它的贡献是拿掉 RNN，并用论文标题本身佐证。</li>
+            <li>“某个符号是不是 token”：他说这个问题没法回答，「所以你如果拿一个符号来问我说 它是不是一个Token 我其实是没有办法回答你的」（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=494s" target="_blank">0:08:14</a>），因为每个模型的 token 列表不同。</li>
+            <li>“多算 Attention 应该更准”：他先替听众把这个直觉说出来，再用实验结果回答（算完整 Attention 的模型没有更好，ChatGPT 系列只看左边）。</li>
+            <li>自己幻灯片上的错当场认：dog 打成 dot（「这边本来是想要打狗啦,想要打Dog啦」，<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=591s" target="_blank">0:09:51</a>）；Linear Transformer 应为 Linear Transform（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=1660s" target="_blank">0:27:40</a>）。</li>
+            <li>本段录像里没有学生提问。</li>
+        </ul>
+        <h3>现场演示</h3>
+        <p>只有一个：OpenAI 的 tokenizer 网站（platform.openai.com/tokenizer）。他贴了一段英文，结果 65 个 token；指出 Language、Model 各是一个 token，Probabilistic 拆成两个，1980 拆成 198 和 0（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=494s" target="_blank">0:08:14</a>）。用来说明 token 由开发者事先定好，不一定合乎人的直觉。</p>
+        <h3>其他手法</h3>
+        <ul>
+            <li>拟人化的动词：Input Layer“理解”token，Attention“理解上下文”，Feed Forward“整合、思考”，多个 Block 是“反复思考”。这些词写在总览图上，给每个模块一个直观角色。</li>
+            <li>用名字倒推含义：ChatGPT 的 T 就是 Transformer，「那ChatGPT的这个T啊 他指的就是Transformer的T」（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=145s" target="_blank">0:02:25</a>）；Attention Is All You Need 的标题说明了它的主张。</li>
+            <li>留悬念再回收：Causal Attention 先讲规则，「为什么会这样 等一下再为大家揭晓 我们先无视这件事」（<a href="https://www.youtube.com/watch?v=uhNsUCb2fJI&t=1367s" target="_blank">0:22:47</a>），讲完整个流程后再解释。</li>
+            <li>机制讲完立刻接一个现实问题：各家模型比谁能读更长的文本，长文本为什么贵，用“长度的平方”一句话回答。</li>
+            <li>幻灯片设计：同一句“introduction of generative ai”的六个 token 贯穿 Tokenization 到 Positional Embedding 各页；Attention 页用颜色区分向量和不同的 head，数字写在箭头旁；首尾同一张总览图。</li>
+            <li>“上古时代”这个说法又出现，用来形容 2017 年的论文。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>李宏毅 · 生成式 AI 导论 2024 · Lecture 10: How Today's LLMs Do Next-Token Prediction: Transformer · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>第16讲：Speculative Decoding：给语言模型加速的外挂 | 李宏毅 生成式 AI 导论 2024 笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="15_生成策略.html">&larr; 上一讲</a></span>
+    <span><a href="index.html">生成式 AI 导论 2024 目录</a> · 16</span>
+    <span><a href="17_影像生成上_图片与视频.html">下一讲 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第16讲：Speculative Decoding：给语言模型加速的外挂</h1>
+        <p class="subtitle">一个不用训练、不改模型的加速方法：找一个"预言家"先猜接下来的 token，让语言模型一次并行验证，猜对就一次输出多个 token；猜错时怎么办，代价是什么，谁能当预言家（非自回归模型、压缩过的小模型、搜索引擎），以及多个预言家</p>
+        <div class="author-meta">
+            主讲：李宏毅（Hung-yi Lee，台湾大学电机系）· 上课日期：2024 年 5 月 17 日 · 时长：13 分钟 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：<a href="https://www.youtube.com/watch?v=MAbGgsWKrg8" target="_blank">课堂录像</a>（台大公开，2024 年春季，本文依据录像字幕整理）· <a href="https://speech.ee.ntu.edu.tw/~hylee/genai/2024-spring-course-data/0517/0517_strategy.pdf" target="_blank">幻灯片</a>（与第 15 讲同一份，本讲对应第 32–41 页）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一讲的内容</h2>
+        <p>第 15 讲比较了两种生成策略：autoregressive（AR，自回归，"按部就班、各个击破"，一个 token 生成完才能生成下一个）和 non-autoregressive（NAR，非自回归，"齐头并进、一次到位"，所有输出同时生成，快但质量差）。这一讲紧接着讲一个让 AR 模型加速的技术 Speculative Decoding。它对任何语言模型都适用，不需要训练，也不改动原来的模型，他称之为一个"外挂"。</p>
+        <p>整讲围绕一个角色"预言家"展开：预言家先猜语言模型接下来会说什么，语言模型拿这些猜测一次并行算出好几步。他按"预言家全对、错一个、全错"三种情况逐步推演，再讨论谁适合当预言家。</p>
+        <ol>
+            <li><a href="#t01">为什么需要加速</a> · <a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">核心想法：找一个预言家</a> · <a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=96s" target="_blank">0:01:36</a></li>
+            <li><a href="#t03">预言家猜错了怎么办</a> · <a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=265s" target="_blank">0:04:25</a></li>
+            <li><a href="#t04">谁可以当预言家</a> · <a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=515s" target="_blank">0:08:35</a></li>
+            <li><a href="#t05">多个预言家与小结</a> · <a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=662s" target="_blank">0:11:02</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 为什么需要加速</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=0s" target="_blank">0:00:00</a>–0:01:36</em></p>
+        <p>他承上一讲：语言模型生成的文字往往不需要很长，所以用 autoregressive 也许就够了。但要生成长篇大论时，等待的时间会很漫长。Speculative Decoding 可以加快任何语言模型的生成速度：</p>
+        <ul>
+            <li>跟用的是哪个模型没有关系；</li>
+            <li>不需要对模型做任何训练；</li>
+            <li>像一个外挂，加到任何语言模型上，生成速度就加快。</li>
+        </ul>
+        <p>幻灯片上的对比图来自 PyTorch 博客（Hitchhiker's Guide to Speculative Decoding）：LLaMA 2 13B 不加和加上 Speculative Decoding 的生成速度，加上后大约可以到原来的两倍甚至三倍。他还猜测，今天看到 GPT-4 生成的结果，也许已经用了类似技术来加速，"也说不定"。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 核心想法：找一个预言家</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=96s" target="_blank">0:01:36</a>–0:04:25</em></p>
+        <h3>AR 的痛点</h3>
+        <p>Speculative 这个词的意思是猜测、投机。Autoregressive 模型的痛点是必须按部就班、循序渐进：第一个 token 没生成之前，没法生成第二个 token。</p>
+        <h3>预言家猜一个，速度乘以二</h3>
+        <p>核心想法是找一个"预言家"，它能预判语言模型接下来会生成什么。假设预言家根据输入直接预判，语言模型等一下会产生黄色的 token，那就可以把"输入"和"输入 + 黄色 token"一次都丢给语言模型，让它并行计算，一次产生两个 token。这样就跳过了 AR"一定要先生第一个才能生第二个"的限制，速度马上变成原来的两倍（幻灯片：同时、速度 ×2；文献 arXiv 2211.17192、2302.01318）。</p>
+        <h3>预言家猜两个，速度乘以三</h3>
+        <p>更具体的流程：蓝色的输入进来，先给预言家看，预言家很快预测语言模型接下来会先生红色 token、再生黄色 token。这里假设预言家奇快无比，预言的时间几乎可以忽略。然后把三份输入一次全部丢给语言模型：</p>
+        <ul>
+            <li>输入 → 模型预测下一步（应该是红色）；</li>
+            <li>输入 + 红色 → 模型预测下下步（应该是黄色）；</li>
+            <li>输入 + 红色 + 黄色 → 模型预测下下下步。</li>
+        </ul>
+        <p>他解释为什么能这样：下一步、下下步是什么，预言家已经说了，所以模型可以直接预测下下下步，三步同时产生。外人不知道里面有没有预言家，从外面看就是模型一次吐出三个 token，速度变成原来的三倍。幻灯片写的是"用原来只能输出一个 Token 的时间，输出三个 Token"。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 预言家猜错了怎么办</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=265s" target="_blank">0:04:25</a>–0:08:35</em></p>
+        <h3>先回答一个疑问</h3>
+        <p>他替听众提出疑问：如果预言家这么厉害，能预言语言模型会输出什么，那还要语言模型干嘛，直接让预言家生成不就好了？（幻灯片原话："不对啊，如果预言家可以准确预言接下来要生成的内容，给预言家生成就好了啊"。）答案是预言家可能会犯错，它又不是语言模型本身。</p>
+        <h3>错一个：还是有赚</h3>
+        <p>假设预言家第一个 token 猜红色，猜对了；第二个猜灰色，猜错了，语言模型其实不会生灰色。但当时还不知道模型会生什么，所以先相信预言家，把"输入""输入 + 红色""输入 + 红色 + 灰色"都丢给模型，模型同时输出三个 token。因为灰色是错的，模型基于它算出的第三个 token（绿色）不可信，输入本来就错了，输出当然也不对。不过前两个 token 是对的，还是可以一次输出两个，速度仍是原来的两倍（幻灯片：输出二个 Token，还是有赚！）。</p>
+        <h3>怎么知道预言家错了</h3>
+        <p>在 token 送进语言模型之前，我们不知道预言家做得怎样。等语言模型产生它的 token 之后，拿模型真正的输出去和预言家的预测比对：模型的下一个 token 是红色，下下个是黄色，预言家的下下个却是灰色，就知道预言家错在这里。凡是输入里含有错误预测的那几路，输出都不要，只把肯定正确的部分拿给用户看。YouTube 说明在 5:00 处补了一段：预言家刚产生预测时无法立即知道对不对，只有语言模型实际生成输出后才能判断；基于错误预测的那部分输出会被丢弃。</p>
+        <h3>全错：几乎不赚不赔</h3>
+        <p>假设预言家很烂，预测全部错误。三份输入里，只要带有预言家输出的都不可信，只有第一份（只有原始输入）的结果是对的，至少还能输出一个 token。本来同样的时间也只能输出一个 token，所以整体来说几乎不赚不赔，相当于没有预言家。</p>
+        <p>他接着说还是有一些损失（幻灯片："几乎不过不失（损失的时间为预言家预言的时间、无谓的运算资源耗损）"）：</p>
+        <ul>
+            <li>时间：要等预言家预言。但前面假设了预言家奇快无比，所以可以忽略。</li>
+            <li>运算资源：带着预言家错误预测的那几次计算全都白费了。</li>
+        </ul>
+        <p>他的总结是：这个方法假设你不在意运算资源，真正在意的是时间，用运算资源换取时间。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 谁可以当预言家</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=515s" target="_blank">0:08:35</a>–0:11:02</em></p>
+        <p>从前面的推演可以得出预言家的要求（幻灯片：超快速、犯错没关系）：要快到产生的时间几乎可以忽略；偶尔犯错没关系，因为最糟的情况也就是全错、不得不失。</p>
+        <h3>非自回归模型</h3>
+        <p>他回扣第 15 讲：non-autoregressive model 的特性是所有输出同时生成，速度快，坏处是容易犯错、生成质量不好。犯错对预言家没关系，所以 NAR 模型正好可以当预言家。这样看，Speculative Decoding 也可以看成 non-autoregressive model 和 autoregressive model 的结合。</p>
+        <h3>压缩过的小模型</h3>
+        <p>大模型有很多压缩方法，比如对参数做量化（quantization，用更少的位数存参数），或者做 knowledge distillation（知识蒸馏，让小模型学大模型的输出）。模型变小，跑得就快。压缩后的模型往往"脑袋不好使"，容易说出奇怪的错误答案，但它跑得快，可以当预言家；它犯错也没关系，最后看的是原来那个语言模型的输出。</p>
+        <h3>预言家不一定是语言模型：搜索引擎</h3>
+        <p>有一篇论文（arXiv 2304.04487）用搜索引擎当预言家。假设现在的输入是"语言模型"，就去某个资料库里搜索"语言模型"后面通常接什么句子。他用 Google 举例（他说不一定要用 Google，任何资料库都可以），搜到"语言模型"后面可以接"经常使用在许多自然语言处理方面的应用"，就把这句直接贴过来，当作预言家的输出。这里同样假设搜索资料的速度很快，快到可以忽略。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 多个预言家与小结</h2>
+        <p><em>录像位置 <a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=662s" target="_blank">0:11:02</a>–0:12:42</em></p>
+        <h3>可以同时有多个预言家</h3>
+        <p>预言家不只能有一个。多个预言家各自产生预言，最后看谁的预言最对，谁就能最大程度帮到语言模型的输出（幻灯片引用 SpecInfer，arXiv 2305.09781，YouTube 说明列为延伸阅读）。幻灯片上的例子有两个预言家：各自预测语言模型接下来会说什么，再分别交给语言模型生成。预言家 1 犯了一些错误，它的预测和语言模型实际产生的结果不一样，就不用预言家 1 那一路；只看语言模型采用预言家 2 的预测当输入时产生的结果。多个预言家能提高预言正确的机会，预测正确的 token 越多，省下的时间越多。</p>
+        <h3>小结</h3>
+        <p>他最后重复：这个方法引入一个预言家，先预判语言模型接下来的输出，可以大幅加快速度；适用于所有语言模型，不需要训练，不用改动原来的模型，挂上去速度就变快。之后暂停三分钟，换助教讲课。</p>
+    </section>
+
+    <section id="how">
+        <h2>他是怎么讲的</h2>
+        <h3>讲的顺序</h3>
+        <p>开头先讲"好处"，后讲"原理"：不用训练、任何模型都能用、速度两三倍，配一张 LLaMA 2 13B 的速度对比图，让听众先有兴趣。原理部分只用一个角色"预言家"，他先假设预言家永远正确，讲清楚"并行算多步"的收益（×2、×3）；等听众接受了，再自己抛出最明显的疑问"那还要语言模型干嘛"，借此引入"预言家会犯错"。犯错的情况按严重程度排：错一个（还是有赚）、全错（不赚不赔），最后才算代价（等预言家的时间、白费的算力）。由这几个推演自然得出预言家的两个要求（快、可以错），再拿这两条去筛候选：NAR 模型、压缩小模型、搜索引擎、多个预言家。候选的第一个回扣上一讲的 NAR，让两讲接上。</p>
+        <h3>每个概念用了什么例子</h3>
+        <ul>
+            <li>外挂的卖点 → LLaMA 2 13B 加与不加 Speculative Decoding 的速度对比；「它是一个神奇的外挂」（<a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=42s" target="_blank">0:00:42</a>）。</li>
+            <li>核心思路 → 一个会预判的角色，「我们能不能够找一个预言家」（<a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=124s" target="_blank">0:02:04</a>）；token 用颜色区分（蓝色输入、红色、黄色、灰色、绿色）。</li>
+            <li>并行产生多个 token → 下一步、下下步、下下下步；从外面看「外人其实不知道里面有没有预言家」（<a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=246s" target="_blank">0:04:06</a>），只看到一次吐三个 token。</li>
+            <li>预言家可能出错 → 自问「那还要语言模型干嘛」（<a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=273s" target="_blank">0:04:33</a>）。</li>
+            <li>部分猜错 → 第二个 token 猜成灰色，第三个输出（绿色）作废，「你还是有赚」（<a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=351s" target="_blank">0:05:51</a>）。</li>
+            <li>全部猜错 → 「整体来讲你几乎可以说是不赚不赔」（<a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=453s" target="_blank">0:07:33</a>）。</li>
+            <li>代价 → 「你就是用了运算资源 来换取了你的时间」（<a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=511s" target="_blank">0:08:31</a>）。</li>
+            <li>压缩模型当预言家 → 「脑袋不好使也没关系 它跑得快」（<a href="https://www.youtube.com/watch?v=MAbGgsWKrg8&t=607s" target="_blank">0:10:07</a>）。</li>
+            <li>非语言模型的预言家 → 用 Google 搜"语言模型"，把搜到的后半句直接当预测。</li>
+            <li>多个预言家 → 预言家 1 和 2 并行，采用猜对的那一路。</li>
+        </ul>
+        <h3>简化了什么、跳过了什么</h3>
+        <ul>
+            <li>反复假设预言家"奇快无比"，时间可以忽略，把讨论集中在"猜对几个就赚几个"上；搜索引擎的例子也同样假设搜索时间可以忽略。</li>
+            <li>"怎么判断预言家错了"在课上讲得比较快，YouTube 说明在 5:00 处补了一段：要等语言模型真的产生输出后才能比对，基于错误预测的输出会被丢弃。</li>
+            <li>没有讲具体的验证或采样规则，只用"比对颜色是否一致"说明；量化和知识蒸馏只点名，不展开。</li>
+            <li>LLaMA 2 13B 的速度图只读出"两倍甚至三倍"，没有讲实验设置。</li>
+            <li>GPT-4 是否用了这个技术，他明确说是猜测。</li>
+        </ul>
+        <h3>怎样处理误解和提问</h3>
+        <ul>
+            <li>他预判听众会问"预言家这么准，干嘛还要语言模型"，主动提出并回答（预言家会犯错），再把这个回答变成下一段的主题。</li>
+            <li>"预言家一定要是语言模型吗""一定只能有一个预言家吗"两个问题也是他自问自答，用来引出搜索引擎和多个预言家。</li>
+            <li>这一讲没有学生提问。</li>
+        </ul>
+        <h3>现场演示</h3>
+        <p>这一讲没有现场演示，全部用幻灯片上的彩色 token 方块示意图推演。</p>
+        <h3>其他手法</h3>
+        <ul>
+            <li>拟人化角色：把"draft model"讲成"预言家"，全讲不出现 draft model 这个术语。</li>
+            <li>记账式的口语："有赚""不赚不赔""不过不失"，把加速比讲成盈亏。</li>
+            <li>颜色编码：每个 token 一个颜色，错误的用灰色，作废的输出单独标出，听众只需对颜色。</li>
+            <li>承上：用上一讲 AR 和 NAR 的特性（"按部就班"、快但质量差）直接推出谁适合当预言家，并说 Speculative Decoding 可以看成两者的结合。</li>
+            <li>收尾重复开头的卖点（适用所有模型、不用训练、外挂），首尾呼应。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>李宏毅 · 生成式 AI 导论 2024 · Lecture 16: Speculative Decoding · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>
