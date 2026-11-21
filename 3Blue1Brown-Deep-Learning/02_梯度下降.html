@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>梯度下降 | 3Blue1Brown 深度学习系列笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+    <style>
+        table { border-collapse: collapse; width: 100%; font-size: 0.9em; margin: 1em 0; }
+        th, td { border-bottom: 1px solid #ccc; padding: 0.35em 0.5em; text-align: left; vertical-align: top; }
+    </style>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="01_什么是神经网络.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">3Blue1Brown 深度学习系列目录</a> · 02</span>
+    <span><a href="03_反向传播的直觉.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 2 章 · 梯度下降：神经网络怎样学习</h1>
+        <p class="subtitle">用代价函数衡量网络有多差，再沿负梯度一小步一小步往下走；最后看训练好的网络到底学到了什么，结论是它没有学成当初期望的“边和图案”</p>
+        <div class="author-meta">
+            主讲：Grant Sanderson（3Blue1Brown）· 发布日期：2017 年 10 月 16 日 · 时长：20 分 33 秒 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：视频（3Blue1Brown YouTube 公开，本文依据视频字幕整理）<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w" target="_blank">Gradient descent, how neural networks learn | Deep Learning Chapter 2</a>，2017 年 10 月 16 日；文字版课程 <a href="https://www.3blue1brown.com/lessons/gradient-descent" target="_blank">3blue1brown.com/lessons/gradient-descent</a>（数字、公式和配图参照文字版；中文转述和讲解，不是逐字翻译；图片引自原网站，版权归原作者）
+        </div>
+    </header>
+    <section>
+        <h2>这一集的内容</h2>
+        <p>
+            上一集搭好了一个识别手写数字的网络：784 个输入神经元、两个各 16 个神经元的隐藏层、10 个输出神经元，一共约 13,000 个权重和偏置。上一集结尾留下的问题是：网络怎样只靠看数据，就学到合适的权重和偏置？这一集回答这个问题。他说这一集有两个目标：一是介绍梯度下降（gradient descent），这个想法不仅是神经网络学习的基础，很多别的机器学习方法也靠它；二是看看这个网络训练完后表现如何，隐藏层的神经元最后在找什么。
+        </p>
+        <p>
+            读完这一页，应该能说清楚：训练数据和测试数据各干什么用，代价函数（cost function）怎么算、输入输出各是什么，为什么沿负梯度走能让代价下降，梯度的每个分量怎样读成“这个参数改动有多值得”，以及这个网络为什么能认对 96% 的新图片，却没有学到当初期望的边和图案。文字版课程由 Josh Pullen 改写，只覆盖到梯度下降为止，“分析这个网络”那部分在网站上是单独一课，这里依据视频整理。视频结尾的 Patreon 和 Amplify Partners 致谢已略过。
+        </p>
+        <ol>
+            <li><a href="#t01">回顾上一集的网络</a> · <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">训练数据和测试数据</a> · <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=109s" target="_blank">0:01:49</a></li>
+            <li><a href="#t03">代价函数：衡量网络有多差</a> · <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=181s" target="_blank">0:03:01</a></li>
+            <li><a href="#t04">梯度下降：一步步往低处走</a> · <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=415s" target="_blank">0:06:55</a></li>
+            <li><a href="#t05">换个方式读梯度：哪个改动更划算</a> · <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=678s" target="_blank">0:11:18</a></li>
+            <li><a href="#t06">三层复杂度的小结</a> · <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=739s" target="_blank">0:12:19</a></li>
+            <li><a href="#t07">训练好的网络到底在做什么</a> · <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=781s" target="_blank">0:13:01</a></li>
+            <li><a href="#t08">怎样继续学</a> · <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=997s" target="_blank">0:16:37</a></li>
+            <li><a href="#t09">Lisha Li 谈网络是记忆还是学到了结构</a> · <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=1058s" target="_blank">0:17:38</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 回顾上一集的网络</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=0s" target="_blank">0:00:00</a>–0:01:49 · Introduction / Recap</em></p>
+        <p>
+            他先快速回顾上一集，让结构在脑子里还新鲜。目标仍是手写数字识别这个经典例子，他称之为神经网络的“hello world”。
+        </p>
+        <p>
+            这些数字画在 28×28 的像素网格上，每个像素有一个 0 到 1 之间的灰度值。这 784 个值决定输入层 784 个神经元的激活值。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/pixels-as-input.jpg" alt="像素作为输入" style="max-width:100%"><figcaption>图：图像的每个像素值成为第一层某个神经元的激活值（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            后面每一层每个神经元的激活值，都基于上一层所有激活值的加权和，再加上一个叫偏置（bias）的特殊数。然后把这个和再送进另一个函数，比如 sigmoid 挤压函数，或者 ReLU。文字版把它写成：
+        </p>
+        $$a_0^{(1)} = \sigma\left(w_{0,0}\, a_0^{(0)} + w_{0,1}\, a_1^{(0)} + \cdots + w_{0,n}\, a_n^{(0)} + b_0\right)$$
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/recap-propagation.jpg" alt="激活值逐层传播" style="max-width:100%"><figcaption>图：输入层的激活值来自像素，其余各层的激活值取决于上一层（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            在两个隐藏层、每层 16 个神经元这个有点随意的选择下，网络共有约 13,000 个可以调的权重和偏置（文字版给出精确数 13,002），网络到底做什么，就由这些值决定。说网络把一张图分类成某个数字，意思是最后一层 10 个神经元里最亮的那个对应这个数字。
+        </p>
+        <p>
+            他还提醒了当初设计分层结构的动机：也许第二层能捕捉边，第三层能捕捉圈和线这类图案，最后一层把这些图案拼起来认出数字。然后他说，这一集要看的是网络怎样学习。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/layer-hypothesis.jpg" alt="分层的设想" style="max-width:100%"><figcaption>图：上一集的设想：像素 → 边 → 圈和线 → 数字（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t02">
+        <h2>02. 训练数据和测试数据</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=109s" target="_blank">0:01:49</a>–0:03:01 · Using training data</em></p>
+        <p>
+            我们要的是这样一个算法：给网络看一大批训练数据（training data），也就是很多张手写数字图，每张配上它应该是几的标签，算法就去调整那 13,000 个权重和偏置，让网络在训练数据上表现更好。文字版强调了这里和普通编程的区别：你从来没有写出识别数字的算法，写的是一个能根据带标签的例子去调网络参数的算法。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/training-data.jpg" alt="训练数据" style="max-width:100%"><figcaption>图：网络通过看大量标注正确的数字来学习（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他希望分层结构能让网络学到的东西推广（generalize）到训练数据以外的图片上。检验的办法是：训练完以后，再给网络看一批它从没见过的带标签数据，看它对这些新图分类得有多准。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/training-vs-testing.jpg" alt="训练与测试" style="max-width:100%"><figcaption>图：一部分数据用来训练，另一部分网络没见过的数据在训练后用来测试（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他说这个例子之所以常被拿来入门，是因为 MNIST 数据库的人整理了几万张手写数字图，每张都标好了它应该是几（文字版补充说可以免费使用）。
+        </p>
+        <p>
+            他接着说，把机器说成在“学习”听起来很有挑衅性，但一旦看懂它怎么做，就不太像疯狂的科幻设定，更像一道微积分练习题。归根到底，就是找某个函数的最小值。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/finding-minima.jpg" alt="找函数的最低点" style="max-width:100%"><figcaption>图：学习的过程就是在某个函数上找越来越低的点（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t03">
+        <h2>03. 代价函数：衡量网络有多差</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=181s" target="_blank">0:03:01</a>–0:06:55 · Cost functions</em></p>
+        <h3>先随机初始化</h3>
+        <p>
+            他回到概念上的图景：每个神经元都和上一层所有神经元相连，定义其激活值的加权和里，权重有点像这些连接的强度，偏置则表示这个神经元倾向于活跃还是不活跃。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/weights-and-biases.jpg" alt="权重和偏置" style="max-width:100%"><figcaption>图：网络的行为取决于它的权重和偏置（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            一开始，所有权重和偏置都完全随机初始化。不用说，网络在任何一个训练样本上都会表现得很糟，因为它只是在做随机的事。比如输入这张 3，输出层看上去一团乱。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/random-trash.jpg" alt="随机权重下的输出" style="max-width:100%"><figcaption>图：权重和偏置完全随机时，网络认不出数字，输出层一团乱（引自 3blue1brown.com）</figcaption></figure>
+        <h3>单个样本的代价</h3>
+        <p>
+            于是要定义一个代价函数（cost function），也就是一个数字指标，衡量网络的输出离正确答案有多远。他用口语这样说：告诉计算机“不对，坏电脑，输出应该是大多数神经元为 0，只有这一个神经元为 1，你给我的完全是垃圾”。
+        </p>
+        <p>
+            说得数学一点：把每个“垃圾”输出激活值和你希望它取的值相减，平方，再全部加起来，这就是单个训练样本的代价。对一张 3 来说，希望的输出是对应 3 的那个神经元为 1、其他为 0。用符号写（$a_j$ 是第 $j$ 个输出神经元的激活值，$y_j$ 是希望的值；这是把他的口头描述写成式子）：
+        </p>
+        $$C_{\text{单个样本}} = \sum_{j=0}^{9} \left(a_j - y_j\right)^2$$
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/cost-calculation.jpg" alt="代价的计算" style="max-width:100%"><figcaption>图：代价 = 实际输出和期望输出之差的平方和（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            网络很有把握地分对这张图时，这个和很小；网络看起来不知道自己在干什么时，这个和很大。文字版在这里出了一道题：给一张 4，让读者给四种输出的代价排序。
+        </p>
+        <h3>所有样本的平均代价</h3>
+        <p>
+            接着要看所有几万个训练样本上的平均代价。这个平均代价就是衡量网络有多差、计算机该有多愧疚的指标。
+        </p>
+        <p>
+            他提醒这是个复杂的东西。网络本身是一个函数，输入 784 个数（像素值），输出 10 个数，某种意义上以所有权重和偏置为参数。代价函数是在这之上又加了一层复杂度：它的输入是那 13,000 个左右的权重和偏置，输出一个数，描述这组权重和偏置有多糟；而它的定义取决于网络在全部几万条训练数据上的表现。文字版换了个说法：训练数据就像是代价函数的一大组参数。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/neural-network-function.jpg" alt="网络是一个函数" style="max-width:100%"><figcaption>图：神经网络是一个函数，根据权重和偏置，把图像变成数字预测（引自 3blue1brown.com）</figcaption></figure>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/cost-function.jpg" alt="代价函数" style="max-width:100%"><figcaption>图：代价函数输入网络的权重和偏置，用训练图像算出一个“代价”，衡量网络分类这些图有多差（引自 3blue1brown.com）</figcaption></figure>
+        <h3>先想一个只有一个输入的函数</h3>
+        <p>
+            光告诉计算机它做得多烂没什么用，你要告诉它怎样改权重和偏置才能变好。为了好想，他建议先别去想象一个有 13,000 个输入的函数，只想一个输入一个数、输出一个数的简单函数。怎样找到让函数值最小的输入？
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/single-input-cost.jpg" alt="单输入代价函数" style="max-width:100%"><figcaption>图：先想象代价函数只有一个输入（实际有 13,002 个），怎样找到让代价最小的输入（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            学过微积分的人知道，有时可以直接把最小值算出来（文字版说是解斜率为 0 的方程）。但对很复杂的函数这不总是可行，对我们这个有 13,000 个输入、复杂得疯狂的代价函数肯定不行。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/infeasible-minimum.jpg" alt="直接求最小值不可行" style="max-width:100%"><figcaption>图：对复杂的代价函数，直接算出精确最小值行不通（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            更灵活的办法是：从任意一个输入出发，判断往哪个方向走一步能让输出变低。具体说，算出你所在位置的斜率：斜率为正就往左挪，斜率为负就往右挪。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/follow-slope.jpg" alt="沿着斜率走" style="max-width:100%"><figcaption>图：沿下坡方向走，逐步接近一个局部最小值（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            反复这样做，每到一个新位置就看新的斜率、迈合适的一步，就会逼近函数的某个局部最小值（local minimum），也就是附近一带最低、但不一定是全局最低的点。他说脑子里可以想象一个球滚下山坡。<a href="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/balls-rolling-down.mp4" target="_blank">动画（引自原网站）</a>演示了几个球从不同位置滚进不同的谷。
+        </p>
+        <p>
+            他请观众注意两点。第一，即便是这个极简的单输入函数，也有很多个谷，落进哪一个取决于从哪个随机输入出发，而且不能保证落进的局部最小值就是代价函数可能的最小值。这一点在神经网络里同样成立。第二，如果步长和斜率成正比，那么接近最小值时斜率变平，步子会越来越小，这有助于不冲过头。（<a href="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/proportional-to-slope.mp4" target="_blank">动画（引自原网站）</a>）
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 梯度下降：一步步往低处走</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=415s" target="_blank">0:06:55</a>–0:11:18 · Gradient descent</em></p>
+        <h3>两个输入：在平面上找下坡方向</h3>
+        <p>
+            把复杂度提高一点，想象一个两个输入、一个输出的函数。可以把输入空间想成 xy 平面，代价函数画成平面上方的一张曲面。这时要问的换成了：在这个输入空间里往哪个方向走，函数输出下降得最快，也就是“下坡方向”在哪。他说还是可以想象一个球滚下山。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/2-input-cost.jpg" alt="两输入代价函数" style="max-width:100%"><figcaption>图：两个输入的函数（离 13,002 个还远，但近了一步）：从随机位置出发，找下坡方向反复走（引自 3blue1brown.com）</figcaption></figure>
+        <h3>梯度</h3>
+        <p>
+            熟悉多元微积分的人知道，函数的梯度（gradient）给出最陡的上升方向，即往哪走函数增加得最快。梯度是一个向量，由函数对每个输入的偏导数组成。很自然，取梯度的负值，就得到让函数下降最快的方向。不仅如此，梯度向量的长度表示这个最陡的坡有多陡。文字版用记号写成：$\nabla C$ 给出上坡方向，$-\nabla C$ 给出下坡方向。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/negative-gradient.jpg" alt="负梯度" style="max-width:100%"><figcaption>图：梯度 $\nabla C$ 指向上坡，负梯度 $-\nabla C$ 指向下坡（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他说不熟悉多元微积分、想多了解的人，可以看他给 Khan Academy 做的相关内容。但他也说，此刻对大家真正要紧的只有一点：原则上存在一种办法能算出这个向量，它告诉你下坡方向在哪、坡有多陡。只知道这一点、细节不扎实也没关系。
+        </p>
+        <p>
+            有了这个，最小化函数的算法就是：算出梯度方向，往下坡走一小步，然后一遍遍重复。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/gradient-descent.jpg" alt="梯度下降" style="max-width:100%"><figcaption>图：梯度下降就是沿下坡方向走，去最小化代价函数（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            文字版在这里多给了一个视频里没讲的细节：实际中每一步是 $-\eta \nabla C$，常数 $\eta$ 叫学习率（learning rate）。它越大，步子越大，可能更快接近最小值，但有冲过头、在最小值附近来回震荡的风险。
+        </p>
+        $$\text{参数} \leftarrow \text{参数} - \eta \nabla C$$
+        <h3>13,000 个输入：同一个想法</h3>
+        <p>
+            对一个有 13,000 个输入而非 2 个输入的函数，基本想法相同。想象把网络全部 13,000 个权重和偏置排成一个巨大的列向量。代价函数的负梯度也只是一个向量，是这个大得离谱的输入空间里的一个方向，它告诉你对所有这些数做哪些微调（nudge），代价函数下降得最快。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/weights-and-gradient.jpg" alt="参数向量与负梯度向量" style="max-width:100%"><figcaption>图：左边是整个网络所有权重和偏置排成的向量，右边是负梯度，即为了往下坡走，对左边每个数该做的微调（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            因为代价函数是专门设计过的，改权重和偏置让它下降，就意味着网络在每条训练数据上的输出越来越不像 10 个随机值，越来越像我们想要的判断。他提醒，代价函数是对全部训练数据取平均，所以把它最小化，意味着在所有这些样本上整体表现更好。
+        </p>
+        <h3>反向传播留到下一集</h3>
+        <p>
+            高效计算这个梯度的算法，可以说是神经网络学习的核心，叫反向传播（backpropagation）。他说下一集会讲它，到时想花时间走一遍：对某一条训练数据，每个权重和偏置究竟发生了什么，并在一堆微积分公式之外给出直观感受。
+        </p>
+        <h3>学习 = 最小化代价函数</h3>
+        <p>
+            他说此刻最想让大家记住的、和实现细节无关的一点是：说网络在学习，意思就是它在最小化一个代价函数。
+        </p>
+        <p>
+            这带来一个后果：代价函数的输出必须平滑，才能靠一小步一小步往下坡走找到局部最小值。他说，这也是为什么人工神经元的激活值是连续取值的，而不像生物神经元那样只有活跃和不活跃两种状态。
+        </p>
+        <p>
+            这种反复按负梯度的某个倍数去微调函数输入的过程，就叫梯度下降。它是收敛到代价函数某个局部最小值的一种办法，局部最小值就是图上的一个谷。
+        </p>
+        <p>
+            他说他一直展示两个输入的函数图，是因为 13,000 维输入空间里的微调很难想象。不过有一种不靠空间的理解方式，下一节讲。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 换个方式读梯度：哪个改动更划算</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=678s" target="_blank">0:11:18</a>–0:12:19 · More on gradient vectors</em></p>
+        <p>
+            负梯度的每个分量告诉我们两件事。符号告诉我们输入向量里对应的那个分量该往上调还是往下调。更要紧的是，所有分量的相对大小告诉你哪些改动更重要。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/gradient-explained.jpg" alt="梯度分量的含义" style="max-width:100%"><figcaption>图：负梯度每个分量的符号表示上调还是下调，大小表示这个改动有多重要（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            在这个网络里，调整某个权重对代价函数的影响，可能比调整另一个权重大得多。有些连接对训练数据就是更要紧。所以可以这样理解这个巨大代价函数的梯度：它编码了每个权重和偏置的相对重要性，也就是哪个改动最“划算”（他的原话是 bang for your buck）。他说这其实只是理解“方向”的另一种方式。文字版配了一张图，假设网络应把输入认成 3，说明有些权重对代价的影响更大。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/weight-importance.jpg" alt="有些权重影响更大" style="max-width:100%"><figcaption>图：有些权重对代价的影响比别的更大（引自 3blue1brown.com）</figcaption></figure>
+        <h3>一个两变量的例子：梯度是 (3, 1)</h3>
+        <p>
+            他换了个更简单的例子：一个有两个输入变量的函数，在某一点算出梯度是 $(3, 1)$。
+        </p>
+        $$\nabla f = \begin{bmatrix} 3 \\ 1 \end{bmatrix}$$
+        <p>
+            一种读法是：站在这个输入点上，沿这个方向走，函数增加得最快；把函数画在输入平面上方时，这个向量指的就是正上坡方向。另一种读法是：对第一个变量的改动，重要性是对第二个变量改动的 3 倍；至少在这个输入点附近，微调 x 的值要划算得多。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 三层复杂度的小结</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=739s" target="_blank">0:12:19</a>–0:13:01 · Gradient descent recap</em></p>
+        <p>
+            他把镜头拉远，总结到目前为止的内容，用的是一层叠一层的说法：
+        </p>
+        <table>
+            <tr><th>层</th><th>输入</th><th>输出</th><th>作用</th></tr>
+            <tr><td>网络本身</td><td>784 个像素值</td><td>10 个数</td><td>由所有加权和定义的函数</td></tr>
+            <tr><td>代价函数</td><td>13,000 个权重和偏置</td><td>1 个数</td><td>根据训练样本给出“有多烂”的单一度量</td></tr>
+            <tr><td>代价函数的梯度</td><td>13,000 个权重和偏置</td><td>13,000 个微调量</td><td>告诉我们对这些权重和偏置做哪些微调，代价变化最快；也可以读成哪些权重的改动最要紧</td></tr>
+        </table>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/gradient-descent/nudges-on-network.jpg" alt="负梯度对网络的微调" style="max-width:100%"><figcaption>图：负梯度告诉我们怎样改权重和偏置，能最有效地降低代价（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t07">
+        <h2>07. 训练好的网络到底在做什么</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=781s" target="_blank">0:13:01</a>–0:16:37 · Analyzing the network</em></p>
+        <h3>准确率：96%，调一调到 98%</h3>
+        <p>
+            那么，用随机权重和偏置初始化网络，再按梯度下降过程调整很多次，它在从没见过的图上表现如何？他描述的这个网络，两个隐藏层各 16 个神经元，主要是出于美观选的，表现还不错：能把大约 96% 的新图分类正确。他说看看它认错的一些例子，会觉得该对它宽容一点。
+        </p>
+        <p>
+            如果调一调隐藏层结构、做几处改动，可以提到 98%。他说这已经相当好了，虽然不是最好，比这个原味网络更复杂的方法当然能做得更好。但考虑到最初的任务有多难，任何网络能在没见过的图上做到这样，而我们从没具体告诉它该找什么图案，他觉得这件事挺了不起。
+        </p>
+        <h3>第二层的权重看起来几乎是随机的</h3>
+        <p>
+            他回到当初设计结构的那个期望：第二层捕捉小边，第三层把边拼成圈和长线，再拼成数字。网络真的在这样做吗？他的回答是：至少这个网络，完全不是。
+        </p>
+        <p>
+            上一集说过，第一层所有神经元连到第二层某个神经元的权重，可以画成一张像素图，表示这个第二层神经元在找什么图案。真把这一层的权重画出来，看不到这里那里一条条孤立的小边，看到的几乎是随机的样子，只在中间有一些很松散的图案。
+        </p>
+        <p>
+            他的解释是：在 13,000 维、大得无法想象的权重和偏置空间里，网络给自己找到了一个不错的局部最小值，虽然能把大多数图分对，却没有捕捉到我们期望的那些图案。
+        </p>
+        <h3>输入随机噪声，它也很笃定</h3>
+        <p>
+            为了把这一点讲透，他让大家看输入一张随机图像会怎样。如果系统够聪明，你可能期待它不确定，也许 10 个输出神经元都不怎么亮，或者都差不多亮。实际上它很笃定地给出一个荒谬的答案，好像它确信这团随机噪声是 5，和确信一张真正的 5 是 5 一样确信。
+        </p>
+        <p>
+            换个说法：这个网络就算能把数字认得挺好，也完全不知道怎么画数字。
+        </p>
+        <p>
+            他认为这很大程度上是因为训练设置太受限。他请观众站在网络的角度想：在它看来，整个宇宙只有清晰、不动、居中摆在一个小网格里的数字，而它的代价函数从没给过它任何动机，去做到除了“对自己的判断完全自信”以外的任何状态。
+        </p>
+        <h3>为什么还要这样讲</h3>
+        <p>
+            既然第二层神经元实际在做的是这样，你可能会问，他为什么用“捕捉边和图案”来引入这个网络，它根本不是这样做的。他的回答是：这不是终点，是起点。坦白说这是老技术，80 和 90 年代研究的那种；要理解更细致的现代变体，得先懂它；它也确实能解决一些有意思的问题。但越深挖隐藏层在做什么，它就显得越不聪明。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 怎样继续学</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=997s" target="_blank">0:16:37</a>–0:17:38 · Learning more（暂停思考的作业在章节前的 0:16:02 开始）</em></p>
+        <p>
+            他把焦点从“网络怎样学习”暂时转到“你怎样学习”：只有以某种方式主动投入，才能真正学到东西。他给观众留了一个很简单的作业：现在就暂停，认真想一会儿，如果想让这个系统更好地捕捉边和图案这类东西，你会对它、对它看图的方式做哪些改动。
+        </p>
+        <p>
+            更好的办法是读 Michael Nielsen 关于深度学习和神经网络的书。书里有这个例子的代码和数据，可以下载来玩，书会一步步讲代码在做什么。这本书免费公开，他请有收获的人和他一起给 Nielsen 捐款。描述里还推荐了 Chris Olah 的博客（他特别提到讲神经网络与拓扑的那篇）、Distill 上的文章、Welch Labs 的机器学习系列，以及 Goodfellow、Bengio、Courville 的《Deep Learning》一书。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. Lisha Li 谈网络是记忆还是学到了结构</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=1058s" target="_blank">0:17:38</a>–0:19:58 · Lisha Li interview</em></p>
+        <p>
+            最后几分钟他放了一段和 Lisha Li 的访谈（上一集结尾出现过，她的博士研究做深度学习）。在这段里，她讲了两篇最近的论文，研究一些更现代的图像识别网络到底在怎样学习。视频描述按顺序给出了她引用的三篇文章：<a href="https://arxiv.org/abs/1611.03530" target="_blank">arXiv 1611.03530</a>、<a href="https://arxiv.org/abs/1706.05394" target="_blank">arXiv 1706.05394</a>、<a href="https://arxiv.org/abs/1412.0233" target="_blank">arXiv 1412.0233</a>。
+        </p>
+        <h3>第一篇：打乱标签，网络照样能记住</h3>
+        <p>
+            他先交代对话背景：第一篇论文拿一个特别深、图像识别很强的神经网络，训练前把数据集的标签全部打乱，而不是用正确标注的数据集训练。测试准确率显然不会比随机好，因为标签都是随机的。但它在训练集上仍能达到和正确标注数据集一样的训练准确率。
+        </p>
+        <p>
+            也就是说，这个网络的几百万个权重足以把随机数据直接记下来。这就引出一个问题：最小化代价函数，到底对应图像里的某种结构，还是只是记忆？（字幕在这里有一处剪接，接上的是 Lisha 的半句话：“……把整个数据集的正确分类都记下来”。）
+        </p>
+        <h3>第二篇：结构化的数据更容易下降</h3>
+        <p>
+            Lisha 说，半年后在当年的 ICML 上，有一篇论文，不完全算反驳，但讨论了其中几个方面，意思是这些网络其实做的事比单纯记忆聪明一点。看准确率曲线：在随机标注的数据上训练时，曲线下降得很慢，几乎是线性的，你是在很费力地找那个对的权重的局部最小值。而在结构化、标签正确的数据集上训练时，开头会摸索一阵，然后很快降到那个准确率水平。所以某种意义上，更容易找到那个局部极值（字幕里她这里说的是 local maxima，前文一直是 minimum）。
+        </p>
+        <h3>第三篇：局部最小值质量相当</h3>
+        <p>
+            她说这还让人想起几年前的另一篇论文，那篇对网络层做了多得多的简化，但其中一个结论是：看优化地形（optimization landscape），这些网络倾向于学到的局部最小值，质量其实差不多。所以某种意义上，如果数据集是有结构的，应该能容易得多地找到它。
+        </p>
+        <p>
+            视频在 <a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=1198s" target="_blank">0:19:58</a> 之后是 Patreon 和 Amplify Partners 的致谢，略过。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一集值得记下的原话</h2>
+        <ul>
+            <li>“once you see how it works, it feels a lot less like some crazy sci-fi premise, and a lot more like a calculus exercise.”<br>一旦看懂它怎么做，就不太像疯狂的科幻设定，更像一道微积分练习。（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=164s" target="_blank">0:02:44</a>）</li>
+            <li>“The image you might have in mind here is a ball rolling down a hill.”<br>这里脑子里可以想象一个球滚下山坡。（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=371s" target="_blank">0:06:11</a>）</li>
+            <li>“what we mean when we talk about a network learning is that it's just minimizing a cost function.”<br>我们说网络在学习，意思就是它在最小化一个代价函数。（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=587s" target="_blank">0:09:47</a>）</li>
+            <li>“it encodes the relative importance of each weight and bias, that is, which of these changes is going to carry the most bang for your buck.”<br>它编码了每个权重和偏置的相对重要性，也就是哪个改动最划算。（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=645s" target="_blank">0:10:45</a>）</li>
+            <li>“Phrased differently, even if this network can recognize digits pretty well, it has no idea how to draw them.”<br>换个说法，这个网络就算能把数字认得挺好，也完全不知道怎么画数字。（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=909s" target="_blank">0:15:09</a>）</li>
+            <li>“the more you dig into what those hidden layers are really doing, the less intelligent it seems.”<br>越深挖那些隐藏层实际在做什么，它就显得越不聪明。（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=962s" target="_blank">0:16:02</a>）</li>
+        </ul>
+    </section>
+
+    <section id="how">
+        <h2>他是怎么讲的</h2>
+        <h3>讲解顺序</h3>
+        <ol>
+            <li><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=4s" target="_blank">0:00:04</a> 开头先说本集两个目标（梯度下降；看网络实际表现），再用一分多钟回顾上一集的结构和“边 → 图案 → 数字”的期望。这个期望是为本集后半段的揭晓埋的伏笔。</li>
+            <li><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=112s" target="_blank">0:01:52</a> 交代“学习”要什么：带标签的训练数据，加上没见过的测试数据。引出 MNIST。</li>
+            <li><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=164s" target="_blank">0:02:44</a> 先给结论式的框架：学习“更像一道微积分练习”，就是找某个函数的最小值。后面所有内容都在兑现这句话。</li>
+            <li><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=164s" target="_blank">0:02:44</a> 随机初始化，输入一张 3，输出一团乱。用这个失败的具体输出引出代价函数。</li>
+            <li><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=216s" target="_blank">0:03:36</a> 先定义单个样本的代价（平方差之和），再取所有样本的平均，然后指出代价函数的输入输出：输入 13,000 个参数，输出 1 个数。</li>
+            <li><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=316s" target="_blank">0:05:16</a> 问“怎样告诉它往哪改”，然后把 13,000 个输入降到 1 个输入：看斜率，左右挪，球滚下山，局部最小值，步长与斜率成正比。</li>
+            <li><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=371s" target="_blank">0:06:11</a> 升到 2 个输入：曲面、下坡方向、梯度、负梯度、梯度的长度。</li>
+            <li><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=474s" target="_blank">0:07:54</a> 再升到 13,000 个输入：把所有参数排成一个列向量，负梯度是这个空间里的一个方向。说明怎样高效算梯度叫反向传播，留到下一集。</li>
+            <li><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=587s" target="_blank">0:09:47</a> 给出本集最想让人记住的一句：学习就是最小化代价函数。顺带回答上一集的一个遗留问题：为什么人工神经元的激活值是连续的。</li>
+            <li><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=645s" target="_blank">0:10:45</a> 因为 13,000 维没法想象，换一种不靠空间的读法：梯度分量的符号和相对大小；用梯度 (3, 1) 的小例子落地。</li>
+            <li><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=697s" target="_blank">0:11:37</a> 小结三层复杂度：网络、代价函数、梯度。</li>
+            <li><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=750s" target="_blank">0:12:30</a> 报结果：96%，调整后 98%。</li>
+            <li><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=857s" target="_blank">0:14:17</a> 揭晓开头的伏笔：第二层权重几乎是随机的，网络没学到边；再用随机噪声输入加强这个结论；解释原因（训练设置太受限）；说明为什么仍要先学这个“老技术”。</li>
+            <li><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=962s" target="_blank">0:16:02</a> 把话题转到观众怎样学：留一个暂停思考的问题，推荐 Nielsen 的书。</li>
+            <li><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=1076s" target="_blank">0:17:56</a> 用 Lisha Li 的访谈收尾，把本集的局部最小值、代价函数接到当时的研究问题：网络是在记忆，还是学到了结构。</li>
+        </ol>
+
+        <h3>画面上是什么</h3>
+        <p>以下依据旁白和文字版配图整理，旁白没交代清楚的画面不做推测。</p>
+        <table>
+            <tr><th>时间</th><th>画面</th><th>这个画面在讲什么</th></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=4s" target="_blank">0:00:04</a></td><td>28×28 的手写数字和 784 个输入神经元；激活值逐层传到 10 个输出（文字版配图 pixels-as-input、recap-propagation、layer-hypothesis）</td><td>回顾上一集的结构</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=112s" target="_blank">0:01:52</a></td><td>一批带标签的手写数字图；训练集和测试集分开（配图 training-data、training-vs-testing）</td><td>学习的原料，以及怎样检验</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=164s" target="_blank">0:02:44</a></td><td>随机初始化的网络输入一张 3，输出层“looks like a mess”（配图 random-trash）</td><td>用一个失败的输出引出代价</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=216s" target="_blank">0:03:36</a></td><td>输出激活值和期望值逐项相减、平方、相加（配图 cost-of-difference、cost-calculation）</td><td>单个样本的代价怎么算</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=267s" target="_blank">0:04:27</a></td><td>网络是“784 进、10 出”的函数；代价函数是“13,000 个参数进、1 个数出”的函数（配图 neural-network-function、cost-function）</td><td>代价函数是叠在网络上的一层</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=316s" target="_blank">0:05:16</a></td><td>一个单输入函数的曲线；按斜率左右挪（配图 single-input-cost、infeasible-minimum、follow-slope）</td><td>把 13,000 维问题降到一维</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=371s" target="_blank">0:06:11</a></td><td>球滚下山坡，从不同起点落进不同的谷；步长随斜率变小（文字版动画 balls-rolling-down、proportional-to-slope）</td><td>局部最小值，以及步长和斜率成正比</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=421s" target="_blank">0:07:01</a></td><td>xy 平面上方的一张代价曲面，球沿下坡方向滚；梯度和负梯度的箭头（配图 2-input-cost、negative-gradient、gradient-descent）</td><td>梯度是最陡上坡方向，负梯度是下坡方向</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=474s" target="_blank">0:07:54</a></td><td>13,000 个权重和偏置排成一个巨大的列向量，旁边是同样长的负梯度向量（配图 weights-and-gradient）</td><td>同一个想法推广到真实的网络</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=587s" target="_blank">0:09:47</a></td><td>他说自己“still showing the picture of a function with two inputs”，即仍用两输入曲面作配图</td><td>承认高维没法画</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=645s" target="_blank">0:10:45</a></td><td>负梯度各分量的符号和大小，对应网络里不同连接的重要性（配图 gradient-explained、weight-importance、nudges-on-network）</td><td>不靠空间的读法</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=697s" target="_blank">0:11:37</a></td><td>梯度 (3, 1) 画成输入平面上的一个向量，指向正上坡</td><td>两种读法对照</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=806s" target="_blank">0:13:26</a></td><td>网络认错的一些例子（他说看了会想对它宽容点）</td><td>96% 准确率的另一面</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=857s" target="_blank">0:14:17</a></td><td>第一层到第二层的权重画成像素图，看起来几乎随机，中间有些松散图案</td><td>揭晓：没有学到小边</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=909s" target="_blank">0:15:09</a></td><td>输入一张随机噪声图，网络很笃定地输出 5</td><td>网络并不“懂”数字</td></tr>
+        </table>
+
+        <h3>他简化了什么、推后了什么</h3>
+        <ul>
+            <li>降维：“rather than struggling to imagine a function with 13,000 inputs, just imagine a simple function that has one number as an input and one number as an output”（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=316s" target="_blank">0:05:16</a>）。一维讲斜率，二维讲梯度，再一句话推到 13,000 维。</li>
+            <li>梯度怎么算不讲：“all that matters for you and me right now is that in principle there exists a way to compute this vector”，“You'll be okay if that's all you know”（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=474s" target="_blank">0:07:54</a>）。多元微积分交给他在 Khan Academy 的内容。</li>
+            <li>高效算梯度的反向传播明确推到下一集（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=535s" target="_blank">0:08:55</a>）。</li>
+            <li>配图一直停在两输入曲面上，他直说是因为 13,000 维的微调“a little hard to wrap your mind around”（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=587s" target="_blank">0:09:47</a>）。</li>
+            <li>学习率 $\eta$ 视频里没提，只在文字版出现；视频里只说“步长与斜率成正比”“走一小步”。</li>
+            <li>代价函数只讲了平方差这一种，没有说别的选择。</li>
+            <li>网络结构本身被定位为“not meant to be our end goal, but instead a starting point”，是“old technology, the kind researched in the 80s and 90s”（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=962s" target="_blank">0:16:02</a>）。</li>
+        </ul>
+
+        <h3>数字怎么用</h3>
+        <ul>
+            <li>13,000 在全集反复出现，充当“这个函数有多大”的提醒：调整 13,000 个权重和偏置，代价函数有 13,000 个输入，13,000 维空间，13,000 个数排成列向量。文字版统一写成精确的 13,002。</li>
+            <li>维度按 1 → 2 → 13,000 跳，前两步是能画出来的，最后一步只用文字说“same basic idea”。</li>
+            <li>用一个两分量的小向量 (3, 1) 讲“相对重要性”：第一个变量的改动重要性是第二个的 3 倍（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=697s" target="_blank">0:11:37</a>）。</li>
+            <li>结果用两个百分比：96%，调整后 98%（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=750s" target="_blank">0:12:30</a>）。</li>
+            <li>代价函数的期望输出是具体的 0 和 1：“0 for most neurons, but 1 for this neuron”。</li>
+            <li>数据规模只说“tens of thousands”，Lisha 段里网络规模说“millions of weights”，没有给精确数。</li>
+        </ul>
+
+        <h3>直觉层和数学层</h3>
+        <ul>
+            <li>代价函数先用口语讲（“no, bad computer”“what you gave me is utter trash”），再说“To say that a little more mathematically”，给出平方差之和。口语和数学之间有一句明确的过渡语。</li>
+            <li>梯度这部分他把观众分成两组：熟悉多元微积分的人会认出“梯度给出最陡上升方向”；不熟悉的人只需知道这个向量存在、能算。数学层对后者是可选的。</li>
+            <li>全集几乎没有公式出现在旁白里，所有计算都用“nudge”“step downhill”“ball rolling”这类动作描述。文字版才补了 $\nabla C$、$-\eta\nabla C$ 这些记号。</li>
+            <li>对梯度给了两套直觉：空间的（下坡方向、球滚下山）和非空间的（每个参数的改动有多划算）。第二套是专门为没法想象的高维准备的，他说“This really is just another way of thinking about direction”。</li>
+            <li>反向传播的数学留到后面，他预告下一集也会先讲直觉，“beyond the pile of relevant calculus and formulas”（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=535s" target="_blank">0:08:55</a>）。</li>
+        </ul>
+
+        <h3>其他做法</h3>
+        <ul>
+            <li>同一种句式串起三个对象：网络是一个函数，代价函数是“a layer of complexity on top of that”，梯度是“one more layer of complexity still”（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=267s" target="_blank">0:04:27</a>、<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=750s" target="_blank">0:12:30</a>）。</li>
+            <li>上一集留下的期望（边和图案）在本集被他自己推翻，回顾时先重提，后半段再揭晓“not at all”。上一集的另一个说法，激活值为什么在 0 到 1 之间连续取值，在本集用“代价函数要平滑”给了理由。</li>
+            <li>他用拟人的说法讲代价：“how bad the computer should feel”；讲随机噪声时请观众“put yourself in the network's shoes”（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=909s" target="_blank">0:15:09</a>）。</li>
+            <li>他直接给观众留作业：暂停，想想怎样改系统才能让它更好地捕捉边和图案（<a href="https://www.youtube.com/watch?v=IHZwWFHWa-w&t=962s" target="_blank">0:16:02</a>）。</li>
+            <li>他在讲完方法后立刻讲方法的局限：能分对 96%，却对随机噪声很笃定、不会画数字，并解释原因来自训练设置。</li>
+            <li>结尾由嘉宾把本集概念（局部最小值、代价函数、训练准确率）接到当时的研究问题上，他自己不做总结。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>3Blue1Brown · Gradient descent, how neural networks learn | Deep Learning Chapter 2 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

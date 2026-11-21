@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>注意力机制 | 3Blue1Brown 深度学习系列笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+    <style>
+        table { border-collapse: collapse; width: 100%; font-size: 0.9em; margin: 1em 0; }
+        th, td { border-bottom: 1px solid #ccc; padding: 0.35em 0.5em; text-align: left; vertical-align: top; }
+    </style>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="06_Transformer与词嵌入.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">3Blue1Brown 深度学习系列目录</a> · 07</span>
+    <span><a href="08_MLP怎样存储事实.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 6 章 · Transformer 里的注意力机制，一步一步讲</h1>
+        <p class="subtitle">用“形容词更新名词”这个编出来的例子，一步步走过 query、key、点积网格、softmax、掩码、value、多头和输出矩阵，并按 GPT-3 的尺寸算出注意力部分的参数量</p>
+        <div class="author-meta">
+            主讲：Grant Sanderson（3Blue1Brown）· 发布日期：2024 年 4 月 7 日 · 时长：26 分 9 秒 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：视频（3Blue1Brown YouTube 公开，本文依据视频字幕整理）<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc" target="_blank">Attention in transformers, step-by-step | Deep Learning Chapter 6</a>，2024 年 4 月 7 日；文字版课程 <a href="https://www.3blue1brown.com/lessons/attention" target="_blank">3blue1brown.com/lessons/attention</a>（文字版由 Justin Sun 改写；数字、公式和配图参照文字版；中文转述和讲解，不是逐字翻译；图片引自原网站，版权归原作者）
+        </div>
+    </header>
+    <section>
+        <h2>这一集的内容</h2>
+        <p>
+            上一集（第 5 章）从整体上走了一遍 Transformer：文本切成 token，每个 token 查表得到一个嵌入向量，向量流过注意力块和 MLP 块，最后用序列里最后一个向量预测下一个 token。那一集还开了一个“记分板”，按 GPT-3 的尺寸一项项累计参数。这一集只拆其中一个零件：注意力（attention）。它来自 2017 年的论文 <em>Attention is All You Need</em>。
+        </p>
+        <p>
+            这一集要回答的问题是：一个词的向量，怎样根据上下文里的其他词被改写？他先举几个“同一个词在不同上下文里意思不同”的例子，说明注意力要做到什么；再用一句话 “a fluffy blue creature roamed the verdant forest” 和一个他自己编的任务（让形容词去更新名词），把单个注意力头里的每一次矩阵乘法走一遍；接着讲训练时为什么要加掩码、为什么上下文长度是瓶颈、value 怎样把信息加回嵌入；然后按 GPT-3 的数字算出一个头、一个块、全部 96 层的注意力参数；最后讲多头、交叉注意力、论文里“输出矩阵”的写法，以及注意力为什么适合大规模并行。读完能说清楚 Q、K、V 各自是什么形状、做什么用，也能看懂论文里那行公式。这一集没有赞助广告；片尾推荐的其他频道和视频只简单记下。
+        </p>
+        <ol>
+            <li><a href="#t01">回顾：token 和嵌入向量</a> · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">几个例子：注意力要做到什么</a> · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=99s" target="_blank">0:01:39</a></li>
+            <li><a href="#t03">单个注意力头的设定和 query</a> · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=269s" target="_blank">0:04:29</a></li>
+            <li><a href="#t04">key、点积网格、softmax 和论文里的公式</a> · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=475s" target="_blank">0:07:55</a></li>
+            <li><a href="#t05">掩码：不让后面的词影响前面的词</a> · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=668s" target="_blank">0:11:08</a></li>
+            <li><a href="#t06">上下文长度为什么是瓶颈</a> · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=762s" target="_blank">0:12:42</a></li>
+            <li><a href="#t07">value：把信息真正加进嵌入</a> · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=790s" target="_blank">0:13:10</a></li>
+            <li><a href="#t08">数参数：一个注意力头有多少参数</a> · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=944s" target="_blank">0:15:44</a></li>
+            <li><a href="#t09">旁注：交叉注意力</a> · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1101s" target="_blank">0:18:21</a></li>
+            <li><a href="#t10">多头注意力</a> · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1159s" target="_blank">0:19:19</a></li>
+            <li><a href="#t11">输出矩阵：论文里的另一种写法</a> · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1336s" target="_blank">0:22:16</a></li>
+            <li><a href="#t12">往深处走：多层叠加和全部注意力参数</a> · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1399s" target="_blank">0:23:19</a></li>
+            <li><a href="#t13">结尾：并行和延伸资料</a> · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1494s" target="_blank">0:24:54</a></li>
+            <li><a href="#how">他是怎么讲的</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 回顾：token 和嵌入向量</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=0s" target="_blank">0:00:00</a>–0:01:39 · Recap on embeddings</em></p>
+        <h3>模型的任务</h3>
+        <p>
+            他先交代这一集默认你记得的背景。这个系列研究的模型只做一件事：读入一段文本，预测下一个词是什么。输入文本先被切成小块，叫 token（词元，模型处理文本的最小单位）。token 常常是一个词或词的一部分。文字版补充说，这一步叫分词（tokenization），在文本进入 Transformer 之前就做完了。
+        </p>
+        <p>
+            为了让例子好想，他说这一集假装 token 永远就是一个完整的词。这是他明说的简化。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/TokenConvenientLie.jpg" alt="token 假装成完整的词" style="max-width:100%"><figcaption>图：为了方便，这一集把 token 当成完整的词（引自 3blue1brown.com）</figcaption></figure>
+        <h3>嵌入和方向</h3>
+        <p>
+            Transformer 的第一步，是给每个 token 配一个高维向量，叫它的嵌入（embedding，一串数字，代表这个词在一个很高维空间里的位置）。他说这一集最想让你记住的一点是：在所有可能嵌入构成的高维空间里，方向可以对应语义。
+        </p>
+        <p>
+            上一集的例子是性别方向：从一个阳性名词的嵌入出发，加上某一步固定的位移，就能到对应阴性名词的嵌入。他说这只是一个例子，可以想象这个空间里还有很多别的方向，各自对应词义的某个方面。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/SemanticMeaning.jpg" alt="高维空间里的方向对应语义" style="max-width:100%"><figcaption>图：嵌入空间里的方向可以对应词义（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            Transformer 的目标，是一步步调整这些嵌入，让它们除了编码单个词，还装进更丰富的、带上下文的含义。说完这句，他提前打招呼：很多人觉得注意力机制很难懂，花点时间才消化也不用担心。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/richerContext.jpg" alt="嵌入逐步装进上下文含义" style="max-width:100%"><figcaption>图：Transformer 逐步调整嵌入，让它带上上下文的含义（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t02">
+        <h2>02. 几个例子：注意力要做到什么</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=99s" target="_blank">0:01:39</a>–0:04:29 · Motivating examples</em></p>
+        <p>
+            他说，在进入计算细节和一堆矩阵乘法之前，先想几个例子，看看我们希望注意力带来什么行为。
+        </p>
+        <h3>mole 的三种意思</h3>
+        <p>
+            三个短语：American shrew mole（美洲鼩鼹，一种动物）、one mole of carbon dioxide（一摩尔二氧化碳）、take a biopsy of the mole（给这颗痣做活检）。人一看就知道 mole 在三处意思不同。但 Transformer 第一步结束时，三处 mole 的向量完全一样，因为最初的 token 嵌入相当于一张查找表，查的时候不看上下文。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/MoleExample.jpg" alt="三个句子里 mole 的初始嵌入相同" style="max-width:100%"><figcaption>图：三个短语里的 mole，初始嵌入是同一个向量（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            只有到了下一步（注意力块），周围词的嵌入才有机会把信息传进 mole 的嵌入。他给的图景是：嵌入空间里有几个不同方向，分别编码 mole 的几种意思；一个训练好的注意力块会根据上下文算出“该给这个通用嵌入加上什么”，把它推向其中一个具体方向。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/added.jpg" alt="注意力块算出要加到通用嵌入上的量" style="max-width:100%"><figcaption>图：注意力块算出一个增量，把通用的 mole 推向具体含义的方向（引自 3blue1brown.com）</figcaption></figure>
+        <h3>tower 的例子</h3>
+        <p>
+            再看 tower。它的嵌入大概是一个很笼统的方向，和许多又高又大的名词相关。如果前面紧挨着 Eiffel，就希望注意力把这个向量更新到更具体地编码“埃菲尔铁塔”的方向，可能和 Paris、France、钢铁做的东西这些向量相关（视频里说 steel，文字版写作 iron）。如果前面还有 miniature（微缩的），向量要再更新一次，让它不再和“高大的东西”相关。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/TowerExample.jpg" alt="tower 被 Eiffel 和 miniature 逐步更新" style="max-width:100%"><figcaption>图：tower 先被 Eiffel 更新，再被 miniature 更新（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他接着把话说宽：注意力块除了细化一个词的意思，还让模型能把一个嵌入里编码的信息搬到另一个嵌入里，距离可以很远，搬的信息也可以比一个词丰富得多。
+        </p>
+        <h3>推理小说的最后一个词</h3>
+        <p>
+            上一集讲过，向量流过整个网络（包括很多个注意力块）之后，预测下一个 token 的计算只用到序列里的最后一个向量。设想输入是一整本推理小说，一直到快结尾的一句 “therefore the murderer was”。要准确预测下一个词，最后那个向量一开始只是 was 这个词的嵌入，经过所有注意力块之后，它得编码整个上下文窗口里所有和“预测下一个词”有关的信息。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/AllContext.jpg" alt="最后一个向量要装下整个上下文的相关信息" style="max-width:100%"><figcaption>图：“the murderer was” 里的 was，最后要装下整本书里相关的信息（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            说完这个，他说要走一遍计算，还是换一个简单得多的例子。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 单个注意力头的设定和 query</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=269s" target="_blank">0:04:29</a>–0:07:55 · The attention pattern（前半）</em></p>
+        <h3>例句和假想任务</h3>
+        <p>
+            例句是 “a fluffy blue creature roamed the verdant forest”（一只毛茸茸的蓝色生物在青翠的森林里游荡）。他先假定，现在唯一关心的更新是：形容词去调整它们对应名词的意思。fluffy、blue 修饰 creature，verdant 修饰 forest。
+        </p>
+        <p>
+            他说接下来讲的是单个注意力头（a single head of attention），之后会看到一个注意力块由很多个头并行组成。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/SimplerExample.jpg" alt="例句里形容词更新名词" style="max-width:100%"><figcaption>图：假想任务，让形容词更新它们修饰的名词（引自 3blue1brown.com）</figcaption></figure>
+        <h3>初始嵌入里还有位置</h3>
+        <p>
+            每个词的初始嵌入是一个高维向量，只编码这个词本身，不含上下文。他随即改口：这句话不完全对，嵌入还编码了词的位置。位置具体怎样编码还有很多可讲，但现在只需知道，这个向量里的数字足以告诉你这个词是什么、在上下文里的哪个位置。他把这些嵌入记作 $\vec{E}$（视频字幕写作 e）。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/Embeddings.jpg" alt="每个词的嵌入记作 E" style="max-width:100%"><figcaption>图：每个词的初始嵌入记作 E（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            目标是：经过一系列计算，得到一组新的、更精细的嵌入 $\vec{E}'$，其中名词的嵌入已经吸收了它们形容词的含义。按“深度学习的玩法”，大部分计算都应该是矩阵乘向量，矩阵里装满可调的权重（weight，模型从数据里学出来的数字）。
+        </p>
+        <p>
+            他特意说明：形容词更新名词这个例子是他编的，只用来展示一个注意力头可能做的那类事。和深度学习里很多东西一样，真实行为难解读得多，因为它来自调整海量参数去最小化某个代价函数（cost function，衡量预测有多差的数）。之所以要编一个例子，是因为走过一个个装满参数的矩阵时，心里有个具体的“它可能在干什么”会有帮助。
+        </p>
+        <h3>query：名词在问“我前面有形容词吗”</h3>
+        <p>
+            第一步，可以想象每个名词（比如 creature）都在问：“嘿，我前面有没有形容词？”而 fluffy 和 blue 能回答：“有，我是形容词，我就在那个位置。”
+        </p>
+        <p>
+            这个问题被编码成另一个向量，叫这个词的 query（查询向量）。query 的维度比嵌入小得多，他举的数是 128。计算 query 就是拿一个矩阵 $W_Q$ 乘以嵌入：
+        </p>
+        $$\vec{Q}_i = W_Q \vec{E}_i$$
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/W_Q.jpg" alt="W_Q 乘以嵌入得到 query" style="max-width:100%"><figcaption>图：query 矩阵 W_Q 乘以嵌入得到 query 向量（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他在这里定了一个画图约定：矩阵放在一个箭头旁边，表示用这个矩阵乘以箭头起点的向量，得到箭头终点的向量。$W_Q$ 要乘以上下文里的每一个嵌入，每个 token 得到一个 query 向量。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/Q_I.jpg" alt="每个 token 一个 query" style="max-width:100%"><figcaption>图：W_Q 作用在每个嵌入上，每个 token 得到一个 query（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            $W_Q$ 的数字是模型参数，真实行为由数据学出，在一个具体注意力头里它做了什么很难解读。按假想的例子，我们希望它把名词的嵌入映射到这个较小 query 空间里的某个方向，这个方向（以某种方式）编码“在前面的位置找形容词”这个意思。至于它对非名词的嵌入做什么，他说：谁知道呢，也许同时在完成别的目标。现在只盯着名词。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/QuerySpace.jpg" alt="名词被映射到 query 空间的某个方向" style="max-width:100%"><figcaption>图：W_Q 把名词映射到 query 空间里“找前面的形容词”的方向（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t04">
+        <h2>04. key、点积网格、softmax 和论文里的公式</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=475s" target="_blank">0:07:55</a>–0:11:08 · The attention pattern（后半）</em></p>
+        <h3>key：可能的回答</h3>
+        <p>
+            同时还有第二个矩阵，叫 key 矩阵 $W_K$，也乘以每一个嵌入，得到第二串向量，叫 key（键向量）。概念上，key 是对 query 的潜在回答。$W_K$ 同样装满可调参数，同样把嵌入映射到那个较小的空间（和 query 同一个空间）。
+        </p>
+        $$\vec{K}_i = W_K \vec{E}_i$$
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/Keys.jpg" alt="W_K 乘以嵌入得到 key" style="max-width:100%"><figcaption>图：key 矩阵 W_K 乘以每个嵌入，得到一串 key（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            key 和 query 方向接近时，就算“匹配”。在例子里，可以想象 $W_K$ 把 fluffy、blue 这样的形容词映射到和 creature 的 query 方向很接近的向量。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/QueryKey.jpg" alt="fluffy 的 key 和 creature 的 query 对齐" style="max-width:100%"><figcaption>图：fluffy 的 key 和 creature 的 query 方向接近（引自 3blue1brown.com）</figcaption></figure>
+        <h3>点积网格</h3>
+        <p>
+            怎样衡量每个 key 和每个 query 有多匹配？对每一对 key 和 query 算点积（dot product，两个向量对应位置相乘再求和，方向越一致结果越大）。他喜欢把结果画成一个点阵网格：点越大，点积越大，表示那一对 key 和 query 越对齐。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/DotProduct.jpg" alt="key-query 点积画成点阵" style="max-width:100%"><figcaption>图：每对 key 和 query 的点积，画成大小不一的点（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            按形容词和名词的例子，如果 fluffy 和 blue 的 key 真的和 creature 的 query 对齐，这两个格子里就是很大的正数。用行话说，fluffy 和 blue 的嵌入 attend to（注意到）creature 的嵌入。反过来，像 the 这种词的 key 和 creature 的 query 点积会很小或为负，说明两者无关。
+        </p>
+        <p>
+            这样得到一个网格，里面的数可以是从 $-\infty$ 到 $\infty$ 的任意实数，给出“每个词对更新另一个词有多相关”的分数。按图里的摆法，key 排在左边（行），query 排在上面（列）。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/Score.jpg" alt="点积分数网格" style="max-width:100%"><figcaption>图：点积分数网格，数值范围是全体实数（引自 3blue1brown.com）</figcaption></figure>
+        <h3>softmax：把每一列变成概率分布</h3>
+        <p>
+            接下来要沿每一列做加权和，权重就是相关度。所以他希望每列的数在 0 到 1 之间，并且每列加起来等于 1，像一个概率分布。上一集讲过怎么做：对每一列做 softmax（一个把任意一串实数变成“全为正、总和为 1”的函数，大的数分到大的份额）。上一集给过它的形式：
+        </p>
+        $$\mathrm{softmax}(x)_i = \frac{e^{x_i}}{\sum_j e^{x_j}}$$
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/SoftMax.jpg" alt="对每列做 softmax" style="max-width:100%"><figcaption>图：沿每一列做 softmax（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            把所有列 softmax 之后的值填回网格，这时每一列就可以看成一组权重，表示左边每个词和上方那个词有多相关。这个网格叫注意力模式（attention pattern）。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/Normalized.jpg" alt="归一化后的注意力模式" style="max-width:100%"><figcaption>图：softmax 之后的网格，就是注意力模式（引自 3blue1brown.com）</figcaption></figure>
+        <h3>论文里那行公式</h3>
+        <p>
+            他接着把原论文里的紧凑写法放出来。按他这一集的约定（向量是矩阵的列），可以写成：
+        </p>
+        $$\mathrm{Attention}(Q, K, V) = V\,\mathrm{softmax}\!\left(\frac{K^{T} Q}{\sqrt{d_k}}\right)$$
+        <p>
+            这里 $Q$ 和 $K$ 分别是全部 query 向量和全部 key 向量排成的数组，也就是嵌入乘以 $W_Q$、$W_K$ 得到的那些小向量。分子 $K^T Q$ 是“所有 key-query 对的点积网格”的紧凑写法。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/Paper.jpg" alt="原论文中的注意力公式" style="max-width:100%"><figcaption>图：原 Transformer 论文里的注意力公式（引自 3blue1brown.com）</figcaption></figure>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/Compact.jpg" alt="K 转置乘 Q 就是点积网格" style="max-width:100%"><figcaption>图：分子里的矩阵乘积就是整个点积网格（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            文字版加了一段记号提醒：论文的约定和这里相反，论文把 key 和 query 向量放在矩阵 $K$、$Q$ 的行里，所以写成
+        </p>
+        $$\mathrm{Attention}(Q, K, V) = \mathrm{softmax}\!\left(\frac{Q K^{T}}{\sqrt{d_k}}\right) V$$
+        <p>
+            这意味着论文的网格里 query 在左、key 在上，整张图沿对角线翻了过来。
+        </p>
+        <p>
+            他补了一个前面没提的技术细节：为了数值稳定，把所有点积除以 key-query 空间维度的平方根，也就是分母里的 $\sqrt{d_k}$（$d_k$ 在这里是 128）。包在外面的 softmax 要理解成逐列做。至于式子里的 $V$，他说马上就讲。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/SoftMaxEq.jpg" alt="除以根号 d_k 并逐列 softmax" style="max-width:100%"><figcaption>图：除以 √d_k，再逐列做 softmax（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t05">
+        <h2>05. 掩码：不让后面的词影响前面的词</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=668s" target="_blank">0:11:08</a>–0:12:42 · Masking</em></p>
+        <h3>训练时一段文本同时预测很多个下一个词</h3>
+        <p>
+            讲 $V$ 之前，还有一个他之前跳过的技术细节。训练时，把模型跑在一段文本上，根据它给真实下一个词分配的概率高低，奖励或惩罚，略微调整所有权重。结果发现，让模型同时预测这段文本里每个前缀后面的下一个 token，会让训练效率高很多。拿例句来说，它也同时在预测 creature 后面跟什么、the 后面跟什么。这样一个训练样本实际上当作很多个样本用。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/Prediction.jpg" alt="同时预测每个前缀后的下一个词" style="max-width:100%"><figcaption>图：训练时对每个前缀都预测下一个 token（引自 3blue1brown.com）</figcaption></figure>
+        <h3>把“后面影响前面”的格子压成 0</h3>
+        <p>
+            对注意力模式来说，这意味着永远不能让后面的词影响前面的词，否则后面的词会把“下一个词是什么”的答案泄露出来。所以网格里代表“后面的 token 影响前面的 token”的那些格子，都要强制变成 0。
+        </p>
+        <p>
+            最直接的想法是直接把它们设成 0，但那样每一列加起来就不等于 1 了，不再归一化。常用做法是在 softmax 之前把这些格子设成负无穷。softmax 之后它们都变成 0，列仍然归一化。因为 $e^{-\infty} = 0$，这些位置在分子和分母里都不贡献。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/Masking.jpg" alt="掩码：softmax 前设为负无穷" style="max-width:100%"><figcaption>图：掩码，在 softmax 之前把“后影响前”的格子设成负无穷（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            这个过程叫掩码（masking）。他说有些版本的注意力不加掩码，但在这一集的 GPT 例子里总是加。掩码在训练阶段更要紧，模型当聊天机器人运行时相对没那么要紧，但 GPT 里一直都用它来阻止后面的 token 影响前面的 token。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 上下文长度为什么是瓶颈</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=762s" target="_blank">0:12:42</a>–0:13:10 · Context size</em></p>
+        <p>
+            这一段很短。注意力模式的大小等于上下文长度（context size，模型一次能看的 token 数）的平方：每个 token 一行、一列。所以上下文长度会成为大语言模型的一个大瓶颈，把它做大并不简单。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/square.jpg" alt="注意力模式大小是上下文长度的平方" style="max-width:100%"><figcaption>图：注意力模式的大小是上下文长度的平方（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他提到，为了更长的上下文窗口，近几年出现了一些注意力机制的变体，目的是让上下文更容易扩展。但他说这里只讲基础，没有展开。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. value：把信息真正加进嵌入</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=790s" target="_blank">0:13:10</a>–0:15:44 · Values</em></p>
+        <h3>value 矩阵和 value 向量</h3>
+        <p>
+            算出注意力模式，模型就知道哪些词和哪些词相关。下一步要真正更新嵌入，让词把信息传给与它相关的词。比如希望 fluffy 的嵌入让 creature 发生变化，把它移到这个 12,000 多维（GPT-3 是 12,288 维）嵌入空间里更具体地编码“毛茸茸的生物”的地方。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/Update.jpg" alt="fluffy 让 creature 的嵌入移动" style="max-width:100%"><figcaption>图：fluffy 的信息把 creature 推向“毛茸茸的生物”（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他先讲最直接的做法，并提前说明多头注意力里会对它稍作修改。最直接的做法是用第三个矩阵，叫 value 矩阵 $W_V$，乘以第一个词（比如 fluffy）的嵌入，得到的叫 value 向量（值向量）。它是要加到第二个词（这里是 creature）嵌入上的东西，所以 value 向量和嵌入住在同一个很高维的空间里。
+        </p>
+        $$\vec{V}_i = W_V \vec{E}_i$$
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/W_V.jpg" alt="value 矩阵乘以嵌入" style="max-width:100%"><figcaption>图：value 矩阵 W_V 乘以 fluffy 的嵌入得到 value 向量（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他给 value 矩阵的解读是：用它乘一个词的嵌入，相当于在问“如果这个词和调整另一个词的意思有关，那个词的嵌入到底该加上什么，才能反映这一点？”
+        </p>
+        <h3>按注意力模式加权求和</h3>
+        <p>
+            回到网格图。算出注意力模式之后，key 和 query 就用完了，可以放到一边。用 value 矩阵乘以每一个嵌入，得到一串 value 向量，可以把它们看成和对应的 key 排在一起（在左边）。对网格的每一列，把每个 value 向量乘以这一列里对应的权重。比如在 creature 那一列下面，fluffy 和 blue 的 value 向量占很大比例，其余 value 向量被压成 0 或接近 0。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/ValueVector.jpg" alt="value 向量按列加权" style="max-width:100%"><figcaption>图：每一列里，value 向量乘以该列的权重（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            最后，把这一列里所有缩放后的 value 加起来，得到一个想要加上去的变化量，记作 $\Delta \vec{E}$，再加到原来的嵌入上。原来这一列编码的是不带上下文的 creature，加完之后希望得到一个更精细的向量 $\vec{E}'$，编码“一只毛茸茸的蓝色生物”这种更带上下文的意思。写成式子，第 $j$ 列（第 $j$ 个词）是：
+        </p>
+        $$\Delta \vec{E}_j = \sum_i A_{ij}\, \vec{V}_i, \qquad \vec{E}'_j = \vec{E}_j + \Delta \vec{E}_j$$
+        <p>
+            其中 $A_{ij}$ 是注意力模式里第 $i$ 行第 $j$ 列的权重。这个求和式是按他的口头描述写出的，视频里没有单独列出这一行。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/DeltaE.jpg" alt="加权和得到 ΔE 并加回嵌入" style="max-width:100%"><figcaption>图：一列里加权后的 value 相加得到 ΔE，再加回原嵌入（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            这不只对一个嵌入做。网格的每一列都做同样的加权和，得到一串变化量，各自加到对应的嵌入上，注意力块的另一端就输出一整串更精细的嵌入。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/SingleHead.jpg" alt="单个注意力头的全过程" style="max-width:100%"><figcaption>图：单个注意力头的完整流程（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            退远一点看，这整个过程就叫一个注意力头。按目前的讲法，它由三个装满可调参数的矩阵决定：key、query、value。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 数参数：一个注意力头有多少参数</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=944s" target="_blank">0:15:44</a>–0:18:21 · Counting parameters</em></p>
+        <h3>key 和 query 矩阵</h3>
+        <p>
+            他接着上一集的“记分板”，用 GPT-3 的数字数参数。key 和 query 矩阵各有 12,288 列（等于嵌入维度）、128 行（等于 key-query 空间的维度）。视频里说每个矩阵多出“大约 150 万”个参数，文字版给出精确数：
+        </p>
+        $$128 \times 12{,}288 = 1{,}572{,}864$$
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/CountQueryKey.jpg" alt="query 和 key 矩阵的参数数" style="max-width:100%"><figcaption>图：W_Q 和 W_K 各有 1,572,864 个参数（引自 3blue1brown.com）</figcaption></figure>
+        <h3>如果 value 是方阵</h3>
+        <p>
+            按前面的讲法，value 矩阵的输入和输出都在很大的嵌入空间里，看起来应该是 12,288 × 12,288 的方阵。那样会多出大约 1.5 亿个参数（视频说 about 150 million，文字版精确数）：
+        </p>
+        $$12{,}288 \times 12{,}288 = 150{,}994{,}944$$
+        <p>
+            他说你确实可以这么做，给 value 映射分配比 key 和 query 多几个数量级的参数。但实践中，让 value 映射的参数量和 key、query 一样，效率高得多。在多个注意力头并行时这一点更要紧。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/ValueQueryKey.jpg" alt="value 参数量与 query key 相同" style="max-width:100%"><figcaption>图：实践中让 value 映射的参数量和 query、key 一样（引自 3blue1brown.com）</figcaption></figure>
+        <h3>value 拆成“下”和“上”两个矩阵</h3>
+        <p>
+            做法是把 value 映射分解成两个较小矩阵的乘积。他建议概念上仍然把它看成一个整体的线性映射，输入和输出都在大嵌入空间里，比如把 blue 的嵌入映射到“蓝色”这个方向，再加到名词上。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/LinearMap.jpg" alt="value 映射分解为两个矩阵" style="max-width:100%"><figcaption>图：value 映射分解成两个小矩阵的乘积（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            右边那个矩阵（12,288 列）行数较少，通常和 key-query 空间一样大，这里是 128。可以把它看成把大的嵌入向量压到一个小得多的空间。他说这不是通行叫法，但他管它叫 value down 矩阵（文字版写作 $\text{Value}_\downarrow$）。文字版在这张图下注了一条更正：图里输出维度应为 128（Correction: d_output = 128）。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/vdown.jpg" alt="value down 矩阵" style="max-width:100%"><figcaption>图：value down 矩阵，把 12,288 维压到 128 维（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            第二个矩阵把这个小空间映射回嵌入空间，产生真正用来更新的向量。他叫它 value up 矩阵（$\text{Value}_\uparrow$），同样不是通行叫法。大多数论文的写法看起来不太一样，他说他认为那种写法在概念上更让人糊涂，稍后再讲。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/vup.jpg" alt="value up 矩阵" style="max-width:100%"><figcaption>图：value up 矩阵，把 128 维映射回嵌入空间（引自 3blue1brown.com）</figcaption></figure>
+        $$W_V = \text{Value}_\uparrow \cdot \text{Value}_\downarrow, \qquad \text{Value}_\downarrow: 128 \times 12{,}288, \qquad \text{Value}_\uparrow: 12{,}288 \times 128$$
+        <p>
+            用线性代数的话说，这相当于把整个 value 映射限制成一个低秩变换（low rank transformation，输出只能落在一个 128 维的子空间里）。
+        </p>
+        <h3>一个头的总数</h3>
+        <p>
+            回到参数计数：$W_Q$、$W_K$、value down、value up 这四个矩阵大小相同，加起来一个注意力头大约 630 万个参数。按上面的数相乘：
+        </p>
+        $$4 \times 1{,}572{,}864 = 6{,}291{,}456$$
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/AttentionHeadCount.jpg" alt="一个注意力头约 630 万参数" style="max-width:100%"><figcaption>图：一个注意力头四个矩阵合计约 6.3 million 参数（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t09">
+        <h2>09. 旁注：交叉注意力</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1101s" target="_blank">0:18:21</a>–0:19:19 · Cross-attention</em></p>
+        <p>
+            他说更准确地讲，前面描述的都叫自注意力头（self-attention head），以区别于其他模型里的一种变体：交叉注意力（cross-attention）。它和 GPT 例子无关，讲给好奇的人。
+        </p>
+        <p>
+            交叉注意力用在处理两种不同数据的模型里，比如一种语言的文本加上正在生成的另一种语言的译文，或者语音音频输入加上正在生成的转写文本。交叉注意力头和自注意力头几乎一样，唯一区别是 key 和 query 映射作用在不同的数据集上。翻译模型里，key 可能来自一种语言，query 来自另一种语言，注意力模式描述一种语言的哪些词对应另一种语言的哪些词。这种情况下通常不加掩码，因为不存在“后面的 token 影响前面的 token”这回事。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/CrossAttentionKeyQuery.jpg" alt="交叉注意力里 key 和 query 来自不同数据" style="max-width:100%"><figcaption>图：交叉注意力里 key 和 query 来自两种不同的数据（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            回到自注意力，他说：如果前面的都懂了，在这里停下，你已经拿到了注意力的核心意思。剩下的只是说明这件事要做很多很多遍。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 多头注意力</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1159s" target="_blank">0:19:19</a>–0:22:16 · Multiple heads</em></p>
+        <h3>上下文改变词义的方式有很多种</h3>
+        <p>
+            例子里只讲了形容词更新名词，但上下文影响词义的方式多得多。如果 car 前面是 “they crashed the”，这对车的形状和结构就有含义。很多关联也不那么语法化：如果同一段文字里任何地方出现 wizard，Harry 可能指 Harry Potter；如果出现的是 Queen、Sussex、William，Harry 的嵌入可能应该更新成指那位王子。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/Harry.jpg" alt="Harry 根据上下文指不同的人" style="max-width:100%"><figcaption>图：同一个 Harry，看上下文里有 wizard 还是 Queen、Sussex、William（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            每一种你能想到的上下文更新，key 和 query 矩阵的参数都会不同，以捕捉不同的注意力模式；value 映射的参数也不同，取决于要往嵌入上加什么。他再次提醒，实际中这些映射的真实行为难解读得多，权重被设成模型为了预测下一个 token 需要的任何样子。
+        </p>
+        <h3>96 个头并行</h3>
+        <p>
+            前面描述的都是一个注意力头。Transformer 里一个完整的注意力块是多头注意力（multi-headed attention）：很多个这样的操作并行跑，每个有自己的 key、query、value 映射。GPT-3 每个块里有 96 个注意力头。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/MultiHeaded.jpg" alt="多头注意力并行" style="max-width:100%"><figcaption>图：多头注意力，很多个头并行，各有一套矩阵（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他把它一项项说清楚：96 套不同的 key 和 query 矩阵，产生 96 个不同的注意力模式；每个头还有自己的 value 矩阵，产生 96 串 value 向量；它们各自用对应的注意力模式作权重加起来。
+        </p>
+        <p>
+            所以对上下文里的每个位置（每个 token），每个头都给出一个提议的变化量 $\Delta \vec{E}$。把这 96 个提议的变化加起来，再加到这个位置原来的嵌入上：
+        </p>
+        $$\vec{E}'_j = \vec{E}_j + \sum_{h=1}^{96} \Delta \vec{E}^{(h)}_j$$
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/AddEmbed.jpg" alt="各头的变化量相加后加回嵌入" style="max-width:100%"><figcaption>图：每个头给出一个 ΔE，全部相加后加到原嵌入上（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            这一整个和，就是多头注意力块输出的一个切片，也就是从另一端出来的一个精细化嵌入。他又说了一次：要想的东西很多，花时间消化完全不用担心。总的想法是，让很多个不同的头并行，模型就有能力学到上下文改变词义的很多种不同方式。
+        </p>
+        <h3>一个块的参数</h3>
+        <p>
+            拿出记分板：96 个头，每个头有自己那四个矩阵，一个多头注意力块大约 6 亿个参数。按前面的数相乘：
+        </p>
+        $$96 \times 6{,}291{,}456 = 603{,}979{,}776$$
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/ParameterCount2.jpg" alt="一个多头注意力块约 6 亿参数" style="max-width:100%"><figcaption>图：96 个头，一个注意力块约 600 million 参数（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t11">
+        <h2>11. 输出矩阵：论文里的另一种写法</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1336s" target="_blank">0:22:16</a>–0:23:19 · The output matrix</em></p>
+        <p>
+            他说有一件“有点烦人”的事，给以后会去读 Transformer 资料的人交代一下。前面把 value 映射拆成 value down 和 value up 两个矩阵，按他的讲法，每个注意力头里都有这样一对。他说完全可以这样实现，这是合法的设计。
+        </p>
+        <p>
+            但论文里的写法和实际实现不一样：所有头的 value up 矩阵被拼在一起，组成一个大矩阵，叫输出矩阵（output matrix），它属于整个多头注意力块。人们说某个注意力头的“value 矩阵”时，通常只指第一步，也就是他叫 value down 的那个投影到小空间的矩阵。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/OutputMatrix.jpg" alt="所有头的 value up 拼成输出矩阵" style="max-width:100%"><figcaption>图：各头的 value up 拼起来就是输出矩阵（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他在画面上留了一条注释给好奇的人，文字版把它贴成了下图。他说这是那种容易让人从主要概念上分心的细节，但还是要点出来，免得读别的资料时对不上。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/Onscreen.jpg" alt="关于输出矩阵的屏幕注释" style="max-width:100%"><figcaption>图：视频里关于输出矩阵的屏幕注释（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t12">
+        <h2>12. 往深处走：多层叠加和全部注意力参数</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1399s" target="_blank">0:23:19</a>–0:24:54 · Going deeper</em></p>
+        <h3>注意力块和 MLP 交替很多次</h3>
+        <p>
+            上一集的预览里讲过，数据在 Transformer 里不只经过一个注意力块。它还会经过另一种操作，叫多层感知机（multi-layer perceptron，MLP，一种由普通神经网络层组成的块），下一集细讲。然后数据反复经过这两种操作的很多份副本。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/ManyBlocks.jpg" alt="注意力块和 MLP 交替多次" style="max-width:100%"><figcaption>图：数据交替穿过很多个注意力块和 MLP 块（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            这意味着一个词吸收了一些上下文之后，这个更微妙的嵌入还有很多机会，被它同样越来越微妙的周围环境再影响。网络越往深处，每个嵌入从其他嵌入里吸收的意思越多，他说希望由此有能力编码比描述词和语法结构更高层、更抽象的东西，比如情绪、语气、这是不是一首诗、这段文字涉及哪些底层的科学事实。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/DeeperMeaning.jpg" alt="越深层编码越抽象的意思" style="max-width:100%"><figcaption>图：越往深层，嵌入有可能编码越抽象的意思（引自 3blue1brown.com）</figcaption></figure>
+        <h3>记分板的最后一次</h3>
+        <p>
+            最后一次回到记分板。GPT-3 有 96 个不同的层，所以 key、query、value 的参数再乘 96，总数不到 580 亿，全部用在注意力头上。按前面的数相乘：
+        </p>
+        $$96 \times 603{,}979{,}776 = 57{,}982{,}058{,}496$$
+        <p>
+            他说这数目确实很大，但只占整个网络 1,750 亿参数的三分之一左右。所以虽然注意力得到了所有的关注，大部分参数其实来自夹在这些步骤之间的那些块（也就是 MLP）。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/attention/FinalCount.jpg" alt="注意力参数约占 GPT-3 的三分之一" style="max-width:100%"><figcaption>图：全部注意力参数不到 58 billion，约占 GPT-3 总参数的三分之一（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t13">
+        <h2>13. 结尾：并行和延伸资料</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1494s" target="_blank">0:24:54</a>–0:26:09 · Ending</em></p>
+        <p>
+            下一集讲那些其他块（MLP），也会多讲训练过程。
+        </p>
+        <p>
+            他最后说，注意力机制成功的一大原因，与其说是它能实现哪种具体行为，不如说是它极易并行（parallelizable），能用 GPU 在短时间内做海量计算。过去一二十年深度学习的一大教训是，单靠规模似乎就能带来模型表现的质的提升，所以能让你扩大规模的可并行架构有很大优势。
+        </p>
+        <p>
+            延伸资料：他说描述里放了很多链接，尤其推荐 Andrej Karpathy 和 Chris Olah（字幕写作 Chris Ola）的任何作品。他说这一集直接跳进注意力的现代形式；想了解它的历史、以及自己怎样重新发明这个想法，可以看他朋友 Vivek 刚发的两个视频（描述里对应的链接是 vcubingx 的系列）；Art of the Problem 频道的 Brit Cruise 有一个讲大语言模型历史的视频。视频描述里他还写到，读了 Anthropic 的 Transformer Circuits 文章之后，他开始把 value 和 output 矩阵的组合看成从嵌入空间到自身的一个低秩映射，这让他想清楚了很多。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一集值得记下的原话</h2>
+        <ul>
+            <li>“I should say up front that a lot of people find the attention mechanism, this key piece in a transformer, very confusing, so don't worry if it takes some time for things to sink in.”<br>我得先说一句，很多人觉得注意力机制这个 Transformer 里的关键部件很难懂，所以要花点时间才消化，也不用担心。 · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=51s" target="_blank">0:00:51</a></li>
+            <li>“this initial token embedding is effectively a lookup table with no reference to the context.”<br>最初的 token 嵌入实际上是一张查找表，完全不参考上下文。 · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=109s" target="_blank">0:01:49</a></li>
+            <li>“I like to visualize a grid full of a bunch of dots, where the bigger dots correspond to the larger dot products, the places where the keys and queries align.”<br>我喜欢把它画成一个满是点的网格，点越大对应点积越大，也就是 key 和 query 对齐的地方。 · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=475s" target="_blank">0:07:55</a></li>
+            <li>“We call this grid an attention pattern.”<br>我们把这个网格叫作注意力模式。 · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=592s" target="_blank">0:09:52</a></li>
+            <li>“This is not the conventional naming, but I'm going to call this the value down matrix.”<br>这不是通行的叫法，但我打算管它叫 value down 矩阵。 · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1059s" target="_blank">0:17:39</a></li>
+            <li>“if you understood everything so far, and if you were to stop here, you would come away with the essence of what attention really is.”<br>如果到这里的内容你都懂了，就算在这里停下，你也已经拿到了注意力的核心。 · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1112s" target="_blank">0:18:32</a></li>
+            <li>“So even though attention gets all of the attention, the majority of parameters come from the blocks sitting in between these steps.”<br>所以虽然注意力吸引了所有的注意，大部分参数其实来自夹在这些步骤之间的块。 · <a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1481s" target="_blank">0:24:41</a></li>
+        </ul>
+    </section>
+
+    <section id="how">
+        <h2>他是怎么讲的</h2>
+
+        <h3>讲解顺序</h3>
+        <ol>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=0s" target="_blank">0:00:00</a> 回顾。只提两件事：模型在预测下一个词，嵌入空间里的方向对应意思。他把 token 简化成“就是词”，并提前说这一块难，慢慢来。这两件事是后面所有画面的前提：“往向量上加一个东西就是改它的意思”。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=109s" target="_blank">0:01:49</a> 先讲要什么，后讲怎么做。他说进入矩阵乘法之前，先看几个例子。mole 三义说明问题（查表得到的向量一样），tower 加 Eiffel 加 miniature 说明“逐次修正”，推理小说的 “the murderer was” 说明信息可以跨很远、可以很多。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=272s" target="_blank">0:04:32</a> 换一个能手算的小例子：一句 8 个词的句子，加一个他明说是编出来的任务（形容词更新名词）。后面每个矩阵都用这个任务来解释“它可能在干什么”。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=374s" target="_blank">0:06:14</a> query：先用拟人的问句（“我前面有形容词吗？”）给出意思，再说它是一个 128 维向量、由 $W_Q$ 乘嵌入得到。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=425s" target="_blank">0:07:05</a> key：作为“回答”出场，和 query 在同一个小空间里，对齐就算匹配。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=475s" target="_blank">0:07:55</a> 点积网格 → softmax 归一化 → 起名“注意力模式”。名字放在东西已经画出来之后才给。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=592s" target="_blank">0:09:52</a> 到这里才放出论文公式，逐项对回刚画过的网格；$\sqrt{d_k}$ 作为“我没提的一个小技术细节”补进来；$V$ 先留着。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=644s" target="_blank">0:10:44</a> 掩码：从训练效率讲起（一个样本当很多个用），推出“后面不能影响前面”，再讲为什么设负无穷而不设 0。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=746s" target="_blank">0:12:26</a> 顺手指出网格大小是上下文长度的平方，点到为止。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=796s" target="_blank">0:13:16</a> value：先讲“最直接”的单个大矩阵版本，提前声明多头时会改。加权求和、得到 $\Delta \vec{E}$、加回去，一个头讲完。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=959s" target="_blank">0:15:59</a> 数参数。value 方阵会多出 1.5 亿，于是引出“拆成 down 和 up 两个矩阵”。这样 value 的分解是被参数数目逼出来的。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1101s" target="_blank">0:18:21</a> 交叉注意力作为旁注，一分钟，明说和 GPT 无关。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1112s" target="_blank">0:18:32</a> 给观众一个停顿点：“到这里停下，你已经拿到核心。”之后的内容定性为“同一件事做很多遍”。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1165s" target="_blank">0:19:25</a> 多头：先用 car、Harry 两个新例子说明“上下文改变词义的方式不止一种”，再给 96 这个数，再把 96 套矩阵、96 个模式、96 串 value 逐项念一遍。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1336s" target="_blank">0:22:16</a> 输出矩阵：把自己的讲法和论文的写法对上，说明为什么他刚才没那样讲。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1376s" target="_blank">0:22:56</a> 退远：注意力块和 MLP 交替多层，越深越抽象；乘 96 层得出不到 580 亿，约占 1,750 亿的三分之一，引出下一集的 MLP。</li>
+            <li><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1481s" target="_blank">0:24:41</a> 收尾讲“为什么成功”：可并行，配合“规模带来质变”。最后是资料推荐。</li>
+        </ol>
+
+        <h3>画面上是什么</h3>
+        <p>以下依据旁白里“如这里所示”“像这样”一类的话和文字版配图。旁白没交代清楚的地方只记旁白说了什么。</p>
+        <table>
+            <tr><th>时间</th><th>画面</th><th>这个画面在讲什么</th></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=51s" target="_blank">0:00:51</a></td><td>嵌入空间里的箭头，阳性名词加一步到阴性名词（文字版 SemanticMeaning、lastChapter 图）</td><td>方向就是意思，加向量就是改意思</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=109s" target="_blank">0:01:49</a></td><td>三个 mole 短语，各自的 mole 指向同一个向量；空间里几个不同方向代表几种意思，注意力算出一个增量把通用向量推过去（MoleExample、added 图）</td><td>查表的嵌入不看上下文，注意力负责补上</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=173s" target="_blank">0:02:53</a></td><td>tower 的向量被 Eiffel、再被 miniature 两次推动（TowerExample 图）</td><td>修正可以一层层叠加</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=223s" target="_blank">0:03:43</a></td><td>序列最后一个向量（was）连向前面整本书的内容（lastvector、AllContext 图）</td><td>最后一个向量要装下所有相关信息</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=322s" target="_blank">0:05:22</a></td><td>例句 8 个词，每个词下面一个嵌入列向量，标 E（Embeddings 图）</td><td>后面所有运算都画在这一排向量上</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=374s" target="_blank">0:06:14</a></td><td>矩阵 $W_Q$ 放在箭头旁，箭头从嵌入指向一个短得多的 query 向量；他说“矩阵放在箭头旁就表示乘法”（W_Q、Q_I 图）</td><td>定一个贯穿全片的图示约定</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=425s" target="_blank">0:07:05</a></td><td>一个较小的 query 空间，名词的 query 落在“找形容词”的方向；随后 key 也映射到同一空间，fluffy 的 key 和 creature 的 query 靠在一起（QuerySpace、QueryKey 图）</td><td>“匹配”就是两个向量方向接近</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=475s" target="_blank">0:07:55</a></td><td>key 排在左边、query 排在上面的网格，每格一个点，点的大小代表点积大小；creature 那一列在 fluffy、blue 处是大点（DotProduct 图）</td><td>所有词对的相关度一眼看完</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=592s" target="_blank">0:09:52</a></td><td>逐列 softmax 之后，网格填上 0 到 1 的数（SoftMax、Normalized 图）</td><td>每一列变成一组权重</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=592s" target="_blank">0:09:52</a></td><td>原论文的公式，分子对应到网格，分母 $\sqrt{d_k}$ 标出（Paper、Compact、SoftMaxEq 图）</td><td>把刚画的东西翻译成论文记号</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=691s" target="_blank">0:11:31</a></td><td>网格里“后影响前”的那一半格子先变成负无穷，softmax 后变成 0（Masking 图）</td><td>掩码的操作和效果</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=746s" target="_blank">0:12:26</a></td><td>网格边长随 token 数增长（square 图）</td><td>平方增长</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=847s" target="_blank">0:14:07</a></td><td>key 和 query 被移走，左边换成一列 value 向量；每列里 value 乘权重，creature 那一列里 fluffy、blue 的 value 很大，其余几乎为 0；加起来得到 $\Delta \vec{E}$，加到 creature 的嵌入上（ValueVector、DeltaE、SingleHead 图）</td><td>信息怎样真正流进一个词</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=959s" target="_blank">0:15:59</a></td><td>参数计数：$W_Q$、$W_K$ 画成 128 × 12,288 的数字矩形；value 方阵对比之下大得多；随后 value 拆成两个瘦长矩阵（CountQueryKey、ValueQueryKey、LinearMap、vdown、vup 图）</td><td>形状对比引出分解</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1112s" target="_blank">0:18:32</a></td><td>两种数据（两种语言）一边出 key、一边出 query（CrossAttention 图）</td><td>交叉注意力的唯一区别</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1165s" target="_blank">0:19:25</a></td><td>car 前面的 “they crashed the”、Harry 和 wizard / Queen、Sussex、William（Example、Harry 图）</td><td>需要不同的头</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1219s" target="_blank">0:20:19</a></td><td>很多个头并排，每个头产生自己的 $\Delta \vec{E}$，全部加到一个位置的嵌入上，得到输出的一个切片（MultiHeaded、ManyMany、AddEmbed、slice 图）</td><td>多头怎样合并</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1336s" target="_blank">0:22:16</a></td><td>各头的 value up 拼成一个大的输出矩阵；屏幕上留一段注释（OutputMatrix、Onscreen 图）</td><td>对上论文写法</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1376s" target="_blank">0:22:56</a></td><td>注意力块和 MLP 块交替叠很多层；参数总数与 175B 对比（ManyBlocks、DeeperMeaning、FinalCount 图）</td><td>把这一集放回整个模型</td></tr>
+        </table>
+
+        <h3>他简化了什么、推后了什么</h3>
+        <ul>
+            <li>token 当成完整的词：“just to make the examples in this video easier... let's simplify by pretending that tokens are always just words”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=0s" target="_blank">0:00:00</a>）。</li>
+            <li>位置编码只说“嵌入里也有位置信息”，具体方法推后：“There's a lot more to say about the specific way that positions are encoded”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=272s" target="_blank">0:04:32</a>）。</li>
+            <li>形容词更新名词是编的例子，他反复声明：“I'm making up this example”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=322s" target="_blank">0:05:22</a>），$W_Q$ 对非名词做什么“who knows?”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=425s" target="_blank">0:07:05</a>），多头部分又说真实行为“much more difficult to interpret”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1219s" target="_blank">0:20:19</a>）。</li>
+            <li>$\sqrt{d_k}$ 和掩码都作为“之前跳过的技术细节”补进来，只给一句理由（数值稳定；训练效率）。</li>
+            <li>长上下文的注意力变体：“right here, you and I are staying focused on the basics”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=746s" target="_blank">0:12:26</a>）。</li>
+            <li>value 先讲单个大矩阵，明说“there's a slight way that this gets modified in the context of multi-headed attention”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=796s" target="_blank">0:13:16</a>），到数参数时再拆。</li>
+            <li>用自己起的名字 value down / value up，明说不是通行叫法；论文写法推到第 11 节，理由是那种写法“tends to make things a little more conceptually confusing”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1059s" target="_blank">0:17:39</a>）。输出矩阵的细节只留一条屏幕注释，因为它“runs the risk of distracting from the main conceptual points”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1376s" target="_blank">0:22:56</a>）。</li>
+            <li>交叉注意力：“This isn't relevant to our GPT example, but if you're curious”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1112s" target="_blank">0:18:32</a>）。</li>
+            <li>推到下一集：MLP 和训练过程（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1376s" target="_blank">0:22:56</a>、<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1481s" target="_blank">0:24:41</a>）。</li>
+            <li>没讲的：残差连接和层归一化的名字都没出现，“加回原嵌入”只当作操作本身讲；softmax 的公式这一集没重写，靠上一集。</li>
+        </ul>
+
+        <h3>数字怎么用</h3>
+        <ul>
+            <li>只有一个维度数在讲机制时出现：query 是 128 维（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=374s" target="_blank">0:06:14</a>），嵌入是“12,000 多维”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=796s" target="_blank">0:13:16</a>）。两个数的对比让人记住“query 空间小得多”。</li>
+            <li>参数计数集中在三处，接续上一集的“scorekeeping”：一个头（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=959s" target="_blank">0:15:59</a>，1.5 million 每个矩阵，假想的方阵 150 million，合计 6.3 million），一个块（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1323s" target="_blank">0:22:03</a>，96 个头约 600 million），全部层（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1430s" target="_blank">0:23:50</a>，96 层不到 58 billion，约占 175 billion 的三分之一）。口头都用约数，精确值在画面和文字版里。</li>
+            <li>数字用来推出设计：150 million 和 1.5 million 差两个数量级，这个对比直接引出 value 的分解。</li>
+            <li>最后一个数字用来纠正印象：“attention gets all of the attention”，但参数只占三分之一，顺势引到下一集的 MLP。</li>
+            <li>例句只有 8 个词，网格是 8 × 8，小到每个格子都能看清。</li>
+        </ul>
+
+        <h3>直觉层和数学层</h3>
+        <ul>
+            <li>每个矩阵都先给一句拟人的问答：query 是“我前面有形容词吗”，key 是“我是形容词，在这个位置”，value 是“如果我和别人有关，该往他身上加什么”。然后才说维度和乘法。</li>
+            <li>他说要“playing the deep learning game”，把计算写成矩阵乘向量（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=322s" target="_blank">0:05:22</a>），但整集几乎不写下标，靠箭头加矩阵的图示约定代替公式。</li>
+            <li>全片唯一一个完整公式是论文那一行，出现在网格已经画完之后，用来对应而不是推导（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=592s" target="_blank">0:09:52</a>）。</li>
+            <li>线性代数术语只在一处点名：“To throw in linear algebra jargon here... a low rank transformation”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1059s" target="_blank">0:17:39</a>），说完就回到参数计数。</li>
+            <li>他建议即使拆成两个矩阵，概念上仍把 value 看成一个整体映射（比如把 blue 映射到“蓝色”方向），实现细节和理解方式分开讲。</li>
+            <li>多次安抚：“don't worry if it takes some time”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=51s" target="_blank">0:00:51</a>）、“don't worry at all if it takes some time to sink in”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1272s" target="_blank">0:21:12</a>），还给了一个“可以在这里停下”的出口（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=1112s" target="_blank">0:18:32</a>）。</li>
+        </ul>
+
+        <h3>其他特点</h3>
+        <ul>
+            <li>一个贯穿例子：fluffy blue creature 从 0:04:32 一直用到 0:15:02，query、key、网格、掩码、value、$\Delta \vec{E}$ 全在这一句上演示。到多头时才换新例子（car、Harry），因为要说明“另一种头”。</li>
+            <li>开场的例子（mole、tower、推理小说）和中段的计算例子分开：前者讲目标，后者讲计算。他明说“let's take a much simpler example”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=223s" target="_blank">0:03:43</a>）。</li>
+            <li>他问观众的方式是“If you're coming in from the last chapter, you know what we need to do then”（<a href="https://www.youtube.com/watch?v=eMlx5fFNoYc&t=539s" target="_blank">0:08:59</a>），让观众自己先想到 softmax。文字版把这类问题做成了选择题。</li>
+            <li>几处“先给错的直觉再纠正”：嵌入不含上下文（随即补充含位置）；掩码直接设 0（列就不归一了）；value 是方阵（参数太多）。</li>
+            <li>收尾不做回顾，讲的是“为什么这个机制赢了”（可并行加规模），再推荐资料。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>3Blue1Brown · Attention in transformers, step-by-step | Deep Learning Chapter 6 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

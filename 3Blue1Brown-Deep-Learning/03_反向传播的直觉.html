@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>反向传播的直觉 | 3Blue1Brown 深度学习系列笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+    <style>
+        table { border-collapse: collapse; width: 100%; font-size: 0.9em; margin: 1em 0; }
+        th, td { border-bottom: 1px solid #ccc; padding: 0.35em 0.5em; text-align: left; vertical-align: top; }
+    </style>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="02_梯度下降.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">3Blue1Brown 深度学习系列目录</a> · 03</span>
+    <span><a href="04_反向传播的微积分.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 3 章 · 反向传播的直觉</h1>
+        <p class="subtitle">不写一个公式，只看一张手写的 2：一个训练样本想让输出层怎么变，这些“愿望”怎样一层层往回传，最后平均起来就是负梯度；再加上小批量随机梯度下降</p>
+        <div class="author-meta">
+            主讲：Grant Sanderson（3Blue1Brown）· 发布日期：2017 年 11 月 3 日 · 时长：12 分 47 秒 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：视频（3Blue1Brown YouTube 公开，本文依据视频字幕整理）<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U" target="_blank">Backpropagation, intuitively | Deep Learning Chapter 3</a>，2017 年 11 月 3 日；文字版课程 <a href="https://www.3blue1brown.com/lessons/backpropagation" target="_blank">3blue1brown.com/lessons/backpropagation</a>（数字、公式和配图参照文字版；中文转述和讲解，不是逐字翻译；图片引自原网站，版权归原作者）
+        </div>
+    </header>
+    <section>
+        <h2>这一集的内容</h2>
+        <p>上一集讲了梯度下降：学习就是找一组权重和偏置，让代价函数尽量小，每一步沿负梯度方向走。可是负梯度怎么算出来，上一集没有讲。这一集回答这个问题。算负梯度的算法叫反向传播（backpropagation）。Grant 把它拆成两集：这一集完全不用公式，只看一个训练样本对每个权重和偏置“想要”什么样的调整；下一集再用微积分把同样的东西写成偏导数。</p>
+        <p>读完这一集，能说清楚三件事：为什么有的权重要调得多、有的调得少；为什么叫“反向”传播；为什么实际训练用的是小批量的随机梯度下降。文字版由 Josh Pullen 改写，在网站上标为第 4 章，视频标题里是第 3 章，本文按视频编号。视频描述里的赞助和 Patreon 感谢已略过。</p>
+        <ol>
+            <li><a href="#t01">回顾：网络、代价函数和梯度的另一种读法</a> · <a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">一个样本对输出层的要求：偏置和权重怎么调</a> · <a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=187s" target="_blank">0:03:07</a></li>
+            <li><a href="#t03">改前一层的激活值，以及“反向”从哪来</a> · <a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=401s" target="_blank">0:06:41</a></li>
+            <li><a href="#t04">随机梯度下降和整段小结</a> · <a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=573s" target="_blank">0:09:33</a></li>
+            <li><a href="#t05">代码、下一集和训练数据</a> · <a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=687s" target="_blank">0:11:27</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 回顾：网络、代价函数和梯度的另一种读法</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=0s" target="_blank">0:00:00</a>–0:03:07 · Introduction / Recap</em></p>
+        <h3>这一集的安排</h3>
+        <p>他开头就把路线讲清楚：先快速回顾我们走到了哪，然后做一遍“直观的走查”（intuitive walkthrough），看这个算法实际在做什么，过程中不碰公式。想看数学的人，下一集讲背后的微积分。</p>
+        <h3>网络的结构</h3>
+        <p>例子还是识别手写数字。图像的像素值送进第一层，第一层有 784 个神经元（neuron，网络里存一个数的单元，28×28 个像素各对应一个）。中间是两层隐藏层，各 16 个神经元。输出层 10 个神经元，表示网络选了哪个数字。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/neural-network.jpg" alt="四层神经网络" style="max-width:100%"><figcaption>图：输入层 784 个神经元、两层各 16 个的隐藏层、10 个输出神经元（引自 3blue1brown.com）</figcaption></figure>
+        <p>他假定观众懂梯度下降（gradient descent，沿着让代价下降最快的方向一小步一小步改参数）。“学习”指的是找到让某个代价函数最小的那组权重（weight）和偏置（bias）。</p>
+        <h3>代价函数怎么算</h3>
+        <p>代价函数（cost function）衡量网络错得有多厉害。一个训练样本的代价这样算：拿网络给的输出，和你希望它给的输出，逐个分量相减，平方，再加起来。对几万个训练样本都这样算一遍再取平均，就是整个网络的总代价。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/cost-calculation.jpg" alt="单个样本的代价计算" style="max-width:100%"><figcaption>图：单个训练样本的代价 = 实际输出和期望输出之差的平方和（引自 3blue1brown.com）</figcaption></figure>
+        <p>写成式子（整理时按文字描述写出）：若期望输出是 $y_j$，网络输出是 $a_j$，单个样本的代价是</p>
+        $$C_0 = \sum_{j=0}^{9} (a_j - y_j)^2$$
+        <p>我们要找的是这个代价函数的负梯度（gradient，所有参数的偏导数排成的向量；取负号就是让代价下降最快的方向）。它告诉你所有权重和偏置，也就是图上所有连线，该怎样改，代价才下降得最有效率。反向传播就是计算这个“复杂得要命”的梯度的算法。</p>
+        <h3>把梯度读成“敏感度”</h3>
+        <p>他说上一集里有一个想法要牢牢记住。把梯度想成 13,000 维空间里的一个方向（视频说约 13,000，文字版写的是精确的 13,002 维，即这个网络的权重和偏置总数），这超出了想象力。另一种读法是：梯度每个分量的大小，表示代价函数对相应那个权重或偏置有多敏感。</p>
+        <p>他举了个数：假设算出负梯度后，某条连线的权重对应的分量是 3.2，另一条连线的是 0.1。这表示代价函数对第一个权重的敏感程度是第二个的 32 倍。把第一个权重轻轻动一下，代价的变化是同样幅度动第二个权重时的 32 倍。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/relative-weight-importance.jpg" alt="两个权重的梯度分量比较" style="max-width:100%"><figcaption>图：一个权重的梯度分量是 3.2，另一个是 0.1，前者对代价的影响是后者的 32 倍（引自 3blue1brown.com）</figcaption></figure>
+        <p>文字版此处还有一段动画：<a href="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/nudge-weights.mp4" target="_blank">动画（引自原网站）</a>，演示轻推权重时代价怎样跟着变。</p>
+        <h3>为什么先扔掉记号</h3>
+        <p>他说自己当初学反向传播，最困惑的是记号和满屏的下标追踪（index chasing）。可是把算法每一部分拆开看，每个单独的效果都相当直观，只是很多小调整叠在一起。所以这一集他先完全不管记号，一步步看每个训练样本对权重和偏置的影响。文字版补了一句目的：等回到记号时，记号是在表达你已经懂的东西，不用当密码去破译。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/notation.jpg" alt="反向传播的满屏记号" style="max-width:100%"><figcaption>图：通常教材里反向传播的记号（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t02">
+        <h2>02. 一个样本对输出层的要求：偏置和权重怎么调</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=187s" target="_blank">0:03:07</a>–0:06:41 · Intuitive walkthrough example（前半）</em></p>
+        <h3>先只看一个样本</h3>
+        <p>总代价是几万个样本代价的平均，所以梯度下降的一步，原则上取决于每一个样本。他说为了计算效率，后面会用一个小技巧，不必每一步都把所有样本过一遍。现在先把注意力放在一个样本上：一张手写的 2。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/cost-of-one-example.jpg" alt="一张手写 2 的代价" style="max-width:100%"><figcaption>图：只看这一张 2，怎样调权重和偏置能让网络在它身上表现更好（引自 3blue1brown.com）</figcaption></figure>
+        <h3>输出层“希望”怎么变</h3>
+        <p>假设网络还没训练好，输出层的激活值（activation，每个神经元当前存的那个 0 到 1 之间的数）看起来很随机，比如 0.5、0.8、0.2，等等。我们没法直接改这些激活值，能动的只有权重和偏置。但把“希望输出层发生什么变化”记下来是有用的。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/output-trash.jpg" alt="未训练网络的输出" style="max-width:100%"><figcaption>图：未训练网络的输出层是一堆乱数，只能靠调权重和偏置来修（引自 3blue1brown.com）</figcaption></figure>
+        <p>我们想让网络把这张图判成 2，所以希望第三个值（数字 2 对应的神经元）被往上推，其他九个都往下推。推的幅度要和当前值离目标值的距离成正比。比如数字 2 神经元要涨的那一下，比数字 8 神经元要降的那一下更重要，因为 8 那个值已经离目标很近了。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/classify-as-2.jpg" alt="期望的输出变化" style="max-width:100%"><figcaption>图：数字 2 神经元往上推，其他往下推，离目标越远推得越多（引自 3blue1brown.com）</figcaption></figure>
+        <h3>放大到一个神经元：三条路</h3>
+        <p>再放大，只看要提高激活值的那一个神经元，数字 2 神经元（文字版说它当前的激活值是 0.2）。它的激活值的定义是：前一层所有激活值的加权和，加上一个偏置，再送进 sigmoid 这类“挤压函数”（squishification function，把任意实数压到 0 到 1 之间）或者 ReLU（负数变 0、正数不变的函数）。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/output-neuron-equation.jpg" alt="输出神经元的计算式" style="max-width:100%"><figcaption>图：数字 2 神经元的激活值 = σ(前一层激活值的加权和 + 偏置)（引自 3blue1brown.com）</figcaption></figure>
+        $$a = \sigma(w_0 a_0 + w_1 a_1 + \cdots + w_{n-1} a_{n-1} + b)$$
+        <p>所以有三条路可以合起来提高这个激活值：</p>
+        <ul>
+            <li>增大偏置；</li>
+            <li>增大权重；</li>
+            <li>改变前一层的激活值。</li>
+        </ul>
+        <h3>偏置</h3>
+        <p>视频里对偏置只是列出来，没有细讲。文字版补了一段：改偏置是改激活值最简单的办法，它对加权和的影响是固定的、可预测的，并出了一道选择题，问数字 2 神经元和其他输出神经元的偏置该怎么调。按前面的逻辑，数字 2 神经元的偏置该增大，其他九个神经元的偏置该减小。</p>
+        <h3>权重：影响力不一样</h3>
+        <p>权重的影响力各不相同。前一层最亮的神经元（激活值大的）连过来的那些权重，效果最大，因为这些权重乘的是更大的激活值。所以增大其中一个权重，对最终代价的影响，比增大连到暗神经元的权重更强。他加了一句限定：至少就这一个训练样本而言。</p>
+        <p>他提醒，讲梯度下降时，除了每个分量该往上还是往下，我们还关心哪些分量“最划算”（the most bang for your buck）。所以要让权重的调整量和对应的激活值成正比。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/weights-proportional-to-activations.jpg" alt="权重按激活值成比例调整" style="max-width:100%"><figcaption>图：按前一层激活值的大小，成比例地调整对应权重（引自 3blue1brown.com）</figcaption></figure>
+        <h3>和赫布理论的松散类比</h3>
+        <p>他说这多少让人想起神经科学里关于生物神经元怎样学习的一个理论，赫布理论（Hebbian theory），常被概括成一句话：一起放电的神经元会连在一起（neurons that fire together wire together）。在这里，权重增长最多、连接加强最多的，发生在最活跃的神经元和我们希望变得更活跃的神经元之间。某种意义上，看到 2 时在放电的神经元，和“想到 2”时放电的神经元，连得更紧了。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/hebbian-theory.jpg" alt="赫布理论示意" style="max-width:100%"><figcaption>图：应该同时激活的神经元之间，连接被加强（引自 3blue1brown.com）</figcaption></figure>
+        <p>他马上划了界线：他没有资格判断人工神经网络到底像不像生物大脑，这个说法也带着几个“有意义的星号”，只能当作很松散的类比，他觉得有意思才提。文字版把其中一个星号写明了：没训练过的网络看到这张图时并没有真的在“想”2，是训练数据的标签硬性规定了它该想什么。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 改前一层的激活值，以及“反向”从哪来</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=401s" target="_blank">0:06:41</a>–0:09:33 · Intuitive walkthrough example（后半）</em></p>
+        <h3>第三条路：前一层的激活值</h3>
+        <p>第三种办法是改前一层所有的激活值。如果以正权重连到数字 2 神经元的那些神经元都变亮，以负权重连过来的都变暗，数字 2 神经元就会更活跃。和调权重一样，最划算的改法是让每个激活值的变化量和对应的权重大小成正比。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/activations-proportional-to-weights.jpg" alt="激活值按权重成比例调整" style="max-width:100%"><figcaption>图：按对应权重的大小，成比例地改变前一层的激活值（引自 3blue1brown.com）</figcaption></figure>
+        <p>当然，这些激活值我们也没法直接改，能控制的仍然只有权重和偏置。但和输出层一样，先把想要的变化记下来。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/no-direct-influence.jpg" alt="无法直接改前一层激活值" style="max-width:100%"><figcaption>图：前一层的激活值改不了，但决定它们的权重和偏置可以改（引自 3blue1brown.com）</figcaption></figure>
+        <h3>十个输出神经元各有各的要求</h3>
+        <p>他把镜头往外拉一步：上面这些只是数字 2 这个输出神经元想要的。我们还希望最后一层其他神经元都变得不那么活跃，而它们每一个对倒数第二层该怎么变也各有想法。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/other-output-desires.jpg" alt="其他输出神经元的要求" style="max-width:100%"><figcaption>图：其他输出神经元也要调整，于是对前一层激活值出现很多互相竞争的要求（引自 3blue1brown.com）</figcaption></figure>
+        <p>所以，数字 2 神经元的愿望要和其他所有输出神经元的愿望加在一起。每个愿望都按对应权重的大小、以及那个输出神经元需要变化多少来加权。</p>
+        <h3>“反向传播”这个名字的来历</h3>
+        <p>他说，“往回传”的想法就在这里出现。把这些想要的效果加起来，就得到一张清单：希望倒数第二层发生哪些轻推（nudge）。有了这张清单，就可以把同样的过程递归地用在决定倒数第二层数值的那些权重和偏置上，一层一层往网络前面走。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/propagate-backwards.jpg" alt="愿望往回传" style="max-width:100%"><figcaption>图：这些竞争的要求不可能都满足，能做的是把它们加起来，得到对前一层的总体期望变化（引自 3blue1brown.com）</figcaption></figure>
+        <h3>对所有样本取平均</h3>
+        <p>再拉远一点：以上全部只是一个训练样本希望怎样轻推每个权重和偏置。如果只听这张 2 的，网络最后会被鼓励把所有图都判成 2。所以要对每个其他训练样本也跑一遍同样的反向传播流程，记下每个样本想怎么改，再把这些想要的变化平均起来。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/average-over-all.jpg" alt="对所有训练样本取平均" style="max-width:100%"><figcaption>图：每个训练样本对每个权重和偏置都有自己的调整意愿，平均起来就是一步梯度下降里该怎么改（引自 3blue1brown.com）</figcaption></figure>
+        <p>这些平均后的轻推合在一起，粗略地说，就是上一集讲的代价函数的负梯度，或者至少和它成正比。他说“粗略地说”，只是因为还没有在数量上把这些轻推说精确。但如果你理解了上面提到的每一种变化，为什么有的成比例地更大，以及它们为什么要加在一起，你就理解了反向传播实际在做什么。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/proportional-to-gradient.jpg" alt="平均后的轻推与负梯度成正比" style="max-width:100%"><figcaption>图：反向传播的结果，是找到（与之成正比的）负梯度（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t04">
+        <h2>04. 随机梯度下降和整段小结</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=573s" target="_blank">0:09:33</a>–0:11:27 · Stochastic gradient descent</em></p>
+        <h3>小批量</h3>
+        <p>实际中，每一步梯度下降都把所有训练样本的影响加一遍，电脑要花极长的时间。常见的做法是：把训练数据随机打乱，分成很多个小批量（mini-batch），比如每批 100 个样本，然后按一个小批量算一步。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/mini-batches.jpg" alt="把训练数据分成小批量" style="max-width:100%"><figcaption>图：打乱训练数据，切成每批 100 个样本的小批量（引自 3blue1brown.com）</figcaption></figure>
+        <p>这样算出来的不是代价函数真正的梯度，真正的梯度取决于全部训练数据，而不是这一小部分，所以这一步不是最有效率的下坡方向。但每个小批量给出的近似相当不错，更重要的是计算上快得多。文字版补了具体比例：如果一共 100 个小批量，每一步只花原来 1/100 的时间；走完 100 步，每条训练数据都有机会影响一次结果。</p>
+        <h3>醉汉和细心人</h3>
+        <p>他打了个比方：如果把网络在代价曲面上的轨迹画出来，它更像一个醉汉跌跌撞撞地下山，但步子很快；而不像一个仔细计算的人，每一步之前都先算准下坡方向，再慢慢、小心地迈出去。这个方法叫随机梯度下降（stochastic gradient descent，SGD，每次只用随机抽的一小批数据估计梯度）。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/stochastic-comparison.jpg" alt="随机梯度下降和完整梯度下降的轨迹对比" style="max-width:100%"><figcaption>图：用小批量，每一步没那么准，但快得多（引自 3blue1brown.com）</figcaption></figure>
+        <h3>他自己做的小结</h3>
+        <p>从 <a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=631s" target="_blank">0:10:31</a> 起他把整集收拢一遍：</p>
+        <ul>
+            <li>反向传播是这样一个算法：确定单个训练样本希望怎样轻推权重和偏置：每个该往上还是往下，以及这些变化之间取什么比例能让代价下降最快。</li>
+            <li>真正的梯度下降一步，要对几万个训练样本都这样做，再平均。</li>
+            <li>那样太慢，所以把数据随机分成小批量，每一步只按一个小批量算。</li>
+            <li>反复过完所有小批量、不断做这些调整，就会收敛到代价函数的一个局部最小值，也就是网络在训练样本上表现得很好。</li>
+        </ul>
+    </section>
+
+    <section id="t05">
+        <h2>05. 代码、下一集和训练数据</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=687s" target="_blank">0:11:27</a>–0:12:47 · Stochastic gradient descent（末段）/ Final words（YouTube 章节从 0:12:28 开始）</em></p>
+        <p>他说，实现反向传播的每一行代码，都对应着这一集里你已经看过的某个东西，至少在非正式的层面上。但有时候知道数学在做什么只是成功的一半，光是把它表示出来就会让人一团乱。所以下一集会把同样的想法用背后的微积分讲一遍，这样在别的资料里看到这个主题时会熟悉一些。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation/code.jpg" alt="实现神经网络的代码" style="max-width:100%"><figcaption>图：搭一个简单神经网络的代码（文字版说类似 Nielsen 书里的代码），每一行背后的直觉这一集都讲过了（引自 3blue1brown.com）</figcaption></figure>
+        <p>最后他强调一点：这个算法要奏效，需要大量训练数据，这对神经网络以外的各种机器学习也一样。手写数字是个好例子，原因之一是有 MNIST 数据库，里面有大量人工标注好的样本。做机器学习的人都熟悉一个常见难题：拿到真正需要的带标签训练数据，不管是请人标几万张图，还是别的数据类型。</p>
+    </section>
+
+    <section>
+        <h2>这一集值得记下的原话</h2>
+        <ul>
+            <li>“Backpropagation, the topic of this video, is an algorithm for computing that crazy complicated gradient.”<br>反向传播，这一集的主题，是计算那个复杂得要命的梯度的算法。（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=62s" target="_blank">0:01:02</a>）</li>
+            <li>“We can't directly change those activations, we only have influence on the weights and biases.”<br>那些激活值我们没法直接改，我们只能影响权重和偏置。（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=226s" target="_blank">0:03:46</a>）</li>
+            <li>“Hebbian theory, often summed up in the phrase, neurons that fire together wire together.”<br>赫布理论，常被概括成一句话：一起放电的神经元会连在一起。（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=344s" target="_blank">0:05:44</a>）</li>
+            <li>“This right here is where the idea of propagating backwards comes in.”<br>“往回传”这个想法就是在这里出现的。（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=462s" target="_blank">0:07:42</a>）</li>
+            <li>“If we only listened to what that 2 wanted, the network would ultimately be incentivized just to classify all images as a 2.”<br>如果只听那张 2 的，网络最后会被鼓励把所有图都判成 2。（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=517s" target="_blank">0:08:37</a>）</li>
+            <li>“it would be a little more like a drunk man stumbling aimlessly down a hill but taking quick steps”<br>它更像一个醉汉跌跌撞撞地下山，但步子很快。（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=573s" target="_blank">0:09:33</a>）</li>
+            <li>“But sometimes knowing what the math does is only half the battle, and just representing the damn thing is where it gets all muddled and confusing.”<br>但有时候知道数学在做什么只是成功的一半，光是把这东西表示出来，就会变得一团乱。（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=687s" target="_blank">0:11:27</a>）</li>
+        </ul>
+    </section>
+
+    <section id="how">
+        <h2>他是怎么讲的</h2>
+        <h3>讲解顺序</h3>
+        <ol>
+            <li><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=4s" target="_blank">0:00:04</a> 先报路线：这一集只做直观走查，不碰公式，数学放到下一集。观众一开始就知道这集不会出现偏导数。</li>
+            <li><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=62s" target="_blank">0:01:02</a> 回顾三样东西：网络结构（784、16、16、10）、代价函数怎么算、负梯度是什么。目的是引出“反向传播就是算这个梯度的算法”。</li>
+            <li><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=124s" target="_blank">0:02:04</a> 换一种读梯度的方式：13,000 维方向想象不了，就读成每个参数的“敏感度”，用 3.2 和 0.1 两个数说明“32 倍”。这一步给后面所有“谁调得多、谁调得少”的讨论定了语言。</li>
+            <li><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=176s" target="_blank">0:02:56</a> 交代为什么扔掉记号：难的是记号和下标，每个效果单独看都直观。</li>
+            <li><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=226s" target="_blank">0:03:46</a> 把问题缩到最小：一个样本（一张 2），一个输出层，问“这张图想让输出怎么变”。</li>
+            <li><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=282s" target="_blank">0:04:42</a> 再缩到一个神经元，列出三条路：偏置、权重、前一层激活值。然后逐条讲，权重那条顺带讲赫布理论。</li>
+            <li><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=401s" target="_blank">0:06:41</a> 第三条路走不通（激活值改不了），但把愿望记下来。这一步留了一个悬念：记下来有什么用。</li>
+            <li><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=462s" target="_blank">0:07:42</a> 往外拉：十个输出神经元的愿望加在一起，得到对倒数第二层的清单，再递归往前。悬念在这里解开，“反向”这个词也在这里出现。</li>
+            <li><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=517s" target="_blank">0:08:37</a> 再往外拉：只听一个样本会出问题（全判成 2），所以对所有样本平均，平均结果和负梯度成正比。</li>
+            <li><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=573s" target="_blank">0:09:33</a> 回到效率问题：平均所有样本太慢，引出小批量和随机梯度下降。</li>
+            <li><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=631s" target="_blank">0:10:31</a> 用四句话把整集收一遍（“let's just sum it up for ourselves, shall we?”）。</li>
+            <li><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=687s" target="_blank">0:11:27</a> 结尾讲两件事：代码和下一集的关系，以及训练数据（MNIST）的重要性。</li>
+        </ol>
+        <p>整体是“缩小再放大”的结构：从整个网络缩到一张图、一个输出层、一个神经元，讲完后按相反顺序一层层拉远（这个神经元 → 十个输出神经元 → 整个网络往回 → 所有样本 → 小批量）。他每拉远一次都说一句类似“zooming out a bit further”的话作为标记。</p>
+
+        <h3>画面上是什么</h3>
+        <p>以下依据他的口述和文字版配图；口述没说清的画面不做推测。</p>
+        <table>
+            <tr><th>时间</th><th>画面</th><th>这个画面在讲什么</th></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=4s" target="_blank">0:00:04</a></td><td>四层网络：784 个输入、两层 16、10 个输出（文字版图 neural-network）</td><td>沿用前两集的同一张网络图，观众不用重新认识对象</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=62s" target="_blank">0:01:02</a></td><td>网络输出和期望输出逐项相减、平方、相加（图 cost-calculation）</td><td>代价函数的算法</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=124s" target="_blank">0:02:04</a></td><td>他指着“this edge here”和另一条边，标出 3.2 和 0.1（图 relative-weight-importance）；文字版另有轻推权重的动画</td><td>梯度分量 = 敏感度</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=176s" target="_blank">0:02:56</a></td><td>满屏的反向传播记号（图 notation）</td><td>先展示“难的样子”，再宣布这集不用它</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=226s" target="_blank">0:03:46</a></td><td>一张手写的 2 送进网络，输出层是 0.5、0.8、0.2 这样的乱数（图 cost-of-one-example、output-trash）</td><td>未训练网络的状态</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=226s" target="_blank">0:03:46</a></td><td>输出层每个神经元旁边标出想要的变化方向和大小（图 classify-as-2）</td><td>“愿望”有方向也有大小，离目标越远越大</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=282s" target="_blank">0:04:42</a></td><td>单独放大数字 2 神经元，旁边写出 σ(加权和 + 偏置) 的式子（图 focus-on-2-neuron、output-neuron-equation）</td><td>三条路从式子里读出来：b、w、a</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=282s" target="_blank">0:04:42</a></td><td>前一层神经元有亮有暗，“the brightest neurons”连过来的线影响最大（图 weights-proportional-to-activations）</td><td>权重调整量和激活值成正比</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=344s" target="_blank">0:05:44</a></td><td>看到 2 时放电的神经元和“想到 2”的神经元之间连接加强（图 hebbian-theory）</td><td>赫布理论的类比</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=401s" target="_blank">0:06:41</a></td><td>前一层神经元按正负权重变亮或变暗（图 activations-proportional-to-weights、no-direct-influence）</td><td>第三条路，以及它为什么只能“记下来”</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=462s" target="_blank">0:07:42</a></td><td>其他九个输出神经元也各自对倒数第二层提出要求，最后加在一起（图 other-output-desires、propagate-backwards）</td><td>“反向”的来历</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=517s" target="_blank">0:08:37</a></td><td>一张 2 对所有权重的愿望，然后多张不同数字图的愿望并排、取平均（图 desires-of-2、average-over-all、proportional-to-gradient）</td><td>平均后 ∝ 负梯度</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=573s" target="_blank">0:09:33</a></td><td>训练数据被打乱、切成小批量（图 mini-batches）；代价曲面上两条下山轨迹，一条歪歪扭扭步子快，一条稳但慢（图 stochastic-comparison）</td><td>SGD 和完整梯度下降的对比</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=687s" target="_blank">0:11:27</a></td><td>一段实现神经网络的代码（图 code）</td><td>每行代码都对应这集讲过的某个效果</td></tr>
+        </table>
+
+        <h3>他简化了什么、推后了什么</h3>
+        <ul>
+            <li>公式整体推后：开头就说 “without any reference to the formulas”，数学留给下一集（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=4s" target="_blank">0:00:04</a>，<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=687s" target="_blank">0:11:27</a>）。</li>
+            <li>“a complete disregard for the notation”：整集不出现下标（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=176s" target="_blank">0:02:56</a>）。</li>
+            <li>计算效率问题先挂起：“we'll do a little trick later”，到 0:09:33 才兑现为小批量（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=176s" target="_blank">0:02:56</a>）。</li>
+            <li>平均后的轻推只是 “loosely speaking” 的负梯度，“或者至少和它成正比”，因为他 “have yet to get quantitatively precise about those nudges”（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=517s" target="_blank">0:08:37</a>）。精确的量留给下一集。</li>
+            <li>偏置这条路只列名、不展开（文字版用一道选择题补上）。</li>
+            <li>赫布理论只当 “a very loose analogy”，并说明自己不对生物大脑下判断，说法有 “a couple meaningful asterisks”（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=344s" target="_blank">0:05:44</a>）。</li>
+            <li>sigmoid 和 ReLU 并列提一句，不区分它们对调整的影响。</li>
+            <li>梯度维数用了整数 13,000（文字版是 13,002）。</li>
+        </ul>
+
+        <h3>数字怎么用</h3>
+        <ul>
+            <li>沿用固定的网络尺寸 784 / 16 / 16 / 10，和前两集一致，观众对“规模”的感觉不用重建。</li>
+            <li>3.2 和 0.1 这对玩具数字，只用来得出一个比值 32 倍，把“敏感度”变成能比较的东西（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=124s" target="_blank">0:02:04</a>）。</li>
+            <li>输出层 0.5、0.8、0.2 这几个数只是为了让“看起来很随机”有具体样子，再用“8 已经很接近目标”说明推的幅度要按距离分配（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=226s" target="_blank">0:03:46</a>）。</li>
+            <li>小批量用 100 这个整数（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=573s" target="_blank">0:09:33</a>）。</li>
+            <li>“tens of thousands of training examples” 反复出现，是为了说明逐个样本平均为什么慢。</li>
+        </ul>
+
+        <h3>直觉层和数学层</h3>
+        <p>这一集整集停在直觉层。他用的词是 nudge（轻推）、wish（希望）、desire（愿望）、wiggle（轻轻动一下）、bang for your buck（划算），把每个神经元说成“想要”某种变化的主体。数学上的对应关系他只点出方向：调整量和激活值成正比、和权重成正比、和离目标的距离成正比，加起来再平均。这三个“成正比”在下一集里分别变成链式法则中的因子（整理者的对照），这一集他不说破，只说下一集会把 “the same ideas” 用微积分再讲一遍。他明确把数学标为可选：“for those of you who do want to dive into the math”（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=4s" target="_blank">0:00:04</a>）。</p>
+
+        <h3>其他</h3>
+        <ul>
+            <li>一个贯穿全集的例子：同一张手写的 2，从 0:03:46 一直用到 0:08:37。</li>
+            <li>他提前替观众说出困难：自己当初最困惑的是记号，以此解释这一集的讲法（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=124s" target="_blank">0:02:04</a>）。</li>
+            <li>给出一个反面结果来说明为什么要平均：只听一张 2，网络会把所有图判成 2（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=517s" target="_blank">0:08:37</a>）。</li>
+            <li>SGD 用醉汉下山和细心计算的人对比，是他自己的比喻（<a href="https://www.youtube.com/watch?v=Ilg3gGewQ5U&t=573s" target="_blank">0:09:33</a>）。</li>
+            <li>结尾跳出算法，落到训练数据的获取难题上，指向实际做机器学习的人会遇到的问题。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>3Blue1Brown · Backpropagation, intuitively | Deep Learning Chapter 3 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

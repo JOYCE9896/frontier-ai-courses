@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>大语言模型简介 | 3Blue1Brown 深度学习系列笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+    <style>
+        table { border-collapse: collapse; width: 100%; font-size: 0.9em; margin: 1em 0; }
+        th, td { border-bottom: 1px solid #ccc; padding: 0.35em 0.5em; text-align: left; vertical-align: top; }
+    </style>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="04_反向传播的微积分.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">3Blue1Brown 深度学习系列目录</a> · 05</span>
+    <span><a href="06_Transformer与词嵌入.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>大语言模型简介</h1>
+        <p class="subtitle">8 分钟讲完聊天机器人怎样靠“预测下一个词”工作：参数是什么、预训练和 RLHF、训练要多少计算、GPU 和 Transformer 的关系，以及注意力和前馈网络各做什么</p>
+        <div class="author-meta">
+            主讲：Grant Sanderson（3Blue1Brown）· 发布日期：2024 年 11 月 20 日 · 时长：7 分 58 秒 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：视频（3Blue1Brown YouTube 公开，本文依据视频字幕整理）<a href="https://www.youtube.com/watch?v=LPZh9BOjkQs" target="_blank">Large Language Models explained briefly</a>，2024 年 11 月 20 日；文字版课程 <a href="https://www.3blue1brown.com/lessons/mini-llm" target="_blank">3blue1brown.com/lessons/mini-llm</a>（数字、公式和配图参照文字版；中文转述和讲解，不是逐字翻译；图片引自原网站，版权归原作者）
+        </div>
+    </header>
+    <section>
+        <h2>这一集的内容</h2>
+        <p>这一集和前面四集隔了七年。视频描述说，它是为计算机历史博物馆（Computer History Museum）的一个展览做的，是对大语言模型、聊天机器人、预训练和 Transformer 的轻量介绍。它在播放列表里排在第 5 位，但发布时间晚于后面的第 5 到 7 章（2024 年 4 月到 8 月）。文字版（Justin Sun 改写）说它是给后面几课打基础的。</p>
+        <p>这一集不出现公式。它回答的问题是：你和聊天机器人对话时，背后发生了什么。看完能说清：大语言模型是一个给“下一个词”打概率的函数；参数是怎样通过大量文本和反向传播调出来的；训练为什么需要巨大的计算量和 GPU；Transformer 里注意力和前馈网络大致各做什么；以及为什么很难解释模型为什么给出某个具体预测。它接得上前四集的地方是“参数”和“反向传播”这两个词，前面讲的手写数字网络里的权重和反向传播，在这里换成了上千亿参数的语言模型。这一集没有赞助内容。</p>
+        <ol>
+            <li><a href="#t01">聊天机器人在做什么</a> · <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">大语言模型：给下一个词打概率</a> · <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=35s" target="_blank">0:00:35</a></li>
+            <li><a href="#t03">训练数据和参数</a> · <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=88s" target="_blank">0:01:28</a></li>
+            <li><a href="#t04">参数怎样一点点调好</a> · <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=128s" target="_blank">0:02:08</a></li>
+            <li><a href="#t05">计算规模</a> · <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=198s" target="_blank">0:03:18</a></li>
+            <li><a href="#t06">预训练和 RLHF</a> · <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=226s" target="_blank">0:03:46</a></li>
+            <li><a href="#t07">GPU</a> · <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=255s" target="_blank">0:04:15</a></li>
+            <li><a href="#t08">Transformer 架构</a> · <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=282s" target="_blank">0:04:42</a></li>
+            <li><a href="#t09">注意力和前馈网络</a> · <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=338s" target="_blank">0:05:38</a></li>
+            <li><a href="#t10">涌现的行为</a> · <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=387s" target="_blank">0:06:27</a></li>
+            <li><a href="#t11">接下来看什么</a> · <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=425s" target="_blank">0:07:05</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 聊天机器人在做什么</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=0s" target="_blank">0:00:00</a>–0:00:35 · How chatbots work</em></p>
+        <p>他从一个设想开始：你偶然捡到一段短剧本，写的是一个人和他的 AI 助手之间的一场戏。剧本里有这个人问 AI 的话，但 AI 的回答被撕掉了。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/script.jpg" alt="AI 回答被撕掉的剧本" style="max-width:100%"><figcaption>图：一段剧本，人问的话还在，AI 的回答被撕掉了（引自 3blue1brown.com）</figcaption></figure>
+        <p>再假设你有一台强大的“魔法机器”，能读入任何文本，给出下一个词的合理预测。那你就可以补完这个剧本：把已有的内容喂给机器，看它预测 AI 的回答以哪个词开头，把这个词接上，再喂进去，一遍遍重复，剧本越长越完整，直到对话补完。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/repeat.jpg" alt="机器预测下一个词" style="max-width:100%"><figcaption>图：喂入 “Can you explain … a semiconductor device …”，机器预测出 used（引自 3blue1brown.com）</figcaption></figure>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/repeat2.jpg" alt="接上一个词后继续预测" style="max-width:100%"><figcaption>图：把 used 接上再喂入，机器预测出 to（引自 3blue1brown.com）</figcaption></figure>
+        <p>他说，你和聊天机器人交互时，发生的就是这件事。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 大语言模型：给下一个词打概率</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=35s" target="_blank">0:00:35</a>–0:01:28 · Large language models</em></p>
+        <h3>定义</h3>
+        <p>大语言模型（large language model，LLM）是一个复杂的数学函数，对任意一段文本，预测下一个词是什么。它并不确定地只预测一个词，它给所有可能的下一个词各分配一个概率。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/probability.jpg" alt="下一个词的概率分布" style="max-width:100%"><figcaption>图：模型输出的是所有可能下一个词的概率（引自 3blue1brown.com）</figcaption></figure>
+        <h3>怎样用它搭一个聊天机器人</h3>
+        <ol>
+            <li>先摆一段文本，描述一个用户和一个假想的 AI 助手之间的交互。</li>
+            <li>把用户输入的内容接上，作为交互的第一部分。</li>
+            <li>让模型反复预测这样一个假想的 AI 助手会怎么回答下一个词，把生成的内容展示给用户。</li>
+        </ol>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/description.jpg" alt="描述交互的开头文本" style="max-width:100%"><figcaption>图：第一步，一段描述用户和 AI 助手交互的文本（引自 3blue1brown.com）</figcaption></figure>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/append.jpg" alt="模型逐词生成回答" style="max-width:100%"><figcaption>图：把开头的绿色文字、用户输入和已生成的内容一起喂给模型，得到概率分布，模型从中选出 option 这个词（引自 3blue1brown.com）</figcaption></figure>
+        <h3>为什么同一个问题每次回答不一样</h3>
+        <p>他说，如果允许模型在生成过程中随机选一些不那么可能的词，输出看起来会自然得多。文字版指出，上图里模型选的就不是概率最高的那个词。这意味着，尽管模型本身是确定性的（同样的输入总给出同样的概率），同一个提示词每次运行通常会得到不同的回答。</p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 训练数据和参数</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=88s" target="_blank">0:01:28</a>–0:02:08 · Training and parameters</em></p>
+        <h3>文本量</h3>
+        <p>模型通过处理海量文本学会做这些预测，文本通常来自互联网。他给了一个数：要让一个普通人读完训练 GPT-3 所用的文本量，就算一天 24 小时不停地读，也要 2,600 多年。之后更大的模型（文字版举 GPT-4 为例）训练用的文本还要多得多。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/data.jpg" alt="训练用的海量文本" style="max-width:100%"><figcaption>图：训练数据来自互联网的海量文本（引自 3blue1brown.com）</figcaption></figure>
+        <h3>参数</h3>
+        <p>他用了一个比喻：可以把训练想成调一台大机器上的旋钮。语言模型的行为完全由许多连续取值的数决定，这些数通常叫参数（parameter）或权重（weight）。改变参数，就会改变模型在给定输入下给下一个词的概率。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/parameter.jpg" alt="参数像机器上的旋钮" style="max-width:100%"><figcaption>图：参数像一台大机器上的旋钮（引自 3blue1brown.com）</figcaption></figure>
+        <p>大语言模型的“大”，就在于它可以有几千亿个这样的参数。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/billions.jpg" alt="数千亿个参数" style="max-width:100%"><figcaption>图：大语言模型有几千亿个参数（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t04">
+        <h2>04. 参数怎样一点点调好</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=128s" target="_blank">0:02:08</a>–0:03:18 · Learning through refinement</em></p>
+        <p>没有人会刻意去设定这些参数。它们一开始是随机的，这时模型只会输出乱码。然后参数根据大量文本样例被反复修正。</p>
+        <p>一个训练样例可以只有几个词，也可以有几千个词。不管多长，做法都一样：把样例除最后一个词以外的部分输进模型，把模型的预测和样例里真正的最后一个词做比较。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/training.jpg" alt="用除最后一个词外的文本做预测" style="max-width:100%"><figcaption>图：输入样例里除最后一个词外的全部内容，把预测和真实的最后一个词对比（引自 3blue1brown.com）</figcaption></figure>
+        <p>然后用一个叫反向传播（backpropagation，本系列第 3、4 章讲的算法，用来算出每个参数该往哪个方向改、改多少）的算法调整所有参数，让模型选中真正那个词的可能性高一点，选其他所有词的可能性低一点。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/backpropogation.jpg" alt="反向传播调整参数" style="max-width:100%"><figcaption>图：反向传播调整参数，提高真实下一个词的概率（引自 3blue1brown.com）</figcaption></figure>
+        <p>对很多很多万亿个样例都这样做之后，模型不只在训练数据上预测得更准，对从没见过的文本也开始给出更合理的预测。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 计算规模</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=198s" target="_blank">0:03:18</a>–0:03:46 · Computational scale</em></p>
+        <p>参数量巨大，训练数据也巨大，训练一个大语言模型涉及的计算量大到难以想象。他请观众想象：你每秒能做 10 亿次加法和乘法。做完训练最大的那些语言模型所需的全部运算，你觉得要多久？</p>
+        <p>他先给两个候选：一年？也许一万年？然后说答案远不止这些：要远超 1 亿年。</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 预训练和 RLHF</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=226s" target="_blank">0:03:46</a>–0:04:15 · Pre-training and RLHF</em></p>
+        <p>他说这只是故事的一部分。上面整个过程叫预训练（pre-training）。补全互联网上一段随机文本，和做一个好的 AI 助手，是很不一样的目标。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/pretraining.jpg" alt="预训练" style="max-width:100%"><figcaption>图：预训练只是聊天机器人训练的一部分（引自 3blue1brown.com）</figcaption></figure>
+        <p>为此，聊天机器人还要经过另一种训练，他说同样重要，叫基于人类反馈的强化学习（reinforcement learning with human feedback，RLHF）。工作人员标出没有帮助或有问题的预测，他们的修正会进一步改变模型参数，让模型更可能给出用户偏好的预测。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/rlhf.jpg" alt="基于人类反馈的强化学习" style="max-width:100%"><figcaption>图：RLHF，人工标出不好的预测，用来继续调整参数（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t07">
+        <h2>07. GPU</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=255s" target="_blank">0:04:15</a>–0:04:42 · The role of GPUs</em></p>
+        <p>回到预训练。那么惊人的计算量，只有靠专门的计算机芯片才可能做到。这些芯片为同时并行地跑大量运算做了优化，叫 GPU。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/gpu.jpg" alt="GPU" style="max-width:100%"><figcaption>图：为并行运算优化的芯片 GPU（引自 3blue1brown.com）</figcaption></figure>
+        <p>但不是所有语言模型都容易并行化。2017 年以前，大多数语言模型一次处理一个词。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. Transformer 架构</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=282s" target="_blank">0:04:42</a>–0:05:38 · Transformer architecture</em></p>
+        <p>后来 Google 的一组研究者提出了一种新模型，叫 Transformer。Transformer 不从头到尾读文本，它一次全部吸收进来，并行处理。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/google.jpg" alt="Google 研究者提出 Transformer" style="max-width:100%"><figcaption>图：2017 年 Google 的研究者提出 Transformer（引自 3blue1brown.com）</figcaption></figure>
+        <h3>第一步：每个词变成一长串数</h3>
+        <p>Transformer 里的第一步（其他大多数语言模型也一样）是把每个词对应到一长串数字上。原因是训练过程只能处理连续的数值，所以得想办法用数字来编码语言。每一串数字可能以某种方式编码了对应那个词的意思。这串数字在后面几章叫嵌入向量（embedding，一个词对应的一长串数，意思相近的词数字也相近），这一集里他只说“一长串数字”。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/token.jpg" alt="每个词对应一长串数字" style="max-width:100%"><figcaption>图：每个词被对应到一长串数字（引自 3blue1brown.com）</figcaption></figure>
+        <p>他说 Transformer 的独特之处，在于它依赖一种特殊的运算，叫注意力（attention）。</p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 注意力和前馈网络</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=338s" target="_blank">0:05:38</a>–0:06:27 · Attention mechanism</em></p>
+        <h3>注意力</h3>
+        <p>注意力这个运算让所有这些数字串有机会互相“交谈”，根据周围的上下文修正它们编码的意思，而且全部并行完成。</p>
+        <p>他举的例子是 bank：编码 bank 这个词的那串数字，可能会根据周围的上下文被改变，从而编码一个更具体的意思，河岸（riverbank）。文字版的配图里，起作用的上下文是 river 和 jumped into。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/bank.jpg" alt="bank 的意思被上下文改变" style="max-width:100%"><figcaption>图：bank 的数字根据上下文 river、jumped into 被修改，编码出“河岸”的意思（引自 3blue1brown.com）</figcaption></figure>
+        <h3>前馈网络</h3>
+        <p>Transformer 通常还包含第二种运算，叫前馈神经网络（feed-forward neural network，文字版也写作多层感知机 Multi-layer Perceptron，MLP）。它给模型额外的容量，存下更多训练中学到的语言规律。</p>
+        <h3>反复流过两种运算</h3>
+        <p>所有这些数据会反复流过这两种基本运算的很多轮。在这个过程中，人们希望每一串数字都被充实，编码进准确预测下一个词所需的任何信息。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/overover.jpg" alt="数据反复流过注意力和前馈网络" style="max-width:100%"><figcaption>图：数据一遍遍流过注意力和前馈网络（引自 3blue1brown.com）</figcaption></figure>
+        <p>最后，对序列里最后一个向量做一次最终的函数运算，得到下一个词的预测。这个向量此时已经受到输入文本所有上下文的影响，也带着模型在训练中学到的一切。预测的形式同样是每个可能的下一个词一个概率。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mini-llm/end.jpg" alt="最后一个向量产生预测" style="max-width:100%"><figcaption>图：用最后一个向量算出下一个词的概率分布（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t10">
+        <h2>10. 涌现的行为</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=387s" target="_blank">0:06:27</a>–0:07:05 · Emergent behavior</em></p>
+        <p>他说，研究者设计的是这些步骤怎样运作的框架，但要明白，模型的具体行为是一种涌现现象（emergent phenomenon，整体表现出的行为没有被任何人逐条设计，是从大量参数的调整中自己出现的），取决于那几千亿个参数在训练中被调成什么样。这让人极难确定模型为什么会给出某个具体的预测。</p>
+        <p>你能看到的是：用大语言模型的预测去补全一个提示词时，它生成的文字流畅得出奇，引人入胜，甚至有用。</p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 接下来看什么</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=425s" target="_blank">0:07:05</a>–0:07:58 · Further learning resources</em></p>
+        <p>他对新观众说，如果想知道 Transformer 和注意力的更多细节，有两个选择：一是他做的深度学习系列，里面把注意力和 Transformer 其他每一步的细节做成了可视化并解释了动机；二是他在第二个频道刚发的一场讲座，是几个月前在慕尼黑给 TNG 公司讲的同一主题。他说有时他自己更喜欢随意讲座的内容，而不是精心制作的视频，哪个更适合接着看，留给观众决定。</p>
+    </section>
+
+    <section>
+        <h2>这一集值得记下的原话</h2>
+        <ul>
+            <li>“A large language model is a sophisticated mathematical function that predicts what word comes next for any piece of text.”<br>大语言模型是一个复杂的数学函数，对任何一段文本预测下一个词是什么。（<a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=1s" target="_blank">0:00:01</a>）</li>
+            <li>“So what this means is even though the model itself is deterministic, a given prompt typically gives a different answer each time it's run.”<br>这意味着，尽管模型本身是确定性的，同一个提示词每次运行通常会得到不同的回答。（<a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=51s" target="_blank">0:00:51</a>）</li>
+            <li>“You can think of training a little bit like tuning the dials on a big machine.”<br>可以把训练大致想成调一台大机器上的旋钮。（<a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=104s" target="_blank">0:01:44</a>）</li>
+            <li>“No human ever deliberately sets those parameters.”<br>没有人会刻意去设定这些参数。（<a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=104s" target="_blank">0:01:44</a>）</li>
+            <li>“It's well over 100 million years.”<br>要远超 1 亿年。（<a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=213s" target="_blank">0:03:33</a>）</li>
+            <li>“Transformers don't read text from the start to the finish, they soak it all in at once, in parallel.”<br>Transformer 不从头到尾读文本，它一次全部吸收进来，并行处理。（<a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=268s" target="_blank">0:04:28</a>）</li>
+            <li>“the specific behavior is an emergent phenomenon based on how those hundreds of billions of parameters are tuned during training.”<br>具体的行为是一种涌现现象，取决于那几千亿个参数在训练中被调成什么样。（<a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=367s" target="_blank">0:06:07</a>）</li>
+        </ul>
+    </section>
+
+    <section id="how">
+        <h2>他是怎么讲的</h2>
+        <p>这一集是给博物馆展览做的，面对的是完全没有背景的观众，和前四集面向想学数学的观众不同。它和大众向科普的条件最接近：8 分钟、零公式、零记号，覆盖从“它在做什么”到“它为什么难解释”的整条线。</p>
+        <h3>讲解顺序</h3>
+        <ol>
+            <li><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=1s" target="_blank">0:00:01</a> 用一个设想开场：AI 回答被撕掉的剧本加一台能预测下一个词的机器。先把“一个词一个词补完”的过程讲出来，再说“聊天机器人就是这样”。</li>
+            <li><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=35s" target="_blank">0:00:35</a> 给出定义：一个函数，给所有下一个词打概率。然后马上落到产品上：怎样用它拼出聊天机器人（三步）。</li>
+            <li><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=51s" target="_blank">0:00:51</a> 顺手解释一个用户会遇到的现象：同一个问题每次回答不同，原因是随机挑不那么可能的词。</li>
+            <li><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=51s" target="_blank">0:00:51</a> 问“它怎么学会的”：海量文本，用 2,600 年阅读量给出规模感。</li>
+            <li><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=104s" target="_blank">0:01:44</a> 引入参数（旋钮），说明“大”指什么（几千亿）。</li>
+            <li><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=104s" target="_blank">0:01:44</a> 训练怎么做：随机开始、遮住最后一个词去猜、用反向传播调参数、样例数到万亿级后能泛化到新文本。</li>
+            <li><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=163s" target="_blank">0:02:43</a> 计算量：先向观众提问，给出两个猜测，再揭晓 1 亿年以上。</li>
+            <li><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=213s" target="_blank">0:03:33</a> “这只是故事的一部分”：预训练和做助手目标不同，引出 RLHF。</li>
+            <li><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=213s" target="_blank">0:03:33</a> 回到计算量这条线：靠 GPU 并行，但老模型一次一个词，不好并行。这个矛盾引出 Transformer。</li>
+            <li><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=268s" target="_blank">0:04:28</a> Transformer：一次全部读入；第一步把词变成数字串；独特之处是注意力。</li>
+            <li><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=316s" target="_blank">0:05:16</a> 注意力用 bank 一个例子说明；前馈网络一句话说明；两者交替很多轮；最后一个向量给出预测，回到开头的“概率分布”。</li>
+            <li><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=367s" target="_blank">0:06:07</a> 收在“框架是设计的，行为是涌现的，所以难解释”，再说生成的文字流畅、有用。</li>
+            <li><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=425s" target="_blank">0:07:05</a> 指向两个延伸资源。</li>
+        </ol>
+        <p>这条线是一个问题接一个问题往下推的：它在做什么 → 怎么学会的 → 要多少计算 → 光预训练够不够 → 计算怎么撑得住 → 为什么是 Transformer → Transformer 里面有什么 → 为什么说不清它为什么这样回答。每一段的结尾都是下一段的问题。</p>
+
+        <h3>画面上是什么</h3>
+        <p>以下依据口述和文字版配图；口述没说清的不做推测。</p>
+        <table>
+            <tr><th>时间</th><th>画面</th><th>这个画面在讲什么</th></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=1s" target="_blank">0:00:01</a></td><td>一张剧本，AI 的回答部分被撕掉（图 script）</td><td>开场设想</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=1s" target="_blank">0:00:01</a></td><td>文本喂进机器，机器吐出 used，接上后再吐出 to（图 repeat、repeat2）</td><td>逐词生成的循环</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=35s" target="_blank">0:00:35</a></td><td>一列候选词，每个词旁有一个概率条（图 probability）</td><td>输出是概率分布</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=51s" target="_blank">0:00:51</a></td><td>绿色的开场描述文字 + 用户输入 + 已生成内容，模型选出 option，不是概率最高的词（图 description、user、append）</td><td>聊天机器人的拼法，以及随机采样</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=51s" target="_blank">0:00:51</a></td><td>海量文本（图 data）</td><td>训练数据规模</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=104s" target="_blank">0:01:44</a></td><td>一台机器上的许多旋钮（图 parameter），以及“几千亿”（图 billions）</td><td>参数是什么、有多少</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=104s" target="_blank">0:01:44</a></td><td>一段文本去掉最后一个词送进模型，预测和真实词对比（图 training）</td><td>训练样例怎么用</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=163s" target="_blank">0:02:43</a></td><td>反向传播调参数，真实词的概率变高（图 backpropogation）</td><td>一次训练步</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=213s" target="_blank">0:03:33</a></td><td>预训练、RLHF 中人工标出不好的预测（图 pretraining、rlhf）</td><td>两种训练</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=213s" target="_blank">0:03:33</a></td><td>GPU 芯片（图 gpu）；Google 研究者（图 google）</td><td>并行和 Transformer 的出现</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=268s" target="_blank">0:04:28</a></td><td>每个词下面挂一长串数字（图 token）</td><td>词变成数字</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=316s" target="_blank">0:05:16</a></td><td>bank 那串数字受 river、jumped into 影响被改动（图 bank）</td><td>注意力的作用</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=316s" target="_blank">0:05:16</a></td><td>数据一遍遍流过注意力和前馈网络（图 overover）</td><td>层层叠加</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=367s" target="_blank">0:06:07</a></td><td>最后一个向量经过一个函数变成概率分布（图 end）</td><td>回到开头的输出形式</td></tr>
+        </table>
+
+        <h3>他简化了什么、推后了什么</h3>
+        <ul>
+            <li>通篇说“词”（word），不提 token。文字版配图文件名叫 token，但正文也只说 word。</li>
+            <li>嵌入只说成 “a long list of numbers”，不给名字，也不说维数。</li>
+            <li>注意力只给作用（数字串互相“交谈”、按上下文修正意思）和一个例子，不讲 query、key、value 等内部计算。</li>
+            <li>前馈网络只用一句话：“extra capacity to store more patterns about language”。</li>
+            <li>“one final function” 不说是什么函数（后面章节会讲 softmax 等）。</li>
+            <li>采样只说 “select less likely words along the way at random”，不提温度等参数。</li>
+            <li>RLHF 只用一句话讲工作人员标注和修正，不展开强化学习。</li>
+            <li>反向传播只点名为 “An algorithm called backpropagation”，不解释。</li>
+            <li>所有细节推给深度学习系列和 TNG 讲座（<a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=425s" target="_blank">0:07:05</a>）。</li>
+        </ul>
+
+        <h3>数字怎么用</h3>
+        <ul>
+            <li>数字全是规模感用的，换算成人能体会的单位：读完 GPT-3 训练文本要不眠不休 2,600 多年（<a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=51s" target="_blank">0:00:51</a>）；每秒 10 亿次运算也要 1 亿年以上（<a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=163s" target="_blank">0:02:43</a>）。</li>
+            <li>计算量那一段先提问、给两个偏小的猜测（一年、一万年），再揭晓，让答案和猜测的差距本身成为信息。</li>
+            <li>其余数字只给量级：几千亿个参数、很多很多万亿个样例、2017 年以前。</li>
+            <li>没有任何模型内部的具体数字（维数、层数、头数），这些留给后面的章节。</li>
+        </ul>
+
+        <h3>直觉层和数学层</h3>
+        <p>这一集只有直觉层。“数学函数”“连续值”“向量”这几个词出现了，但没有一个式子。机制用三种方式说明：一个开场设想（撕掉的剧本）、一个比喻（旋钮）、一个具体例子（bank）。每个技术名词（parameter、backpropagation、pre-training、RLHF、GPU、transformer、attention、feed-forward）都在第一次出现时配一句它做什么，不讲它怎么做。前四集里的数学对象（权重、反向传播）在这里被当作已知的名字直接用，不再推导。</p>
+
+        <h3>其他</h3>
+        <ul>
+            <li>开头和结尾呼应：开头是“预测下一个词”的机器，结尾的 Transformer 最后输出的也是“每个可能下一个词一个概率”。</li>
+            <li>中途一次直接向观众提问：计算量要多久（<a href="https://www.youtube.com/watch?v=LPZh9BOjkQs&t=163s" target="_blank">0:02:43</a>）。开场两句分别以 Imagine 和 Suppose 起头，是设想句式，让观众站进场景里。</li>
+            <li>用 “This is only part of the story, though.” 这样的句子做段落转折，把预训练接到 RLHF。</li>
+            <li>结尾不做总结，落在一个开放的事实上：行为是涌现的，很难解释。</li>
+            <li>延伸资源里他并列推荐精心制作的视频和随意的讲座，说有时自己更喜欢讲座，让观众自选。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>3Blue1Brown · Large Language Models explained briefly · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

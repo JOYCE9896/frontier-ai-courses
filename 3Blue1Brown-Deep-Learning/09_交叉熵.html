@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>交叉熵 | 3Blue1Brown 深度学习系列笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+    <style>
+        table { border-collapse: collapse; width: 100%; font-size: 0.9em; margin: 1em 0; }
+        th, td { border-bottom: 1px solid #ccc; padding: 0.35em 0.5em; text-align: left; vertical-align: top; }
+    </style>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="08_MLP怎样存储事实.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">3Blue1Brown 深度学习系列目录</a> · 09</span>
+    <span><a href="10_AI怎样生成图像和视频.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>交叉熵：从文件压缩到大模型的损失函数</h1>
+        <p class="subtitle">用一个压缩问题引出交叉熵，再说明大语言模型预训练和蒸馏的损失函数为什么必须是它，最后补上 KL 散度</p>
+        <div class="author-meta">
+            主讲：Grant Sanderson（3Blue1Brown）· 发布日期：2026 年 7 月 16 日 · 时长：33 分 51 秒 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：视频（3Blue1Brown YouTube 公开，本文依据视频字幕整理）<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU" target="_blank">But what is cross-entropy? | Information theory, part 2</a>，2026 年 7 月 16 日；课程页 <a href="https://www.3blue1brown.com/lessons/cross-entropy" target="_blank">3blue1brown.com/lessons/cross-entropy</a>（这一课目前只有视频，没有文字版；中文转述和讲解，不是逐字翻译）
+        </div>
+    </header>
+    <section>
+        <h2>这一集的内容</h2>
+        <p>
+            这是 Grant 信息论小系列的第 2 部分。第 1 部分 <a href="https://youtu.be/l6DKRf-fAAM" target="_blank">Reinventing Entropy | Information theory, part 1</a>（2026 年 6 月 7 日）讲熵和最优编码，那一集不在这个播放列表里，这里不整理。本集会多次回到第 1 部分的结论：最优编码给一个符号分配的比特数约等于 $-\log_2$ 概率，以及熵可以画成一排柱子的面积。视频描述给这一集的一句话简介是“训练大语言模型的损失函数从哪来”。在系列里，它接在前面几章讲 Transformer、注意力和 MLP 之后，回头补上“模型到底用什么标准来训练”这一块。
+        </p>
+        <p>
+            视频分两半。前一半从压缩出发：一个为某种分布优化过的编码，拿去用在另一种分布上，平均每个符号要花多少比特，这个数就是交叉熵（cross-entropy）。他用机器人指令的例子算出具体数字，再用只有两个结果的分布画图，得出本集最重要的一条性质：固定 $P$、改变 $Q$ 时，交叉熵在 $Q=P$ 时最小，最小值等于 $P$ 的熵。后一半讲大语言模型的预训练和蒸馏（distillation），说明为什么损失函数只能取负对数，以及为什么这样一来平均损失就是交叉熵。最后他补上 KL 散度（KL divergence），留了三个思考题。读完能说清楚：交叉熵在压缩里是什么意思，预训练损失怎么算，为什么叫“交叉熵损失”，蒸馏比普通预训练多给了什么信息，KL 散度和交叉熵差在哪。
+        </p>
+        <p>
+            视频 30:12–31:35 是 3b1b Talent（Grant 做的招聘页面）的推广，这一段已略过；其中提到的招聘题目和 KL 散度有关，这一点只在第 09 节顺带一提。YouTube 章节里没有 KL 散度这一段，视频描述的时间戳里有（31:35），这里单列为第 09 节。
+        </p>
+        <ol>
+            <li><a href="#t01">用 gzip 重建语言谱系树</a> · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">回顾第 1 部分：最优编码和信息量</a> · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=182s" target="_blank">0:03:02</a></li>
+            <li><a href="#t03">定义交叉熵：旧编码遇上新分布</a> · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=320s" target="_blank">0:05:20</a></li>
+            <li><a href="#t04">两个结果的例子和最小值曲线</a> · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=506s" target="_blank">0:08:26</a></li>
+            <li><a href="#t05">回到语言谱系树：gzip 在估计交叉熵</a> · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=779s" target="_blank">0:12:59</a></li>
+            <li><a href="#t06">大语言模型的预训练损失</a> · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=895s" target="_blank">0:14:55</a></li>
+            <li><a href="#t07">为什么损失函数必须是对数</a> · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1238s" target="_blank">0:20:38</a></li>
+            <li><a href="#t08">蒸馏，以及交叉熵和压缩的联系</a> · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1573s" target="_blank">0:26:13</a></li>
+            <li><a href="#t09">KL 散度和三个思考题</a> · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1895s" target="_blank">0:31:35</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 用 gzip 重建语言谱系树</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=0s" target="_blank">0:00:00</a>–0:03:02 · Language trees and zipping</em></p>
+
+        <h3>2002 年的论文 Language Trees and Zipping</h3>
+        <p>
+            Grant 用一篇 2002 年的论文开场，题目叫 Language Trees and Zipping，他形容它“有点疯狂”。论文说明，只用通用的文件压缩工具，就能找出不同语言之间的结构。
+        </p>
+        <p>
+            他把任务讲得更具体：给你一堆不同语言写的文本文件，第一步要按语言自动分组。再进一步，还要找出哪些语言彼此更接近，重建出语言之间共同来源的谱系树。限制条件是你只能写一个处理每份文本的函数，不能预先放进任何语言学知识。他提醒观众，这是将近四分之一个世纪以前的事，那时没有任何类似现代语言模型的东西。论文作者只用了 gzip，也就是平时在电脑上把文件压小一点的那种操作。
+        </p>
+
+        <h3>做法：把 B 的一小段接到 A 后面再压缩</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=49s" target="_blank">0:00:49</a> 起是基本做法。有两份文档 A 和 B。把 B 的一小段接在 A 的末尾，压缩整个结果；再单独压缩 A；比较两个文件的大小。
+        </p>
+        <p>
+            他给的理解方式是：这个差值告诉你，当压缩器主要是按 A 优化的时候，B 的这一小段被压得有多好。如果 B 的语言模式和 A 相近，差值应该小；B 和 A 差别越大，差值越大。作者用这个思路定义了一个只依赖“两份文件一起压缩得怎么样”的距离，这个基于共同压缩的距离就足以重建语言谱系树。同样的方法还能用于其他自然语言任务，比如判断一份文档的作者是谁。
+        </p>
+
+        <h3>这一集要做什么</h3>
+        <p>
+            他说喜欢这篇论文，是因为它很纯粹地展示了压缩的理论和工程，可以在看起来属于机器学习和人工智能的任务上派上用场。这个例子背后的概念叫交叉熵。交叉熵也是现代语言模型训练的核心部分，这暗示训练和压缩之间有一层意想不到的联系。
+        </p>
+        <p>
+            接着他交代全集结构：前一半讲交叉熵的基础，包括它是什么、怎样在压缩研究中自然出现、怎样可视化；后一半讲预训练和蒸馏语言模型的基础。<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=146s" target="_blank">0:02:26</a> 他说，在后一半里交叉熵出现的方式起初看起来和压缩毫无关系，可同一个公式在两个不相干的场合冒出来，就是数学在“冲你眨眼”，暗示两者有联系。他预告，结尾会换一种方式看训练大语言模型：把它看成压缩，放下“预测下一个 token”的说法。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 回顾第 1 部分：最优编码和信息量</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=182s" target="_blank">0:03:02</a>–0:05:20 · Recap optimal codes</em></p>
+
+        <h3>把消息当成从分布里抽出的符号序列</h3>
+        <p>
+            他说，用“把消息编码成比特序列”的场景来引出交叉熵最容易。第 1 部分的设定是：消息是一串符号，比如一串字符；如果把每个新符号看成是从某个概率分布里抽出来的，这些概率就决定了压缩的根本极限。
+        </p>
+        <p>
+            自然语言的分布太复杂，很难写出来，所以第 1 部分主要用一个简化的玩具例子，这一集接着用它。
+        </p>
+
+        <h3>机器人例子</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=205s" target="_blank">0:03:25</a> 起：我们给远处的一台机器人发指令，只有四种：上、下、左、右。每个指令按下面的概率抽取，就像想让机器人走一种有偏向的随机游走：
+        </p>
+        <table>
+            <tr><th>指令</th><th>概率</th><th>最优编码的比特数</th></tr>
+            <tr><td>上</td><td>1/2（50%）</td><td>1</td></tr>
+            <tr><td>下</td><td>1/4</td><td>2</td></tr>
+            <tr><td>左</td><td>1/8</td><td>3</td></tr>
+            <tr><td>右</td><td>1/8</td><td>3</td></tr>
+        </table>
+        <p>
+            第 1 部分的结论之一是，最好的编码把“上”编成 1 个比特，“下”编成 2 个比特，“左”“右”各 3 个比特。他强调这个玩具例子是一个更一般事实的具体演示：对最优编码来说，分配给某个符号的比特数等于这个符号出现概率的负的以 2 为底的对数：
+        </p>
+        $$\text{比特数} = -\log_2 p$$
+
+        <h3>信息量</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=270s" target="_blank">0:04:30</a> 他说这个负对数需要一点时间去习惯。他重复了第 1 部分的一个想法：真希望历史上把它叫作以 1/2 为底的对数，因为它问的就是“要对半切多少次，才能切到这个大小”。Claude Shannon 把这个表达式定义为一个事件的信息量（information content）。信息量衡量一个事件有多出乎意料：概率越小，信息量越大。
+        </p>
+        <p>
+            通常概率不会这么整齐，信息量一般不是整数，所以最优编码不可能简单到“每个符号对应一串固定比特”。更一般的看法是：一整条消息的信息量等于其中每个符号信息量之和，而对这条消息的最优编码，比特数约等于这个总信息量。所以他说，“小数的信息量”是有实际含义的。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 定义交叉熵：旧编码遇上新分布</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=320s" target="_blank">0:05:20</a>–0:08:26 · Defining cross-entropy</em></p>
+
+        <h3>航天局改了计划</h3>
+        <p>
+            第 2 部分的新情节：航天局改了计划，相当于把方向转了一下，让机器人整体往右走得多。从现在开始，“上”和“下”各占 1/8，“左”占 1/4，“右”占一半。可是所有编码和解码系统都写死了旧方案，按旧分布优化。这显然变得低效了，问题是低效多少。
+        </p>
+        <p>
+            他说这不难算。现在 1 比特的“上”只有 1/8 的时候出现，2 比特的“下”也只有 1/8，其余两个指令各要 3 比特，合起来占 75% 的时间。按加权求和：
+        </p>
+        $$\tfrac{1}{8}\cdot 1 + \tfrac{1}{8}\cdot 2 + \tfrac{3}{4}\cdot 3 = 2.625$$
+        <p>
+            平均每条指令 2.625 比特。<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=367s" target="_blank">0:06:07</a> 他说，这个数就是原分布相对新分布的交叉熵。它回答的问题是：如果你围绕一种情境优化了压缩方案，它在另一种情境下表现如何？他提示观众，这已经能让人联想到开头的压缩和语言谱系树。（笔记补算：新分布本身的熵也是 1.75 比特，只是概率换了位置；视频这里没有念这个数，它在第 09 节的 KL 散度里会用到。）
+        </p>
+
+        <h3>写成一般公式</h3>
+        <p>
+            他先把记号定下来：新分布的概率记作 $P$，原分布的概率记作 $Q$。也不再只限于四种机器人指令，考虑任意符号组成的消息，可以是机器人指令，可以是英文字符，也可以是别的。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=422s" target="_blank">0:07:02</a> 按 $Q$ 优化的编码给第 $i$ 个符号分配 $-\log_2 q_i$ 比特。如果实际出现的也是 $Q$，平均每个符号的比特数是一个加权和：逐个符号走一遍，用它出现的比例（也就是概率）乘以它的信息量：
+        </p>
+        $$H(Q) = \sum_i q_i \left(-\log_2 q_i\right)$$
+        <p>
+            这是上一课的另一个核心量，$Q$ 的熵（entropy）。熵是平均信息量，也就是按这种分布最优编码时平均每个符号至少要花的比特数。第 1 部分把它画成一张图的面积：每根柱子代表加权和里的一项，宽度是 $q_i$，高度是 $-\log_2 q_i$。
+        </p>
+        <p>
+            如果实际出现的是另一个分布 $P$，而我们继续用按 $Q$ 优化的编码，平均比特数仍然是加权和，只是权重换成了新概率 $P$：
+        </p>
+        $$\sum_i p_i \left(-\log_2 q_i\right)$$
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=479s" target="_blank">0:07:59</a> 按定义，这就是分布 $Q$ 相对于分布 $P$ 的交叉熵。他说外面看到的记号有点乱，约定很多，所以他和观众只看这个求和本身，用同一种柱状图来想：每根柱子的宽度是 $p_i$，高度是 $-\log_2 q_i$。宽度来自实际分布，高度来自编码所依据的分布。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 两个结果的例子和最小值曲线</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=506s" target="_blank">0:08:26</a>–0:12:59 · Intuition and examples</em></p>
+
+        <h3>例 1：Q 均匀，P 偏斜</h3>
+        <p>
+            他说，面对新公式，先用极简单的例子建立直觉。这里只考虑两个事件的分布。$Q$ 是均匀分布，两个事件各 50%；$P$ 偏斜，一个 90%，一个 10%。
+        </p>
+        <p>
+            从 $Q$ 的角度，每个事件都有 1 比特信息量，按 $Q$ 的最优编码每个符号花 1 比特，所以 $Q$ 的熵是 1 比特。<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=541s" target="_blank">0:09:01</a> 那交叉熵呢？因为两个符号的信息量都是 1 比特，加权和里的权重怎么变都不影响结果，交叉熵也是 1 比特。
+        </p>
+
+        <h3>例 2：反过来，Q 偏斜，P 均匀</h3>
+        <p>
+            把两者对调：$Q$ 是 90/10 的偏斜分布，$P$ 是 50/50 的均匀分布。从 $Q$ 的角度，常见的那个事件信息量很小，另一个信息量很大。所以 $Q$ 眼中的完美编码，会给常见符号花远少于 1 比特（这里也是按所有消息平均来说），代价是给第二个符号平均花好几个比特。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=592s" target="_blank">0:09:52</a> 算下来，$Q$ 的熵小于 1 比特（笔记补算约 0.47 比特）。可如果这套按偏斜分布优化的编码面对的现实是两个事件同样可能，劣势就出来了，加权和约为 1.74 比特：
+        </p>
+        $$0.5\cdot(-\log_2 0.9) + 0.5\cdot(-\log_2 0.1) \approx 1.74$$
+        <p>
+            他让观众注意顺序有多重要：对调 $P$ 和 $Q$，交叉熵的值变了。这说得通，因为公式里 $P$ 和 $Q$ 的角色很不一样。
+        </p>
+
+        <h3>画成函数图像</h3>
+        <p>
+            既然只有两个结果，就可以画图。$Q$ 只有一个自由变量 $q_1$，另一个概率锁定为 $1-q_1$；$P$ 同样只依赖 $p_1$。<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=639s" target="_blank">0:10:39</a> 他请观众想象：把 $P$ 固定住，把交叉熵画成 $Q$ 的函数。图像有一个很明显的最小值，最小值出现在 $P$ 和 $Q$ 相同的地方。
+        </p>
+        <p>
+            他说按前面的动机，这应该很好理解。一定要记住交叉熵问的问题：按一种情境 $Q$ 优化的编码，在另一种情境 $P$ 下表现如何？两种情境一致时，压缩效率当然最好。
+        </p>
+
+        <h3>绿色曲线：最小值的轨迹</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=688s" target="_blank">0:11:28</a> 接着他移动 $P$ 的值，整张图的形状随之变化，同时把最小值的位置描出来，形成一条新的绿色曲线。他问观众：这条曲线代表什么？
+        </p>
+        <p>
+            答案：当现实服从 $P$ 时，交叉熵的最小值就是最有效的压缩，这正好是 $P$ 的熵要表示的东西。在只有两个结果的情况下，这条绿色曲线就是 $P$ 的熵作为 $p_1$ 的函数的图像。
+        </p>
+        <p>
+            他说这张图强调了本集最希望观众记住的一点：
+        </p>
+        <blockquote>把 $P$ 看作固定、$Q$ 看作变量时，交叉熵在 $Q=P$ 时取最小值，最小值等于 $P$ 的熵。</blockquote>
+        $$\sum_i p_i(-\log_2 q_i) \;\ge\; \sum_i p_i(-\log_2 p_i) = H(P),\quad \text{当且仅当 } Q=P \text{ 时取等号}$$
+
+        <h3>推广到多个结果</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=745s" target="_blank">0:12:25</a> 一般情况下分布有很多结果，不容易画图。他给了一种在脑子里记住同一事实的方法：回到那张柱状图，固定 $P$（所有柱子的宽度），让 $Q$ 变化，$Q$ 决定的是所有柱子的高度 $-\log_2 q_i$。这个总面积有下限；当 $Q=P$ 时达到下限；下限就是 $P$ 的熵。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 回到语言谱系树：gzip 在估计交叉熵</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=779s" target="_blank">0:12:59</a>–0:14:55 · Application to language trees</em></p>
+        <p>
+            在讲这条性质为什么让交叉熵适合训练大语言模型之前，他先请观众想想开头的例子为什么基本上就是交叉熵的应用。做法是：想衡量文档 A 和 B 有多不同，就把 B 的一小段接到 A 后面压缩，再和单独压缩 A 的大小相比。因为第一种情况下的压缩主要是按 A 的模式优化的，算这个差值，问的就是交叉熵问的那个问题：按一种情境优化的压缩方案，面对另一种情境表现如何？
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=805s" target="_blank">0:13:25</a> 他说自己略过了一些细节：论文作者定义的距离比这个差值复杂一点，但核心就是这个差值。它也不完全是交叉熵，原因有几条：
+        </p>
+        <ul>
+            <li>它比较的不是两个概率分布，更像是把一种语言的文本当成某个分布的样本，所以这个差值像是交叉熵的经验估计。</li>
+            <li>即使作为估计也不会很准，因为 gzip 远远达不到 Shannon 极限下的完美压缩。<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=859s" target="_blank">0:14:19</a> 它背后的算法直接得多：找到重复出现的文本片段，把后面出现的地方换成指向前面的指针。</li>
+        </ul>
+        <p>
+            作者的想法是，只要它近似交叉熵，就能得到一个有用的距离，用来做一件真正有意思的自然语言处理任务。
+        </p>
+        <p>
+            他说这是交叉熵在实际中常见的用法：每当你想量化一个情境里的模式和另一个情境里的模式有多不同，它就会出现。在这里是一种语言和另一种语言的模式；接下来的主要应用是训练语言模型，要量化的是模型对语言的理解和语言的真实模式（至少是一大堆训练数据所代表的模式）相差多少。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 大语言模型的预训练损失</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=895s" target="_blank">0:14:55</a>–0:20:38 · Pre-training LLMs</em></p>
+
+        <h3>快速回顾语言模型</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=910s" target="_blank">0:15:10</a> 他说前面一直闪过的动画是 Transformer 的底层架构，是一位朋友做的；接下来换成更示意的画法：一个黑箱，由大量可调参数控制。他假设多数观众对语言模型和神经网络有一定了解，频道以前讲过，这里只快速回顾需要的基础：
+        </p>
+        <ul>
+            <li>现代语言模型把文本切成 token，通常是词或词的一部分。</li>
+            <li>可以把语言模型看成一个函数：输入任意一段文本（一串 token），输出所有可能 token 上的一个概率分布，这个输出就是它对下一个 token 的预测。</li>
+            <li>训练模型需要一个损失函数（loss function），用一个数衡量模型的预测总体上是好是坏。</li>
+        </ul>
+
+        <h3>损失曲面和训练</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=967s" target="_blank">0:16:07</a> 一种粗略的直觉是把损失函数的图像想成一个曲面，训练就是在上面找最低点。他提醒要对这种图保持怀疑：图上是两个输入 $x$、$y$ 的函数，真正的损失函数输入是刻画语言模型的数十亿个参数，真实的图要放在数十亿维里。但它足以表达核心想法：训练就是以某种自动的方式微调模型，一步步往山下走，让损失变小。自动微调靠梯度下降（gradient descent，沿着让损失下降最快的方向一小步一小步调参数）和反向传播（backpropagation，高效算出每个参数该往哪调的算法），频道里有专门的视频。
+        </p>
+        <p>
+            他想强调的是：对试图训练模型的工程师来说，一旦定义好一个好的损失函数，基本就完成了，深度学习的标准流程会接手。损失是相对于一大堆训练数据定义的，在语言模型里就是大量文本样本，通常来自互联网。所以真正的设计问题是：能写出什么样的数学函数，描述模型在全部数据上的表现，使得“最小化这个函数”就等于“提高模型表现”？
+        </p>
+
+        <h3>平均每个 token 的信息量（从模型的角度）</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1021s" target="_blank">0:17:01</a> 他给出的理解方式是：损失就是从模型的角度看，平均每个 token 的信息量。具体做法：
+        </p>
+        <ol>
+            <li>取训练数据里的一段文本。</li>
+            <li>对每一个前缀（开头的若干个 token），让模型预测下一个是什么。</li>
+            <li>看这段文本里真正出现的下一个 token，查模型给它的概率。</li>
+        </ol>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1081s" target="_blank">0:18:01</a> 画面上每个 token 下面有一个小饼图，表示这个概率。他说模型在设计上可以一次前向计算就给出所有这些概率。然后对这些概率取负对数，按前面讲过的，这衡量一个事件有多出乎意料。一个真正跟上了文意的聪明模型，通常不会对看到的内容感到意外，它给真实下一个 token 的概率较高，信息量就低；随机或训练不足的模型会很困惑，给什么都是低概率，总是被吓一跳。
+        </p>
+        $$\text{loss} = \frac{1}{N}\sum_{t=1}^{N} -\log q\left(x_t \mid x_1,\dots,x_{t-1}\right)$$
+        <p>
+            （记号是笔记补的：$x_t$ 是第 $t$ 个真实 token，$q(\cdot)$ 是模型给的概率，$N$ 是训练集里所有 token 的数量。）
+        </p>
+
+        <h3>为什么偏偏是对数</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1132s" target="_blank">0:18:52</a> 他调出上次玩过的负对数图像：如果模型给真实 token 的概率很低，惩罚很重，而且陡峭；概率高时，这次预测对总损失只贡献一点点。所以作为损失函数，它很符合直觉。但很多函数都有这种大致形状，他要观众把一个问题挂在心里：为什么偏偏是信息量最好？对数在所有这种形状的函数里有什么特别之处？
+        </p>
+        <p>
+            一个小细节：机器学习里几乎总用自然对数 $\ln$，不用以 2 为底。这没关系，两者只差一个常数倍，反正会被学习率（learning rate，每一步调参数的步长）吸收掉。用自然对数是因为求导时干净得多，而求导是梯度下降的核心。
+        </p>
+
+        <h3>预训练就这么简单</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1185s" target="_blank">0:19:45</a> 他说，在某种意义上这就是预训练的全部：遍历每个 token，对模型给它的概率取负对数，在见到的所有 token 上求平均。这里的“所有 token”指整个庞大训练集里的 token，一个样本里的只是其中一小部分，你希望它能代表你想建模的语言的一个可观样本。
+        </p>
+        <p>
+            他也承认实际上还有更多东西：他略过了批处理（batching）和具体的优化器，而把它跑在实际使用的那种规模上是一项完整的工程壮举。但在只考虑损失函数的抽象层次上，它就是平均每个 token 的信息量。假设深度学习的机制能把这个损失降下来，希望它接近语言的熵，那么最后得到的就是一个强大的通用预测器。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 为什么损失函数必须是对数</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1238s" target="_blank">0:20:38</a>–0:26:13 · What makes this loss function best?</em></p>
+
+        <h3>一个不让人满意的解释</h3>
+        <p>
+            你可能以为这个损失会叫“信息损失”或“对数损失”（log loss），可大家叫它交叉熵损失（cross-entropy loss）。乍听很奇怪，因为前面的解释里根本没用到交叉熵公式。
+        </p>
+        <p>
+            常见的说法是：我们在算交叉熵，是模型在某个 token 上的输出分布，和一个“全偏”的分布之间的交叉熵，后者把全部概率放在那一个真实的下一个 token 上。代入前面的加权和公式，权重里全是 0，只有一个 1，于是只剩下模型给真实 token 的概率的负对数。
+        </p>
+        <p>
+            他说如果只是这样，那就“很逊”，至少在他看来如此：这完全没解释为什么一开始要用交叉熵；既然最后全都消掉了，为什么不直接一点，叫它对数损失或信息损失？<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1294s" target="_blank">0:21:34</a> 他要讲一个更让他满意的解释：用对数其实不是一个选择，你几乎是被逼着用它，看清这一点之后，交叉熵公式会自然出现在你面前。
+        </p>
+
+        <h3>把损失函数先记作 F</h3>
+        <p>
+            到目前为止只看了一个例子：一段文本里的一次 token 预测。在这个框架里，我们想把模型给这个 token 的概率变成某种损失，告诉模型它该有多难受、该多用力地纠正自己。乍看唯一的约束是它应该是递减函数：低概率对应高损失，接近 1 的概率对应低损失。那么在无数个有这种形状的函数里，凭什么某一个比别的好？
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1345s" target="_blank">0:22:25</a> 他说假设我们现在还不知道，就把选定的函数记作 $F$，看能不能找到 $F$ 应该具备的另一种性质来逼出答案。
+        </p>
+
+        <h3>例子：“My name is ___”</h3>
+        <p>
+            想象“My name is ___”这样的片段。它短而常见，会在预训练数据里出现很多次。很常见的名字会出现多次，罕见的名字出现较少。把“My name is”这几个 token 输入模型，它给出所有下一个 token 上的一个分布，把模型输出的这些概率记作 $Q$。
+        </p>
+        <p>
+            他问：这次预测相关的总损失是多少？如果只看训练数据里这个模式出现的某一次，损失是 $F(q)$，$q$ 是模型给那个真实名字的概率，$F$ 是你选的函数，负对数也好，别的也好。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1397s" target="_blank">0:23:17</a> 但这只是这个例子总损失的一部分。同一个名字的每一次出现都贡献同样的量；其他每个名字的每一次出现也贡献类似的量，只是代入的是模型给那些名字的概率。用 $P$ 表示每个名字在训练数据里出现的比例，所有带这个模式的样本上的平均损失就是一个按 $P$ 加权的平均：
+        </p>
+        $$\sum_i p_i\, F(q_i)$$
+        <p>
+            如果令 $F(q) = -\log q$，这个式子就正好是交叉熵的定义。具体说，是模型输出相对于数据中统计规律的交叉熵。
+        </p>
+
+        <h3>反过来推：只有对数满足要求</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1452s" target="_blank">0:24:12</a> 再想起那条性质：这个式子恰好在所有 $p_i$ 和 $q_i$ 相等时取最小。放在这里就是：当模型输出的分布和数据里的统计分布相同时，平均损失最小。
+        </p>
+        <p>
+            他说真正的要点是这个推论可以反过来。回到一般的 $F$，如果你希望“所有样本上的平均损失只在模型输出和数据统计相符时最小”，有一个很漂亮的数学论证说明 $F$ 必须是对数。他犹豫要不要展开，因为细节涉及拉格朗日乘数（Lagrange multiplier，在有约束条件下求极值的方法），有“见树不见林”的风险。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1502s" target="_blank">0:25:02</a> 他把细节放在屏幕上给多元微积分爱好者暂停细看，口头只讲高层思路：在“所有 $q_i$ 之和等于 1”的约束下最小化这个式子，问题变成找两组等高线相切的位置；相切的条件是让一对梯度相等；对这里的式子，这最后归结为 $F$ 对 $q$ 的导数必须形如“某个常数除以 $q$”，只有对数有这个性质。
+        </p>
+        <p>
+            按他口述的思路，推导大致如下（笔记补写，屏幕上的原式字幕里没有念出来）：
+        </p>
+        $$\min_{q}\ \sum_i p_i F(q_i) \quad \text{s.t.}\ \sum_i q_i = 1 \;\Rightarrow\; p_i F'(q_i) = \lambda$$
+        <p>
+            要求最小值恰好落在 $q_i = p_i$，就得到对所有 $p$ 都有 $p\,F'(p) = \lambda$，即 $F'(q) = \lambda / q$，所以 $F(q) = \lambda \ln q + C$。损失要随概率递减，$\lambda$ 取负，于是 $F$ 是负对数。描述里还附了他在 Khan Academy 时期讲拉格朗日乘数的视频链接。
+        </p>
+        <p>
+            他再次说这只是给特别好奇的人看的，细节不太重要。<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1553s" target="_blank">0:25:53</a> 要记住的是：如果你想要一个“只在模型和数据统计相符时才最小”的损失函数，你别无选择，只能用负对数；这时任何一段输入文本对应的平均损失看起来就是交叉熵公式。他顺便在屏幕上放了另一条给好奇者的注释，讲过拟合（overfitting），以及考虑到数据有多稀疏，这套方法居然能行有多神奇；注释内容字幕里没有展开。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 蒸馏，以及交叉熵和压缩的联系</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1573s" target="_blank">0:26:13</a>–0:30:12 · Distillation</em></p>
+
+        <h3>蒸馏的设定</h3>
+        <p>
+            这一部分最后一个话题是训练语言模型的一种变体，其中交叉熵公式被更直接地使用。每个训练样本对模型分布的拉动更“软”，不会过分偏向某一个下一个 token。这就是蒸馏（distillation）：用一个大模型的输出来训练一个小模型，让小模型逼近大模型的表现。
+        </p>
+        <p>
+            他说这种需求一直都有：经常是先把参数规模做大，拿到想要的表现，然后很希望用一个小得多、推理时跑起来高效得多的模型来逼近这个表现。
+        </p>
+
+        <h3>做法</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1614s" target="_blank">0:26:54</a> 手里有了大模型，就能做比小模型普通预训练高效得多的事：
+        </p>
+        <ol>
+            <li>和以前一样遍历数据，在每个新 token 处看小模型对后面内容的预测，也就是完整的分布。</li>
+            <li>不再只和数据里真实的下一个 token 比，而是和大模型在同一位置对所有 token 的完整预测分布比。</li>
+            <li>把这个 token 处的损失定义为小模型分布相对于大模型分布的交叉熵。</li>
+        </ol>
+        $$\text{loss}_t = \sum_i p^{\text{大}}_i \left(-\log q^{\text{小}}_i\right)$$
+        <p>
+            他说这比普通预训练给的信息丰富得多，因为预训练只把全部权重给一个恰好出现在那里的真实 token。他打了个比方：区别就像只靠看一盘棋去学下棋，和有个比你强的人在每一步把所有好棋都讲一遍、说出他会怎么给它们分配权重。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1671s" target="_blank">0:27:51</a> 回到“My name is ___”：普通预训练要在数据里见到成千上万甚至上百万个例子，损失才等于对一个合理的名字分布的交叉熵；蒸馏只用一个例子、对照好模型的预测，就能得到同样的效果。
+        </p>
+
+        <h3>回顾两半</h3>
+        <p>
+            他接着回顾全集。前一半在压缩的语境里，交叉熵很自然地来自一个问题：按一种情境优化的压缩方案在另一种情境下表现如何。有点出人意料的是，这个想法作为“衡量两个情境的模式差多少”的工具，用途广得多，所以它在现代机器学习里常被用作损失函数。
+        </p>
+        <p>
+            但到目前为止，后一半里公式出现的方式和前一半很不一样，<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1725s" target="_blank">0:28:45</a> 基本和压缩无关，逻辑来自数学的另一个分支：约束优化。他说如果两者没有更紧的联系，他不会把它们放进同一个视频。他打的比方是：数学里只要出现 $\pi$，即使看起来和圆无关，背后总藏着和圆的联系；同样，他认为每当交叉熵出现，总有办法把它和压缩连起来。
+        </p>
+
+        <h3>预告下一部分：把预测器变成压缩器</h3>
+        <p>
+            对语言模型来说，把损失描述成“从模型角度看平均每个 token 的信息量”，已经为这个联系做了铺垫。下一步是说明怎样把一个通用预测器变成压缩器，比如把语言模型这台预测机器变成语言压缩器，<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1772s" target="_blank">0:29:32</a> 而且表示一段文本所用的比特数，约等于从模型角度看这段文本的信息量。他说这居然可行是很令人意外的。有一种很直观、很漂亮的压缩算法能做到，下一部分会深入讲。理解了它，就会明白用交叉熵损失训练模型，等价于把模型训练成最好的文本压缩器。站在这个基础上，就能正面评估“压缩即智能”（compression is intelligence）这句话。
+        </p>
+        <p>
+            最后他说要加一个脚注，简单讲讲一个相关概念 KL 散度，它在机器学习论文里到处都是。之后是 3b1b Talent 推广（已略过）。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. KL 散度和三个思考题</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1895s" target="_blank">0:31:35</a>–0:33:51 · KL Divergence（视频描述时间戳，YouTube 章节中没有）</em></p>
+        <p>
+            （略过的推广段里有一个和本节相关的细节：招聘页面上一家叫 Dopple 的公司出的挑战题恰好用到 KL 散度公式。Grant 说这不是安排好的，对方并不知道他在做这个视频，他把它当作这些数学确实出现在现实中的一个小证据。）
+        </p>
+
+        <h3>定义：交叉熵减去熵</h3>
+        <p>
+            他让观众回想那条性质：交叉熵在 $P$ 和 $Q$ 相同时取最小值，最小值等于 $P$ 的熵。于是很自然地想给“这两个值的差”起个名字。这个差就叫 Kullback-Leibler 散度，常简称 KL 散度（KL divergence）：
+        </p>
+        $$D_{\mathrm{KL}}(P\,\|\,Q) = \underbrace{\sum_i p_i(-\log_2 q_i)}_{\text{交叉熵}} \;-\; \underbrace{\sum_i p_i(-\log_2 p_i)}_{H(P)}$$
+        <p>
+            用压缩的语言来说，它描述的是：用一个没优化好的编码，平均每个符号浪费了多少比特。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1930s" target="_blank">0:32:10</a> 在机器人例子里，用未优化方案时每个符号的比特数，减去用优化方案时每个符号的比特数，这个差就是两个分布之间的 KL 散度，它告诉你浪费了多少。（笔记补算：$2.625 - 1.75 = 0.875$ 比特，视频没有念这个数。）
+        </p>
+
+        <h3>像距离，但不对称</h3>
+        <p>
+            在机器学习里，KL 散度起一种“分布之间的距离”的作用：两个分布相同时为 0，差别越大它越大。但它不完全是距离，因为它不对称：$Q$ 相对 $P$ 的 KL 散度，和 $P$ 相对 $Q$ 的不一样。
+        </p>
+
+        <h3>留给观众的三个问题</h3>
+        <ol>
+            <li>实际中 KL 散度常写成更紧凑的形式，请自己验证它和上面的差值形式相同。他说紧凑形式更简洁，但把“它就是交叉熵减熵”这件事藏起来了。常见的紧凑写法是
+                $$D_{\mathrm{KL}}(P\,\|\,Q) = \sum_i p_i \log_2 \frac{p_i}{q_i}$$
+                （这一写法是笔记按通行定义补的，字幕里没有念出屏幕上的式子。）</li>
+            <li><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1981s" target="_blank">0:33:01</a> 他一直在屏幕上放一张图，是交叉熵柱状图的变体。请观众想一想，这张图在什么意义上表示了 KL 散度。</li>
+            <li>前面说蒸馏时用两个模型分布之间的交叉熵当损失。如果改用 KL 散度会怎样？既然 KL 散度像距离，它岂不是更自然的选择？</li>
+        </ol>
+        <p>
+            视频在第三个问题处结束，没有给答案。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一集值得记下的原话</h2>
+        <ul>
+            <li>“But whenever you see the same formula pop up in two separate contexts, it's math's way of kind of winking at you and hinting at a connection.”<br>只要你看到同一个公式在两个不同的场合冒出来，那就是数学在冲你眨眼，暗示两者有联系。 · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=146s" target="_blank">0:02:26</a></li>
+            <li>“If you've optimized a compression scheme around one context, how does it perform in another context?”<br>如果你围绕一种情境优化了压缩方案，它在另一种情境下表现如何？ · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=367s" target="_blank">0:06:07</a></li>
+            <li>“That compression efficiency will obviously be at its best when both settings align.”<br>两种情境一致时，压缩效率显然最好。 · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=639s" target="_blank">0:10:39</a></li>
+            <li>“But the point I want to emphasize is that for you, the engineer, trying to train a model, once you define a good loss function, you're essentially done.”<br>我想强调的是，对想训练模型的工程师来说，一旦定义好一个好的损失函数，你基本就完成了。 · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=967s" target="_blank">0:16:07</a></li>
+            <li>“It really is just the average information per token”<br>它真的就是平均每个 token 的信息量。 · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1185s" target="_blank">0:19:45</a></li>
+            <li>“Your hand is almost forced into it, and when you see how, the formula for cross-entropy just naturally pops right out in front of you.”<br>你几乎是被逼着这么选的，看清怎么被逼的之后，交叉熵公式会自然出现在你面前。 · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1294s" target="_blank">0:21:34</a></li>
+            <li>“As an analogy, it's the difference between trying to learn chess just by watching a game versus having someone better than you talk through all the possible good moves and how heavily they would weight them at each new turn.”<br>打个比方，这就像只靠看一盘棋学下棋，和有个比你强的人在每一步把所有好棋讲一遍、说出他会给每步多大权重之间的区别。 · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1614s" target="_blank">0:26:54</a></li>
+            <li>“In the language of compression, you would think of it as describing how many bits per symbol are you wasting by using a poorly optimized code.”<br>用压缩的语言来说，它描述的是用一个没优化好的编码，平均每个符号浪费了多少比特。 · <a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1877s" target="_blank">0:31:17</a></li>
+        </ul>
+    </section>
+
+    <section id="how">
+        <h2>他是怎么讲的</h2>
+
+        <h3>讲解顺序</h3>
+        <ol>
+            <li><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=0s" target="_blank">0:00:00</a> 先讲一个反直觉的结果：2002 年只用 gzip 就重建了语言谱系树。他没有先给定义，先给一个“这怎么可能”的问题，再说出背后的概念名字叫交叉熵，并把它和大模型训练挂钩。</li>
+            <li><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=146s" target="_blank">0:02:26</a> 交代全集两半的结构，并预告“同一公式在两处出现”这个悬念，结尾会回收。</li>
+            <li><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=182s" target="_blank">0:03:02</a> 回顾第 1 部分的机器人例子和 $-\log_2 p$，只回顾后面要用的部分。</li>
+            <li><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=320s" target="_blank">0:05:20</a> 在同一个例子上改一个条件（航天局改计划），先算出一个具体数 2.625，再说这个数叫交叉熵，然后才写一般公式。</li>
+            <li><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=506s" target="_blank">0:08:26</a> 用两个结果的分布做两个对照例子（1 比特和 1.74 比特），引出“顺序重要”，再画成函数图像，引出最小值性质。</li>
+            <li><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=688s" target="_blank">0:11:28</a> 移动 $P$、描出绿色曲线，向观众提问它是什么，答案是熵。这一步把本集唯一要记住的性质定下来。</li>
+            <li><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=779s" target="_blank">0:12:59</a> 回到开场例子，解释 gzip 方法为什么是交叉熵的近似，同时说清它在哪些方面不是。</li>
+            <li><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=895s" target="_blank">0:14:55</a> 转到语言模型：快速回顾，提出“写一个什么函数”这个设计问题，给出“平均每个 token 的信息量”，并留下问题：为什么一定是对数。</li>
+            <li><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1238s" target="_blank">0:20:38</a> 先摆出一个常见解释并说它不让人满意，再用“My name is ___”把很多样本的损失加起来，交叉熵自己出现；再反向推出对数是唯一选择。</li>
+            <li><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1573s" target="_blank">0:26:13</a> 蒸馏：交叉熵被显式使用，并用同一个“My name is ___”说明为什么信息更丰富。</li>
+            <li><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1671s" target="_blank">0:27:51</a> 回顾两半，承认后一半的推导和压缩无关，再用 $\pi$ 和圆的比方把悬念推到下一部分（预测器变压缩器）。</li>
+            <li><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1895s" target="_blank">0:31:35</a> 脚注式地补 KL 散度：直接由前面那条性质定义，回到机器人例子，最后留三个问题收尾。</li>
+        </ol>
+
+        <h3>画面上是什么</h3>
+        <p>没有文字版配图可参照，下表只按他的口述（如 “What I'm going to do is move around that value P”“I'm going to keep P, the width of all the bars, fixed”）记录画面。</p>
+        <table>
+            <tr><th>时间</th><th>画面</th><th>这个画面在讲什么</th></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=49s" target="_blank">0:00:49</a></td><td>文档 A、B，B 的一段接到 A 后面，两次压缩的文件大小对比</td><td>共同压缩距离的做法</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=205s" target="_blank">0:03:25</a></td><td>远处的机器人，四个方向指令及其概率和编码</td><td>第 1 部分的玩具例子</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=320s" target="_blank">0:05:20</a></td><td>分布“旋转”成偏向右，旧编码配新概率做加权和</td><td>交叉熵的第一个具体数 2.625</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=422s" target="_blank">0:07:02</a></td><td>柱状图：每根柱子宽 $q_i$、高 $-\log_2 q_i$，面积是熵；再换成宽 $p_i$、高 $-\log_2 q_i$</td><td>熵和交叉熵用同一种图表示，只差宽度来自哪个分布</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=639s" target="_blank">0:10:39</a></td><td>固定 $P$，交叉熵关于 $q_1$ 的曲线，最低点在 $q_1=p_1$</td><td>最小值性质</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=688s" target="_blank">0:11:28</a></td><td>拖动 $P$，曲线变形，最低点描出一条绿色曲线</td><td>最小值就是 $P$ 的熵</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=745s" target="_blank">0:12:25</a></td><td>回到柱状图，宽度固定，高度随 $Q$ 变化</td><td>多结果情况下同一性质的记法</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=910s" target="_blank">0:15:10</a></td><td>前面闪过的 Transformer 架构动画（朋友制作，描述里写 NanoGPT 动画），之后换成由大量可调参数控制的黑箱（描述里写 3D 黑箱模型）</td><td>把模型简化为函数</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=967s" target="_blank">0:16:07</a></td><td>二元函数的损失曲面，往山下走</td><td>训练的直觉，并提醒真实维度是数十亿</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1081s" target="_blank">0:18:01</a></td><td>一段训练文本，每个 token 下有一个小饼图表示模型给它的概率</td><td>逐 token 取负对数再平均</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1132s" target="_blank">0:18:52</a></td><td>上一集的负对数图像</td><td>低概率被重罚</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1345s" target="_blank">0:22:25</a></td><td>“My name is ___”，模型输出的名字分布 $Q$，数据中名字的比例 $P$</td><td>把多次出现的损失加权平均，得到交叉熵</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1502s" target="_blank">0:25:02</a></td><td>屏幕上的拉格朗日乘数推导注释（描述里说这类场景由 Nishad Deulkar 制作），还有一条关于过拟合的注释</td><td>给想看的人暂停阅读，口述只讲思路</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1614s" target="_blank">0:26:54</a></td><td>大模型和小模型在同一位置的完整分布对比；下棋的画面（描述里有国际象棋场景）</td><td>蒸馏给的是整个分布</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1981s" target="_blank">0:33:01</a></td><td>交叉熵柱状图的一个变体</td><td>留给观众：它怎样表示 KL 散度</td></tr>
+        </table>
+
+        <h3>他简化了什么、推后了什么</h3>
+        <ul>
+            <li>自然语言的分布“very difficult to describe”，所以用四个指令的机器人代替（<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=205s" target="_blank">0:03:25</a>）。</li>
+            <li>交叉熵的记号“a little bit of a mess”，他干脆不用标准记号，只看求和本身和柱状图（<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=479s" target="_blank">0:07:59</a>）。</li>
+            <li>先用只有两个结果的分布，因为自由参数少，能画图（<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=639s" target="_blank">0:10:39</a>）。</li>
+            <li>论文的距离定义“a little more complicated”，他说自己在 “glossing over a couple details”（<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=805s" target="_blank">0:13:25</a>）。</li>
+            <li>损失曲面图要 “with a heavy grain of salt”，真实维度是数十亿（<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=967s" target="_blank">0:16:07</a>）；梯度下降和反向传播指向以前的视频。</li>
+            <li>“I've glossed over things like batching or specific optimizers”，工程规模问题不谈（<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1185s" target="_blank">0:19:45</a>）。</li>
+            <li>拉格朗日乘数的推导只放屏幕，口头说 “The details are not too important”，理由是怕 “losing the forest for the trees”（<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1452s" target="_blank">0:24:12</a>）。</li>
+            <li>预测器怎样变压缩器推到下一部分（<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1772s" target="_blank">0:29:32</a>）；KL 散度的紧凑形式和图的含义留作思考题。</li>
+        </ul>
+
+        <h3>数字怎么用</h3>
+        <ul>
+            <li>机器人例子的概率全是 1/2、1/4、1/8，对应整数比特 1、2、3，让 $-\log_2 p$ 能心算；改计划后只是把同一组概率换位置，算出 2.625 这一个数。</li>
+            <li>两个结果的例子用 50/50 和 90/10，第一个结果是整的 1 比特，第二个是 1.74，对比出“顺序重要”。熵的具体值他只说“小于 1 比特”，没有报数。</li>
+            <li>“将近四分之一个世纪以前”用来强调 2002 年没有语言模型。</li>
+            <li>“数十亿个参数”“数十亿维”只出现在提醒损失曲面图的局限时。</li>
+            <li>蒸馏的对比用“成千上万甚至上百万个例子”对“一个例子”。</li>
+            <li>整集没有用某个具体模型的参数量或 token 数，数字都服务于小例子。</li>
+        </ul>
+
+        <h3>直觉层和数学层</h3>
+        <ul>
+            <li>每个公式都先有一个具体算出来的数（2.625），再写一般形式，再给它画图（柱状图），三者对应同一件事。</li>
+            <li>他反复把公式翻回一个问句：“按一种情境优化的编码，在另一种情境下表现如何？”这个问句在 0:06:07、0:10:39、0:13:25 都出现过，措辞略有不同。</li>
+            <li>最小值性质被他明确标为“本集唯一要记住的点”（<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=688s" target="_blank">0:11:28</a>），后面预训练、蒸馏、KL 散度都从这条性质出发。</li>
+            <li>拉格朗日乘数那一步他有意停在直觉层：口头只说“两组等高线相切”“导数形如常数除以 $q$”，完整推导放屏幕“for any multivariable calculus enthusiasts”。</li>
+            <li>自然对数和以 2 为底的区别用一句话处理：差一个常数，被学习率吸收。</li>
+        </ul>
+
+        <h3>其他</h3>
+        <ul>
+            <li>他会先给一个“常见但不满意”的解释（全偏分布的交叉熵），直接说它 “very lame”，再给他自己的解释（<a href="https://www.youtube.com/watch?v=GlYgs6v2YfU&t=1238s" target="_blank">0:20:38</a>）。这给了观众一个对照，知道外面通常怎么讲、缺了什么。</li>
+            <li>“My name is ___”是后一半的持续例子，用在损失推导和蒸馏两处。</li>
+            <li>他常对观众提问后停一下再答：“what does this new curve represent?”（0:11:28），“what is the total loss associated with this prediction?”（0:22:25）。</li>
+            <li>开头埋的悬念（同一公式两处出现，训练等于压缩）在结尾回收一半，另一半明确交给下一部分。</li>
+            <li>结尾用三个思考题收尾，不给答案。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>3Blue1Brown · But what is cross-entropy? | Information theory, part 2 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 怎样生成图像和视频 | 3Blue1Brown 深度学习系列笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+    <style>
+        table { border-collapse: collapse; width: 100%; font-size: 0.9em; margin: 1em 0; }
+        th, td { border-bottom: 1px solid #ccc; padding: 0.35em 0.5em; text-align: left; vertical-align: top; }
+    </style>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="09_交叉熵.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">3Blue1Brown 深度学习系列目录</a> · 10</span>
+    <span><a href="11_讲法拆解.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>客座视频 · AI 怎样生成图像和视频</h1>
+        <p class="subtitle">从 CLIP 的图文共享空间，到扩散模型学到的随时间变化的向量场，再到条件输入、classifier-free guidance 和负向提示词</p>
+        <div class="author-meta">
+            主讲：Stephen Welch（Welch Labs，3Blue1Brown 客座视频）· 发布日期：2025 年 7 月 25 日 · 时长：37 分 20 秒 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：视频（3Blue1Brown YouTube 公开，本文依据视频字幕整理）<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY" target="_blank">But how do AI images and videos actually work? | Guest video by Welch Labs</a>，2025 年 7 月 25 日（中文转述和讲解，不是逐字翻译；视频描述里的技术注释也一并参考）
+        </div>
+    </header>
+    <section>
+        <h2>这一集的内容</h2>
+        <p>
+            这是 Grant Sanderson 休陪产假期间邀请的客座视频，作者是 Welch Labs 频道的 Stephen Welch（视频描述写明由他撰稿，Grant 提供了反馈）。前面几章讲的是生成文字的语言模型，这一集讲生成图像和视频的模型。它要回答的问题是：一段纯随机噪声，怎样被一步步变成符合提示词的视频？为什么这个过程和物理里的布朗运动有关？文字提示词又是怎样“指挥”这个过程的？
+        </p>
+        <p>
+            Welch 把内容分成三部分。第一部分讲 OpenAI 2021 年的 CLIP，一个把图像和文字放进同一个向量空间的模型，借它熟悉扩散模型工作的那种高维空间。第二部分讲扩散过程本身：从 2020 年的 DDPM 论文出发，用一个只有两个像素的玩具数据集（点排成螺旋形），说明扩散模型学到的是一个随时间变化的向量场，并解释 DDPM 两个反直觉的做法，以及后来的 DDIM 怎样去掉随机步。第三部分把两者合起来：DALL·E 2、条件输入（conditioning）、classifier-free guidance 和负向提示词。读完能说清楚扩散模型训练时学的是什么，生成时为什么要加噪声，去掉噪声为什么会得到模糊图像，以及提示词怎样把生成结果推向想要的内容。
+        </p>
+        <p>
+            最后约两分钟是 Grant 本人出镜介绍客座视频计划，这里只简单记录；其中提到用 Patreon 资金资助客座作者，以及 Patreon 支持者可以提前观看，不展开。字幕里 Welch 拼作 Welsh，DALL·E 2 写作 DALI2，引用原话时照字幕原样保留。
+        </p>
+        <ol>
+            <li><a href="#t01">开场：从噪声到视频</a> · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">CLIP：对比学习的图文模型</a> · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=217s" target="_blank">0:03:37</a></li>
+            <li><a href="#t03">共享嵌入空间：戴帽子减去不戴帽子</a> · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=385s" target="_blank">0:06:25</a></li>
+            <li><a href="#t04">扩散模型和 DDPM 的两个反直觉做法</a> · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=496s" target="_blank">0:08:16</a></li>
+            <li><a href="#t05">两像素的玩具数据：加噪声就是随机游走</a> · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=704s" target="_blank">0:11:44</a></li>
+            <li><a href="#t06">时间条件、生成时的噪声和“学到均值”</a> · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=999s" target="_blank">0:16:39</a></li>
+            <li><a href="#t07">DDIM：不加随机步的生成</a> · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1320s" target="_blank">0:22:00</a></li>
+            <li><a href="#t08">DALL·E 2：用扩散模型反转 CLIP</a> · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1525s" target="_blank">0:25:25</a></li>
+            <li><a href="#t09">条件输入：把文字向量喂给扩散模型</a> · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1597s" target="_blank">0:26:37</a></li>
+            <li><a href="#t10">Classifier-free guidance</a> · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1802s" target="_blank">0:30:02</a></li>
+            <li><a href="#t11">负向提示词</a> · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=2019s" target="_blank">0:33:39</a></li>
+            <li><a href="#t12">结尾</a> · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=2067s" target="_blank">0:34:27</a></li>
+            <li><a href="#t13">Grant 介绍客座视频</a> · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=2132s" target="_blank">0:35:32</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场：从噪声到视频</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=0s" target="_blank">0:00:00</a>–0:03:37 · Intro</em></p>
+
+        <h3>扩散和物理的联系</h3>
+        <p>
+            Welch 开头说，过去几年 AI 系统把文字提示词变成视频的能力好得惊人，这些模型的核心和物理有一层深的联系。这一代图像和视频模型用的是一种叫扩散（diffusion）的过程。扩散模型从纯噪声开始，一步步去掉噪声，最后得到图像或视频。他说这个过程和粒子扩散时的布朗运动（Brownian motion，粒子受随机碰撞做的无规则运动）相当，只是时间倒着走，而且在高维空间里。他说这个联系远远超出一个奇闻的分量：从物理里能得到真正可用的生成算法，这个视角也能给出模型实际工作方式的直觉。
+        </p>
+
+        <h3>动手看一个真实模型：WAN 2.1</h3>
+        <p>
+            最好的模型是闭源的，但有一些不错的开源模型。他先展示一段宇航员的视频，由开源模型 WAN 2.1 生成。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=57s" target="_blank">0:00:57</a> 在提示词里加内容，可以让宇航员拿旗子、拿笔记本电脑，或者主持会议（英文 hold a meeting，和前两个 hold 构成文字游戏）。把提示词删到只剩“一个宇航员”，得到另一段视频；删到什么都没有，有意思的是仍然会得到一段视频，内容是一位女性。
+        </p>
+        <p>
+            翻 WAN 的源代码，视频生成从调用一个随机数生成器开始，生成一段每个像素亮度都随机选取的视频，也就是纯噪声视频。这段噪声视频被送进一个 Transformer，和 ChatGPT 这类大语言模型用的是同一类模型，但它输出的不是文字，是另一段视频：仍然大部分是噪声，但有了一点结构的迹象。这段新视频被加到原来的噪声视频上，再送回模型，得到第三段视频。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=114s" target="_blank">0:01:54</a> 这个过程一遍遍重复，画面依次展示 5 次、10 次、20 次、30 次、40 次，最后 50 次迭代后的样子。Transformer 就这样一步步把纯噪声塑造成逼真的视频。
+        </p>
+        <p>
+            （视频描述的技术注释说，开头的噪声视频经过了 VAE 处理，因为扩散过程实际上发生在一个压缩过的“潜空间”（latent space）里，VAE 的作用很像视频压缩器，所以这些噪声视频看起来不像纯粹的椒盐噪声。）
+        </p>
+
+        <h3>三部分的路线</h3>
+        <p>
+            他提出两个问题：这和布朗运动到底有什么联系？模型怎样这么灵活地用文字输入，把噪声塑造成提示词描述的样子？然后交代三部分：
+        </p>
+        <ol>
+            <li>OpenAI 2021 年的论文和模型 CLIP。CLIP 其实是两个模型，一个语言模型，一个视觉模型，用一个巧妙的学习目标训练，学到一个文字和图片共享的空间。在这个空间里做实验，能帮助理解扩散模型所在的高维空间。</li>
+            <li><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=170s" target="_blank">0:02:50</a> 扩散过程本身。笼统说，扩散模型被训练来去除图像或视频里的噪声，但看这个领域的里程碑论文就会发现，这种朴素理解在实践中站不住。这一部分讲扩散模型和物理扩散过程的联系，这层联系能帮助理解模型实际怎样工作，也提供了大幅加快生成的理论。</li>
+            <li>把两者合起来：CLIP 这类方法怎样和扩散模型结合，去条件化和引导生成过程，得到提示词要求的视频。</li>
+        </ol>
+    </section>
+
+    <section id="t02">
+        <h2>02. CLIP：对比学习的图文模型</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=217s" target="_blank">0:03:37</a>–0:06:25 · CLIP</em></p>
+
+        <h3>背景：2020 年和 GPT-3</h3>
+        <p>
+            2020 年是语言建模的里程碑之年。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=220s" target="_blank">0:03:40</a> 神经缩放定律（neural scaling laws）的新结果和 OpenAI 的 GPT-3 表明，更大确实更好：在海量数据上训练的超大模型有小模型完全没有的能力。研究者很快把类似思路用到图像上。
+        </p>
+
+        <h3>CLIP 的结构和训练数据</h3>
+        <p>
+            2021 年 2 月，OpenAI 的团队发布了新的模型架构 CLIP，用从互联网抓取的 4 亿对图片和配文（caption）训练。CLIP 由两个模型组成，一个处理文字，一个处理图片。每个模型输出一个长度为 512 的向量，核心想法是：一张图片和它的配文，对应的向量应该相近。
+        </p>
+
+        <h3>对比学习：用整个批次的配对</h3>
+        <p>
+            OpenAI 团队的训练方法是：取一批图片和配文的配对。他举的例子是一批里有一张猫、一张狗、一张他本人的照片，配文分别是“a photo of a cat”“a photo of a dog”“a photo of a man”。三张图送进图像模型，三条配文送进文字模型。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=284s" target="_blank">0:04:44</a> 现在有三个图像向量和三个文字向量，希望配对的图文向量相近。巧妙之处是：不只用配对之间的相似度，而是用这一批里所有图文组合的相似度来训练。把图像向量排成矩阵的列，文字向量排成行，对角线上是配对的图文，非对角线上是不配对的。CLIP 的训练目标是：让对角线上的相似度尽量大，同时让非对角线上的相似度尽量小。
+        </p>
+        <table>
+            <tr><th></th><th>猫的图</th><th>狗的图</th><th>人的图</th></tr>
+            <tr><td>a photo of a cat</td><td>拉高</td><td>压低</td><td>压低</td></tr>
+            <tr><td>a photo of a dog</td><td>压低</td><td>拉高</td><td>压低</td></tr>
+            <tr><td>a photo of a man</td><td>压低</td><td>压低</td><td>拉高</td></tr>
+        </table>
+        <p>
+            CLIP 的 C 代表 contrastive（对比），因为模型学的是对比配对和不配对的图文。
+        </p>
+
+        <h3>余弦相似度</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=336s" target="_blank">0:05:36</a> CLIP 用余弦相似度（cosine similarity）衡量向量的相似程度。几何上，每个向量指向高维空间里的某个方向，余弦相似度就是两个向量夹角的余弦。如果文字向量和图像向量指向同一个方向，夹角为 0，余弦相似度取最大值 1。
+        </p>
+        $$\cos\theta = \frac{\mathbf{a}\cdot\mathbf{b}}{\|\mathbf{a}\|\,\|\mathbf{b}\|}$$
+        <p>
+            所以组成 CLIP 的两个模型被训练成：在这个共享的高维空间里，让相关的图文尽量对齐，不相关的尽量不对齐。（视频描述的技术注释补充：如果只看一个批次，直接最小化余弦相似度会把不配对的向量推到相差 180 度；但整体上 CLIP 需要让各种概念在它所在的超球面上分布得尽量均匀，所以动画里把这些向量画成大致正交。）
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 共享嵌入空间：戴帽子减去不戴帽子</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=385s" target="_blank">0:06:25</a>–0:08:16 · Shared Embedding Space</em></p>
+
+        <h3>向量减法的实验</h3>
+        <p>
+            这个共享向量空间学到的几何结构，叫潜空间或嵌入空间（latent / embedding space），有一些有意思的性质。Welch 拿两张自己的照片，一张没戴帽子，一张戴帽子，都送进 CLIP 的图像模型，得到嵌入空间里的两个向量。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=395s" target="_blank">0:06:35</a> 用戴帽子的向量减去不戴帽子的向量，得到一个新向量。这个新向量对应什么文字？数学上，我们取的是“戴帽子的我”和“不戴帽子的我”的差。为了找对应的文字，把一批词送进文字编码器，对每个词算它和这个差向量的余弦相似度。在几百个常用词里测试，排第一的是 hat（帽子），相似度 0.165，其后是 cap（便帽）和 helmet（头盔）。
+        </p>
+        <p>
+            他说这个结果很了不起：CLIP 嵌入空间学到的几何结构，让我们能对图像和文字里的“纯粹的概念”做数学运算，把图像内容的差别（比如有没有帽子）变成向量之间实实在在的距离。
+        </p>
+
+        <h3>零样本分类，以及 CLIP 只能单向</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=453s" target="_blank">0:07:33</a> OpenAI 团队展示了 CLIP 可以做出很好的图像分类：把图像送进图像编码器，把得到的向量和一组候选配文比较（每个可能的标签一条配文），选余弦相似度最高的那个标签。
+        </p>
+        <p>
+            所以 CLIP 这类技术给了图像和文字一个强大的共享表示，他称之为“纯粹概念的向量空间”。但 CLIP 只能单向工作：只能把图像和文字映射进共享嵌入空间，没法从嵌入向量生成图像或文字。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 扩散模型和 DDPM 的两个反直觉做法</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=496s" target="_blank">0:08:16</a>–0:11:44 · Diffusion Models &amp; DDPM</em></p>
+
+        <h3>DDPM 和扩散的核心想法</h3>
+        <p>
+            2020 年对图像生成也是转折年。GPT-3 论文发表几周后，Berkeley 的团队发表了 Denoising Diffusion Probabilistic Models，现在简称 DDPM（去噪扩散概率模型）。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=510s" target="_blank">0:08:30</a> 这篇论文第一次证明可以用扩散过程生成很高质量的图像：纯噪声一步步变成逼真的图像。
+        </p>
+        <p>
+            核心想法很直接：取一组训练图像，一步步给每张图加噪声，直到图像完全被破坏；然后训练一个神经网络把这个过程反过来。
+        </p>
+
+        <h3>他原先以为的做法</h3>
+        <p>
+            Welch 说，他刚学扩散模型时以为模型是一次去掉一步噪声：给第 2 步更吵的图，训练模型预测第 1 步的图；给第 3 步的图，预测第 2 步的图；依此类推。生成时把纯噪声送进模型，把输出再送回输入，一遍又一遍，足够多步后就得到一张好图。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=565s" target="_blank">0:09:25</a> 结果这种朴素做法效果很差，几乎没有现代模型这样做。画面上是 Berkeley 论文里的训练算法和生成算法（Algorithm 1 和 Algorithm 2）。他说记号有点密，但能从中挑出几个关键细节。
+        </p>
+
+        <h3>反直觉之一：生成时也要加随机噪声</h3>
+        <p>
+            第一个让他意外的地方是：团队不只在训练时加噪声，生成时也加。Algorithm 2 说，生成新图像时，每一步在神经网络预测出一张噪声少一点的图之后，要先给它加上随机噪声，再送回模型。
+        </p>
+        <p>
+            这一点在实践中影响很大。拿流行的扩散模型 Stable Diffusion 2，用 Berkeley 团队的生成方法（叫 DDPM 采样）能得到很好的图像。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=623s" target="_blank">0:10:23</a> 画面上是用一条要求“沙漠里的一棵树”的提示词生成的图。如果删掉生成过程中每一步加噪声的那行代码，得到的是一棵小小的、可怜的、模糊的树。为什么生成时加随机噪声，反而得到质量更好、更清晰的图？
+        </p>
+        <p>
+            （视频描述里引 Chenyang Yuan 的注释：这个模糊结果很可能来自去噪器被调用时噪声水平不匹配。DDPM 采样时，去噪器在 $x_{t-1}$ 上被调用，它预期 $x_{t-1}$ 带有一定的噪声水平 $\sigma_{t-1}$；如果从 $x_t$ 生成 $x_{t-1}$ 时不加噪声，$x_{t-1}$ 里的噪声总是比 $\sigma_{t-1}$ 小，去噪器就会去掉过多噪声，于是指向数据集的平均值。）
+        </p>
+
+        <h3>反直觉之二：预测加进去的全部噪声</h3>
+        <p>
+            第二个意外是：团队并没有训练模型去反转加噪过程中的单独一步。他们取一张干净的初始图像，记作 $x_0$，加上按比例缩放的随机噪声，记作 $\epsilon$（epsilon），然后训练模型预测加到原图上的全部噪声。也就是说，团队在要求模型跳过所有中间步骤，直接对原图做出预测。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=674s" target="_blank">0:11:14</a> 他说直觉上这比“把一张有噪声的图弄得稍微干净一点”难得多。Berkeley 的论文是让扩散方法站稳脚跟的里程碑。那么，为什么生成时加随机噪声、并且这样训练，效果会这么好？
+        </p>
+        <p>
+            DDPM 论文用了相当复杂的理论推出这些算法，他在描述里放了一个教程链接（Preetum Nakkiran 的入门教程）给想深入的人。他说好在有一种不同但数学上等价的理解方式，可以直观地看出 DDPM 算法为什么有效：把扩散模型看成在学习一个随时间变化的向量场（time-varying vector field，空间里每个点、每个时刻都对应一个箭头）。这个视角也引出了更一般的方法，叫基于流的模型（flow-based models），最近很流行。
+        </p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 两像素的玩具数据：加噪声就是随机游走</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=704s" target="_blank">0:11:44</a>–0:16:39 · Learning Vector Fields（前半）</em></p>
+
+        <h3>图像是高维空间里的一个点</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=727s" target="_blank">0:12:07</a> 为了看清扩散模型怎样学到这个向量场，他先把问题简化。一张图像可以看成高维空间里的一个点，每个像素的亮度值决定这个点在一个维度上的位置。如果把图像缩到只有两个像素，就能画出图像的分布：第一个像素的亮度放在散点图的 $x$ 轴，第二个放在 $y$ 轴。第一个像素黑、第二个像素白的图像在 $x=0, y=1$；全白的图像在 $(1,1)$；依此类推。
+        </p>
+        <p>
+            真实图像在高维空间里有很特定的结构。他在二维里给点造一个结构让扩散模型去学。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=779s" target="_blank">0:12:59</a> 具体选什么结构这时不太重要，他选了螺旋形。
+        </p>
+
+        <h3>加噪声等于随机走一步</h3>
+        <p>
+            从这个二维玩具数据的角度看，扩散模型的核心想法很有意思。给图像加随机噪声，就是把每个像素的值随机改一点。在玩具数据里，点的坐标就是像素值，所以加随机噪声等于朝随机方向走一步。噪声越加越多，点就在做随机游走（random walk）。这个过程相当于物理里驱动扩散过程的布朗运动，扩散模型的名字就是从这来的。
+        </p>
+        <p>
+            他说，想想我们在要求扩散模型做什么，很不可思议。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=831s" target="_blank">0:13:51</a> 模型会看到从数据集里各个起点出发的许多随机游走，我们实际上是要它把时钟倒拨：让这些扩散过程倒着播放，从随机位置出发，恢复数据集原来的结构。
+        </p>
+
+        <h3>模型怎样学会倒着走</h3>
+        <p>
+            看一条 100 步随机游走的终点。在朴素做法里（一次只去一步噪声），就是把第 100 个点的坐标给模型，让它预测第 99 步的坐标。虽然第 100 步的方向是随机选的，但汇总起来仍然有信号可学。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=882s" target="_blank">0:14:42</a> 训练点够多时，会有很多扩散路径经过这一带；平均来说，这些点在离开起始的螺旋，所以模型能学会指回螺旋。
+        </p>
+        <p>
+            现在能看出 Berkeley 团队的训练目标为什么好用。他们不训练模型一次去一步噪声（相当于由第 100 步预测第 99 步），而是训练模型预测整条游走里加进去的全部噪声。在图上，这是一个从第 100 步指回游走起点的向量。
+        </p>
+        <p>
+            他说可以证明：学习预测游走最后一步加的噪声，在数学上等价于学习预测全部噪声除以步数。这意味着当模型学着反转单独一步时，虽然训练数据很吵，我们预期模型最终学到的也是指回 $x_0$。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=942s" target="_blank">0:15:42</a> 直接训练模型预测指回 $x_0$ 的向量，大幅降低了训练样本的方差（variance，样本之间的离散程度），让模型学得高效得多，而底层的学习目标并没有变。
+        </p>
+
+        <h3>score function</h3>
+        <p>
+            所以对空间里的每个点，模型学到的是指回原始数据分布的方向。这也叫 score function（得分函数），直觉是它指向更可能出现、噪声更少的数据。
+        </p>
+        <p>
+            实践中，学到的方向很依赖加了多少噪声。100 步之后，大多数点离起点很远，模型学到的是把它们大致往螺旋的方向拉回去。如果只用走了一步的样本训练，得到的向量场就细致得多，指向螺旋的精细结构。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 时间条件、生成时的噪声和“学到均值”</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=999s" target="_blank">0:16:39</a>–0:22:00 · Learning Vector Fields（后半）</em></p>
+
+        <h3>把时间也作为输入</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=999s" target="_blank">0:16:39</a> 噪声多少决定向量场的样子，这个问题有一个巧妙的解法：除了把点的坐标传给模型（记作函数 $f$），也传入一个时间变量 $t$，对应随机游走走了多少步。设第 100 步时 $t=1$，第 99 步时 $t=0.99$，依此类推。
+        </p>
+        $$f(x, t)$$
+        <p>
+            他说像这样让模型以时间为条件，在实践中必不可少：$t$ 大时模型学粗略的向量场，$t$ 趋近 0 时学很精细的结构。
+        </p>
+        <p>
+            训练完后可以看模型随时间的变化。在 $t$ 接近 0.4 时出现一个有意思的现象：学到的向量场突然转变，从指向螺旋的中心变成指向螺旋本身。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1049s" target="_blank">0:17:29</a> 他说这感觉像相变（phase change）。
+        </p>
+
+        <h3>跟着一个点走一遍 DDPM 生成</h3>
+        <p>
+            现在可以解开 DDPM 论文最后一个谜团：为什么每一步加随机噪声会得到更清晰、质量更好的图？在二维数据上，生成一张图就是从随机位置出发，走回螺旋。
+        </p>
+        <ol>
+            <li>从随机选的位置 $x=-1.6,\ y=1.8$ 出发，模型的向量场指回螺旋。</li>
+            <li>按 DDPM 算法，沿模型给的方向走一小步，再加上按比例缩放的随机噪声，相当于朝随机方向移动一下。</li>
+            <li><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1099s" target="_blank">0:18:19</a> 画面上，模型驱动的步用蓝色，随机步用灰色。随机步看起来很大，但按 DDPM 算法，随机步会随着进程逐渐变小。</li>
+            <li>重复 64 步。由于向量场在变、随机步也在加，点跳来跳去，但最终稳稳落在螺旋上。</li>
+        </ol>
+        <p>
+            对 256 个点组成的点云做同样的事，逆向扩散一开始看起来一片混乱，但会很好地收敛，大多数点落在螺旋上。
+        </p>
+
+        <h3>去掉随机步会怎样</h3>
+        <p>
+            不加随机噪声步再跑一次逆向扩散，所有点很快移到螺旋中心，然后朝螺旋内侧的某一条边移动。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1154s" target="_blank">0:19:14</a> 这能帮助理解前面那棵模糊的树：加了噪声步时，生成的点覆盖整条螺旋；去掉之后，所有点都落在螺旋的中心，也就是平均值附近。在图像空间里，平均值看起来是模糊的。概念上，可以想象螺旋的不同部分对应沙漠里不同的树的图像；去掉随机步，生成的图就落在这些图的中心或平均值，看起来是一团模糊。
+        </p>
+        <p>
+            他提醒玩具数据和高维图像数据的类比在这里有点不成立。如果螺旋上所有点都对应逼真的图像，既然生成的点最后还是落在二维螺旋上，按理它们应该仍像真实图像，只是多样性不如我们想要的。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1213s" target="_blank">0:20:13</a> 但在高维图像空间里，生成过程似乎没能到达逼真图像所在的流形（manifold，真实图像在高维空间里聚集成的那片低维“曲面”），所以得到模糊、不真实的图。
+        </p>
+
+        <h3>模型学到的是均值</h3>
+        <p>
+            他说预测出平均值不是巧合。可以从数学上证明：模型学到的是指向数据集的均值，条件是输入点和扩散过程的时刻。一种推法是：既然正向过程加的噪声是高斯的，步长足够小时，逆向过程也服从高斯分布，而模型学到的是这个分布的均值。
+        </p>
+        <p>
+            既然模型只预测正态分布的均值，要真正从这个分布里采样，就得在模型预测值上加零均值的高斯噪声，这正好就是 DDPM 生成过程每一步之后加随机噪声的那一步。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1271s" target="_blank">0:21:11</a> 这种“学到均值”的行为在逆向扩散早期看得最清楚：$t$ 接近 1、训练点离螺旋很远时，模型学到的向量场指向数据集的中心或平均值。所以生成时加随机噪声是从理论里自然得出的，在实践中它防止所有点都落到数据集的中心或平均值附近。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. DDIM：不加随机步的生成</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1320s" target="_blank">0:22:00</a>–0:25:25 · DDIM</em></p>
+
+        <h3>DDPM 的问题：步数太多</h3>
+        <p>
+            DDPM 论文让扩散模型成为可行的图像生成方法，但扩散方法没有立刻被广泛采用。当时一个主要问题是算力需求高：生成高质量图像要很多步，每一步都要完整跑一遍可能很大的神经网络。几个月后，Stanford 和 Google 团队的两篇论文表明，生成过程中可以完全不加随机噪声，照样得到高质量图像，而且需要的步数大大减少。
+        </p>
+
+        <h3>随机微分方程和 Fokker-Planck 方程</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1333s" target="_blank">0:22:13</a> 前面看的 DDPM 生成过程可以写成一种特殊的微分方程：随机微分方程（stochastic differential equation，SDE，带随机项的微分方程）。第一项代表点在模型向量场驱动下的运动，第二项代表点的随机运动，两项相加就是点每一步的总运动 $dx$。示意写法如下（具体系数视频没有念）：
+        </p>
+        $$dx = \underbrace{f(x,t)\,dt}_{\text{向量场驱动}} + \underbrace{g(t)\,dW}_{\text{随机运动}}$$
+        <p>
+            接着可以考虑：如果每个点都按这个 SDE 运动，所有点的分布随时间怎样演化。这个问题在物理里研究得很透。Google Brain 团队用统计力学的一个关键结果 Fokker-Planck 方程（描述随机运动的粒子分布怎样随时间变化的方程）证明，存在另一个微分方程，这次是没有随机项的常微分方程（ordinary differential equation，ODE），它得到的最终点分布和那个 SDE 完全相同。
+        </p>
+
+        <h3>DDIM</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1387s" target="_blank">0:23:07</a> 这给了一个用模型学到的向量场生成图像、但不需要随机步的新算法。ODE 具体怎样变成生成算法有点技术性，他放了一个教程链接。关键结果是：得到的东西和 DDPM 生成过程很像，只是每一步不加随机噪声，并且步长用了新的缩放方式。这种方法一般叫 DDIM。
+        </p>
+        <p>
+            步长的缩放，尤其是步长在逆向扩散过程中怎样变化，在实践中很重要。前面直接从 DDPM 里去掉随机步时，所有点都落在数据均值附近，生成的图是模糊的。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1443s" target="_blank">0:24:03</a> 换成 DDIM，步长的缩放更小，轨迹能更好地沿着向量场的等高线走，最后落在正确的螺旋分布上。用 DDIM 生成沙漠里的树，也得到了好的结果。
+        </p>
+        <p>
+            和需要随机步的 DDPM 相比，DDIM 不需要改动模型训练，却能用少得多的步数生成高质量图像，而且完全是确定性的。他提醒：理论并没有说单张图像（或螺旋上的单个点）会相同，它说的是最终的点分布或图像分布相同，不管用随机的 DDPM 还是确定性的 DDIM。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1496s" target="_blank">0:24:56</a> 开头那个 WAN 模型用的是 DDIM 的一种推广，叫流匹配（flow matching）。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. DALL·E 2：用扩散模型反转 CLIP</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1525s" target="_blank">0:25:25</a>–0:26:37 · Dall E 2</em></p>
+        <p>
+            到 2021 年初，扩散模型能生成高质量图像已经很清楚，有了 DDIM 这样的生成方法，也不再需要巨量算力。但用文字提示词引导扩散过程的能力还很有限。
+        </p>
+        <p>
+            前面的 CLIP 通过同时训练图像和文字编码器，学到了强大的图文共享表示，但它只能单向，把文字或图像变成嵌入向量。他说这两个问题可能以一种有意思的方式拼在一起：扩散模型有可能反转 CLIP 的图像编码器，生成高质量图像；CLIP 文字编码器的输出向量可以用来把扩散模型引向我们想要的图像或视频。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1557s" target="_blank">0:25:57</a> 高层想法是：把提示词送进 CLIP 文字编码器得到嵌入向量，用这个向量把扩散过程引向提示词描述的图像或视频。OpenAI 的团队在 2022 年就是这么做的，用图文配对训练一个扩散模型去反转 CLIP 图像编码器。这个方法对提示词的遵循程度前所未有，能抓住输入文字里的大量细节。团队把方法叫 unCLIP，但它更有名的是商业名称 DALL·E 2。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 条件输入：把文字向量喂给扩散模型</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1597s" target="_blank">0:26:37</a>–0:30:02 · Conditioning</em></p>
+
+        <h3>conditioning</h3>
+        <p>
+            那么 CLIP 这类模型的嵌入向量到底怎样引导扩散过程？一种做法是把文字向量直接作为扩散模型的另一个输入，照常训练去噪。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1609s" target="_blank">0:26:49</a> 如果像 OpenAI 团队那样用图文配对训练扩散模型，想法是模型会学着利用文字信息更准确地去噪，因为它对正在去噪的图像有了更多背景信息。这种技术叫条件输入（conditioning）。
+        </p>
+        <p>
+            前面已经用过类似的做法：让玩具扩散模型以扩散过程走过的时间步为条件，使模型在 $t$ 大时学粗结构，训练样本接近原始螺旋时学细结构。
+        </p>
+        <p>
+            把文字向量传给扩散模型有多种方式：有的用交叉注意力（cross-attention，让图像部分的计算去“查询”文字部分的信息）把图像和文字信息耦合起来；有的直接把嵌入的文字向量加到或拼接到扩散模型的输入上；有的同时用好几种方式。（视频描述的技术注释说，Stable Diffusion 的文字条件输入用的是 512 维文字嵌入向量前一层的输出，维度是 77×512。）
+        </p>
+
+        <h3>只有条件输入还不够</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1665s" target="_blank">0:27:45</a> 光靠条件输入，达不到 DALL·E 2 那种对提示词的遵循程度。拿一直在用的 Stable Diffusion“沙漠里的一棵树”，只用文字做条件，模型不再给出要求的全部内容：有沙漠里的一个影子，但没有树。他顺带说明：Stable Diffusion 由 Heidelberg 大学的团队开发，和 DALL·E 2 差不多同时，工作方式类似，但是开源的。
+        </p>
+
+        <h3>回到螺旋：带类别的玩具模型</h3>
+        <p>
+            要有效引导扩散模型，还需要一个强有力的想法。他最后一次回到玩具数据集。如果整条螺旋对应逼真的图像，螺旋的不同段可能对应不同类型的图像。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1715s" target="_blank">0:28:35</a> 设内段是人的图像，中段是狗，外段是各种猫。训练和之前一样的扩散模型，但除了起始坐标和扩散时刻，再传入点的类别：人、猫或狗。
+        </p>
+        $$f(x, t, \text{class})$$
+        <p>
+            这个额外信号应该能让模型按类别把点引到螺旋的对应段。给每个点分配人、狗或猫的标签后跑生成，能恢复数据集的整体结构，但拟合得不好，人和狗的图像之间有一些混淆。
+        </p>
+        <p>
+            问题之一在于，我们同时要求模型学两件事：指向逼真图像的整条螺旋，以及指向螺旋上的特定类别。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1768s" target="_blank">0:29:28</a> 以一个猫的点为例：它一开始朝螺旋中心走；随着带类别条件的向量场转向螺旋上猫的区域，它往那边移动，但没能到达。拟合整条螺旋的任务压过了模型把点推向特定类别的能力。他问：有没有办法把这两个因素解耦，甚至加以控制？
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. Classifier-free guidance</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1802s" target="_blank">0:30:02</a>–0:33:39 · Guidance</em></p>
+
+        <h3>同一个模型，有条件和无条件两种输出</h3>
+        <p>
+            答案是可以。诀窍是利用“没有用特定类别训练的无条件模型”和“以特定类别为条件的模型”之间的差。可以训练两个独立的模型，但实践中更高效的做法是：在一部分训练样本里去掉类别信息。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1818s" target="_blank">0:30:18</a> 这样就可以选择不给模型任何类别或文字信息，得到一个指向数据整体、不指向任何特定类别的向量场。把两个向量场画在一起：灰色向量是不给类别信息时模型指向的方向，黄色向量是以“猫”为条件时的方向。扩散时间大、训练数据离螺旋远时，两个向量场方向基本一样，大致指向螺旋的平均位置；$t$ 趋近 0 时两者分开，猫条件的向量场更多地指向螺旋外侧猫的部分。（描述注释说，这里 $t=1$ 的无条件向量场和 17:15 处的样子不太一样，因为视频不同部分用了不同的模型训练，可能是随机初始化不同造成的。）
+        </p>
+
+        <h3>用差向量放大类别方向</h3>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1870s" target="_blank">0:31:10</a> 有了两个方向，就能用它们的差把点更多地推向想要的类别。具体是：用黄色的条件向量减去灰色的无条件向量，得到一个从无条件向量尖端指向条件向量尖端的新向量。想法是，去掉了“大体指向数据”的那部分方向之后，这个方向应该更多地指向猫的样本。然后乘以一个缩放系数 $\alpha$ 放大这个方向，用指向新方向的向量替换原来的黄色条件向量。按视频描述注释里他选的写法：
+        </p>
+        $$f(x,t) + \alpha\big(f(x,t,\text{cat}) - f(x,t)\big)$$
+        <p>
+            注释说明，有的实现写成 $f(x,t,\text{cat}) + \alpha\big(f(x,t,\text{cat}) - f(x,t)\big)$，有的写成上面这种；在上面这种写法里 $\alpha=1$ 相当于不加引导，他为了简单选了这种。
+        </p>
+        <p>
+            再跟踪之前那个没能到达螺旋的猫点：把扩散时间倒回去，从同一个起点开始一个新的绿色点。用新的绿色向量代替原来的黄色向量引导扩散，灰色箭头（指向螺旋中心）和黄色向量（开始指回螺旋上猫的部分）之间的差被放大了，于是这个点稳稳落在了螺旋上。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1931s" target="_blank">0:32:11</a> 这种方法叫 classifier-free guidance（无分类器引导）。用绿色向量引导一批猫点，它们紧贴螺旋上猫的那段。换成狗类：无条件的灰色向量场不变，狗条件的模型输出用品红色表示，更多地指向螺旋上狗的部分；加上引导后这个方向被放大，生成的狗点拟合得很好。最后，人的类别得到第三个向量场，同样很好地收敛到螺旋上。他说 classifier-free guidance 效果出奇地好，已经是很多现代图像和视频生成模型的必备部分。
+        </p>
+
+        <h3>沙漠里的树长出来了</h3>
+        <p>
+            回到前面只用条件输入的 Stable Diffusion：图里有沙漠和影子，没有提示词要的树。<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1988s" target="_blank">0:33:08</a> 加上 classifier-free guidance，引导系数 $\alpha$ 到 2 左右时，图里开始出现一棵小树；继续增大 $\alpha$，树的大小和细节都在增加。他说这么好用让他很惊讶：用引导把 Stable Diffusion 的向量场更多地指向提示词的方向，图里的树真的就长大、变清晰了。
+        </p>
+    </section>
+
+    <section id="t11">
+        <h2>11. 负向提示词</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=2019s" target="_blank">0:33:39</a>–0:34:27 · Negative Prompts</em></p>
+        <p>
+            WAN 视频生成模型把引导又推进了一步。WAN 团队拿来做减法的，换成了所谓负向提示词（negative prompt）的输出，没有用“没有文字输入的无条件模型”：把不想在视频里出现的特征一条条写出来，把它得到的向量从条件输出里减掉，再放大结果，让扩散过程远离这些不想要的特征。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=2042s" target="_blank">0:34:02</a> 他说 WAN 的标准负向提示词很有意思，里面有“多余的手指”“倒着走”之类的特征，而且有意思的是，它是用中文写好再送进文字编码器的。画面上是用同一条“宇航员骑马”的提示词、但不用负向提示词生成的视频：场景的各部分变得卡通化，彼此也对不上了。
+        </p>
+    </section>
+
+    <section id="t12">
+        <h2>12. 结尾</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=2067s" target="_blank">0:34:27</a>–0:35:32 · Outro</em></p>
+        <p>
+            自 2020 年夏天 DDPM 论文发表以来，这个领域进展飞快，一直走到今天这些惊人的文生视频模型。他说在让这些模型运转的所有细节里，最让他震惊的是这些部件居然能拼到一起：拿一个训练好的文字编码器（来自 CLIP 或别处），用它的输出去引导本身就很复杂的扩散过程，好得几乎不像真的。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=2099s" target="_blank">0:34:59</a> 而且很多核心想法可以从相对简单的几何直觉建立起来，这些直觉居然在模型所在的极高维空间里仍然成立。他说这些模型像是一类全新的机器：要创作逼真、漂亮的图像和视频，不再需要相机，不需要会画画，不需要会用动画软件，只需要语言。
+        </p>
+    </section>
+
+    <section id="t13">
+        <h2>13. Grant 介绍客座视频</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=2132s" target="_blank">0:35:32</a>–0:37:20 · About guest videos</em></p>
+        <p>
+            最后换成 Grant 出镜。他说这是一期客座视频，来自运营 Welch Labs 频道的 Stephen Welch，推荐观众把 Welch Labs 的视频都看一遍；提到 Welch 早年那套关于虚数的系列，后来做成了书（视频描述里有书的链接），近来做了很多机器学习内容。
+        </p>
+        <p>
+            <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=2154s" target="_blank">0:35:54</a> 至于为什么做客座视频：他和妻子最近有了第一个孩子。他休陪产假的方式是联系几位他喜欢的创作者，把频道的一部分 Patreon 资金转给他们，委托他们做几期视频，在他离开期间填补空档。他说自己对这些稿件做了一些编辑把关，题材有统计力学、机器学习，甚至现代艺术；下一期客座视频讲现代艺术和群论的结合。之后是 Patreon 支持者提前观看的说明和告别，这里略过。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一集值得记下的原话</h2>
+        <ul>
+            <li>“This generation of image and video models works using a process known as diffusion, which is remarkably equivalent to the Brownian motion we see as particles diffuse, but with time run backwards, and in high-dimensional space.”<br>这一代图像和视频模型用一种叫扩散的过程工作，它和粒子扩散时的布朗运动惊人地等价，只是时间倒着走，并且在高维空间里。 · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=3s" target="_blank">0:00:03</a></li>
+            <li>“The C in CLIP stands for contrastive, because the model learns to contrast matching and non-matching image-caption pairs.”<br>CLIP 的 C 代表 contrastive（对比），因为模型学的是对比配对和不配对的图文。 · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=284s" target="_blank">0:04:44</a></li>
+            <li>“Now, if we remove the line of code that adds noise at each step of the generation process, we end up with a tiny sad blurry tree.”<br>如果删掉生成过程中每一步加噪声的那行代码，我们得到的是一棵小小的、可怜的、模糊的树。 · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=623s" target="_blank">0:10:23</a></li>
+            <li>“As we add more and more noise to our image, our point goes on a random walk.”<br>随着我们给图像加的噪声越来越多，这个点就在做随机游走。 · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=779s" target="_blank">0:12:59</a></li>
+            <li>“The key will be thinking of diffusion models as learning a time-varying vector field.”<br>关键是把扩散模型看成在学习一个随时间变化的向量场。 · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=674s" target="_blank">0:11:14</a></li>
+            <li>“In the space of images, averages look blurry.”<br>在图像空间里，平均值看起来是模糊的。 · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1154s" target="_blank">0:19:14</a></li>
+            <li>“As we use guidance to point our stable diffusion model's vector field more in the direction of our prompt, our tree literally grows in size and detail in our images.”<br>当我们用引导把 Stable Diffusion 的向量场更多地指向提示词的方向，图里的树真的在变大、变清晰。 · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1988s" target="_blank">0:33:08</a></li>
+            <li>“All you need is language.”<br>你只需要语言。 · <a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=2099s" target="_blank">0:34:59</a></li>
+        </ul>
+    </section>
+
+    <section id="how">
+        <h2>他是怎么讲的</h2>
+        <p>这一节的主讲是 Stephen Welch。最后的客座视频说明是 Grant，不在分析范围内。</p>
+
+        <h3>讲解顺序</h3>
+        <ol>
+            <li><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=3s" target="_blank">0:00:03</a> 先抛出一句结论（扩散等于时间倒流的布朗运动），再马上动手：用开源模型 WAN 2.1 改提示词、删提示词，然后翻源代码，看到生成从一个随机数生成器开始，再把 5、10、20…50 次迭代的结果依次放出来。观众先看到整个过程，再听原理。</li>
+            <li><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=114s" target="_blank">0:01:54</a> 提出两个问题（和布朗运动什么关系；文字怎样起作用），并交代三部分路线。</li>
+            <li><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=217s" target="_blank">0:03:37</a> 第一部分先讲 CLIP，用三张图三条配文的小批次讲对比学习，再用“戴帽子减不戴帽子”做一次实验，让观众对高维嵌入空间有体感。结尾指出 CLIP 只能单向，留下“怎么生成”的缺口。</li>
+            <li><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=496s" target="_blank">0:08:16</a> 第二部分从 DDPM 论文的算法框出发，先说出自己原来的朴素理解，再指出论文里两个让他意外的做法（生成时加噪声；预测全部噪声），并用“模糊的树”展示第一个做法的效果。两个问题都先挂着。</li>
+            <li><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=704s" target="_blank">0:11:44</a> 换到两像素的螺旋玩具数据，把加噪声变成随机游走，用它先解开第二个谜（为什么预测全部噪声），再引入时间变量和相变。</li>
+            <li><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1049s" target="_blank">0:17:29</a> 跟踪一个点、再到 256 个点，对比加不加随机步，解开第一个谜（模糊的树），再给出“模型学的是均值”的理论说法。</li>
+            <li><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1320s" target="_blank">0:22:00</a> 提出新问题（步数太多），引入 SDE、Fokker-Planck、ODE，得到 DDIM，在螺旋和树两个例子上验证，再接回开头的 WAN（流匹配）。</li>
+            <li><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1525s" target="_blank">0:25:25</a> 第三部分把前两部分接起来：CLIP 只能单向，扩散能生成，DALL·E 2 用扩散反转 CLIP。</li>
+            <li><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1597s" target="_blank">0:26:37</a> 条件输入，用前面的时间条件类比；再用“只有影子没有树”说明不够，回到螺旋加类别，看到猫点没能到达。</li>
+            <li><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1802s" target="_blank">0:30:02</a> 用灰色和黄色两个向量场之差解决，跟踪同一个猫点重来一次，再推广到狗和人，最后回到树，展示 $\alpha$ 增大时树长出来。</li>
+            <li><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=2019s" target="_blank">0:33:39</a> 负向提示词把开头的 WAN 再接回来，最后用“只需要语言”收尾。</li>
+        </ol>
+
+        <h3>画面上是什么</h3>
+        <p>没有文字版配图可参照，下表按他的口述记录画面。</p>
+        <table>
+            <tr><th>时间</th><th>画面</th><th>这个画面在讲什么</th></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=57s" target="_blank">0:00:57</a></td><td>WAN 2.1 生成的宇航员视频，随提示词改动变化；空提示词得到一位女性的视频</td><td>先让观众玩一个真实模型</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=57s" target="_blank">0:00:57</a></td><td>WAN 源代码里调用随机数生成器的那一行，随后是纯噪声视频</td><td>生成从噪声开始</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=114s" target="_blank">0:01:54</a></td><td>第 5、10、20、30、40、50 次迭代后的视频依次出现</td><td>逐步去噪的全过程</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=284s" target="_blank">0:04:44</a></td><td>图像向量为列、文字向量为行的 3×3 矩阵，对角线是配对</td><td>对比学习目标</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=336s" target="_blank">0:05:36</a></td><td>高维空间里的向量和它们的夹角</td><td>余弦相似度</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=395s" target="_blank">0:06:35</a></td><td>他本人戴帽子和不戴帽子的两张照片，两个向量相减；词表排名 hat 0.165、cap、helmet</td><td>嵌入空间里的概念运算</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=565s" target="_blank">0:09:25</a></td><td>DDPM 论文的训练算法和生成算法</td><td>从原始论文里挑细节</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=623s" target="_blank">0:10:23</a></td><td>Stable Diffusion 2 的“沙漠里的树”，加噪声版和去掉噪声的模糊小树</td><td>生成时加噪声的效果</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=727s" target="_blank">0:12:07</a></td><td>两像素图像对应散点图上的点，(0,1)、(1,1) 等</td><td>图像等于高维空间的点</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=779s" target="_blank">0:12:59</a></td><td>螺旋形数据点，单个点做随机游走</td><td>加噪声等于布朗运动</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=882s" target="_blank">0:14:42</a></td><td>100 步游走，从第 100 步指向第 99 步的向量，和指回起点 $x_0$ 的向量</td><td>两种训练目标的区别</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=942s" target="_blank">0:15:42</a></td><td>整个平面上的箭头场，100 步时粗略、1 步时细致</td><td>score function 依赖噪声多少</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=999s" target="_blank">0:16:39</a></td><td>向量场随 $t$ 演化，约 $t=0.4$ 时从指向中心变为指向螺旋</td><td>时间条件和“相变”</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1099s" target="_blank">0:18:19</a></td><td>从 (−1.6, 1.8) 出发的点，蓝色模型步、灰色随机步，64 步后落在螺旋上；再到 256 个点的点云</td><td>DDPM 采样</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1099s" target="_blank">0:18:19</a></td><td>去掉随机步后点云聚到螺旋中心，再挤到内侧一条边</td><td>模糊图像的原因</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1333s" target="_blank">0:22:13</a></td><td>SDE 的两项分别标出，再到无随机项的 ODE</td><td>从 DDPM 到 DDIM 的理论</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1443s" target="_blank">0:24:03</a></td><td>DDIM 轨迹沿向量场等高线走，落在螺旋上；DDIM 生成的树</td><td>确定性生成也能得到好结果</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1665s" target="_blank">0:27:45</a></td><td>只有条件输入时：沙漠和影子，没有树</td><td>条件输入不够</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1715s" target="_blank">0:28:35</a></td><td>螺旋分三段：人、狗、猫；带标签的点生成后人和狗混淆；一个猫点没到达</td><td>类别条件的局限</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1818s" target="_blank">0:30:18</a></td><td>灰色无条件向量和黄色猫条件向量叠在一起，$t$ 大时重合，$t$ 小时分开</td><td>两个向量场的差</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1870s" target="_blank">0:31:10</a></td><td>从灰色尖端指向黄色尖端的差向量，乘 $\alpha$ 后的绿色向量；绿色点从同一起点重新出发并落在螺旋上</td><td>classifier-free guidance 的几何</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1931s" target="_blank">0:32:11</a></td><td>狗条件向量用品红色；三类点分别紧贴各自的螺旋段</td><td>推广到每个类别</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1988s" target="_blank">0:33:08</a></td><td>$\alpha$ 从约 2 开始增大，树出现并变大变清晰</td><td>引导在真实模型上的效果</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=2042s" target="_blank">0:34:02</a></td><td>WAN 的中文负向提示词；不用负向提示词的“宇航员骑马”视频变得卡通、不协调</td><td>负向提示词的作用</td></tr>
+        </table>
+
+        <h3>他简化了什么、推后了什么</h3>
+        <ul>
+            <li>DDPM 论文的推导：“The DDPM paper draws on some fairly complex theory”，他不讲，放教程链接，改用等价的向量场视角（<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=674s" target="_blank">0:11:14</a>）。</li>
+            <li>“let's temporarily simplify our learning problem”：把图像缩成两个像素（<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=727s" target="_blank">0:12:07</a>），螺旋形状“doesn't matter too much”。</li>
+            <li>“预测最后一步噪声等价于预测全部噪声除以步数”和“模型学到均值”都只给结论，说“we can prove”“we can show mathematically”，不展开证明。</li>
+            <li>他主动指出类比的边界：“the analogy between our toy dataset and high dimensional image dataset breaks down a bit here”（<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1154s" target="_blank">0:19:14</a>）。</li>
+            <li>ODE 怎样变成生成算法“is a bit technical”，放链接（<a href="https://www.youtube.com/watch?v=iv-5mZ_9CPY&t=1387s" target="_blank">0:23:07</a>）。</li>
+            <li>文字向量传入模型的几种方式只点名（交叉注意力、相加、拼接），不展开。</li>
+            <li>更细的技术出入都放在视频描述的 Technical Notes 里：潜空间和 VAE、CLIP 向量画成近似正交、模糊树的另一种解释、77×512 的条件输入、guidance 公式的两种写法、不同部分用了不同模型。正片里不提。</li>
+        </ul>
+
+        <h3>数字怎么用</h3>
+        <ul>
+            <li>真实规模的数字只在 CLIP 处出现：4 亿对图文、512 维向量、2021 年 2 月。</li>
+            <li>实验里的具体读数：帽子的余弦相似度 0.165，几百个常用词。</li>
+            <li>过程计数：WAN 的 5/10/20/30/40/50 次迭代；玩具里 100 步游走、64 步生成、256 个点；时间变量 $t=1$、$0.99$、约 $0.4$ 的相变。</li>
+            <li>具体坐标：起点 $(-1.6, 1.8)$；两像素例子里的 $(0,1)$、$(1,1)$。</li>
+            <li>引导系数 $\alpha$ 约 2 时树开始出现。</li>
+            <li>年份串起时间线：2020（GPT-3、DDPM）、2021（CLIP、DDIM 之后扩散可行）、2022（DALL·E 2），以及“GPT-3 论文发表几周后”“几个月后”。</li>
+        </ul>
+
+        <h3>直觉层和数学层</h3>
+        <ul>
+            <li>整集几乎全部停在几何直觉层：点、箭头、轨迹、颜色。公式只在两处出现：SDE 的两项（逐项口头解释成“模型的运动”和“随机的运动”），以及把模型写成 $f(x,t)$、$f(x,t,\text{class})$ 的函数记号。</li>
+            <li>每个理论结论都配一个可见的对照实验：加不加随机步（点云散开与聚到中心；清晰的树与模糊的树），DDPM 与 DDIM，有无引导（猫点到不到螺旋；树有没有），有无负向提示词。</li>
+            <li>理论结果用“我们可以证明”带过，再立刻回到图上看它意味着什么，比如“学到均值”马上对应到 $t$ 接近 1 时向量场指向螺旋中心。</li>
+            <li>他从论文里摘具体细节（Algorithm 2 的那一行），用“删掉这一行代码”这样的操作让观众看到它的作用。</li>
+        </ul>
+
+        <h3>其他</h3>
+        <ul>
+            <li>两个持续例子贯穿全集：二维螺旋（从 0:12:59 一直用到 0:32:11），和“沙漠里的一棵树”（0:10:23 模糊、0:24:03 DDIM、0:27:45 只有影子、0:33:08 长出来）。同一个提示词在四个阶段出现，每次对应一个新机制。</li>
+            <li>开头的 WAN 在结尾被两次接回（流匹配、负向提示词），开场的“随机数生成器”和“反复送回模型”在后面都有了解释。</li>
+            <li>他用第一人称讲自己的误解和意外：“When I first learned about diffusion models, I assumed…”“The first thing that surprised me…”“The second thing that surprised me…”。先说出观众很可能也有的朴素理解，再推翻。</li>
+            <li>他自己出镜做实验素材：CLIP 批次里的“a photo of a man”和戴帽子的照片都是他本人。</li>
+            <li>他常用提问推进：“How is it that adding random noise while generating images leads to better quality, sharper images?”先在 0:10:23 提出，到 0:17:29 才回答。</li>
+            <li>结尾没有回顾技术点，用“不需要相机、不需要会画画……只需要语言”收束。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>3Blue1Brown · But how do AI images and videos actually work? | Guest video by Welch Labs · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

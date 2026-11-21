@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MLP 怎样存储事实 | 3Blue1Brown 深度学习系列笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+    <style>
+        table { border-collapse: collapse; width: 100%; font-size: 0.9em; margin: 1em 0; }
+        th, td { border-bottom: 1px solid #ccc; padding: 0.35em 0.5em; text-align: left; vertical-align: top; }
+    </style>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="07_注意力机制.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">3Blue1Brown 深度学习系列目录</a> · 08</span>
+    <span><a href="09_交叉熵.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 7 章 · 大语言模型可能怎样存储事实</h1>
+        <p class="subtitle">拆开 Transformer 里的多层感知机（MLP）：两次矩阵乘法中间夹一个 ReLU，用“Michael Jordan 打篮球”这个玩具例子演示它在原理上怎样存下一条事实，再数一遍 GPT-3 的参数，最后讲叠加（superposition）和高维空间里“几乎垂直”的方向有多少</p>
+        <div class="author-meta">
+            主讲：Grant Sanderson（3Blue1Brown）· 发布日期：2024 年 8 月 31 日 · 时长：22 分 42 秒 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：视频（3Blue1Brown YouTube 公开，本文依据视频字幕整理）<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8" target="_blank">How might LLMs store facts | Deep Learning Chapter 7</a>，2024 年 8 月 31 日；文字版课程 <a href="https://www.3blue1brown.com/lessons/mlp" target="_blank">3blue1brown.com/lessons/mlp</a>（数字、公式和配图参照文字版；中文转述和讲解，不是逐字翻译；图片引自原网站，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一集的内容</h2>
+        <p>
+            这是 Transformer 小系列的第三集。第 5 章讲了 Transformer 的整体流程和词嵌入，第 6 章讲了注意力（attention）。Transformer 里除了注意力，另一大块是多层感知机（multilayer perceptron，MLP）。这一集就拆这一块。Grant 开头用的问题是：大模型能接上“Michael Jordan plays the sport of ___”这句话，说明它在某处记住了“这个人打篮球”这件事，那么这条事实存在哪里、怎么存的？他引用 Google DeepMind 几位研究者的一篇文章，说事实看起来存在 MLP 里。
+        </p>
+        <p>
+            MLP 的计算本身不复杂，就是一对矩阵乘法，中间加一个简单的非线性函数。难的是解释这些计算在做什么。Grant 的做法是搭一个玩具例子：假设嵌入空间里有“名字 Michael”“姓 Jordan”“篮球”三个方向，然后一步步演示一个 MLP 块怎样在“看到 Michael Jordan”时往向量里加上“篮球”。之后他做两件事：把 GPT-3 的参数账算完（MLP 占了约三分之二），再讲叠加假说，以及 Johnson–Lindenstrauss 引理带来的一个高维现象：几乎垂直的方向数随维度指数增长。读完能知道 MLP 每一步的形状、每一步在玩具例子里起什么作用、GPT-3 的 MLP 有多大，以及为什么单个神经元很少对应单个干净的特征。视频结尾没有赞助内容，致谢部分略过。文字版指出视频里那段 Python 演示的代码有错，本文在第 08 节一并记下。
+        </p>
+        <ol>
+            <li><a href="#t01">事实存在大模型的哪里</a> · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">Transformer 快速回顾</a> · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=135s" target="_blank">0:02:15</a></li>
+            <li><a href="#t03">玩具例子的几个假设</a> · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=279s" target="_blank">0:04:39</a></li>
+            <li><a href="#t04">MLP 块的整体形状</a> · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=367s" target="_blank">0:06:07</a></li>
+            <li><a href="#t05">第一步：上投影矩阵和偏置</a> · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=445s" target="_blank">0:07:25</a></li>
+            <li><a href="#t06">第二步：ReLU 和“神经元”</a> · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=599s" target="_blank">0:09:59</a></li>
+            <li><a href="#t07">第三步：下投影矩阵，加回原向量</a> · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=722s" target="_blank">0:12:02</a></li>
+            <li><a href="#t08">数参数：GPT-3 的 MLP 有多大</a> · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=938s" target="_blank">0:15:38</a></li>
+            <li><a href="#t09">叠加：高维空间里能塞下多少个几乎垂直的方向</a> · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1024s" target="_blank">0:17:04</a></li>
+            <li><a href="#t10">下一章预告</a> · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1297s" target="_blank">0:21:37</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 事实存在大模型的哪里</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=0s" target="_blank">0:00:00</a>–0:02:15 · Where facts in LLMs live</em></p>
+
+        <h3>从一个填空开始</h3>
+        <p>
+            Grant 开头给一句话：Michael Jordan plays the sport of ___（Michael Jordan 从事的运动是 ___）。如果让大语言模型预测下一个词，它答出 basketball（篮球），那就说明在它几千亿个参数里的某处，存着一条关于这个具体的人和他具体从事的运动的知识。他说，用过这些模型的人都会有一个清楚的感觉：它记住了大量事实。于是一个合理的问题是：这到底是怎么做到的，这些事实住在哪里？
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/MotivatingExample.jpg" alt="Michael Jordan plays the sport of 填空" style="max-width:100%"><figcaption>图：开场例子，模型要补全“Michael Jordan plays the sport of ___”（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>DeepMind 的部分结论</h3>
+        <p>
+            他说，“去年十二月”（文字版写明是 2023 年 12 月）Google DeepMind 的几位研究者发表了针对这个问题的工作，用的正好是“把运动员和他们的运动对上”这个例子。完整的、机制层面的理解还没有做到，但他们有一些有意思的部分结果，其中最笼统的一条高层结论是：事实似乎存在网络里一个特定的部分，这个部分有个花哨的名字，叫多层感知机（multi-layer perceptron），简称 MLP。视频描述里给了这篇文章的链接（发在 AI Alignment Forum 上）。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/MLP.jpg" alt="Transformer 中的 MLP 部分" style="max-width:100%"><figcaption>图：事实看起来存在 MLP 这一部分里（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>这一集要做什么</h3>
+        <p>
+            他接着交代系列的位置。前几章一直在拆 Transformer：大语言模型背后的架构，也是很多其他现代 AI 背后的架构。上一章讲的是注意力。下一步就是看 MLP 里面发生什么，MLP 是网络的另一大块。
+        </p>
+        <p>
+            他说这里的计算其实相对简单，尤其是和注意力比。归结起来就是一对矩阵乘法，中间夹一个简单的东西。但要解释这些计算在做什么，极其困难。所以这一集的主要目标是把计算一步步走一遍，让人记得住；他想在一个具体例子的语境里做这件事，演示这样一个块至少在原理上怎样存下一条具体的事实，也就是“Michael Jordan 打篮球”。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/Overview.jpg" alt="MLP 计算概览" style="max-width:100%"><figcaption>图：MLP 的计算概览，两次矩阵乘法中间夹一个简单函数（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他还提到，这一集的整体布局受到他和 DeepMind 研究者之一 Neel Nanda 一次谈话的启发。（字幕把名字写成 Neil Nanda，视频描述里是 Neel Nanda。）
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. Transformer 快速回顾</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=135s" target="_blank">0:02:15</a>–0:04:39 · Quick refresher on transformers</em></p>
+
+        <h3>整体流程</h3>
+        <p>
+            他默认观众看过前两章，或者大致知道 Transformer 是什么，但还是快速回顾一遍。
+        </p>
+        <ul>
+            <li>模型的任务：读入一段文本，预测下一段是什么。</li>
+            <li>输入文本先被切成很多 token（词元）。token 是小块文本，通常是一个词或词的一部分。</li>
+            <li>每个 token 对应一个高维向量，也就是一长串数字。文字版把它叫作这个 token 的嵌入（embedding）。</li>
+            <li>这串向量反复经过两种操作。一种是注意力，让向量之间互相传递信息；另一种是多层感知机，也就是这一集的主角。两者之间还有一个归一化（normalization）步骤，文字版说留到别的课再讲。</li>
+            <li>这串向量流过很多轮这两种块之后，希望每个向量都已经吸收了足够的信息，既有来自上下文（输入里所有其他词）的信息，也有训练时烙进模型权重里的一般知识，足以用来预测下一个 token 是什么。</li>
+        </ul>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/tokens.jpg" alt="文本切成 token" style="max-width:100%"><figcaption>图：输入文本被切成 token（引自 3blue1brown.com）</figcaption></figure>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/manylayers.jpg" alt="注意力和 MLP 交替多层" style="max-width:100%"><figcaption>图：向量序列反复经过注意力块和 MLP 块（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>方向代表含义</h3>
+        <p>
+            他要观众记住一个核心想法：这些向量都活在一个维度极高的空间里，在这个空间里，不同的方向可以编码不同种类的含义。他再搬出常用的经典例子：拿 woman 的嵌入减去 man 的嵌入，得到一小步位移，把这一步加到另一个男性名词上，比如 uncle，结果会落在对应的女性名词附近。在这个意义上，这个方向编码了性别信息。照这个思路，这个超高维空间里很多别的方向，也可以对应模型想表示的其他特征（feature）。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/DirectionExample.jpg" alt="woman 减 man 加到 uncle 上" style="max-width:100%"><figcaption>图：woman − man 这一步加到 uncle 上，落在对应的女性名词附近（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>向量装的不只是一个词</h3>
+        <p>
+            他补充：在 Transformer 里，这些向量不只编码单个词的含义。它们在网络里流动时，会根据周围的上下文和模型的知识，吸收丰富得多的含义。最终每个向量要编码远远超出一个词的东西，因为它要足以预测接下来是什么。
+        </p>
+        <p>
+            注意力块怎样引入上下文，前一章已经看过。而模型的大部分参数其实在 MLP 块里。对 MLP 在做什么，一种想法是：它们提供了额外的容量来存储事实。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 玩具例子的几个假设</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=279s" target="_blank">0:04:39</a>–0:06:07 · Assumptions for our toy example</em></p>
+
+        <h3>三个方向</h3>
+        <p>
+            这一集围绕一个具体的玩具例子：MLP 怎样存下“Michael Jordan 打篮球”。为此要先对高维空间做几个假设。
+        </p>
+        <ul>
+            <li>有一个方向代表“名字是 Michael”。</li>
+            <li>另一个几乎垂直的方向代表“姓 Jordan”。</li>
+            <li>第三个方向代表“篮球”。（文字版说它和前两个也几乎垂直。）</li>
+        </ul>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/MJB.jpg" alt="Michael、Jordan、Basketball 三个方向" style="max-width:100%"><figcaption>图：假设嵌入空间里有 Michael、Jordan、Basketball 三个方向（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>用点积读“是不是”</h3>
+        <p>
+            “一个方向代表某个概念”具体是什么意思？他这样定义：从网络里取出一个正在被处理的向量，如果它和“名字 Michael”方向的点积（dot product，两个向量对应分量相乘再求和，衡量两者方向有多一致）等于 1，就表示这个向量在编码“一个名叫 Michael 的人”。否则点积是 0 或负数，表示这个向量和这个方向不太对齐。同样，它和另外两个方向的点积，告诉你它是否在表示“姓 Jordan”或“篮球”。
+        </p>
+        <p>
+            为了简单，他说要“完全忽略一个很合理的问题”：点积大于 1 意味着什么。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/align.jpg" alt="向量与 Michael 方向对齐" style="max-width:100%"><figcaption>图：向量 $\vec{E}$ 与 Michael 方向对齐（引自 3blue1brown.com）</figcaption></figure>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/noalign.jpg" alt="向量与 Michael 方向不对齐" style="max-width:100%"><figcaption>图：向量 $\vec{E}$ 与 Michael 方向不对齐（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>两个 token 合成一个全名</h3>
+        <p>
+            如果一个向量要表示全名 Michael Jordan，它和 Michael、Jordan 两个方向的点积都得是 1。“Michael Jordan”在文本里占两个 token，所以还要再假设一件事：前面某个注意力块已经把信息成功传给了两个向量中的第二个（Jordan 那个位置），让它能同时编码两个名字。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/BothNames.jpg" alt="同时编码两个名字的向量" style="max-width:100%"><figcaption>图：表示全名的向量与两个方向的点积都是 1（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t04">
+        <h2>04. MLP 块的整体形状</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=367s" target="_blank">0:06:07</a>–0:07:25 · Inside a multilayer perceptron（前段）</em></p>
+
+        <h3>每个向量各算各的，最后加回去</h3>
+        <p>
+            有了这些假设，进入正题：MLP 里面发生了什么？可以想象一串向量流进这个块，每个向量原本对应输入文本里的一个 token。
+        </p>
+        <ul>
+            <li>序列里的每个向量各自经过一小串操作，最后得到另一个维度相同的向量。</li>
+            <li>这个新向量被加到原来流进来的向量上，和就是流出去的结果。</li>
+            <li>这串操作对序列里每个向量（也就是每个 token）都做一遍，全部并行。</li>
+            <li>在这一步里向量之间不交流，“各干各的”。</li>
+        </ul>
+        <p>
+            他说这对理解反而是好事：只要搞懂一个向量经过这个块时发生了什么，就等于搞懂了所有向量。文字版在这里放了一道小题：和注意力不同，流过 MLP 的向量“不受其他向量影响”。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/ManyVectors.jpg" alt="每个向量并行经过 MLP" style="max-width:100%"><figcaption>图：同一串操作并行地作用在序列里每个向量上（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>“存储事实”在这里指什么</h3>
+        <p>
+            他把目标说清楚：说这个块编码了“Michael Jordan 打篮球”，意思是如果流进来的向量编码了“名字 Michael”和“姓 Jordan”，这串计算就会产生一个包含“篮球”方向的东西，加到这个位置的向量上。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/MLPJordan.jpg" alt="MLP 输出包含篮球方向" style="max-width:100%"><figcaption>图：目标是让编码 Michael Jordan 的向量流出时多了篮球方向（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t05">
+        <h2>05. 第一步：上投影矩阵和偏置</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=445s" target="_blank">0:07:25</a>–0:09:59 · Inside a multilayer perceptron（续）</em></p>
+
+        <h3>乘一个很大的矩阵</h3>
+        <p>
+            第一步是把向量乘一个很大的矩阵。他的原话是“No surprises there, this is deep learning”。这个矩阵和前面见过的所有矩阵一样，填满了从数据里学到的模型参数，可以想成一大堆旋钮，调来调去决定模型的行为。
+        </p>
+
+        <h3>按行看：一行就是一个问题</h3>
+        <p>
+            他给出一种理解矩阵乘法的方式：把矩阵的每一行看成一个向量，矩阵乘向量就是拿这些行分别和被处理的向量做点积。被处理的向量他记作 $\vec{E}$（embedding 的首字母）。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/Step12.jpg" alt="矩阵每行与向量做点积" style="max-width:100%"><figcaption>图：把矩阵每一行当成一个向量，和 $\vec{E}$ 逐行做点积（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            例如，假设第一行正好等于前面假定存在的“名字 Michael”方向。那么输出的第一个分量，也就是这一行和 $\vec{E}$ 的点积 $R_0\cdot\vec{E}$，在向量编码了“名字 Michael”时等于 1，否则是 0 或负数。
+        </p>
+        <p>
+            他接着说“更好玩的”：如果第一行是“名字 Michael 加姓 Jordan”方向，简写成 $\vec{M}+\vec{J}$，那么点积可以拆开：
+        </p>
+        $$(\vec{M}+\vec{J})\cdot\vec{E} = \vec{M}\cdot\vec{E} + \vec{J}\cdot\vec{E}$$
+        <p>
+            于是这个值在向量编码全名 Michael Jordan 时是 2，否则是 1 或更小。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/Step14.jpg" alt="M 加 J 与 E 的点积展开" style="max-width:100%"><figcaption>图：第一行取 $\vec{M}+\vec{J}$ 时，点积拆成两项之和（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            这只是矩阵里的一行。其他各行可以想成在并行地问别的问题，探测被处理向量的其他特征。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/Step15Updated.jpg" alt="每一行问一个问题" style="max-width:100%"><figcaption>图：其他行在并行地探测别的特征（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>偏置：把门槛设在 1</h3>
+        <p>
+            这一步通常还要在输出上再加一个向量，同样填满从数据学到的参数，叫偏置（bias）。在玩具例子里，他让偏置的第一个分量是 −1，于是第一个输出变成“相关点积减 1”：
+        </p>
+        $$\vec{M}\cdot\vec{E} + \vec{J}\cdot\vec{E} - 1$$
+        <p>
+            他说观众可能会合理地问，凭什么假设模型学到了这个值。理由马上就会看到：如果这个值当且仅当向量编码了全名 Michael Jordan 时为正，否则为 0 或负数，后面会变得很干净。（编码全名时是 $2-1=1$；只有一个名字时最多是 $1-1=0$。）
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/Bias1.jpg" alt="偏置第一个分量为 -1" style="max-width:100%"><figcaption>图：偏置第一个分量取 −1（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>GPT-3 里有多少行</h3>
+        <p>
+            这个矩阵的总行数，大致相当于“同时问了多少个问题”。在一直跟着算的 GPT-3 里，这个数“略少于 50,000”，准确说是嵌入空间维度的 4 倍。GPT-3 的嵌入维度是 12,288，所以行数是 $4\times 12{,}288 = 49{,}152$（文字版小测题的选项里也出现了 49,152）。他说这是一个设计选择，可以更多也可以更少，但取一个整齐的倍数通常对硬件友好。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/4embed.jpg" alt="行数是嵌入维度的 4 倍" style="max-width:100%"><figcaption>图：GPT-3 中上投影矩阵的行数是嵌入维度的 4 倍（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            因为这个矩阵把向量映射到更高维的空间，他给它起简称 $W_\uparrow$（W up，上投影矩阵），偏置记作 $B_\uparrow$，被处理的向量仍记作 $\vec{E}$。这一步写成：
+        </p>
+        $$W_\uparrow \vec{E} + B_\uparrow$$
+    </section>
+
+    <section id="t06">
+        <h2>06. 第二步：ReLU 和“神经元”</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=599s" target="_blank">0:09:59</a>–0:12:02 · Inside a multilayer perceptron（续）</em></p>
+
+        <h3>线性的问题</h3>
+        <p>
+            到这里有个问题：上面的操作纯粹是线性的，而语言是一个高度非线性的过程。如果某个分量在 Michael 加 Jordan 时值很高，那它在 Michael 加 Phelps，或者 Alexis 加 Jordan 时，也必然会被部分触发，尽管这几个人在概念上毫无关系。真正想要的是对全名给一个简单的“是”或“否”。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/YesNo.jpg" alt="想要对全名的是或否" style="max-width:100%"><figcaption>图：线性一步会被 Michael Phelps、Alexis Jordan 部分触发，想要的是对全名的是或否（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>ReLU</h3>
+        <p>
+            所以下一步是让这个很大的中间向量通过一个很简单的非线性函数。常见的选择是：所有负数变成 0，所有正数原样保留。他说，“延续深度学习给东西起过分花哨名字的传统”，这个简单函数通常叫线性整流单元（rectified linear unit），简称 ReLU。
+        </p>
+        $$\text{ReLU}(x) = \max(0, x)$$
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/ReLU.jpg" alt="ReLU 函数图像" style="max-width:100%"><figcaption>图：ReLU 的图像，负数部分被压成 0（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            回到玩具例子：中间向量的第一个分量当且仅当全名是 Michael Jordan 时为 1，否则是 0 或负数。经过 ReLU，0 和负数都被截成 0，输出就很干净：全名 Michael Jordan 时为 1，否则为 0。换句话说，它直接模仿了一个与门（AND gate）的行为：两个条件都满足才输出 1。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/And.jpg" alt="ReLU 之后像与门" style="max-width:100%"><figcaption>图：减去偏置再过 ReLU，效果像一个与门（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他提到模型常用一个稍作修改的函数 GELU，基本形状相同，只是更平滑一些。在这里只考虑 ReLU 更干净。
+        </p>
+
+        <h3>Transformer 里的“神经元”指什么</h3>
+        <p>
+            人们说 Transformer 的神经元（neuron）时，指的就是这里的值，也就是 ReLU 输出的那些数。系列前面几集里那张常见的神经网络图（一层点，加上一堆连到前一层的线），通常就是在表达这个组合：先一个线性步骤（矩阵乘法），再逐项套一个简单的非线性函数，比如 ReLU。这个值为正时说这个神经元是激活的（active），为 0 时是未激活的。文字版的配图里用白点表示激活的神经元。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/NeuralNetwork.jpg" alt="常见的神经网络示意图" style="max-width:100%"><figcaption>图：点和连线的神经网络图，表达的是“矩阵乘法加逐项非线性函数”（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            文字版在这里有一道小题：按 GPT-3 的数字，ReLU 函数需要多少参数？选项是 0、1、12,288、49,152。ReLU 是固定的函数，没有要学的参数，所以是 0。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 第三步：下投影矩阵，加回原向量</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=722s" target="_blank">0:12:02</a>–0:15:38 · Inside a multilayer perceptron（后段）</em></p>
+
+        <h3>再乘一个大矩阵</h3>
+        <p>
+            下一步和第一步很像：乘一个很大的矩阵，再加一个偏置。不同的是输出维度回到嵌入空间的大小，所以他把这个矩阵叫下投影矩阵（down projection matrix）。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/DPM.jpg" alt="下投影矩阵" style="max-width:100%"><figcaption>图：下投影矩阵把向量带回嵌入空间的维度（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>按列看：一列就是一个要加上去的方向</h3>
+        <p>
+            这次他换一种看法：一列一列地看，比一行一行地看更方便。矩阵乘法的另一种理解方式是，把矩阵的每一列乘以向量里对应的那一项，再把这些缩放过的列加起来：
+        </p>
+        $$W_\downarrow \vec{n} = n_0 \vec{C}_0 + n_1 \vec{C}_1 + n_2 \vec{C}_2 + \cdots$$
+        <p>
+            （这里 $\vec{n}$ 是 ReLU 输出的神经元向量，$\vec{C}_i$ 是第 $i$ 列；记号是本笔记为了写清楚加的。）这样看更方便的原因是，这里每一列的维度和嵌入空间相同，可以把列当成嵌入空间里的方向。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/Column1.jpg" alt="按列理解矩阵乘法" style="max-width:100%"><figcaption>图：按列理解矩阵乘法，每列乘以对应的神经元值后相加（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            比如，设想模型学会了把第一列变成前面假定存在的“篮球”方向。那么当第一个位置的那个神经元激活时，就会把这一列加到最终结果上；如果它未激活，值为 0，这一列就没有任何作用。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/BNeuron.jpg" alt="神经元激活时加上篮球列" style="max-width:100%"><figcaption>图：第一个神经元激活时，篮球这一列被加进结果（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            也不一定只有篮球。模型可以把很多它想和“全名 Michael Jordan”关联起来的特征都烙进这一列（文字版举了芝加哥公牛队和 23 号）。同时，矩阵里其他每一列都告诉你：对应的神经元激活时，会往结果里加什么。
+        </p>
+
+        <h3>第二个偏置</h3>
+        <p>
+            这一步如果有偏置，它是每次都加上的，和神经元的值无关。它在做什么？他说，和这里所有填满参数的东西一样，很难准确说；也许是网络需要做的某种记账，现在可以先忽略。记号上，下投影矩阵记作 $W_\downarrow$，偏置记作 $B_\downarrow$。
+        </p>
+
+        <h3>加回原向量，全部合起来</h3>
+        <p>
+            像开头预告的那样，这个结果再加到这个位置流进来的向量上，得到最终输出。整个 MLP 块可以写成：
+        </p>
+        $$\vec{E}_{\text{out}} = \vec{E} + W_\downarrow\,\text{ReLU}\left(W_\uparrow \vec{E} + B_\uparrow\right) + B_\downarrow$$
+        <p>
+            放回玩具例子：如果流进来的向量同时编码了“名字 Michael”和“姓 Jordan”，这串操作会触发那个与门，于是加上篮球方向，流出来的向量同时编码这三样东西。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/MJBex.jpg" alt="流出的向量编码 Michael Jordan 和篮球" style="max-width:100%"><figcaption>图：流出的向量同时编码 Michael、Jordan 和篮球（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他提醒，这个过程同时发生在每个向量上。按 GPT-3 的数字，这个块里不只是 50,000 个神经元，而是 50,000 乘以输入 token 数。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/Figure1.jpg" alt="每个 token 都有一组神经元" style="max-width:100%"><figcaption>图：每个 token 位置都有自己的一组约 50,000 个神经元激活值（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>回到第 1 章的那个网络</h3>
+        <p>
+            这就是全部操作：两次矩阵乘法，各加一个偏置，中间一个简单的截断函数。看过系列前几集的人会认出，这就是当时学过的最基本的那种神经网络，那里它被训练来识别手写数字。在大语言模型的 Transformer 里，它是更大架构里的一块；要解释它到底在做什么，和“把信息编码进高维嵌入空间的向量”这个想法紧紧缠在一起。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/ogmlp.jpg" alt="识别手写数字的原始网络" style="max-width:100%"><figcaption>图：系列开头识别手写数字的网络，结构相同（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他说这是核心内容，然后要退一步谈两件事：一件是记账，另一件是一个关于高维的、引人深思的事实，他说自己在研究 Transformer 之前也不知道。
+        </p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 数参数：GPT-3 的 MLP 有多大</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=938s" target="_blank">0:15:38</a>–0:17:04 · Counting parameters</em></p>
+        <p>
+            前两章一直在数 GPT-3 的总参数、看它们分布在哪里，这里把这笔账算完。
+        </p>
+        <table>
+            <tr><th>项目</th><th>算法</th><th>数量</th></tr>
+            <tr><td>上投影矩阵 $W_\uparrow$</td><td>行数略少于 50,000 × 每行 12,288（嵌入维度）</td><td>约 6.04 亿（604 million）</td></tr>
+            <tr><td>下投影矩阵 $W_\downarrow$</td><td>同样多，形状是转置的</td><td>约 6.04 亿</td></tr>
+            <tr><td>一个 MLP 块</td><td>两个矩阵相加</td><td>约 12 亿（1.2 billion）</td></tr>
+            <tr><td>偏置向量</td><td>多几个参数</td><td>占比微不足道，画面上不显示</td></tr>
+            <tr><td>全部 MLP</td><td>GPT-3 里向量要流过 96 个不同的 MLP</td><td>约 1,160 亿（116 billion）</td></tr>
+            <tr><td>占全网比例</td><td></td><td>约三分之二</td></tr>
+            <tr><td>全网合计</td><td>加上前几章算过的注意力块、嵌入矩阵、反嵌入矩阵</td><td>1,750 亿（175 billion）</td></tr>
+        </table>
+        <p>
+            按数字核对：$12{,}288 \times 49{,}152 = 603{,}979{,}776$，约 6.04 亿；乘 2 约 12 亿；再乘 96 约 1,160 亿。他说，加上注意力、嵌入和反嵌入，就“确实得到”宣传中的 1,750 亿总数。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/Parameter.jpg" alt="MLP 参数计数" style="max-width:100%"><figcaption>图：一个 MLP 块两个矩阵的参数计数（引自 3blue1brown.com）</figcaption></figure>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/TotalParam.jpg" alt="GPT-3 总参数" style="max-width:100%"><figcaption>图：96 个 MLP 合计约 1,160 亿，全网合计 1,750 亿（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他补了一句：还有一组和归一化步骤相关的参数，这个讲解跳过了，但和偏置一样，占总数的比例微不足道。文字版给了这组参数的量级：大约 49,000 个。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 叠加：高维空间里能塞下多少个几乎垂直的方向</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1024s" target="_blank">0:17:04</a>–0:21:37 · Superposition</em></p>
+
+        <h3>玩具例子和真实模型的差距</h3>
+        <p>
+            第二件要反思的事：花了这么多时间的这个玩具例子，能不能反映真实大语言模型存储事实的方式？他先确认两点是成立的。第一个矩阵的行确实可以看成嵌入空间里的方向，所以每个神经元的激活值告诉你一个向量和某个特定方向对齐了多少。第二个矩阵的列确实告诉你神经元激活时会往结果里加什么。他说这两点都只是数学事实。
+        </p>
+        <p>
+            但证据显示，单个神经元很少代表一个干净的单一特征，比如“Michael Jordan”。这背后可能有一个很好的理由，和可解释性（interpretability，研究模型内部在做什么的领域）研究者最近常谈的一个想法有关，叫叠加（superposition）。他说这是一个假说，它可能同时解释两件事：为什么这些模型特别难解释，以及为什么它们的规模扩展效果出人意料地好。
+        </p>
+
+        <h3>严格垂直：最多只能放 n 个</h3>
+        <p>
+            基本想法是这样的。在一个 n 维空间里，如果想用彼此完全垂直的方向表示一批不同的特征（这样在一个方向上加一个分量，不会影响其他方向），那么最多只能放 n 个向量，也就是维度数。他说，对数学家来说，这其实就是维度的定义。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/SuperPos1.jpg" alt="n 维空间最多 n 个互相垂直的方向" style="max-width:100%"><figcaption>图：n 维空间里最多放 n 个两两垂直的方向（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>放宽到“几乎垂直”</h3>
+        <p>
+            有意思的地方在于把这个约束放宽一点，容忍一些噪声。比如允许特征用不完全垂直、只是几乎垂直的向量来表示，视频里说的范围是彼此夹角在 89 度到 91 度之间（文字版这里写的是 85 度到 95 度）。在二维或三维里，这几乎没有区别，放宽之后并不能多塞进几个向量。所以更反直觉的是，在高维里答案变化巨大。
+        </p>
+
+        <h3>一段 Python 演示（视频版）</h3>
+        <p>
+            他用一段他自己称为 scrappy（简陋）的 Python 代码做了一个快速粗糙的演示：
+        </p>
+        <ol>
+            <li>生成一个由 100 维向量组成的列表，每个向量随机初始化，一共 10,000 个，是维度数的 100 倍。</li>
+            <li>画出这些向量两两之间夹角的分布。因为是随机的，夹角可以是 0 到 180 度之间的任何值，但已经能看到，即使是随机向量，夹角也明显偏向 90 度附近。</li>
+            <li>然后跑一个优化过程，反复轻推所有向量，让它们彼此更垂直。</li>
+            <li>重复很多次之后再画分布，要放大才看得清，因为所有向量对的夹角都落在 89 度到 91 度这个窄范围里。</li>
+        </ol>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/RandomDis.jpg" alt="随机向量夹角分布" style="max-width:100%"><figcaption>图：10,000 个随机 100 维向量两两夹角的分布，已偏向 90 度（引自 3blue1brown.com）</figcaption></figure>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/RandomDis1.jpg" alt="优化后夹角分布" style="max-width:100%"><figcaption>图：优化之后的夹角分布，看上去全在 89 到 91 度之间（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>文字版的更正</h3>
+        <p>
+            文字版（Justin Sun 改编）在这里加了一段视频里没有的更正，以 Grant 的口吻写：视频里的代码有错。实际发生的是，有少数几对向量被推到点积接近 ±1，藏在图的两翼；他用的代价函数不好，没有足够惩罚这些情况。仔细检查后他认为，在 100 维里不可能让这么多向量“几乎正交”到这个程度；至少对 (89°, 91°) 这个范围，100 维不够让 Johnson–Lindenstrauss 引理真正起作用。（这段原文写的是“100,000 vectors in 100 dimensions”，前文是 10,000 个向量，两处数字不一致，原文如此。）
+        </p>
+        <p>
+            文字版说，视频那一处的大方向仍然成立：能塞进去的几乎正交向量数会指数增长，但这个效应从多大维度开始变得可观，是个有意思的问题。观众 Nick Yoder 来信做了更多探索，文字版列了几条要点：
+        </p>
+        <ul>
+            <li>把向量对限制在 (89°, 91°) 范围相当严格。在这个角度下，维度要超过 250,000 才开始变得有意思。</li>
+            <li>85 度（点积只有 0.087）扩展得很快。</li>
+            <li>85 度、12,288 维（GPT-3 的嵌入空间）能装下远超 400 亿个向量（可能超过 $10^{17}$）。</li>
+            <li>85 度、116,000 维（对 GPT-4、GPT-o1、-o3 或类似的较新模型来说在合理范围内）能装下远超一个古戈尔（googol，$10^{100}$）个向量，可能超过 $10^{160}$。</li>
+        </ul>
+
+        <h3>Johnson–Lindenstrauss 引理</h3>
+        <p>
+            他说，一个叫 Johnson–Lindenstrauss 引理的结论有一个推论：在一个空间里能塞进去的、彼此几乎垂直的向量个数，随维度数指数增长。（视频里只讲这个推论，没有给引理的陈述或证明。）
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/JLL.jpg" alt="几乎垂直向量数随维度指数增长" style="max-width:100%"><figcaption>图：几乎垂直的向量个数随维度指数增长（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>这对大模型意味着什么</h3>
+        <p>
+            他说这对大语言模型意义很大，因为把相互独立的概念对应到几乎垂直的方向上，可能对模型有好处。这意味着模型能存下的概念，可以远多于分配给它的空间的维度数。这也许能部分解释为什么模型性能随规模扩展得那么好：维度多 10 倍的空间，能存下的独立概念远远不止 10 倍。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/GPTScale.jpg" alt="维度增加带来的容量" style="max-width:100%"><figcaption>图：维度多 10 倍，能存的独立概念远不止 10 倍（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            这一点不只适用于向量流动的嵌入空间，也适用于刚才 MLP 中间那个装满神经元的向量。也就是说，在 GPT-3 的规模下，它探测的可能不只是 50,000 个特征；如果它利用几乎垂直的方向带来的巨大额外容量，就能探测被处理向量的多得多的特征。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/mlp/ManyMore.jpg" alt="神经元向量探测更多特征" style="max-width:100%"><figcaption>图：中间的神经元向量可能在探测远多于 50,000 个特征（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            但如果真是这样，单个特征就不会表现为某一个神经元亮起来，而会是某种特定的神经元组合，这就是“叠加”。
+        </p>
+
+        <h3>稀疏自编码器</h3>
+        <p>
+            他给想深入的人一个关键搜索词：稀疏自编码器（sparse autoencoder）。这是一些可解释性研究者用的工具，用来在特征高度叠加在神经元上的情况下，尝试提取出真正的特征。他说会链接 Anthropic 关于这个话题的文章，文字版列了两篇：Toy Models of Superposition 和 Decomposing Language Models With Dictionary Learning。视频描述里另外列了 Neel Nanda 推荐的入门资料：一份机制可解释性论文书单、一篇入门指南、Neuronpedia 做的稀疏自编码器交互演示和 ARENA 的编程教程。
+        </p>
+    </section>
+
+    <section id="t10">
+        <h2>10. 下一章预告</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1297s" target="_blank">0:21:37</a>–0:22:42 · Up next</em></p>
+        <p>
+            他说，到这里还没有碰到 Transformer 的每个细节，但最重要的点已经讲到了。下一章主要想讲训练过程。简短的回答是，训练全靠反向传播（backpropagation），这在系列前面几集里已经在别的情境下讲过。但还有更多可谈：语言模型用的具体代价函数（cost function），用人类反馈强化学习（reinforcement learning with human feedback，RLHF）做微调的思路，以及缩放定律（scaling laws）。
+        </p>
+        <p>
+            他还对常看频道的观众说，在做下一章之前，他想先做一些和机器学习无关的视频，所以可能要等一阵子，但会来的。（文字版把下一课链接到了交叉熵那一集，也就是本系列的第 09 篇。）
+        </p>
+    </section>
+
+    <section>
+        <h2>这一集值得记下的原话</h2>
+        <ul>
+            <li>“It boils down essentially to a pair of matrix multiplications with a simple something in between.”<br>归结起来，就是一对矩阵乘法，中间夹一个简单的东西。 · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=63s" target="_blank">0:01:03</a></li>
+            <li>“No surprises there, this is deep learning.”<br>这不奇怪，这就是深度学习。 · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=445s" target="_blank">0:07:25</a></li>
+            <li>“And continuing with the deep learning tradition of overly fancy names, this very simple function is often called the rectified linear unit, or ReLU for short.”<br>延续深度学习给东西起过分花哨名字的传统，这个很简单的函数通常叫线性整流单元，简称 ReLU。 · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=599s" target="_blank">0:09:59</a></li>
+            <li>“In other words, it very directly mimics the behavior of an AND gate.”<br>换句话说，它直接模仿了一个与门的行为。 · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=656s" target="_blank">0:10:56</a></li>
+            <li>“However, the evidence does suggest that individual neurons very rarely represent a single clean feature like Michael Jordan”<br>不过，证据确实显示，单个神经元很少代表像 Michael Jordan 这样一个干净的单一特征。 · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1054s" target="_blank">0:17:34</a></li>
+            <li>“To a mathematician, actually, this is the definition of dimension.”<br>对数学家来说，这其实就是维度的定义。 · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1054s" target="_blank">0:17:34</a></li>
+            <li>“A space that has 10 times as many dimensions can store way, way more than 10 times as many independent ideas.”<br>维度多 10 倍的空间，能存下的独立概念远远不止 10 倍。 · <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1211s" target="_blank">0:20:11</a></li>
+        </ul>
+    </section>
+
+    <section id="how">
+        <h2>他是怎么讲的</h2>
+
+        <h3>讲解顺序</h3>
+        <ol>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=0s" target="_blank">0:00:00</a> 用一个填空题开场：模型能答出 Michael Jordan 打篮球，那这条事实存在哪？随后引 DeepMind 的部分结论，把答案指向 MLP。问题先于组件出现，MLP 是作为“事实住的地方”被引入的。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=63s" target="_blank">0:01:03</a> 先给难度预期：计算简单（两次矩阵乘法加中间一个简单东西），解释很难。然后说清本集目标：把计算走一遍，并放在一个具体例子里。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=113s" target="_blank">0:01:53</a> 回顾 Transformer 流程，只回顾这一集要用到的部分：token、向量、注意力和 MLP 交替、最后预测。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=173s" target="_blank">0:02:53</a> 重提“方向代表含义”，用 woman − man + uncle 的老例子。这是后面整个玩具例子的地基。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=278s" target="_blank">0:04:38</a> 明确列出假设：三个方向，点积为 1 代表“是”，忽略大于 1 的情况，假设注意力已经把两个名字合到一个向量上。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=386s" target="_blank">0:06:26</a> 先讲块的外形：每个向量独立、并行，输出加回输入。再说“存储事实”在这里的操作定义：进来 Michael + Jordan，出去多了 basketball。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=445s" target="_blank">0:07:25</a> 第一步，按行看矩阵：一行先设成 Michael，再改成 M+J，得到值 2。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=545s" target="_blank">0:09:05</a> 加偏置 −1，并提前说“一会儿你会看到为什么”；顺带给出 GPT-3 的行数，命名 $W_\uparrow$、$B_\uparrow$。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=599s" target="_blank">0:09:59</a> 提出线性的问题（Michael Phelps、Alexis Jordan 也会触发），再引入 ReLU 作为解决方案，得出与门。之后顺带讲“神经元”指什么，接回系列第 1 章的网络图。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=722s" target="_blank">0:12:02</a> 第三步，换成按列看矩阵：一列设成 basketball 方向，神经元激活就加上这一列。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=825s" target="_blank">0:13:45</a> 合起来：加回原向量，例子闭环。提醒每个 token 都在并行做这件事。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=888s" target="_blank">0:14:48</a> 总结结构，点明它就是第 1 章识别手写数字的那种网络。然后预告“退一步谈两件事”。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=941s" target="_blank">0:15:41</a> 第一件：把前两章开始的 GPT-3 参数账算完，落到 1,750 亿。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=998s" target="_blank">0:16:38</a> 第二件：自问“这个玩具例子真实吗”，先承认数学部分成立，再说证据显示神经元很少对应单一特征，引出叠加。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1108s" target="_blank">0:18:28</a> 从“严格垂直只能放 n 个”到“几乎垂直能放多少”，用 Python 演示，再给 Johnson–Lindenstrauss 的推论。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1211s" target="_blank">0:20:11</a> 把高维结论接回模型：嵌入空间和 MLP 中间层都可能用几乎垂直的方向存更多特征，所以单个特征看起来是一组神经元的组合。给出搜索词 sparse autoencoder。</li>
+            <li><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1267s" target="_blank">0:21:07</a> 收尾：说已经讲到 Transformer 最重要的部分，预告训练过程。</li>
+        </ol>
+
+        <h3>画面上是什么</h3>
+        <p>以下依据他的旁白和文字版配图。旁白没有说清的画面细节，这里不补。</p>
+        <table>
+            <tr><th>时间</th><th>画面</th><th>这个画面在讲什么</th></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=0s" target="_blank">0:00:00</a></td><td>填空句 “Michael Jordan plays the sport of ___”，模型预测 basketball（配图 MotivatingExample）</td><td>提出问题：事实存在哪</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=63s" target="_blank">0:01:03</a></td><td>Transformer 结构里标出 MLP 部分；MLP 计算概览图（配图 MLP、Overview）</td><td>定位 MLP 在网络中的位置</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=113s" target="_blank">0:01:53</a></td><td>文本切成 token，每个 token 对应一列数字；向量序列穿过多层注意力和 MLP（配图 tokens、embedding、manylayers、MLPRecap）</td><td>回顾整体流程</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=173s" target="_blank">0:02:53</a></td><td>woman − man 这一步加到 uncle 上，落到对应女性名词附近（配图 DirectionExample）</td><td>方向编码含义</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=278s" target="_blank">0:04:38</a></td><td>三个箭头：Michael、Jordan、Basketball；一个向量 $\vec{E}$ 与 Michael 方向对齐、不对齐的两种情况；与两个名字方向都对齐的向量（配图 MJB、align、noalign、BothNames）</td><td>玩具例子的假设，点积读“是不是”</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=386s" target="_blank">0:06:26</a></td><td>向量序列流进 MLP 块，每个向量各自变换后加回自己（配图 mlppre、ManyVectors、MLPJordan）</td><td>块的外形：独立、并行、残差相加</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=445s" target="_blank">0:07:25</a></td><td>一个大矩阵乘 $\vec{E}$，矩阵每行被看成一个向量，第一行先是 Michael，再是 $\vec{M}+\vec{J}$，点积展开成两项（配图 Step11 到 Step15Updated）</td><td>按行看矩阵：每行是一个问题</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=545s" target="_blank">0:09:05</a></td><td>输出上加偏置向量，第一项是 −1；矩阵行数标为嵌入维度的 4 倍（配图 Bias1、4embed）</td><td>设门槛；GPT-3 规模</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=599s" target="_blank">0:09:59</a></td><td>Michael Phelps、Alexis Jordan 也部分触发；ReLU 的函数图像；ReLU 后只剩全名时为 1（配图 YesNo、ReLU、And）</td><td>非线性带来与门</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=656s" target="_blank">0:10:56</a></td><td>ReLU 输出的值被标为神经元；点和连线的经典神经网络图，白点表示激活（配图 Neurons1、NeuralNetwork）</td><td>“神经元”在 Transformer 里指什么</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=722s" target="_blank">0:12:02</a></td><td>下投影矩阵按列拆开，第一列是 basketball 方向，神经元激活就加上这一列（配图 DPM、Column1、BDirection、BNeuron）</td><td>按列看矩阵：每列是一个要加上的方向</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=825s" target="_blank">0:13:45</a></td><td>完整的 MLP 图，输出加回输入，结果向量同时含 Michael、Jordan、basketball；每个 token 都有一组神经元（配图 MLPEnd、MJBex、Figure1）</td><td>例子闭环</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=888s" target="_blank">0:14:48</a></td><td>系列开头识别手写数字的网络（配图 ogmlp）</td><td>和第 1 章接上</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=941s" target="_blank">0:15:41</a></td><td>参数计数：两个矩阵各约 6.04 亿，乘 96 层，总数 1,750 亿（配图 Parameter、TotalParam）；他说偏置“我都不打算显示”</td><td>记账</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1054s" target="_blank">0:17:34</a></td><td>n 维空间里 n 个两两垂直的方向（配图 SuperPos1）</td><td>严格垂直的上限</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1160s" target="_blank">0:19:20</a></td><td>Python 代码和夹角分布直方图：先是随机向量的分布，优化后要放大看，全部挤在 89 到 91 度（配图 RandomDis、RandomDis1）</td><td>高维里“几乎垂直”的空间很大</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1211s" target="_blank">0:20:11</a></td><td>几乎垂直向量数随维度指数增长；维度与容量；中间神经元向量探测更多特征（配图 JLL、GPTScale、ManyMore）</td><td>把高维结论接回大模型</td></tr>
+        </table>
+
+        <h3>他简化了什么、推后了什么</h3>
+        <ul>
+            <li>点积大于 1：“let's completely ignore the very reasonable question of what it might mean if that dot product was bigger than one”（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=329s" target="_blank">0:05:29</a>）。</li>
+            <li>两个 token 合成全名的过程交给“前面某个注意力块”，作为假设直接给定（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=329s" target="_blank">0:05:29</a>）。</li>
+            <li>偏置取 −1 先给出，理由推后：“in a moment you'll see why”（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=545s" target="_blank">0:09:05</a>）。</li>
+            <li>GELU 只提一句，“for our purposes, it's a little bit cleaner if we only think about the ReLU”（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=656s" target="_blank">0:10:56</a>）。</li>
+            <li>第二个偏置：“you can feel free to ignore it for now”（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=825s" target="_blank">0:13:45</a>）。</li>
+            <li>参数计数里，偏置“so I'm not even gonna show it”，归一化参数“this explanation has skipped over”（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=941s" target="_blank">0:15:41</a>、<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=998s" target="_blank">0:16:38</a>）。</li>
+            <li>归一化步骤在回顾时只说“there's a certain normalization step in between”，没有展开。</li>
+            <li>Johnson–Lindenstrauss 引理只给推论，不讲陈述和证明；演示自称 “quick and dirty illustration”，用的是 “some scrappy Python”（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1108s" target="_blank">0:18:28</a>）。文字版事后说这段代码有错。</li>
+            <li>他明说这个玩具例子是“at least in principle”的演示（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=63s" target="_blank">0:01:03</a>），并在 <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=998s" target="_blank">0:16:38</a> 回头自问它是否反映真实模型。</li>
+            <li>训练过程（代价函数、RLHF、缩放定律）推到下一章（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1267s" target="_blank">0:21:07</a>）。</li>
+        </ul>
+
+        <h3>数字怎么用</h3>
+        <ul>
+            <li>玩具例子里只用 −1、0、1、2 这几个小整数：点积为 1 表示“是”，M+J 得 2，减偏置 1 后变成 1 或 ≤0，ReLU 后变成干净的 1 或 0。每一步的数字都能心算。</li>
+            <li>真实规模的数字穿插在讲机制的过程中，各出现一次：行数“略少于 50,000，是嵌入维度的 4 倍”（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=545s" target="_blank">0:09:05</a>），神经元数“50,000 乘 token 数”（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=825s" target="_blank">0:13:45</a>）。</li>
+            <li>参数账延续前两章的累计：12,288 × 略少于 50,000 ≈ 6.04 亿，两个矩阵约 12 亿，乘 96 约 1,160 亿，约占三分之二，加上之前各部分正好是 1,750 亿。他用“you do indeed get that grand total”把这一系列账收口。</li>
+            <li>高维演示用 100 维、10,000 个向量（“100 times as many vectors as there are dimensions”），夹角范围 89 到 91 度。</li>
+            <li>“10 倍维度存远超 10 倍概念”是用一个整数倍率说指数增长。</li>
+        </ul>
+
+        <h3>直觉层和数学层</h3>
+        <ul>
+            <li>他把矩阵乘法讲了两种看法，各配一个用途：上投影按行看，每行是“一个问题”，点积给出“是不是”；下投影按列看，每列是“一个要加上的方向”，神经元值决定加不加。理由是下投影的列和嵌入空间同维，可以看成方向（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=722s" target="_blank">0:12:02</a>）。</li>
+            <li>唯一的代数推导是点积分配律：$(\vec{M}+\vec{J})\cdot\vec{E}$ 拆成两项，他说“things distribute really nicely”（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=495s" target="_blank">0:08:15</a>）。</li>
+            <li>记号是在讲完含义之后才给的：先讲“映射到更高维”，再叫它 W up；先讲“回到嵌入维度”，再叫 W down。他说这是“Making our notation a little more compact again”（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=825s" target="_blank">0:13:45</a>）。</li>
+            <li>ReLU 用“逻辑门”来解释，落到 AND gate 这个已有概念上。</li>
+            <li>他把机制和解释分开：行和列的解读他称为 “just mathematical facts”，而单个神经元对应单个特征这件事，他说证据不支持（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=1054s" target="_blank">0:17:34</a>）。叠加他明确称为 hypothesis。</li>
+            <li>高维部分不推公式，只用一张夹角分布的直方图和一个引理名字。</li>
+        </ul>
+
+        <h3>其他</h3>
+        <ul>
+            <li>一个例子贯穿全集：Michael Jordan 打篮球从开场填空一直用到第三步结束，最后在叠加部分被拿来当“干净的单一特征”的反例。</li>
+            <li>他多次提前说结构：“two matrix products… with a simple something in between”在开头说一次，在 <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=888s" target="_blank">0:14:48</a> 再说一次；“加回原向量”在 <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=386s" target="_blank">0:06:26</a> 预告，在 <a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=825s" target="_blank">0:13:45</a> 用 “Like I previewed earlier” 兑现。</li>
+            <li>他替观众提问：“You might very reasonably ask why I would want you to assume that the model has learned this”（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=545s" target="_blank">0:09:05</a>），“You might wonder what's that doing”（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=776s" target="_blank">0:12:56</a>），“you might be wondering if this central toy example… reflects how facts are actually stored”（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=998s" target="_blank">0:16:38</a>）。</li>
+            <li>他提出问题先于给工具：先说线性会被 Michael Phelps 触发，再给 ReLU。</li>
+            <li>用系列已有内容做锚点：方向的例子来自第 5 章，神经网络图和手写数字来自第 1 章，参数账来自第 5、6 章。</li>
+            <li>他说高维那件事“I actually didn't know until I dug into transformers”（<a href="https://www.youtube.com/watch?v=9-Jl0dxWQs8&t=888s" target="_blank">0:14:48</a>），作为后半段的引子。</li>
+            <li>开头和结尾都给出处：开头是 DeepMind 的文章和与 Neel Nanda 的谈话，结尾是稀疏自编码器这个搜索词和 Anthropic 的文章。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>3Blue1Brown · How might LLMs store facts | Deep Learning Chapter 7 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

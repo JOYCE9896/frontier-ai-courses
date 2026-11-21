@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transformer 与词嵌入 | 3Blue1Brown 深度学习系列笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+    <style>
+        table { border-collapse: collapse; width: 100%; font-size: 0.9em; margin: 1em 0; }
+        th, td { border-bottom: 1px solid #ccc; padding: 0.35em 0.5em; text-align: left; vertical-align: top; }
+    </style>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="05_大语言模型简介.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">3Blue1Brown 深度学习系列目录</a> · 06</span>
+    <span><a href="07_注意力机制.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 5 章 · Transformer 的整体结构与词嵌入</h1>
+        <p class="subtitle">先用一遍预览看清数据怎样流过 Transformer，再细讲开头的嵌入矩阵、结尾的反嵌入矩阵和 softmax，同时开始数 GPT-3 的 1750 亿个参数</p>
+        <div class="author-meta">
+            主讲：Grant Sanderson（3Blue1Brown）· 发布日期：2024 年 4 月 1 日 · 时长：27 分 14 秒 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：视频（3Blue1Brown YouTube 公开，本文依据视频字幕整理）<a href="https://www.youtube.com/watch?v=wjZofJX0v4M" target="_blank">Transformers, the tech behind LLMs | Deep Learning Chapter 5</a>，2024 年 4 月 1 日；文字版课程 <a href="https://www.3blue1brown.com/lessons/gpt" target="_blank">3blue1brown.com/lessons/gpt</a>（数字、公式和配图参照文字版；中文转述和讲解，不是逐字翻译；图片引自原网站，版权归原作者）
+        </div>
+    </header>
+
+    <section>
+        <h2>这一集的内容</h2>
+        <p>
+            这是 3Blue1Brown 神经网络系列的第 5 章，也是 Transformer 三集（第 5、6、7 章）的第一集。前四章讲的是识别手写数字的小网络、梯度下降和反向传播；上一篇（2024 年 11 月发布的短片）是面向大众的大语言模型简介，这一集发布得更早，讲得更细。Grant 说，他想用画面带着观众跟着数据一步步走过 Transformer 内部。这一集只处理网络的两头：输入怎样变成向量（嵌入），最后一个向量怎样变成“下一个词”的概率分布（反嵌入和 softmax）。中间的注意力模块留给下一章，MLP 模块和训练留到再后面。
+        </p>
+        <p>
+            他还花了不少时间复习机器学习工程师默认已经懂的背景：深度学习模型为什么一定要写成“矩阵乘向量”的形式，权重和数据怎样区分，点积怎样衡量两个向量的方向是否一致。整集贯穿一个计数：GPT-3 的 1750 亿个参数分在约 28,000 个矩阵里，属于 8 类，他每讲到一类就把它的参数加进总数。这一集加进去两类，嵌入矩阵和反嵌入矩阵，合计略多于 10 亿。读完你能说清楚：token 是什么，词嵌入的“方向有含义”指什么，上下文长度限制了什么，softmax 和 temperature 怎样把一串分数变成可以抽样的概率，logits 指什么。片尾关于 Patreon 预览版的说明从略。
+        </p>
+        <ol>
+            <li><a href="#t01">预测、抽样、重复</a> · <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">Transformer 内部一览</a> · <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=183s" target="_blank">0:03:03</a></li>
+            <li><a href="#t03">接下来几章的安排</a> · <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=396s" target="_blank">0:06:36</a></li>
+            <li><a href="#t04">深度学习的基本前提</a> · <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=440s" target="_blank">0:07:20</a></li>
+            <li><a href="#t05">词嵌入</a> · <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=747s" target="_blank">0:12:27</a></li>
+            <li><a href="#t06">嵌入不只代表单个词</a> · <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1105s" target="_blank">0:18:25</a></li>
+            <li><a href="#t07">反嵌入</a> · <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1222s" target="_blank">0:20:22</a></li>
+            <li><a href="#t08">带 temperature 的 softmax</a> · <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1342s" target="_blank">0:22:22</a></li>
+            <li><a href="#t09">下一章预告</a> · <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1563s" target="_blank">0:26:03</a></li>
+            <li><a href="#how">他是怎么讲的</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 预测、抽样、重复</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=0s" target="_blank">0:00:00</a>–0:03:03 · Predict, sample, repeat</em></p>
+
+        <h3>GPT 三个字母</h3>
+        <p>
+            他从名字讲起。GPT 是 Generative Pretrained Transformer 的缩写。Generative（生成式）好理解，这些模型会生成新的文本。Pretrained（预训练）指模型先在海量数据上学过一遍；“pre” 这个前缀暗示之后还可以针对具体任务做额外训练，也就是微调（fine-tune）。他说第三个词才是核心：Transformer 是一种特定的神经网络，一种机器学习模型，也是当前这轮 AI 热潮背后的核心发明。这一集和后面几章要做的，是用画面讲清 Transformer 内部到底发生了什么，跟着流过它的数据一步一步走。
+        </p>
+
+        <h3>用 Transformer 能做的模型</h3>
+        <p>
+            他列了几种：有的模型输入音频、输出文字稿；他念的这一句话本身就来自反方向的模型，只凭文字合成语音；2022 年风靡的 DALL-E、Midjourney 输入一段文字描述、输出一张图，也基于 Transformer。他顺便说，虽然他没法让模型理解 pi creature（他频道里的小圆周率角色）长什么样，但这种事居然能做到，还是让他震惊。2017 年 Google 提出的原始 Transformer，是专门为把一种语言的文本翻译成另一种语言而发明的。
+        </p>
+        <p>
+            这一系列关注的是 ChatGPT 这类工具背后的变体：训练它读入一段文本（也许还带着图片或声音），预测这段文字接下来是什么。这个预测的形式是一个概率分布（probability distribution），也就是给所有可能接在后面的文本片段各分配一个概率。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/predict.jpg" alt="模型输出下一个词的概率分布" style="max-width:100%"><figcaption>图：模型读入一段文本，输出接下来各个词的概率（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>从“预测下一个词”到“写一整段”</h3>
+        <p>
+            乍看之下，预测下一个词和生成新文本是两回事。他说，有了预测模型，就可以这样生成长文：给它一段开头，从它给出的分布里随机抽一个样（sample），把抽到的词接到文本后面，再拿全部文本重新跑一遍，做新的预测。如此循环。
+        </p>
+        <p>
+            他坦白说，这个办法直觉上不像能行得通。他演示了两次：先在自己的笔记本上跑 GPT-2，让它反复预测、抽样，根据一段种子文本（seed text）编故事，结果故事没什么逻辑；再换成调用 GPT-3 的 API，GPT-3 是同一种基本模型，只是大得多，故事一下子就通顺了，甚至推断出 pi creature 应该住在一个“数学与计算之国”。
+        </p>
+        <p>
+            他说，你和 ChatGPT 这类大语言模型对话、看着它一个词一个词往外蹦时，背后基本就是这个“反复预测、抽样”的过程。他还说自己很想要一个功能：能看到它每选一个新词时背后的那个概率分布。
+        </p>
+    </section>
+
+    <section id="t02">
+        <h2>02. Transformer 内部一览</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=183s" target="_blank">0:03:03</a>–0:06:36 · Inside a transformer</em></p>
+        <p>
+            这一节是高层预览。他说后面会花更多时间解释每一步的动机、含义和细节，这里只给大框架：聊天机器人生成某一个词的时候，内部按下面的顺序进行。
+        </p>
+
+        <h3>第一步：切成 token</h3>
+        <p>
+            输入先被切成很多小块，叫 token。token 是模型处理文本的最小单位；对文本来说，token 通常是单词、单词的一部分，或者其他常见的字符组合。如果输入里有图片或声音，token 可以是图片的一小块（patch）或声音的一小段。文字版课程给了一个切分示例，句子 “To date, the cleverest thinker of all time was ...” 被切成：
+        </p>
+        <p><code>To| date|,| the| cle|ve|rest| thinker| of| all| time| was ...</code></p>
+        <p>可以看到 “cleverest” 被切成了三块。</p>
+
+        <h3>第二步：每个 token 对应一个向量</h3>
+        <p>
+            每个 token 都对应一个向量（vector），也就是一串数字，这串数字要以某种方式编码这块文本的含义。把这些向量看作某个维度很高的空间里的坐标，意思相近的词往往落在彼此靠近的位置。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/token.jpg" alt="token 和对应的向量" style="max-width:100%"><figcaption>图：输入被切成 token，每个 token 对应一个向量（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>第三步：注意力模块</h3>
+        <p>
+            这串向量接着通过一个叫注意力模块（attention block）的运算。注意力的作用是让序列里的向量互相“交流”，来回传递信息，更新各自的值。他的例子是 “model” 这个词：在 “a machine learning model”（一个机器学习模型）里和在 “a fashion model”（一位时装模特）里，意思不同。注意力模块负责判断上下文里哪些词和更新哪些词的含义有关，以及具体该怎样更新。他强调，每当他说“含义”，这含义完全编码在那些向量的数字里。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/attent.jpg" alt="注意力模块" style="max-width:100%"><figcaption>图：向量在注意力模块里互相传递信息（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>第四步：MLP 模块</h3>
+        <p>
+            之后，向量通过另一种运算，不同资料里叫它多层感知机（multi-layer perceptron, MLP）或前馈层（feed-forward layer）。MLP 是一种普通的全连接神经网络层，对每个向量单独做同样的计算。这里向量之间不交流，全部并行地经过同一个运算。他说这个模块更难解释，以后会讲到：这一步有点像对每个向量问一长串问题，再根据答案更新它。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/multi.jpg" alt="MLP 模块" style="max-width:100%"><figcaption>图：向量各自并行经过 MLP 模块（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            两种模块里的所有运算，看起来都是一大堆矩阵乘法，他说这一系列的主要工作就是学会读懂这些底层矩阵。他也说明自己略过了一些夹在中间的归一化（normalization）步骤，因为这毕竟只是高层预览。
+        </p>
+
+        <h3>第五步：反复交替，最后一个向量出结果</h3>
+        <p>
+            之后过程基本是重复：注意力模块、MLP 模块、注意力模块、MLP 模块……来回交替。期望是到最后，整段文字的核心含义都已经“烤”进了序列的最后一个向量里。再对这最后一个向量做一个运算，得到所有可能 token 的概率分布。文字版补了一句：大量这样的层叠在一起，就是深度学习里“深”的来历。
+        </p>
+
+        <h3>怎样变成聊天机器人</h3>
+        <p>
+            他回顾说，早在 ChatGPT 出现之前，GPT-3 的早期演示就是这样：给一段开头，让它续写故事和文章。要把这种续写工具变成聊天机器人，最简单的起点是先放一小段文字，设定“一个用户正在和一个乐于助人的 AI 助手对话”的场景，这叫系统提示词（system prompt）；然后把用户的问题当作对话的第一句，让模型开始预测这样一个助手会怎么回答。他补充说，要让这招真正好用还需要额外一步训练，这里只讲大意。
+        </p>
+    </section>
+
+    <section id="t03">
+        <h2>03. 接下来几章的安排</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=396s" target="_blank">0:06:36</a>–0:07:20 · Chapter layout</em></p>
+        <p>
+            他交代这一章的范围：网络最开头发生什么、最末尾发生什么，再用相当多时间复习一些背景知识，这些知识在 Transformer 出现的时候，对机器学习工程师来说早已是常识。他说，如果你熟悉这些背景又有点心急，可以直接跳到下一章；下一章讲注意力模块，通常被看作 Transformer 的心脏。再之后他要讲 MLP 模块、训练怎样进行，以及前面跳过的其他细节。
+        </p>
+        <p>
+            他还说，这几集是深度学习小系列的续篇，没看过前几集也没关系，可以乱序看。但在进入 Transformer 之前，他认为有必要先对齐深度学习的基本前提和结构。
+        </p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 深度学习的基本前提</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=440s" target="_blank">0:07:20</a>–0:12:27 · The premise of Deep Learning</em></p>
+
+        <h3>机器学习：用数据决定模型的行为</h3>
+        <p>
+            他说深度学习是机器学习（machine learning）的一种做法。机器学习泛指用数据来决定模型怎样表现的方法。比如你想要一个函数，输入一张图、输出一个描述它的标签；或者本系列的例子，给一段文字预测下一个词；或者任何需要直觉和模式识别的任务。AI 最早期的人会尝试用代码明确写出完成任务的步骤。机器学习的思路不同：先搭一个很灵活、带可调参数（parameter）的结构，像一堆旋钮和拨盘，然后用大量“这个输入应该得到这个输出”的例子去调这些参数的值，让模型模仿这种行为。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/imagetraining.jpg" alt="用带标签的图片训练" style="max-width:100%"><figcaption>图：用大量带已知标签的图片去调模型参数（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>最简单的例子：线性回归</h3>
+        <p>
+            他说也许最简单的机器学习是线性回归（linear regression）：输入和输出都只是一个数，比如房子的面积和房价。目标是找一条最贴合数据的直线（line of best fit），用来预测以后的房价。这条线由两个连续参数决定，斜率和 y 轴截距，线性回归要做的就是定出这两个参数，使直线尽量贴近数据。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/linreg.jpg" alt="线性回归" style="max-width:100%"><figcaption>图：面积和房价的数据点，以及最贴合的直线（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            深度学习模型当然复杂得多。GPT-3 的参数有 1750 亿个，不是 2 个。但他指出，造一个参数极多的巨型模型，并不能保证它既不严重过拟合（overfitting，把训练数据背下来却不会推广到新数据），又能训练得动。
+        </p>
+
+        <h3>为什么模型要遵守特定格式</h3>
+        <p>
+            他说，深度学习指的是一类在过去二十来年被证明能很好扩展规模的模型。它们的共同点是用同一种训练算法：反向传播（backpropagation，按误差从输出往回算出每个参数该怎样调的方法），前几章讲过。他要观众带着这样的背景进入：要让这个训练算法在大规模下好用，模型必须遵守一种特定格式。知道了这个格式，Transformer 处理语言时的很多选择就说得通了，否则会显得有些随意。
+        </p>
+        <ul>
+            <li><strong>输入必须是实数数组。</strong>不管做什么模型，输入都要整理成一组实数：可以是一列数，可以是二维数组，很多时候是更高维的数组，通称张量（tensor）。</li>
+            <li>输入数据被逐层变换成许多不同的层，每一层也总是某种实数数组，直到最后一层，也就是输出。比如这个文本模型的最后一层，是一列数，代表所有可能的下一个 token 的概率分布。</li>
+        </ul>
+
+        <h3>参数为什么叫“权重”</h3>
+        <p>
+            在深度学习里，模型参数几乎总被称为权重（weight）。原因是这些模型有个关键特征：参数和被处理的数据之间唯一的互动方式就是加权求和（weighted sum）。中间也会撒上一些非线性函数，但这些函数不依赖参数。
+        </p>
+        <p>
+            通常你不会看到这些加权和被一个个明着写出来，而是打包成矩阵乘向量（matrix-vector product）的各个分量。两种写法说的是同一件事：回想矩阵乘向量的算法，输出的每个分量都是一个加权和。他说，把它想成“装满可调参数的矩阵，去变换来自数据的向量”，概念上更干净。写成式子（示意）：
+        </p>
+        $$\begin{bmatrix} w_{11} & w_{12} & \cdots & w_{1n} \\ w_{21} & w_{22} & \cdots & w_{2n} \\ \vdots & & \ddots & \vdots \\ w_{m1} & w_{m2} & \cdots & w_{mn} \end{bmatrix}\begin{bmatrix} x_1 \\ x_2 \\ \vdots \\ x_n \end{bmatrix} = \begin{bmatrix} w_{11}x_1 + w_{12}x_2 + \cdots + w_{1n}x_n \\ w_{21}x_1 + w_{22}x_2 + \cdots + w_{2n}x_n \\ \vdots \\ w_{m1}x_1 + w_{m2}x_2 + \cdots + w_{mn}x_n \end{bmatrix}$$
+        <p>左边的矩阵装的是权重，右边的向量来自数据，结果的每一行都是一次加权求和。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/arrays.jpg" alt="数据以数组形式逐层变换" style="max-width:100%"><figcaption>图：数据以实数数组的形式逐层变换，中间是矩阵乘向量（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>GPT-3 的 1750 亿个权重怎样分布</h3>
+        <p>
+            他给出这一系列的计数框架：GPT-3 的 1750 亿个权重，分布在不到 28,000 个不同的矩阵里。这些矩阵又分成 8 类。他要一类一类讲清楚每类做什么，同时引用 GPT-3 的具体数字，数清这 1750 亿到底从哪来。
+        </p>
+        <p>
+            为什么选 GPT-3？他给了两个理由：虽然现在有更大更好的模型，GPT-3 作为第一个真正在机器学习圈外引起全世界注意的大语言模型，有它的特殊意义；另外，实际情况是公司对更新模型的具体数字守口如瓶。他说，往 ChatGPT 这类工具内部看，几乎所有实际计算看起来都是矩阵乘向量。
+        </p>
+
+        <h3>权重和数据：蓝红色和灰色</h3>
+        <p>
+            他提醒，在几十亿个数字里很容易迷路，所以要在心里把两样东西分得很清楚：模型的权重，他在画面上一律涂成蓝色或红色；被处理的数据，一律涂成灰色。权重才是模型真正的“大脑”，是训练时学到的东西，决定模型怎样表现。数据只是某一次运行时喂进去的具体输入，比如一段示例文本。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/distinction.jpg" alt="权重与数据的颜色区分" style="max-width:100%"><figcaption>图：权重用蓝色或红色，被处理的数据用灰色（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t05">
+        <h2>05. 词嵌入</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=747s" target="_blank">0:12:27</a>–0:18:25 · Word embeddings</em></p>
+
+        <h3>先假装 token 就是词</h3>
+        <p>
+            有了这些基础，他开始讲文本处理的第一步：把输入切成小块，再把小块变成向量。他重申 token 可能是词的一部分或标点，但在这一章，尤其是下一章，他有时会假装输入被干净地切成了完整的词。理由是人用词来思考，这样举小例子、讲清每一步都方便得多。
+        </p>
+
+        <h3>嵌入矩阵 $W_E$</h3>
+        <p>
+            模型有一个预先定好的词表（vocabulary），即所有可能出现的词的列表，比如 50,000 个。第一个出场的矩阵叫嵌入矩阵（embedding matrix），每个词占一列。这些列决定了每个词在第一步变成什么向量。他把它记作 $W_E$。和后面所有矩阵一样，它的值一开始是随机的，再根据数据学出来。
+        </p>
+        <p>
+            把词变成向量，在 Transformer 出现之前很久就是机器学习的常规做法。他说第一次见会有点怪，但后面的一切都建立在它上面，所以值得花点时间熟悉。这个操作常叫“嵌入”（embedding）一个词，这个叫法引导你从几何上把这些向量看成某个高维空间里的点。
+        </p>
+
+        <h3>12,288 维，用三维切片来看</h3>
+        <p>
+            三个数可以画成三维空间里的一个点，这没问题，但词嵌入的维数高得多。GPT-3 的词嵌入有 12,288 维。他说后面会看到，在一个有很多不同方向的空间里工作是重要的。
+        </p>
+        <p>
+            为了把词嵌入做成动画，他用了一个类比：就像可以在三维空间里取一个二维切面，把所有点投影到这个切面上，他在这个超高维空间里选一个三维切片，把词向量投影上去，再显示出来。动画里的词向量来自一个简单模型，不是 GPT-3。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/embedding.jpg" alt="嵌入矩阵把词变成向量" style="max-width:100%"><figcaption>图：嵌入矩阵的每一列是一个词的向量（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>大想法：空间里的方向带有语义</h3>
+        <p>
+            他说这里的大想法是：模型在训练中调整权重、决定词怎样嵌入成向量时，往往会落到这样一组嵌入上，空间里的方向带有某种语义。
+        </p>
+        <p>
+            他用的是一个简单的 word-to-vector 模型。在里面搜索和 “tower”（塔）的嵌入最接近的所有词，会发现它们都带着类似“塔”的感觉。他说想在家用 Python 跟着玩的人，可以用他做动画用的这个具体模型（字幕里没有念出模型名）。他强调它不是 Transformer，但足以说明“空间里的方向能承载语义”。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/tower.jpg" alt="和 tower 最接近的词" style="max-width:100%"><figcaption>图：和 tower 的嵌入最接近的一组词（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>king − man + woman ≈ queen，以及它的不完美</h3>
+        <p>
+            经典例子：woman 和 man 两个向量的差，可以画成空间里从一个向量尖端连到另一个尖端的小箭头，这个差和 king 与 queen 的差很相似。所以假如你不知道“女性君主”这个词，可以拿 king，加上 woman − man 这个方向，再找离这个点最近的嵌入。
+        </p>
+        $$E(\text{king}) + E(\text{woman}) - E(\text{man}) \approx E(\text{queen})$$
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/queen.jpg" alt="king 加上 woman 减 man 的方向" style="max-width:100%"><figcaption>图：king 加上 woman − man 的方向，落在 queen 附近（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他马上补了一句“至少，大致如此”。在他玩的这个模型里，queen 的真实嵌入比这个计算结果要远一些，他推测是因为训练数据里 queen 的用法不只是“女版的 king”。他试下来发现，家庭关系的词更能说明这个想法。他的结论是：看起来模型在训练中发现，让空间里的某一个方向编码性别信息是有利的。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/gender.jpg" alt="家庭关系词里的性别方向" style="max-width:100%"><figcaption>图：家庭关系的词对里，性别方向更一致（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>更多例子</h3>
+        <ul>
+            <li>Italy 的嵌入减去 Germany，再加上 Hitler，结果很接近 Mussolini。他说就像模型学会了把某些方向和“意大利性”联系起来，把另一些方向和二战轴心国领导人联系起来。</li>
+            <li>他说也许最喜欢的例子是：在一些模型里，Germany 和 Japan 的差加到 sushi（寿司）上，结果很接近 bratwurst（德国香肠）。</li>
+            <li>玩“找最近邻”时，他很高兴地看到 cat 离 beast 和 monster 都很近。</li>
+        </ul>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/italy.jpg" alt="Italy − Germany + Hitler" style="max-width:100%"><figcaption>图：Italy − Germany + Hitler 落在 Mussolini 附近（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>点积：衡量两个向量有多对齐</h3>
+        <p>
+            他说有一点数学直觉值得记住，尤其是为了下一章：两个向量的点积（dot product）可以看作衡量它们方向对齐程度的一种方式。计算上，点积是把对应分量逐个相乘再相加。他说这很好，因为我们的计算大多必须是加权和的样子。几何上，两个向量方向相近时点积为正，垂直时为零，方向相反时为负。
+        </p>
+        $$\vec{v} \cdot \vec{w} = \sum_{i=1}^{n} v_i w_i$$
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/HowToDot.jpg" alt="点积的计算和几何含义" style="max-width:100%"><figcaption>图：点积的算法，以及正、零、负三种几何情况（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>用点积测“复数方向”</h3>
+        <p>
+            他举了一个检验假设的例子。假设你在玩这个模型，猜测 cats 的嵌入减去 cat 的嵌入，可能代表空间里的一个“复数方向”。检验办法：拿这个差向量，分别和一些单数名词的嵌入、对应复数名词的嵌入算点积，比较大小。试下来，复数名词给出的值确实一贯比单数的高，说明它们和这个方向更对齐。
+        </p>
+        <p>
+            他觉得更有意思的是：拿这个向量和 one、two、three 等词的嵌入算点积，得到的值依次递增。就像可以定量地测出模型觉得一个词“有多复数”。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/dotProduct.jpg" alt="复数方向与各词的点积" style="max-width:100%"><figcaption>图：cats − cat 方向和单数、复数名词以及 one、two、three、four 的点积（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>参数计数第一笔：嵌入矩阵</h3>
+        <p>
+            他再次强调，每个词具体怎样嵌入，是用数据学出来的。这个嵌入矩阵的各列告诉我们每个词变成什么，它是模型里的第一堆权重。按 GPT-3 的数字：词表大小是 50,257（严格说是 token，不是词），嵌入维数是 12,288。两者相乘：
+        </p>
+        $$50{,}257 \times 12{,}288 = 617{,}558{,}016$$
+        <p>
+            视频里说约 6.17 亿个权重，文字版给出精确值 617,558,016。他把这一笔加进一个“累计计数”（running tally），并提醒大家，到最后应该数到 1750 亿。
+        </p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 嵌入不只代表单个词</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1105s" target="_blank">0:18:25</a>–0:20:22 · Embeddings beyond words</em></p>
+
+        <h3>向量会吸收上下文</h3>
+        <p>
+            他说，在 Transformer 里要把嵌入空间里的向量想成不只代表单个词。一方面，它们还编码了这个词的位置信息，这个以后再讲。更重要的是，要把它们想成有能力吸收上下文。
+        </p>
+        <p>
+            他举的例子：一个一开始是 king 这个词嵌入的向量，可能被网络里的各个模块一步步拉扯，到最后指向一个更具体、更细致的方向，以某种方式编码出“这是一位住在苏格兰的国王，他通过谋杀前任国王登上王位，而且是在用莎士比亚式的语言被描述”。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/king.jpg" alt="king 的向量被上下文拉向更具体的方向" style="max-width:100%"><figcaption>图：king 的向量经过网络后，指向更具体的含义（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            他请观众想想自己怎样理解一个词：词义显然由周围的文字决定，有时还包括很远处的上下文。所以，要搭一个能预测下一个词的模型，目标就是让它能高效地吸收上下文。文字版在这里多举了 quill 一例：豪猪的刺和羽毛笔，靠上下文区分。
+        </p>
+        <p>
+            他特意说清楚：在第一步，根据输入文本生成向量数组时，每个向量只是从嵌入矩阵里直接取出来的，所以一开始每个向量只能编码单个词的含义，不受周围词的任何影响。但这个网络的首要目标，应该理解为让每个向量吸收比单个词丰富、具体得多的含义。
+        </p>
+
+        <h3>上下文长度：2048</h3>
+        <p>
+            网络一次只能处理固定数量的向量，这叫上下文长度（context size）。GPT-3 训练时的上下文长度是 2048，所以流过网络的数据总是一个 2048 列的数组，每列约 12,000 维（准确值是 12,288）。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/InitialContext.jpg" alt="2048 列的上下文数组" style="max-width:100%"><figcaption>图：流过网络的数据，是 2048 列、每列 12,288 维的数组（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            上下文长度限制了 Transformer 预测下一个词时能纳入多少文本。他说，这就是为什么和某些聊天机器人（比如早期版本的 ChatGPT）聊得太久，常常会觉得它丢了对话的线索。
+        </p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 反嵌入</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1222s" target="_blank">0:20:22</a>–0:22:22 · Unembedding</em></p>
+
+        <h3>跳到最后：想要的输出</h3>
+        <p>
+            他说注意力的细节以后再讲，先跳到最末端花一分钟。要的输出是所有可能的下一个 token 的概率分布。例子：最后一个词是 Professor，上下文里有 Harry Potter 这样的词，紧挨着前面是 least favorite teacher（最不喜欢的老师），再允许他假装 token 都是完整的词，那么一个训练好、积累了《哈利·波特》知识的网络，大概会给 Snape（斯内普）这个词一个很高的数。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/Snape.jpg" alt="预测 Snape" style="max-width:100%"><figcaption>图：上下文指向《哈利·波特》，网络给 Snape 高分（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>两步：一个矩阵加 softmax</h3>
+        <ol>
+            <li>用另一个矩阵，把上下文里的最后一个向量映射成一列约 50,000 个值，词表里每个 token 一个值。</li>
+            <li>再用一个函数把这列值归一化成概率分布，这个函数叫 softmax，下一节细讲。</li>
+        </ol>
+
+        <h3>为什么只用最后一个向量</h3>
+        <p>
+            他先回应一个可能的疑问：最后一层里还有成千上万个其他向量，各自带着丰富的上下文含义，只拿最后一个来预测，似乎有点怪。他解释说，这和训练有关：训练时让最后一层的每个向量同时预测紧跟在它后面的那个词，效率要高得多。他说训练还有很多可讲的，以后再说，这里只是先点出来。
+        </p>
+
+        <h3>反嵌入矩阵 $W_U$ 与参数计数第二笔</h3>
+        <p>
+            这个矩阵叫反嵌入矩阵（unembedding matrix），记作 $W_U$。和所有权重矩阵一样，它的元素一开始随机，在训练中学出来。
+        </p>
+        $$\text{logits} = W_U \, \vec{x}_{\text{last}}$$
+        <p>
+            继续计数：反嵌入矩阵每个词表里的词占一行，共 50,257 行；每行的元素个数等于嵌入维数，12,288 列。它和嵌入矩阵很像，只是行列对调，所以又添了约 6.17 亿个参数。到这里累计略多于 10 亿，他说这是最终 1750 亿里一个很小但并非完全可以忽略的部分。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/WU.jpg" alt="反嵌入矩阵" style="max-width:100%"><figcaption>图：反嵌入矩阵 W_U 把最后一个向量映射成词表大小的一列数（引自 3blue1brown.com）</figcaption></figure>
+        <table>
+            <thead><tr><th>到这一集为止的参数计数（GPT-3）</th><th>形状</th><th>参数个数</th></tr></thead>
+            <tbody>
+                <tr><td>嵌入矩阵 $W_E$</td><td>12,288 行 × 50,257 列（每个 token 一列）</td><td>617,558,016</td></tr>
+                <tr><td>反嵌入矩阵 $W_U$</td><td>50,257 行 × 12,288 列（每个 token 一行）</td><td>617,558,016</td></tr>
+                <tr><td>累计</td><td></td><td>1,235,116,032（他说 “a little over a billion”）</td></tr>
+                <tr><td>目标</td><td>8 类矩阵，不到 28,000 个</td><td>约 1750 亿</td></tr>
+            </tbody>
+        </table>
+        <p>表中累计一栏是把前两行相加得到的，视频里只说“略多于 10 亿”。剩下 6 类矩阵在后面两章里继续数。</p>
+    </section>
+
+    <section id="t08">
+        <h2>08. 带 temperature 的 softmax</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1342s" target="_blank">0:22:22</a>–0:26:03 · Softmax with temperature</em></p>
+
+        <h3>为什么需要 softmax</h3>
+        <p>
+            他把 softmax 作为这一章最后一个小课题，因为它在注意力模块里还会再出现。想让一串数当作概率分布用，比如所有可能下一个词的分布，每个值都得在 0 到 1 之间，而且总和为 1。可是在深度学习这个“一切都是矩阵乘向量”的游戏里，默认得到的输出根本不满足这些：值常常是负的，或者比 1 大得多，加起来也几乎不可能正好是 1。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/SoftMax.jpg" alt="softmax 把任意数列变成概率分布" style="max-width:100%"><figcaption>图：softmax 把一串任意的数变成合法的概率分布（引自 3blue1brown.com）</figcaption></figure>
+        <p>
+            softmax 是把任意一串数变成合法分布的标准办法，最大的值变得最接近 1，较小的值变得很接近 0。他说，你真正需要知道的就这些。
+        </p>
+
+        <h3>怎么算</h3>
+        <p>
+            如果好奇：先对每个数取 $e$ 的幂，得到一列正数；再把这些正数加起来，每一项除以这个总和，就归一化成一列和为 1 的数。
+        </p>
+        $$\text{softmax}(x)_n = \frac{e^{x_n}}{\sum_{i=1}^{N} e^{x_i}}$$
+        <p>
+            如果输入里某个数明显比其余的大，输出里对应的那一项就会主导整个分布，从中抽样几乎肯定选中最大的那个输入。但它比“直接取最大值”（max）要“软”：其他值也差不多大时，它们在分布里也会得到不小的权重；而且输入连续变化时，输出也随之连续变化。这就是 softmax 名字的由来。
+        </p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/howsoftmax.jpg" alt="softmax 的计算步骤" style="max-width:100%"><figcaption>图：softmax 的计算：取指数，求和，再相除（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>temperature</h3>
+        <p>
+            在某些场合，比如 ChatGPT 用这个分布生成下一个词时，可以给这个函数加点“额外的料”：在指数的分母上放一个常数 $T$。他说这叫温度（temperature），因为它和某些热力学方程里温度的角色有点像。
+        </p>
+        $$\text{softmax}(x, T)_n = \frac{e^{x_n / T}}{\sum_{i=1}^{N} e^{x_i / T}}$$
+        <ul>
+            <li>$T$ 越大，较小的值得到越多权重，分布更均匀一些。</li>
+            <li>$T$ 越小，较大的值越强势地主导分布。</li>
+            <li>极端情况 $T = 0$：所有权重都给最大值。</li>
+        </ul>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2024/gpt/temperatureReal.jpg" alt="不同 temperature 下的分布" style="max-width:100%"><figcaption>图：同一组输入在不同温度下得到的分布（引自 3blue1brown.com）</figcaption></figure>
+
+        <h3>GPT-3 的温度实验</h3>
+        <p>
+            他让 GPT-3 用种子文本 “once upon a time there was A” 生成故事，每次用不同温度。温度为 0 时，它总选最可预测的词，结果是一个落入俗套的《金发姑娘》（Goldilocks）翻版。温度更高时，它有机会选不太可能的词，但有风险：这次故事开头更有新意，讲一位来自韩国的年轻网页艺术家，但很快就变成胡言乱语。
+        </p>
+        <p>
+            他补充两个技术细节。第一，API 其实不让你把温度设到 2 以上，这没有数学上的理由，只是一个人为限制，避免工具被人看到生成太离谱的东西。第二，这段动画的实际做法是：取 GPT-3 给出的 20 个最可能的下一个 token（这似乎是 API 给他的上限），再按一个指数调整这些概率。字幕里这个指数记作 “1/5”，从上下文看应是指 $1/T$ 这类与温度对应的指数，原文没有展开。
+        </p>
+
+        <h3>logits</h3>
+        <p>
+            再一个术语：既然可以把这个函数的输出分量叫“概率”，人们也常把输入分量叫 logits。他提到这个词有好几种念法，他选了一种。具体来说，你输入一段文本，让所有词嵌入流过网络，最后乘以反嵌入矩阵，机器学习的人会把这个原始、未归一化的输出的各个分量，称为下一个词预测的 logits。
+        </p>
+    </section>
+
+    <section id="t09">
+        <h2>09. 下一章预告</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1563s" target="_blank">0:26:03</a>–0:27:14 · Up next</em></p>
+        <p>
+            他说这一章的主要目标，是为理解注意力机制打基础，用的是电影《功夫梦》（Karate Kid）里 “wax on, wax off”（上蜡、擦蜡）那种练法：先练看似无关的基本动作。如果你对词嵌入、softmax、点积怎样衡量相似度有了扎实的直觉，也接受了“大多数计算都得是矩阵乘法，矩阵里装满可调参数”这个前提，那么理解注意力机制，这个现代 AI 热潮的基石，应该会相对顺利。
+        </p>
+        <p>
+            他邀请观众去看下一章。之后关于 Patreon 预览版的说明从略。
+        </p>
+    </section>
+
+    <section>
+        <h2>这一集值得记下的原话</h2>
+        <ul>
+            <li>“I don't know about you, but it really doesn't feel like this should actually work.”<br>我不知道你怎么想，但这个办法直觉上真不像能行得通。（<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=105s" target="_blank">0:01:45</a>）</li>
+            <li>“All of the operations in both of these blocks look like a giant pile of matrix multiplications, and our primary job is going to be to understand how to read the underlying matrices.”<br>这两种模块里的所有运算，看起来都是一大堆矩阵乘法，我们的主要工作就是学会读懂这些底层矩阵。（<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=269s" target="_blank">0:04:29</a>）</li>
+            <li>“The weights are the actual brains, they are the things learned during training, and they determine how it behaves.”<br>权重才是真正的大脑，是训练中学到的东西，决定了模型怎样表现。（<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=717s" target="_blank">0:11:57</a>）</li>
+            <li>“In GPT-3 they have 12,288 dimensions, and as you'll see, it matters to work in a space that has a lot of distinct directions.”<br>GPT-3 的词嵌入有 12,288 维；你会看到，在一个有很多不同方向的空间里工作是重要的。（<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=824s" target="_blank">0:13:44</a>）</li>
+            <li>“It's as if the model learned to associate some directions with Italian-ness, and others with WWII axis leaders.”<br>就像模型学会了把某些方向和“意大利性”联系起来，把另一些方向和二战轴心国领导人联系起来。（<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=927s" target="_blank">0:15:27</a>）</li>
+            <li>“That's all you really need to know.”<br>你真正需要知道的就这些。（<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1365s" target="_blank">0:22:45</a>）</li>
+            <li>“Technically speaking, the API doesn't actually let you pick a temperature bigger than 2.”<br>严格说，API 其实不让你把温度设到 2 以上。（<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1473s" target="_blank">0:24:33</a>）</li>
+        </ul>
+    </section>
+
+    <section id="how">
+        <h2>他是怎么讲的</h2>
+        <p>
+            这一集的结构是“先全景，后两头，中间留空”。他用 6 分钟把整台机器过一遍，然后明确只讲入口和出口，把心脏（注意力）留到下一章。大约 5 分钟花在复习背景上，他也明说熟悉的人可以跳过。
+        </p>
+
+        <h3>讲解顺序</h3>
+        <ol>
+            <li><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=0s" target="_blank">0:00:00</a> 拆 GPT 三个字母，把重点落到 Transformer。随后列出 Transformer 能做的各种模型（语音转文字、文字转语音、文生图、翻译），再收窄到“预测下一个词”这一种。</li>
+            <li><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=105s" target="_blank">0:01:45</a> 抛出一个反直觉问题：预测下一个词怎么能变成写文章？他给出“预测、抽样、追加、重复”的循环，说自己也觉得这不像能行，然后用 GPT-2 和 GPT-3 的对比演示来回答。这个对比顺带埋下了“规模”的伏笔。</li>
+            <li><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=183s" target="_blank">0:03:03</a> 高层预览：token → 向量 → 注意力 → MLP → 反复交替 → 最后一个向量 → 概率分布。每个模块只给一句功能描述加一个例子（model 的两种意思；“问一长串问题”）。</li>
+            <li><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=328s" target="_blank">0:05:28</a> 把预览接回用户熟悉的东西：GPT-3 早期的续写演示，加上系统提示词，就成了聊天机器人。</li>
+            <li><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=387s" target="_blank">0:06:27</a> 交代本章和后续几章的分工，给有基础的观众一个跳过的出口。</li>
+            <li><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=449s" target="_blank">0:07:29</a> 从最一般的“机器学习是什么”讲起，用线性回归的 2 个参数对照 GPT-3 的 1750 亿个参数。</li>
+            <li><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=550s" target="_blank">0:09:10</a> 提出“格式约束”：为了让反向传播在大规模下好用，模型必须是实数数组逐层变换，参数只通过加权和和数据互动。他说明这样讲的目的：让后面 Transformer 的设计不显得随意。</li>
+            <li><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=666s" target="_blank">0:11:06</a> 立下全系列的计数框架：不到 28,000 个矩阵、8 类、要数到 1750 亿。再立下颜色约定：权重蓝/红，数据灰。</li>
+            <li><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=768s" target="_blank">0:12:48</a> 进入第一个矩阵 $W_E$，先讲形状（每个词一列），再讲几何（高维空间里的点），再讲“方向有语义”，用一串例子撑起这个说法。</li>
+            <li><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=976s" target="_blank">0:16:16</a> 引入点积，说明“尤其为了下一章”。用 cats − cat 的复数方向做一次“提出假设、用点积检验”的小实验。</li>
+            <li><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1080s" target="_blank">0:18:00</a> 给出第一笔参数计数，然后把“嵌入”从“单个词的意思”扩展到“吸收上下文”，引出上下文长度 2048。</li>
+            <li><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1194s" target="_blank">0:19:54</a> 跳到网络末端，用 Harry Potter / Snape 的例子说明想要的输出，讲反嵌入矩阵，加第二笔计数。</li>
+            <li><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1305s" target="_blank">0:21:45</a> 讲 softmax：先说为什么需要，再说“知道这些就够了”，然后给好奇的人讲算法，再加 temperature 并用 GPT-3 的故事实验演示，最后补上 logits 这个术语。</li>
+            <li><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1533s" target="_blank">0:25:33</a> 收尾时列出本章打下的四块基础（词嵌入、softmax、点积、矩阵乘法前提），说明它们都是为注意力准备的。</li>
+        </ol>
+
+        <h3>画面上是什么</h3>
+        <p>以下依据他的旁白和文字版配图整理；旁白没有说清的画面不作推测。</p>
+        <table>
+            <thead><tr><th>时间</th><th>画面</th><th>这个画面在讲什么</th></tr></thead>
+            <tbody>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=51s" target="_blank">0:00:51</a></td><td>一句由文字转语音模型合成的旁白；文生图工具画的 pi creature</td><td>Transformer 能做的模型种类，用实物演示代替列表</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=105s" target="_blank">0:01:45</a></td><td>他在笔记本上跑 GPT-2 逐词生成故事的动画，然后换成 GPT-3 API 的结果</td><td>“预测、抽样、重复”的循环；同一机制，规模不同，效果差别很大</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=161s" target="_blank">0:02:41</a></td><td>文本被切成 token（文字版图 token.jpg：每个 token 下面接一个向量）</td><td>输入的第一步</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=217s" target="_blank">0:03:37</a></td><td>向量序列进入注意力模块，互相传递信息；“machine learning model” 和 “fashion model” 两个短语</td><td>同一个词的含义靠上下文更新</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=269s" target="_blank">0:04:29</a></td><td>向量各自并行经过 MLP（文字版图 multi.jpg）</td><td>和注意力的区别：这里向量之间不交流</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=499s" target="_blank">0:08:19</a></td><td>房屋面积和价格的散点图与拟合直线（linreg.jpg）</td><td>最简单的“带参数的模型”，2 个参数</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=609s" target="_blank">0:10:09</a></td><td>加权和先被“明着”写出来，再打包成矩阵乘向量</td><td>加权和与矩阵乘向量是同一件事</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=717s" target="_blank">0:11:57</a></td><td>权重涂蓝/红，数据涂灰（distinction.jpg）</td><td>贯穿后面所有章节的颜色约定</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=824s" target="_blank">0:13:44</a></td><td>从高维空间取三维切片，词向量投影成三维空间里的箭头/点</td><td>怎样“看见”12,288 维的嵌入</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=874s" target="_blank">0:14:34</a></td><td>搜索 tower 的最近邻词（tower.jpg）；woman − man 画成连接两个向量尖端的小箭头，平移到 king 上（queen.jpg）</td><td>空间方向有语义</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=927s" target="_blank">0:15:27</a></td><td>家庭关系词对（gender.jpg）；Italy − Germany + Hitler（italy.jpg）</td><td>修正 queen 例子的不完美；方向也能编码国别、身份</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=976s" target="_blank">0:16:16</a></td><td>点积的分量相乘相加，以及同向、垂直、反向三种情形（HowToDot.jpg）</td><td>点积衡量对齐程度</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1026s" target="_blank">0:17:06</a></td><td>cats − cat 向量与单数、复数名词以及 one、two、three、four 的点积数值（dotProduct.jpg）</td><td>用点积检验一个“方向”假设</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1080s" target="_blank">0:18:00</a></td><td>king 的向量被一步步拉向更具体的方向（king.jpg）</td><td>嵌入会吸收上下文</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1194s" target="_blank">0:19:54</a></td><td>2048 列的数组（InitialContext.jpg）；Harry Potter 上下文和 Snape（Snape.jpg）</td><td>上下文长度；输出该是什么</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1305s" target="_blank">0:21:45</a></td><td>反嵌入矩阵 $W_U$ 乘最后一个向量（WU.jpg）</td><td>从向量到词表大小的一列分数</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1365s" target="_blank">0:22:45</a></td><td>一列杂乱的数经过 softmax 变成概率（SoftMax.jpg、howsoftmax.jpg）</td><td>softmax 的作用和算法</td></tr>
+                <tr><td><a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1473s" target="_blank">0:24:33</a></td><td>GPT-3 在不同温度下续写 “once upon a time there was A”（temperatureReal.jpg 为分布随温度变化）</td><td>温度对生成结果的实际影响</td></tr>
+            </tbody>
+        </table>
+
+        <h3>他简化了什么、推后了什么</h3>
+        <ul>
+            <li>归一化步骤：<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=269s" target="_blank">0:04:29</a> “I'm glossing over some details about some normalization steps that happen in between, but this is after all a high-level preview.”</li>
+            <li>聊天机器人需要的额外训练：<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=387s" target="_blank">0:06:27</a> 只说 “There is more to say about an added step of training”，没有展开。</li>
+            <li>token 当作完整的词：<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=717s" target="_blank">0:11:57</a> 他说会 “pretend that it's broken more cleanly into words”，理由是人用词思考；讲 Snape 时又一次请观众 “give me some leeway”。</li>
+            <li>演示用的嵌入来自一个简单的 word-to-vector 模型，他明说 “It's not a transformer”。</li>
+            <li>位置信息：<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1080s" target="_blank">0:18:00</a> 嵌入还编码位置，“which we'll talk about later”。</li>
+            <li>只用最后一个向量和训练效率的关系：<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1256s" target="_blank">0:20:56</a> “There's a lot more to be said about training later on”。</li>
+            <li>注意力和 MLP：本章只给一句话功能描述，注意力留到下一章，MLP 和训练留到更后面。</li>
+            <li>softmax 的算法标成可选：“That's all you really need to know. But if you're curious”</li>
+            <li>他也主动交代了自己的取巧：queen 的例子在他的模型里不完全成立；温度动画其实只用了 API 给的前 20 个 token 再调概率。</li>
+        </ul>
+
+        <h3>数字怎么用</h3>
+        <ul>
+            <li>规模对照：线性回归 2 个参数对 GPT-3 的 1750 亿个参数（<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=499s" target="_blank">0:08:19</a>），用一句 “not two, but 175 billion” 完成对比。</li>
+            <li>累计计数：<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=666s" target="_blank">0:11:06</a> 先定终点（1750 亿、不到 28,000 个矩阵、8 类），<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1080s" target="_blank">0:18:00</a> 加第一笔（50,257 × 12,288 ≈ 6.17 亿），<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1305s" target="_blank">0:21:45</a> 加第二笔（又一个 6.17 亿，累计略多于 10 亿），并评价它在 1750 亿里的分量。这个计数会延续到后面两章。</li>
+            <li>他解释了为什么用 GPT-3 的数字：它是第一个在圈外出名的大模型，而且新模型的数字不公开。</li>
+            <li>具体维数反复出现：12,288（嵌入维数）、50,257（词表）、2048（上下文长度），让“高维空间”“数组”这些抽象词有了尺寸。讲上下文时他说 “12,000 dimensions”，这里取了整数。</li>
+            <li>温度的数字边界：API 温度上限 2；动画用前 20 个 token。这些是他交代演示做法的数字，不属于模型本身。</li>
+            <li>点积实验里的数值（复数名词更高、one/two/three 递增）只给趋势，不报具体数字。</li>
+        </ul>
+
+        <h3>直觉层和数学层</h3>
+        <ul>
+            <li>整集几乎不写公式。“权重”的定义靠一句话：参数只通过加权和与数据互动；再说加权和打包成矩阵乘向量“amounts to saying the same thing”（<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=609s" target="_blank">0:10:09</a>），让矩阵这个词对新手不显得多出一层。</li>
+            <li>点积同时给两种说法：计算上“对应分量相乘再相加”，几何上“正、零、负对应同向、垂直、反向”。他把计算说法接回前面的前提：“which is good, since so much of our computation has to look like weighted sums”。</li>
+            <li>softmax 分两层：先给功能（最大值接近 1，小值接近 0），明说 “That's all you really need to know”；再对好奇的人讲 $e$ 的幂和归一化；temperature 只讲方向性的效果（大则均匀、小则集中、0 则取最大），再用真实生成结果让人看到差别。</li>
+            <li>“含义”一词他用得很直觉，但每次都拉回数字：“whenever I use the word meaning, this is somehow entirely encoded in the entries of those vectors”（<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=217s" target="_blank">0:03:37</a>）。</li>
+        </ul>
+
+        <h3>其他特点</h3>
+        <ul>
+            <li>开头的问题是他自己先提出的怀疑（“doesn't feel like this should actually work”），再用演示回答。</li>
+            <li>例子大多可以让观众自己复现：他说用的是哪个嵌入模型，欢迎 “pull up some Python and play along at home”；cats − cat 的检验写成“你假设……我来算……”的实验口吻（<a href="https://www.youtube.com/watch?v=wjZofJX0v4M&t=1026s" target="_blank">0:17:06</a>）。</li>
+            <li>经典例子他会当场修正：king/queen 讲完立刻说 “At least, kind of”，换成更好用的家庭关系词。</li>
+            <li>把技术点接到观众的使用体验上：上下文长度对应“聊久了它会丢线索”；温度对应 ChatGPT 生成文字；系统提示词对应“续写工具怎样变成聊天机器人”。</li>
+            <li>每讲一个新矩阵，都按同样的格式交代：名字、记号（$W_E$、$W_U$）、“values begin random”、形状、参数个数。</li>
+            <li>收尾用 Karate Kid 的 “wax on, wax off” 说明这一章的用途，并列出四块基础，直接接到下一章的注意力。</li>
+        </ul>
+    </section>
+
+    <footer class="document-footer">
+        <p>3Blue1Brown · Transformers, the tech behind LLMs | Deep Learning Chapter 5 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>

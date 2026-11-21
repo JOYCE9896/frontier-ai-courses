@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>反向传播的微积分 | 3Blue1Brown 深度学习系列笔记</title>
+    <link rel="stylesheet" href="../11-768-AI-Agents/tufte.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+    <style>
+        table { border-collapse: collapse; width: 100%; font-size: 0.9em; margin: 1em 0; }
+        th, td { border-bottom: 1px solid #ccc; padding: 0.35em 0.5em; text-align: left; vertical-align: top; }
+    </style>
+</head>
+<body>
+<nav class="top-nav">
+    <span><a href="03_反向传播的直觉.html">&larr; 上一篇</a></span>
+    <span><a href="index.html">3Blue1Brown 深度学习系列目录</a> · 04</span>
+    <span><a href="05_大语言模型简介.html">下一篇 &rarr;</a></span>
+</nav>
+<article>
+    <header>
+        <h1>第 4 章 · 反向传播的微积分</h1>
+        <p class="subtitle">把上一集的“轻推”写成偏导数：先在每层只有一个神经元的网络上用链式法则算出代价对最后一个权重、偏置和前一层激活值的敏感度，再加下标推广到每层多个神经元</p>
+        <div class="author-meta">
+            主讲：Grant Sanderson（3Blue1Brown）· 发布日期：2017 年 11 月 3 日 · 时长：10 分 17 秒 · 整理：Joyce（<a href="https://github.com/JOYCE9896" target="_blank">@JOYCE9896</a>）<br>
+            资料来源：视频（3Blue1Brown YouTube 公开，本文依据视频字幕整理）<a href="https://www.youtube.com/watch?v=tIeHLnjs5U8" target="_blank">Backpropagation calculus | Deep Learning Chapter 4</a>，2017 年 11 月 3 日；文字版课程 <a href="https://www.3blue1brown.com/lessons/backpropagation-calculus" target="_blank">3blue1brown.com/lessons/backpropagation-calculus</a>（数字、公式和配图参照文字版；中文转述和讲解，不是逐字翻译；图片引自原网站，版权归原作者）
+        </div>
+    </header>
+    <section>
+        <h2>这一集的内容</h2>
+        <p>上一集不用公式，把反向传播讲成一串“轻推”：每个训练样本希望输出层怎么变，这些愿望按权重和激活值加权，一层层往回传。这一集和上一集同一天发布，是它的附录。Grant 在视频描述里说，这一集符号多，这就是目的：把上一集的直觉写成偏导数，好和 Michael Nielsen 的书、Chris Olah 的博客等资料里的写法接上。</p>
+        <p>这一集要回答的问题是：代价函数对网络里每一个权重和偏置的偏导数，具体怎么算。他先用一个每层只有一个神经元的最简网络把链式法则走一遍，再说明每层多个神经元时只是多了下标，唯一新增的是“一个神经元通过多条路径影响代价，要把各条路径加起来”。读完能看懂教材里反向传播那几行式子各自是什么。文字版由 Josh Pullen 改写，比视频多了结尾一段总结和推荐资料，本文在相应位置注明。视频描述里的 Patreon 感谢已略过。</p>
+        <ol>
+            <li><a href="#t01">开场：前提和这一集的目标</a> · <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=0s" target="_blank">0:00:00</a></li>
+            <li><a href="#t02">每层一个神经元的网络和链式法则</a> · <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=38s" target="_blank">0:00:38</a></li>
+            <li><a href="#t03">算出三个导数</a> · <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=236s" target="_blank">0:03:56</a></li>
+            <li><a href="#t04">这些导数是什么意思</a> · <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=285s" target="_blank">0:04:45</a></li>
+            <li><a href="#t05">对偏置和前一层激活值的敏感度</a> · <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=339s" target="_blank">0:05:39</a></li>
+            <li><a href="#t06">每层多个神经元</a> · <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=402s" target="_blank">0:06:42</a></li>
+            <li><a href="#t07">回顾</a> · <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=553s" target="_blank">0:09:13</a></li>
+        </ol>
+    </section>
+
+    <section id="t01">
+        <h2>01. 开场：前提和这一集的目标</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=0s" target="_blank">0:00:00</a>–0:00:38 · Introduction</em></p>
+        <p>他说这一集有一个硬前提：看过第 3 集的直观走查。这里要更正式一些，进入相关的微积分。看着有点困惑是正常的，“经常暂停、想一想”这句老话在这里同样适用。</p>
+        <p>主要目标是展示做机器学习的人在网络的语境里通常怎样思考微积分里的链式法则（chain rule，复合函数求导时把每一环的导数相乘的规则）。他说这和大多数微积分入门课讲这个主题的感觉不一样。对微积分不熟的人，他有一整套微积分系列可以先看。</p>
+        <p>文字版在开头先把目标写成式子：反向传播是计算代价函数梯度的算法，梯度向量的每一项是代价对某个权重或偏置的偏导数（partial derivative，其他变量都不动，只动这一个时函数的变化率）：</p>
+        $$\nabla C = \begin{bmatrix} \dfrac{\partial C}{\partial w^{(1)}} \\[0.8em] \dfrac{\partial C}{\partial b^{(1)}} \\ \vdots \\ \dfrac{\partial C}{\partial w^{(L)}} \\[0.8em] \dfrac{\partial C}{\partial b^{(L)}} \end{bmatrix}$$
+        <p>所以反向传播帮我们找的，就是这些导数。</p>
+    </section>
+
+    <section id="t02">
+        <h2>02. 每层一个神经元的网络和链式法则</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=38s" target="_blank">0:00:38</a>–0:03:56 · The Chain Rule in networks</em></p>
+        <h3>最简单的网络</h3>
+        <p>从一个极简网络开始：每层只有一个神经元。这个网络由 3 个权重和 3 个偏置决定（文字版说明：每条连线一个权重，除第一个以外的每个神经元一个偏置；一共四个神经元）。目标是弄清代价函数对这些变量有多敏感，这样就知道调哪些项能让代价下降得最有效率。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation-calculus/simple-weights-and-biases.svg" alt="每层一个神经元的网络及其权重和偏置" style="max-width:100%"><figcaption>图：每层一个神经元的网络，3 个权重、3 个偏置，它们各自对代价影响多大（引自 3blue1brown.com）</figcaption></figure>
+        <h3>记号</h3>
+        <p>先只看最后两个神经元之间的连接。最后一个神经元的激活值记作 $a^{(L)}$，上标 $L$ 表示它在哪一层；前一个神经元的激活值就是 $a^{(L-1)}$。他特意说明：这些上标不是指数，只是用来标记在说哪一层，下标要留给后面别的索引用。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation-calculus/activation-labels.jpg" alt="按层标记激活值" style="max-width:100%"><figcaption>图：按所在层给激活值加上标，L 是最后一层（引自 3blue1brown.com）</figcaption></figure>
+        <p>对某个训练样本，希望最后一个激活值等于 $y$，比如 $y$ 可能是 0 或 1。那么这个样本的代价是（字幕把这里写成了 “a^(L - y) squared”，按文字版应为下式）：</p>
+        $$C_0 = \left(a^{(L)} - y\right)^2$$
+        <p>下标 0 表示这只是一个训练样本的代价。</p>
+        <h3>中间量 z</h3>
+        <p>最后这个激活值由一个权重 $w^{(L)}$ 乘前一个神经元的激活值、再加一个偏置 $b^{(L)}$ 决定，然后送进 sigmoid 或 ReLU 这类非线性函数：</p>
+        $$a^{(L)} = \sigma\left(w^{(L)} a^{(L-1)} + b^{(L)}\right)$$
+        <p>他说给这个加权和单独起个名字会方便很多，记作 $z$，用和激活值相同的上标：</p>
+        $$z^{(L)} = w^{(L)} a^{(L-1)} + b^{(L)}, \qquad a^{(L)} = \sigma\left(z^{(L)}\right)$$
+        <p>可以这样想：权重、前一个激活值和偏置合起来算出 $z^{(L)}$，$z^{(L)}$ 算出 $a^{(L)}$，$a^{(L)}$ 和常数 $y$ 一起算出代价。当然 $a^{(L-1)}$ 也受它自己的权重和偏置影响，但现在先不管。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation-calculus/tree.jpg" alt="依赖关系树" style="max-width:100%"><figcaption>图：这棵树表示网络里哪些值依赖于哪些值（引自 3blue1brown.com）</figcaption></figure>
+        <p>这些都只是数，所以可以给每个变量配一条自己的小数轴。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation-calculus/tree-with-number-lines.jpg" alt="每个变量一条数轴" style="max-width:100%"><figcaption>图：依赖树上每个变量都有一条自己的数轴（引自 3blue1brown.com）</figcaption></figure>
+        <h3>第一个目标：代价对 $w^{(L)}$ 有多敏感</h3>
+        <p>换个说法，求代价对 $w^{(L)}$ 的导数。看到 $\partial w^{(L)}$，就把它想成对权重的一次微小轻推，比如改变 0.01；把 $\partial C_0$ 想成由此引起的代价变化。我们要的是这两者的比值。</p>
+        <p>概念上，对 $w^{(L)}$ 的微小轻推会引起 $z^{(L)}$ 的轻推，$z^{(L)}$ 的轻推再引起 $a^{(L)}$ 的轻推，$a^{(L)}$ 直接影响代价。所以把问题拆开：先看 $z^{(L)}$ 的变化和 $w^{(L)}$ 的变化之比，即 $z^{(L)}$ 对 $w^{(L)}$ 的导数；再看 $a^{(L)}$ 的变化和引起它的 $z^{(L)}$ 变化之比；最后看代价的变化和 $a^{(L)}$ 变化之比。</p>
+        <p>文字版此处有一段动画：<a href="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation-calculus/derivative-wiggle.mp4" target="_blank">动画（引自原网站）</a>，演示轻推一路传到代价。</p>
+        <p>把这三个比值乘起来，就得到代价对 $w^{(L)}$ 微小变化的敏感度。这就是链式法则：</p>
+        $$\frac{\partial C_0}{\partial w^{(L)}} = \frac{\partial z^{(L)}}{\partial w^{(L)}} \, \frac{\partial a^{(L)}}{\partial z^{(L)}} \, \frac{\partial C_0}{\partial a^{(L)}}$$
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation-calculus/chain-rule-breakdown.svg" alt="链式法则拆解" style="max-width:100%"><figcaption>图：把 ∂C₀/∂w⁽ᴸ⁾ 拆成三个比值相乘（引自 3blue1brown.com）</figcaption></figure>
+    </section>
+
+    <section id="t03">
+        <h2>03. 算出三个导数</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=236s" target="_blank">0:03:56</a>–0:04:45 · Computing relevant derivatives</em></p>
+        <p>他说屏幕上现在符号很多，先花点时间确认每个都清楚，然后开始算。每个导数都从网络定义里对应的那条式子出发：</p>
+        $$C_0 = \left(a^{(L)} - y\right)^2 \;\longrightarrow\; \frac{\partial C_0}{\partial a^{(L)}} = 2\left(a^{(L)} - y\right)$$
+        $$a^{(L)} = \sigma\left(z^{(L)}\right) \;\longrightarrow\; \frac{\partial a^{(L)}}{\partial z^{(L)}} = \sigma'\left(z^{(L)}\right)$$
+        $$z^{(L)} = w^{(L)} a^{(L-1)} + b^{(L)} \;\longrightarrow\; \frac{\partial z^{(L)}}{\partial w^{(L)}} = a^{(L-1)}$$
+        <ul>
+            <li>代价对 $a^{(L)}$ 的导数是 $2(a^{(L)} - y)$。他指出这意味着它的大小和网络输出与目标之差成正比：如果输出差得很远，哪怕一点点变化也会对代价有很大影响。</li>
+            <li>$a^{(L)}$ 对 $z^{(L)}$ 的导数，就是 sigmoid（或你选的其他非线性函数）的导数。</li>
+            <li>$z^{(L)}$ 对 $w^{(L)}$ 的导数是 $a^{(L-1)}$。</li>
+        </ul>
+        <p>文字版把三者代回，得到完整结果：</p>
+        $$\frac{\partial C_0}{\partial w^{(L)}} = a^{(L-1)} \, \sigma'\left(z^{(L)}\right) \, 2\left(a^{(L)} - y\right)$$
+        <p>这条式子说的是：对最后一层这一个权重轻推一下，对这一个训练样本的代价有多大影响。</p>
+    </section>
+
+    <section id="t04">
+        <h2>04. 这些导数是什么意思</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=285s" target="_blank">0:04:45</a>–0:05:39 · What do the derivatives mean?</em></p>
+        <h3>回头看含义</h3>
+        <p>他说，很容易埋头在公式里，不停下来提醒自己它们是什么意思。拿最后那个导数 $\partial z^{(L)}/\partial w^{(L)} = a^{(L-1)}$ 来说：对权重的小轻推对最后一层影响多大，取决于前一个神经元有多强。这里就是上一集“一起放电的神经元会连在一起”的想法出现的地方。</p>
+        <h3>从一个样本到全部样本</h3>
+        <p>以上全部都只是一个特定训练样本的代价对 $w^{(L)}$ 的导数。完整的代价函数是很多训练样本的代价取平均，所以它的导数要把这个表达式对所有训练样本取平均。文字版写成：</p>
+        $$C = \frac{1}{n}\sum_{k=0}^{n-1} C_k, \qquad \frac{\partial C}{\partial w^{(L)}} = \frac{1}{n}\sum_{k=0}^{n-1} \frac{\partial C_k}{\partial w^{(L)}}$$
+        <p>这只是梯度向量的一个分量。梯度向量由代价函数对所有权重和偏置的偏导数组成。</p>
+    </section>
+
+    <section id="t05">
+        <h2>05. 对偏置和前一层激活值的敏感度</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=339s" target="_blank">0:05:39</a>–0:06:42 · Sensitivity to weights/biases</em></p>
+        <p>他说，虽然这只是所需的众多偏导数之一，但它已经完成了一半以上的工作。</p>
+        <h3>偏置</h3>
+        <p>对偏置的敏感度几乎一模一样，只要把 $\partial z/\partial w$ 换成 $\partial z/\partial b$。看相关的式子，这个导数等于 1：</p>
+        $$\frac{\partial C_0}{\partial b^{(L)}} = \frac{\partial z^{(L)}}{\partial b^{(L)}} \, \frac{\partial a^{(L)}}{\partial z^{(L)}} \, \frac{\partial C_0}{\partial a^{(L)}}, \qquad \frac{\partial z^{(L)}}{\partial b^{(L)}} = 1$$
+        <p>文字版说，这样梯度向量里已经有两项了。</p>
+        <h3>前一层的激活值：往回传从这里开始</h3>
+        <p>他说，“往回传”的想法也在这里出现：可以看代价函数对前一层激活值有多敏感。链式法则里第一个导数换成 $z$ 对前一个激活值的敏感度，结果是权重 $w^{(L)}$：</p>
+        $$\frac{\partial C_0}{\partial a^{(L-1)}} = \frac{\partial z^{(L)}}{\partial a^{(L-1)}} \, \frac{\partial a^{(L)}}{\partial z^{(L)}} \, \frac{\partial C_0}{\partial a^{(L)}}, \qquad \frac{\partial z^{(L)}}{\partial a^{(L-1)}} = w^{(L)}$$
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation-calculus/tree-activation-highlighted.jpg" alt="依赖树中高亮前一层激活值" style="max-width:100%"><figcaption>图：还要处理前一层那个神经元的激活值（引自 3blue1brown.com）</figcaption></figure>
+        <p>我们没法直接改前一层的激活值，但记下它有用：现在可以把同一个链式法则的想法继续往回迭代，看代价对更前面的权重和偏置有多敏感。前一层的激活值是由它自己的权重和偏置决定的，依赖树其实往上延伸得更远。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation-calculus/tree-extended.jpg" alt="向上延伸的依赖树" style="max-width:100%"><figcaption>图：倒数第二层的激活值由它自己的权重和偏置决定，树继续往上长（引自 3blue1brown.com）</figcaption></figure>
+        <p>文字版在这里留了一道练习：怎样用链式法则把 $\partial C_0/\partial w^{(L-1)}$ 拆成小步？答案藏在 “Reveal” 按钮后面，抓取的文本里没有。按同样的规则沿依赖树往上走，可以写成（整理者按原文规则写出，不是原文）：</p>
+        $$\frac{\partial C_0}{\partial w^{(L-1)}} = \frac{\partial z^{(L-1)}}{\partial w^{(L-1)}} \, \frac{\partial a^{(L-1)}}{\partial z^{(L-1)}} \, \frac{\partial z^{(L)}}{\partial a^{(L-1)}} \, \frac{\partial a^{(L)}}{\partial z^{(L)}} \, \frac{\partial C_0}{\partial a^{(L)}}$$
+        <p>文字版的结论是：沿着依赖树追踪、把一长串偏导数乘起来，就能算出代价对整个网络里任何一个权重或偏置的导数，于是能算出整个梯度向量。“至少对这个网络来说，任务完成。”</p>
+    </section>
+
+    <section id="t06">
+        <h2>06. 每层多个神经元</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=402s" target="_blank">0:06:42</a>–0:09:13 · Layers with additional neurons</em></p>
+        <h3>只是多几个下标</h3>
+        <p>他预判观众会觉得这个例子太简单：每层只有一个神经元，真实网络会复杂得多。他说其实给每层加上多个神经元后变化不大，只是多了几个要跟踪的下标。</p>
+        <p>每层的激活值除了上标 $L$，还要加一个下标，表示是这一层的第几个神经元。用字母 $k$ 索引第 $L-1$ 层，$j$ 索引第 $L$ 层。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation-calculus/index-by-j-k.jpg" alt="用 j 和 k 索引神经元" style="max-width:100%"><figcaption>图：k 索引第 L−1 层，j 索引第 L 层（引自 3blue1brown.com）</figcaption></figure>
+        <p>代价还是看期望输出，只是这次把最后一层各激活值和期望输出之差的平方加起来：</p>
+        $$C_0 = \sum_{j=0}^{n_L - 1} \left(a_j^{(L)} - y_j\right)^2$$
+        <p>（求和上限 $n_L - 1$ 是整理时按文字版后文的记号补上的，$n_L$ 是第 $L$ 层的神经元个数。）</p>
+        <h3>权重的下标为什么是 jk</h3>
+        <p>权重多了，每个都要再加几个下标标明位置：连接第 $k$ 个神经元到第 $j$ 个神经元的那条边的权重记作 $w^{(L)}_{jk}$。他说这个下标顺序一开始可能感觉是反的，但它和第 1 集里讲的权重矩阵的索引方式一致。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation-calculus/complicated-weight-label.jpg" alt="权重 w_jk 的标记" style="max-width:100%"><figcaption>图：从第 L−1 层第 k 个神经元连到第 L 层第 j 个神经元的权重记作 w⁽ᴸ⁾ⱼₖ（引自 3blue1brown.com）</figcaption></figure>
+        <p>加权和仍然起名叫 $z$，最后一层的激活值就是特殊函数（比如 sigmoid）作用在 $z$ 上。文字版以三个输入为例写出：</p>
+        $$z_j^{(L)} = w_{j0}^{(L)} a_0^{(L-1)} + w_{j1}^{(L)} a_1^{(L-1)} + w_{j2}^{(L)} a_2^{(L-1)} + b_j^{(L)}, \qquad a_j^{(L)} = \sigma\left(z_j^{(L)}\right)$$
+        <p>这些和每层一个神经元时的式子基本相同，只是看起来更复杂。描述代价对某个具体权重有多敏感的链式法则表达式也基本一样：</p>
+        $$\frac{\partial C_0}{\partial w_{jk}^{(L)}} = \frac{\partial z_j^{(L)}}{\partial w_{jk}^{(L)}} \, \frac{\partial a_j^{(L)}}{\partial z_j^{(L)}} \, \frac{\partial C_0}{\partial a_j^{(L)}}$$
+        <p>他说每一项是什么，想的话可以自己暂停想一想。</p>
+        <h3>唯一真正变了的地方：多条路径要相加</h3>
+        <p>变了的是代价对第 $L-1$ 层某个激活值的导数。区别在于，这个神经元通过多条不同的路径影响代价：它影响 $a^{(L)}_0$，$a^{(L)}_0$ 进入代价函数；它也影响 $a^{(L)}_1$，$a^{(L)}_1$ 也进入代价函数。这些要加起来：</p>
+        $$\frac{\partial C_0}{\partial a_k^{(L-1)}} = \sum_{j=0}^{n_L - 1} \frac{\partial z_j^{(L)}}{\partial a_k^{(L-1)}} \, \frac{\partial a_j^{(L)}}{\partial z_j^{(L)}} \, \frac{\partial C_0}{\partial a_j^{(L)}}$$
+        <p>文字版此处有一段动画：<a href="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation-calculus/activation-two-effects.mp4" target="_blank">动画（引自原网站）</a>，演示一个神经元经两条路径影响代价。</p>
+        <p>他说：“差不多就这些了。”知道了代价对倒数第二层激活值的敏感度，就可以对所有输入这一层的权重和偏置重复同样的过程。</p>
+    </section>
+
+    <section id="t07">
+        <h2>07. 回顾</h2>
+        <p><em>视频位置 <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=553s" target="_blank">0:09:13</a>–0:10:17 · Recap</em></p>
+        <p>他说，如果这些都讲得通，你已经看到了反向传播的核心，它是神经网络学习背后的主力。这些链式法则表达式给出梯度里每个分量的导数，梯度帮助网络通过反复下坡来最小化代价。这里有很多层复杂性要消化，花点时间是正常的。</p>
+        <figure><img src="https://storage.googleapis.com/3blue1brown-website-bucket/lessons/2017/backpropagation-calculus/summary.jpg" alt="反向传播计算梯度的公式汇总" style="max-width:100%"><figcaption>图：用反向传播算梯度的主要数学，大部分都在这张图里（引自 3blue1brown.com）</figcaption></figure>
+        <h3>文字版多出的结尾</h3>
+        <p>视频到这里结束。文字版还多写了几段：</p>
+        <ul>
+            <li>这些公式通常会被整理成几条简洁的向量表达式，乱糟糟的下标就不用摆在明面上。</li>
+            <li>实际实现一般交给库去做，最重要、最能推广的理解，是怎样通过拆解依赖链来推理一个变量对另一个变量的敏感度。</li>
+            <li>他希望读者回头想想：矩阵乘法、导数这类相对简单的数学，放在合适的语境里，能造出真正了不起的技术。矩阵乘法表达信息从一层传到下一层；把“正确分类图像”这一窄片智能变成找一个精心定义的代价函数的最小值（准确说是局部最小值）；链式法则在多数微积分课上只是“又一个工具”，在这里却能把一张极复杂的影响网络干净地拆开，看出代价对每个权重和偏置的敏感度。</li>
+            <li>推荐资料：Michael Nielsen 的免费书《Neural Networks and Deep Learning》第 2 章及其代码、Chris Olah 讲反向传播的博客文章、Distill 期刊、Welch Labs 的两个机器学习系列（Learning to See、Neural Networks Demystified），以及 Goodfellow、Bengio、Courville 的《Deep Learning》。文字版写着“这是我们这个系列的结尾”，那是 2017 年的说法，之后的系列又续上了大语言模型的几集。</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>这一集值得记下的原话</h2>
+        <ul>
+            <li>“These are not exponents, they're just a way of indexing what we're talking about, since I want to save subscripts for different indices later on.”<br>这些不是指数，只是用来标记在说什么，因为我想把下标留给后面别的索引。（<a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=55s" target="_blank">0:00:55</a>）</li>
+            <li>“When you see this del w term, think of it as meaning some tiny nudge to W, like a change by 0.01”<br>看到这个 ∂w，就把它想成对 w 的一次微小轻推，比如改变 0.01。（<a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=169s" target="_blank">0:02:49</a>）</li>
+            <li>“This right here is the chain rule, where multiplying together these three ratios gives us the sensitivity of C to small changes in w(L).”<br>这就是链式法则：把这三个比值乘起来，得到 C 对 w(L) 微小变化的敏感度。（<a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=225s" target="_blank">0:03:45</a>）</li>
+            <li>“Now I don't know about you, but I think it's easy to get stuck head down in the formulas without taking a moment to sit back and remind yourself of what they all mean.”<br>不知道你怎么样，我觉得很容易埋头在公式里，而不停下来提醒自己它们都是什么意思。（<a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=277s" target="_blank">0:04:37</a>）</li>
+            <li>“But honestly, not that much changes when we give the layers multiple neurons, really it's just a few more indices to keep track of.”<br>说实话，给每层多个神经元后变化不大，其实只是多几个下标要跟踪。（<a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=386s" target="_blank">0:06:26</a>）</li>
+            <li>“In this case, the difference is that the neuron influences the cost function through multiple different paths.”<br>这里的区别是，这个神经元通过多条不同的路径影响代价函数。（<a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=495s" target="_blank">0:08:15</a>）</li>
+        </ul>
+    </section>
+
+    <section id="how">
+        <h2>他是怎么讲的</h2>
+        <h3>讲解顺序</h3>
+        <ol>
+            <li><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=0s" target="_blank">0:00:00</a> 先立前提（看过第 3 集）、给心理预期（困惑是正常的）、说目标（机器学习的人怎样想链式法则）。</li>
+            <li><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=0s" target="_blank">0:00:00</a> 把网络缩到每层一个神经元，3 个权重、3 个偏置，只看最后两个神经元。问题从“整个梯度”缩成“代价对一个权重有多敏感”。</li>
+            <li><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=55s" target="_blank">0:00:55</a> 逐个引入记号：$a^{(L)}$、$a^{(L-1)}$、$y$、$C_0$、$w^{(L)}$、$b^{(L)}$，再引入中间量 $z^{(L)}$。每个记号出现时都说它是什么。</li>
+            <li><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=117s" target="_blank">0:01:57</a> 用依赖树和数轴把这些量的关系摆出来：w、a、b → z → a → C。</li>
+            <li><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=169s" target="_blank">0:02:49</a> 把 $\partial w$ 解释成“轻推 0.01”，把导数解释成两次轻推之比，然后顺着依赖树拆成三个比值。到 <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=225s" target="_blank">0:03:45</a> 才说出“这就是链式法则”。</li>
+            <li><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=236s" target="_blank">0:03:56</a> 逐个算出三个导数，每算完一个就说它的含义。</li>
+            <li><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=285s" target="_blank">0:04:45</a> 停下来回看含义，把 $a^{(L-1)}$ 接回上一集的赫布类比；再从单样本推到所有样本取平均。</li>
+            <li><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=339s" target="_blank">0:05:39</a> 换一个变量重复：偏置（因子变 1）、前一层激活值（因子变 $w^{(L)}$），由后者引出“往回迭代”。</li>
+            <li><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=386s" target="_blank">0:06:26</a> 预先回答“这例子太简单”的质疑，加上 $j$、$k$ 下标推广到多个神经元，指出唯一新增的是多路径求和。</li>
+            <li><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=553s" target="_blank">0:09:13</a> 简短回顾，告诉观众消化需要时间。</li>
+        </ol>
+
+        <h3>画面上是什么</h3>
+        <p>以下依据口述（“on screen right now, there's a lot of symbols”等）和文字版配图；口述没说清的不做推测。</p>
+        <table>
+            <tr><th>时间</th><th>画面</th><th>这个画面在讲什么</th></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=0s" target="_blank">0:00:00</a></td><td>一串四个神经元、三条连线的网络（图 simple-network、simple-weights-and-biases）</td><td>把问题缩到最小</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=55s" target="_blank">0:00:55</a></td><td>最后两个神经元上标出 $a^{(L)}$、$a^{(L-1)}$，旁边是期望值 $y$ 和代价 $C_0$（图 activation-labels、cost-of-one-example）</td><td>记号的来源，上标表示层</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=117s" target="_blank">0:01:57</a></td><td>依赖树：w、a、b 汇到 z，z 到 a，a 和 y 汇到 C；之后树往上延伸到前一层的 w、b（图 tree、tree-extended）</td><td>链式法则要走的路径</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=117s" target="_blank">0:01:57</a></td><td>树上每个变量旁有一条小数轴（图 tree-with-number-lines）</td><td>每个量都是一个能被轻推的数</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=169s" target="_blank">0:02:49</a></td><td>对 w 轻推，z、a、C 依次跟着动（文字版动画 derivative-wiggle）</td><td>导数 = 轻推之比，变化沿树传下去</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=225s" target="_blank">0:03:45</a></td><td>三个比值相乘的式子，他说“屏幕上符号很多”（图 chain-rule-breakdown）</td><td>链式法则的完整形式</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=236s" target="_blank">0:03:56</a></td><td>三个导数各自从定义式算出</td><td>每一项都只是一步求导</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=339s" target="_blank">0:05:39</a></td><td>链式法则式子里替换第一个因子：$\partial z/\partial w$ → $\partial z/\partial b$ → $\partial z/\partial a^{(L-1)}$；依赖树里高亮前一层激活值（图 tree-activation-highlighted）</td><td>同一模板换一个变量</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=402s" target="_blank">0:06:42</a></td><td>每层多个神经元，带上下标的激活值，k 和 j 分别标在两层上，$w_{jk}$ 标在一条边上（图 complicated-activation-labels、index-by-j-k、complicated-cost、complicated-weight-label）</td><td>下标的含义</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=495s" target="_blank">0:08:15</a></td><td>一个前一层神经元经 $a^{(L)}_0$ 和 $a^{(L)}_1$ 两条路径影响代价（文字版动画 activation-two-effects）</td><td>为什么要求和</td></tr>
+            <tr><td><a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=553s" target="_blank">0:09:13</a></td><td>公式汇总（图 summary）</td><td>全部式子放在一起</td></tr>
+        </table>
+
+        <h3>他简化了什么、推后了什么</h3>
+        <ul>
+            <li>先用 “an extremely simple network, one where each layer has a single neuron”，所有式子先在这里推完（<a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=0s" target="_blank">0:00:00</a>）。</li>
+            <li>只看最后两个神经元的连接，$a^{(L-1)}$ 自己的权重和偏置 “we're not going to focus on that right now”（<a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=117s" target="_blank">0:01:57</a>）。</li>
+            <li>sigmoid 的导数只写成 $\sigma'$，不展开具体形式。</li>
+            <li>代价对更早层权重的完整长链没有写出来，只说 “keep iterating this same chain rule idea backwards”（<a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=386s" target="_blank">0:06:26</a>）；文字版把它留作练习。</li>
+            <li>多神经元情形下对权重的式子 “I'll leave it to you to pause and think about each of those terms”（<a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=495s" target="_blank">0:08:15</a>）。</li>
+            <li>向量化写法和具体实现没有讲；文字版结尾说这些通常封装成向量表达式、交给库来做。</li>
+        </ul>
+
+        <h3>数字怎么用</h3>
+        <ul>
+            <li>这一集几乎不用具体数字，数字只出现在三处：网络的规模（3 个权重、3 个偏置），轻推的大小（0.01），期望输出的取值（0 或 1）。</li>
+            <li>0.01 的作用是把 $\partial w$ 这个符号变成“一个很小的具体改变量”，让导数读成两次改变之比（<a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=169s" target="_blank">0:02:49</a>）。</li>
+            <li>“more than 50% of the work” 用比例说明算完一个导数后剩下的工作量不大（<a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=328s" target="_blank">0:05:28</a>）。</li>
+        </ul>
+
+        <h3>直觉层和数学层</h3>
+        <p>这一集在数学层，但他每一步都把符号翻回上一集的语言。偏导数被说成“轻推之比”，三个因子各自对应一个上一集讲过的现象：$2(a^{(L)} - y)$ 对应“离目标越远推得越多”，$a^{(L-1)}$ 对应“一起放电的神经元会连在一起”，$w^{(L)}$ 对应“往回传时按权重分配”。他在 <a href="https://www.youtube.com/watch?v=tIeHLnjs5U8&t=277s" target="_blank">0:04:37</a> 明说要停下来回看含义，不能只埋头算。数学门槛在开头交代：对微积分不熟的人可以去看他的微积分系列，而“这一集有点让人困惑是正常的”。</p>
+
+        <h3>其他</h3>
+        <ul>
+            <li>先做最简单的情形，再说“其实变化不大”，把复杂情形降格为“多几个下标”。真正新的一点（多路径求和）单独挑出来讲。</li>
+            <li>预判观众的疑问并先说出来：“下标看起来是反的”“这个例子太简单”。</li>
+            <li>用同一个链式法则模板连续换三个变量（$w$、$b$、$a^{(L-1)}$），观众只需看每次哪个因子变了。</li>
+            <li>开头和结尾都在管理情绪：开头说困惑正常、建议暂停，结尾说 “pat yourself on the back”、消化需要时间。</li>
+        </ul>
+    </section>
+    <footer class="document-footer">
+        <p>3Blue1Brown · Backpropagation calculus | Deep Learning Chapter 4 · Notes curated by Joyce</p>
+    </footer>
+</article>
+</body>
+</html>
